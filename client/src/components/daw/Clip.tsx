@@ -26,6 +26,73 @@ interface ClipProps {
   isOverlay?: boolean;
 }
 
+export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md bg-card border-primary/20">
+        <DialogHeader>
+          <DialogTitle className="text-primary font-heading uppercase tracking-widest flex items-center gap-2">
+            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: clip.color }} />
+            {clip.name}
+          </DialogTitle>
+          <DialogDescription className="text-muted-foreground italic">
+            File Properties & Metadata
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div className="bg-black/40 p-3 rounded-lg border border-border">
+            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Format</span>
+            <span className="text-sm font-mono text-foreground">{clip.metadata?.format || "WAV"}</span>
+          </div>
+          <div className="bg-black/40 p-3 rounded-lg border border-border">
+            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Sample Rate</span>
+            <span className="text-sm font-mono text-foreground">{clip.metadata?.sampleRate || "48kHz"}</span>
+          </div>
+          <div className="bg-black/40 p-3 rounded-lg border border-border">
+            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Bit Depth</span>
+            <span className="text-sm font-mono text-foreground">{clip.metadata?.bitDepth || "24-bit"}</span>
+          </div>
+          <div className="bg-black/40 p-3 rounded-lg border border-border">
+            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Type</span>
+            <span className="text-sm font-mono text-foreground uppercase">{clip.type}</span>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          <span className="text-[10px] text-muted-foreground uppercase block mb-2">Description</span>
+          <p className="text-sm text-foreground leading-relaxed bg-black/20 p-3 rounded border border-border">
+            {clip.metadata?.description || "No description provided."}
+          </p>
+        </div>
+
+        <div className="mt-4">
+          <span className="text-[10px] text-muted-foreground uppercase block mb-2">Comments & Notes</span>
+          <ScrollArea className="h-32 bg-black/20 rounded border border-border p-2">
+            {clip.comments && clip.comments.length > 0 ? (
+              <div className="space-y-3">
+                {clip.comments.map(c => (
+                  <div key={c.id} className="text-xs border-b border-border/50 pb-2 last:border-0">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-bold text-primary">{c.author}</span>
+                      <span className="text-[10px] text-muted-foreground">{c.createdAt}</span>
+                    </div>
+                    <p className="text-foreground/80 italic">"{c.text}"</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="h-full flex items-center justify-center text-muted-foreground text-xs italic">
+                No notes tracked yet.
+              </div>
+            )}
+          </ScrollArea>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function TimelineClip({ clip, isOverlay }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
@@ -51,7 +118,6 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 
   const handleAddComment = () => {
     if (!newComment.trim()) return;
-    // In a real app, we'd update state/backend
     setShowCommentInput(false);
     setNewComment("");
   };
@@ -98,7 +164,6 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
               )}
             </div>
             
-            {/* Click area for adding notes */}
             <div 
               className="absolute inset-0 z-20 cursor-text opacity-0 hover:opacity-100 bg-white/5 transition-opacity flex items-center justify-center"
               onClick={(e) => {
@@ -123,71 +188,8 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
         </ContextMenuContent>
       </ContextMenu>
 
-      {/* Info Window / Metadata */}
-      <Dialog open={showInfo} onOpenChange={setShowInfo}>
-        <DialogContent className="max-w-md bg-card border-primary/20">
-          <DialogHeader>
-            <DialogTitle className="text-primary font-heading uppercase tracking-widest flex items-center gap-2">
-              <div className="w-3 h-3 rounded-full" style={{ backgroundColor: clip.color }} />
-              {clip.name}
-            </DialogTitle>
-            <DialogDescription className="text-muted-foreground italic">
-              File Properties & Metadata
-            </DialogDescription>
-          </DialogHeader>
+      <ClipInfoWindow clip={clip} open={showInfo} onOpenChange={setShowInfo} />
 
-          <div className="grid grid-cols-2 gap-4 mt-4">
-            <div className="bg-black/40 p-3 rounded-lg border border-border">
-              <span className="text-[10px] text-muted-foreground uppercase block mb-1">Format</span>
-              <span className="text-sm font-mono text-foreground">{clip.metadata?.format || "WAV"}</span>
-            </div>
-            <div className="bg-black/40 p-3 rounded-lg border border-border">
-              <span className="text-[10px] text-muted-foreground uppercase block mb-1">Sample Rate</span>
-              <span className="text-sm font-mono text-foreground">{clip.metadata?.sampleRate || "48kHz"}</span>
-            </div>
-            <div className="bg-black/40 p-3 rounded-lg border border-border">
-              <span className="text-[10px] text-muted-foreground uppercase block mb-1">Bit Depth</span>
-              <span className="text-sm font-mono text-foreground">{clip.metadata?.bitDepth || "24-bit"}</span>
-            </div>
-            <div className="bg-black/40 p-3 rounded-lg border border-border">
-              <span className="text-[10px] text-muted-foreground uppercase block mb-1">Type</span>
-              <span className="text-sm font-mono text-foreground uppercase">{clip.type}</span>
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-2">Description</span>
-            <p className="text-sm text-foreground leading-relaxed bg-black/20 p-3 rounded border border-border">
-              {clip.metadata?.description || "No description provided."}
-            </p>
-          </div>
-
-          <div className="mt-4">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-2">Comments & Notes</span>
-            <ScrollArea className="h-32 bg-black/20 rounded border border-border p-2">
-              {clip.comments && clip.comments.length > 0 ? (
-                <div className="space-y-3">
-                  {clip.comments.map(c => (
-                    <div key={c.id} className="text-xs border-b border-border/50 pb-2 last:border-0">
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="font-bold text-primary">{c.author}</span>
-                        <span className="text-[10px] text-muted-foreground">{c.createdAt}</span>
-                      </div>
-                      <p className="text-foreground/80 italic">"{c.text}"</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="h-full flex items-center justify-center text-muted-foreground text-xs italic">
-                  No notes tracked yet.
-                </div>
-              )}
-            </ScrollArea>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Quick Comment Input */}
       <Dialog open={showCommentInput} onOpenChange={setShowCommentInput}>
         <DialogContent className="max-w-sm bg-card border-primary/20">
           <DialogHeader>
@@ -213,6 +215,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 }
 
 export function BucketClip({ clip }: { clip: Clip }) {
+  const [showInfo, setShowInfo] = useState(false);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
     data: { clip, type: 'bucket-clip' },
@@ -223,27 +226,40 @@ export function BucketClip({ clip }: { clip: Clip }) {
   } : undefined;
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      {...listeners}
-      {...attributes}
-      className={cn(
-        "p-2 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group",
-        isDragging && "opacity-0"
-      )}
-    >
-      <div 
-        className="w-3 h-8 rounded-sm shrink-0" 
-        style={{ backgroundColor: clip.color }}
-      />
-      <div className="flex flex-col min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-sm font-medium truncate text-foreground group-hover:text-primary transition-colors">{clip.name}</span>
-          {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
-        </div>
-        <span className="text-xs text-muted-foreground uppercase">{clip.type} • {clip.duration}s</span>
-      </div>
-    </div>
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger>
+          <div
+            ref={setNodeRef}
+            style={style}
+            {...listeners}
+            {...attributes}
+            className={cn(
+              "p-2 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group",
+              isDragging && "opacity-0"
+            )}
+          >
+            <div 
+              className="w-3 h-8 rounded-sm shrink-0" 
+              style={{ backgroundColor: clip.color }}
+            />
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="text-sm font-medium truncate text-foreground group-hover:text-primary transition-colors">{clip.name}</span>
+                {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
+              </div>
+              <span className="text-xs text-muted-foreground uppercase">{clip.type} • {clip.duration}s</span>
+            </div>
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="bg-popover border-border">
+          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2">
+            <Info size={14} /> More Info
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+      
+      <ClipInfoWindow clip={clip} open={showInfo} onOpenChange={setShowInfo} />
+    </>
   );
 }
