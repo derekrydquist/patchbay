@@ -44,10 +44,8 @@ export function DAWWorkspace() {
     if (!trackId || !clip) return;
 
     if (activeType === 'bucket-clip') {
-      // Add new clip to track
       setTracks(prev => prev.map(t => {
         if (t.id === trackId) {
-          // Find next available spot or just append
           const lastClip = t.clips[t.clips.length - 1];
           const start = lastClip ? lastClip.start + lastClip.duration : 0;
           
@@ -58,8 +56,6 @@ export function DAWWorkspace() {
         }
         return t;
       }));
-    } else if (activeType === 'clip') {
-      // Handle moving existing clips if implemented
     }
   };
 
@@ -67,7 +63,7 @@ export function DAWWorkspace() {
     <div className="flex flex-col h-screen w-full bg-background text-foreground overflow-hidden">
       <Transport />
       
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-col flex-1 overflow-hidden">
         <DndContext 
           sensors={sensors} 
           onDragStart={handleDragStart} 
@@ -75,23 +71,20 @@ export function DAWWorkspace() {
         >
           <MediaBucket />
           
-          <div className="flex-1 flex flex-col min-w-0 bg-background relative">
+          <div className="flex-1 flex flex-col min-w-0 bg-background relative overflow-hidden">
              <Ruler />
 
-             {/* Tracks Area */}
              <div className="flex-1 overflow-y-auto overflow-x-auto relative">
                <div className="min-w-[2000px] pb-32">
                  {tracks.map(track => (
                    <TimelineTrack key={track.id} track={track} />
                  ))}
                  
-                 {/* Empty State / Add Track */}
                  <div className="h-24 flex items-center justify-center border-b border-border/20 border-dashed text-muted-foreground hover:bg-card/10 cursor-pointer transition-colors group">
                     <span className="text-sm font-medium group-hover:text-primary transition-colors">+ Add New Track</span>
                  </div>
                </div>
 
-               {/* Playhead */}
                <div className="absolute top-0 bottom-0 left-[240px] w-[1px] bg-primary z-40 pointer-events-none shadow-[0_0_10px_rgba(212,175,55,0.5)]">
                  <div className="absolute -top-3 -left-[5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-primary" />
                </div>
