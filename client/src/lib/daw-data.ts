@@ -10,6 +10,22 @@ export interface Comment {
   createdAt: string;
 }
 
+export interface ClipMetadata {
+  format: string;
+  sampleRate: string;
+  bitDepth: string;
+  description: string;
+  tags: string[];
+  originalFileName: string;
+  uploadedBy: string;
+  uploadedDate: string;
+  timeSignature: string;
+  key: string;
+  bpm: number;
+  channels: 'Mono' | 'Stereo' | '5.1';
+  peakLevel: string;
+}
+
 export interface Clip {
   id: string;
   name: string;
@@ -18,13 +34,7 @@ export interface Clip {
   start: number; // grid position (0-100)
   duration: number; // grid units
   src?: string; // mock source
-  metadata?: {
-    format: string;
-    sampleRate: string;
-    bitDepth: string;
-    description: string;
-    tags: string[];
-  };
+  metadata?: ClipMetadata;
   comments?: Comment[];
 }
 
@@ -40,13 +50,21 @@ export interface Track {
   clips: Clip[];
 }
 
-const DEFAULT_METADATA = {
+const createMetadata = (name: string): ClipMetadata => ({
   format: 'WAV',
   sampleRate: '48kHz',
   bitDepth: '24-bit',
-  description: 'High-quality studio recording',
-  tags: ['studio', 'raw', 'v1']
-};
+  description: 'High-quality studio recording processed through analog hardware.',
+  tags: ['studio', 'raw', 'v1', 'dry'],
+  originalFileName: `${name.toLowerCase().replace(/\s+/g, '_')}_final_v2.wav`,
+  uploadedBy: 'Alex Rivers',
+  uploadedDate: '2024-02-05 14:32',
+  timeSignature: '4/4',
+  key: 'A Minor',
+  bpm: 120,
+  channels: 'Stereo',
+  peakLevel: '-3.2 dBFS'
+});
 
 export const MOCK_CLIPS: Clip[] = [
   { 
@@ -56,17 +74,22 @@ export const MOCK_CLIPS: Clip[] = [
     color: 'hsl(var(--chart-1))', 
     start: 0, 
     duration: 4,
-    metadata: { ...DEFAULT_METADATA, description: 'Solid foundational kick drum' },
+    metadata: { 
+      ...createMetadata('Kick Basic'), 
+      key: 'N/A', 
+      channels: 'Mono',
+      description: 'Solid foundational kick drum with a tight sub-end.'
+    },
     comments: [
       { id: 'com1', author: 'Producer', text: 'This punch feels great', timestamp: 1, createdAt: '2024-02-05' }
     ]
   },
-  { id: 'c2', name: 'Snare Snap', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 4, metadata: DEFAULT_METADATA },
-  { id: 'c3', name: 'Hi-Hat 8ths', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 8, metadata: DEFAULT_METADATA },
-  { id: 'c4', name: 'Bass Groove A', type: 'audio', color: 'hsl(var(--chart-2))', start: 0, duration: 16, metadata: DEFAULT_METADATA },
-  { id: 'c5', name: 'Guitar Riff', type: 'audio', color: 'hsl(var(--chart-3))', start: 0, duration: 8, metadata: DEFAULT_METADATA },
-  { id: 'c6', name: 'Synth Pad', type: 'midi', color: 'hsl(var(--chart-5))', start: 0, duration: 12, metadata: DEFAULT_METADATA },
-  { id: 'c7', name: 'Vocal Hook', type: 'vocal', color: 'hsl(var(--chart-4))', start: 0, duration: 8, metadata: DEFAULT_METADATA },
+  { id: 'c2', name: 'Snare Snap', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 4, metadata: { ...createMetadata('Snare Snap'), channels: 'Mono', key: 'N/A' } },
+  { id: 'c3', name: 'Hi-Hat 8ths', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 8, metadata: { ...createMetadata('Hi-Hat 8ths'), channels: 'Mono', key: 'N/A' } },
+  { id: 'c4', name: 'Bass Groove A', type: 'audio', color: 'hsl(var(--chart-2))', start: 0, duration: 16, metadata: createMetadata('Bass Groove A') },
+  { id: 'c5', name: 'Guitar Riff', type: 'audio', color: 'hsl(var(--chart-3))', start: 0, duration: 8, metadata: { ...createMetadata('Guitar Riff'), key: 'E Minor' } },
+  { id: 'c6', name: 'Synth Pad', type: 'midi', color: 'hsl(var(--chart-5))', start: 0, duration: 12, metadata: createMetadata('Synth Pad') },
+  { id: 'c7', name: 'Vocal Hook', type: 'vocal', color: 'hsl(var(--chart-4))', start: 0, duration: 8, metadata: { ...createMetadata('Vocal Hook'), description: 'Lead vocal take with light compression.' } },
 ];
 
 export const INITIAL_TRACKS: Track[] = [
@@ -87,10 +110,10 @@ export const INITIAL_TRACKS: Track[] = [
         color: 'hsl(var(--chart-1))', 
         start: 0, 
         duration: 8,
-        metadata: DEFAULT_METADATA,
+        metadata: createMetadata('Kick Basic'),
         comments: []
       },
-      { id: 'tc2', name: 'Snare Snap', type: 'drums', color: 'hsl(var(--chart-1))', start: 16, duration: 8, metadata: DEFAULT_METADATA },
+      { id: 'tc2', name: 'Snare Snap', type: 'drums', color: 'hsl(var(--chart-1))', start: 16, duration: 8, metadata: createMetadata('Snare Snap') },
     ]
   },
   {
@@ -103,7 +126,7 @@ export const INITIAL_TRACKS: Track[] = [
     solo: false,
     color: 'hsl(var(--chart-2))',
     clips: [
-      { id: 'tc3', name: 'Bass Groove A', type: 'audio', color: 'hsl(var(--chart-2))', start: 0, duration: 32, metadata: DEFAULT_METADATA },
+      { id: 'tc3', name: 'Bass Groove A', type: 'audio', color: 'hsl(var(--chart-2))', start: 0, duration: 32, metadata: createMetadata('Bass Groove A') },
     ]
   },
   {

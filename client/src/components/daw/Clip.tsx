@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Tag, Clock } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -20,73 +20,150 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 
 interface ClipProps {
   clip: Clip;
   isOverlay?: boolean;
 }
 
+function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
+  return (
+    <div className="bg-black/30 p-2.5 rounded border border-white/5 flex flex-col gap-1">
+      <div className="flex items-center gap-1.5 opacity-60">
+        <Icon size={10} className="text-primary" />
+        <span className="text-[9px] uppercase tracking-wider font-semibold">{label}</span>
+      </div>
+      <span className={cn("text-xs font-medium text-foreground truncate", mono && "font-mono")}>
+        {value || "---"}
+      </span>
+    </div>
+  );
+}
+
 export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md bg-card border-primary/20">
-        <DialogHeader>
-          <DialogTitle className="text-primary font-heading uppercase tracking-widest flex items-center gap-2">
-            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: clip.color }} />
-            {clip.name}
-          </DialogTitle>
-          <DialogDescription className="text-muted-foreground italic">
-            File Properties & Metadata
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid grid-cols-2 gap-4 mt-4">
-          <div className="bg-black/40 p-3 rounded-lg border border-border">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Format</span>
-            <span className="text-sm font-mono text-foreground">{clip.metadata?.format || "WAV"}</span>
-          </div>
-          <div className="bg-black/40 p-3 rounded-lg border border-border">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Sample Rate</span>
-            <span className="text-sm font-mono text-foreground">{clip.metadata?.sampleRate || "48kHz"}</span>
-          </div>
-          <div className="bg-black/40 p-3 rounded-lg border border-border">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Bit Depth</span>
-            <span className="text-sm font-mono text-foreground">{clip.metadata?.bitDepth || "24-bit"}</span>
-          </div>
-          <div className="bg-black/40 p-3 rounded-lg border border-border">
-            <span className="text-[10px] text-muted-foreground uppercase block mb-1">Type</span>
-            <span className="text-sm font-mono text-foreground uppercase">{clip.type}</span>
-          </div>
+      <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0">
+        <div className="bg-gradient-to-r from-primary/20 to-transparent p-6 border-b border-primary/10">
+          <DialogHeader>
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-lg shadow-lg flex items-center justify-center border border-white/10" style={{ backgroundColor: clip.color }}>
+                <Music size={20} className="text-black/70" />
+              </div>
+              <div className="flex flex-col">
+                <DialogTitle className="text-2xl font-heading font-bold text-white tracking-tight uppercase">
+                  {clip.name}
+                </DialogTitle>
+                <div className="flex items-center gap-2 mt-1">
+                   <Badge variant="outline" className="text-[10px] bg-primary/10 border-primary/20 text-primary uppercase">{clip.type}</Badge>
+                   <span className="text-[10px] text-muted-foreground font-mono">{clip.id}</span>
+                </div>
+              </div>
+            </div>
+          </DialogHeader>
         </div>
 
-        <div className="mt-4">
-          <span className="text-[10px] text-muted-foreground uppercase block mb-2">Description</span>
-          <p className="text-sm text-foreground leading-relaxed bg-black/20 p-3 rounded border border-border">
-            {clip.metadata?.description || "No description provided."}
-          </p>
-        </div>
+        <ScrollArea className="max-h-[70vh]">
+          <div className="p-6 space-y-6">
+            {/* Essential Audio Stats */}
+            <div className="grid grid-cols-4 gap-3">
+              <InfoStat icon={Clock} label="Duration" value={`${clip.duration} Units`} mono />
+              <InfoStat icon={Hash} label="Sample Rate" value={clip.metadata?.sampleRate} mono />
+              <InfoStat icon={Activity} label="Bit Depth" value={clip.metadata?.bitDepth} mono />
+              <InfoStat icon={HardDrive} label="Format" value={clip.metadata?.format} mono />
+            </div>
 
-        <div className="mt-4">
-          <span className="text-[10px] text-muted-foreground uppercase block mb-2">Comments & Notes</span>
-          <ScrollArea className="h-32 bg-black/20 rounded border border-border p-2">
-            {clip.comments && clip.comments.length > 0 ? (
-              <div className="space-y-3">
-                {clip.comments.map(c => (
-                  <div key={c.id} className="text-xs border-b border-border/50 pb-2 last:border-0">
-                    <div className="flex justify-between items-center mb-1">
-                      <span className="font-bold text-primary">{c.author}</span>
-                      <span className="text-[10px] text-muted-foreground">{c.createdAt}</span>
-                    </div>
-                    <p className="text-foreground/80 italic">"{c.text}"</p>
+            {/* Musical Context */}
+            <div>
+              <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
+                <div className="h-px flex-1 bg-primary/20" /> Musical Intelligence
+              </h4>
+              <div className="grid grid-cols-3 gap-3">
+                <InfoStat icon={Music} label="Key / Scale" value={clip.metadata?.key} />
+                <InfoStat icon={Clock} label="Time Sign." value={clip.metadata?.timeSignature} mono />
+                <InfoStat icon={Activity} label="BPM" value={clip.metadata?.bpm} mono />
+              </div>
+            </div>
+
+            {/* Upload & Ownership */}
+            <div>
+              <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
+                <div className="h-px flex-1 bg-primary/20" /> Asset Chain
+              </h4>
+              <div className="grid grid-cols-2 gap-3">
+                <InfoStat icon={User} label="Uploaded By" value={clip.metadata?.uploadedBy} />
+                <InfoStat icon={Calendar} label="Date Added" value={clip.metadata?.uploadedDate} mono />
+                <div className="col-span-2">
+                   <InfoStat icon={Info} label="Original File Name" value={clip.metadata?.originalFileName} mono />
+                </div>
+              </div>
+            </div>
+
+            {/* Technical Detail Summary */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-4">
+                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
+                  <div className="h-px flex-1 bg-primary/20" /> Technical
+                </h4>
+                <div className="space-y-2">
+                   <div className="flex justify-between text-[11px]">
+                      <span className="text-muted-foreground">Channels</span>
+                      <span className="text-foreground">{clip.metadata?.channels}</span>
+                   </div>
+                   <div className="flex justify-between text-[11px]">
+                      <span className="text-muted-foreground">Peak Level</span>
+                      <span className="text-foreground">{clip.metadata?.peakLevel}</span>
+                   </div>
+                </div>
+              </div>
+              
+              <div className="space-y-4">
+                <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
+                  <div className="h-px flex-1 bg-primary/20" /> Meta Tags
+                </h4>
+                <div className="flex flex-wrap gap-1.5">
+                  {clip.metadata?.tags.map(tag => (
+                    <span key={tag} className="text-[9px] px-2 py-0.5 rounded bg-white/5 border border-white/10 text-muted-foreground hover:text-primary transition-colors cursor-default">
+                      #{tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Comments Section */}
+            <div>
+              <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
+                <div className="h-px flex-1 bg-primary/20" /> Session Notes
+              </h4>
+              <div className="bg-black/30 rounded border border-white/5 p-1">
+                {clip.comments && clip.comments.length > 0 ? (
+                  <div className="space-y-1">
+                    {clip.comments.map(c => (
+                      <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
+                            <User size={10} /> {c.author}
+                          </span>
+                          <span className="text-[9px] text-muted-foreground font-mono opacity-50">{c.createdAt}</span>
+                        </div>
+                        <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
+                      </div>
+                    ))}
                   </div>
-                ))}
+                ) : (
+                  <div className="py-8 flex flex-col items-center justify-center text-muted-foreground text-[11px] italic opacity-40">
+                    <MessageSquare size={16} className="mb-2" />
+                    No collaboration notes for this asset.
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="h-full flex items-center justify-center text-muted-foreground text-xs italic">
-                No notes tracked yet.
-              </div>
-            )}
-          </ScrollArea>
+            </div>
+          </div>
+        </ScrollArea>
+        <div className="p-4 bg-black/40 border-t border-white/5 flex justify-end">
+           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-[10px] uppercase tracking-widest h-8">Close Inspector</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -175,14 +252,15 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             </div>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="bg-popover border-border">
-          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2">
-            <Info size={14} /> More Info
+        <ContextMenuContent className="bg-popover border-border min-w-[160px]">
+          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Info size={14} className="text-primary" /> More Info
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => setShowCommentInput(true)} className="gap-2">
-            <MessageSquare size={14} /> Add Note
+          <ContextMenuItem onClick={() => setShowCommentInput(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <MessageSquare size={14} className="text-primary" /> Add Note
           </ContextMenuItem>
-          <ContextMenuItem className="text-destructive gap-2">
+          <Separator className="my-1 bg-border/50" />
+          <ContextMenuItem className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold">
             Delete Clip
           </ContextMenuItem>
         </ContextMenuContent>
@@ -252,9 +330,9 @@ export function BucketClip({ clip }: { clip: Clip }) {
             </div>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="bg-popover border-border">
-          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2">
-            <Info size={14} /> More Info
+        <ContextMenuContent className="bg-popover border-border min-w-[160px]">
+          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Info size={14} className="text-primary" /> More Info
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
