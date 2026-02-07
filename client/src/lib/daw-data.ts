@@ -57,15 +57,15 @@ export interface Song {
   instruments: InstrumentFolder[];
 }
 
-const createMetadata = (name: string, author: string): ClipMetadata => ({
+const createMetadata = (name: string, author: string, version: number): ClipMetadata => ({
   format: 'WAV',
   sampleRate: '48kHz',
   bitDepth: '24-bit',
-  description: 'Studio recording idea.',
-  tags: ['idea', 'v1'],
-  originalFileName: `${name.toLowerCase().replace(/\s+/g, '_')}.wav`,
+  description: `Version ${version} of ${name}. Recorded in home studio.`,
+  tags: ['idea', `v${version}`],
+  originalFileName: `${name.toLowerCase().replace(/\s+/g, '_')}_v${version}.wav`,
   uploadedBy: author,
-  uploadedDate: '2024-02-05',
+  uploadedDate: `2024-02-0${version + 1}`,
   timeSignature: '4/4',
   key: 'A Minor',
   bpm: 120,
@@ -73,47 +73,41 @@ const createMetadata = (name: string, author: string): ClipMetadata => ({
   peakLevel: '-3.0 dBFS'
 });
 
+const generateVersions = (ideaName: string, author: string, type: ClipType, color: string, duration: number): Clip[] => {
+  return Array.from({ length: 5 }).map((_, i) => ({
+    id: nanoid(),
+    name: `${ideaName} V${i + 1}`,
+    type,
+    color,
+    start: 0,
+    duration,
+    metadata: createMetadata(ideaName, author, i + 1)
+  }));
+};
+
+const instruments: { name: string, type: 'instrument' | 'audio' | 'vocal', color: string, author: string, duration: number }[] = [
+  { name: 'Drums', type: 'audio', color: 'hsl(var(--chart-1))', author: 'Dave', duration: 8 },
+  { name: 'Bass', type: 'audio', color: 'hsl(var(--chart-2))', author: 'Sarah', duration: 16 },
+  { name: 'Guitar 1', type: 'audio', color: 'hsl(var(--chart-3))', author: 'Mike', duration: 8 },
+  { name: 'Guitar 2', type: 'audio', color: 'hsl(var(--chart-5))', author: 'Mike', duration: 8 },
+  { name: 'Vocals', type: 'vocal', color: 'hsl(var(--chart-4))', author: 'Elena', duration: 16 }
+];
+
+const ideasPerInstrument = ['Main Progression', 'Alternative Bridge', 'Outro Concept'];
+
 export const MOCK_SONG: Song = {
   id: 'song-1',
   name: 'Midnight Horizon',
-  instruments: [
-    {
-      id: 'inst-1',
-      name: 'Drums',
-      type: 'audio',
-      ideas: [
-        {
-          id: 'idea-1',
-          name: 'Main Beat',
-          versions: [
-            { id: 'v1-1', name: 'Main Beat V1', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 8, metadata: createMetadata('Main Beat V1', 'Dave') },
-            { id: 'v1-2', name: 'Main Beat V2 (Heavy)', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 8, metadata: createMetadata('Main Beat V2', 'Dave') },
-          ]
-        },
-        {
-          id: 'idea-2',
-          name: 'Fill Options',
-          versions: [
-            { id: 'v2-1', name: 'Snare Fill', type: 'drums', color: 'hsl(var(--chart-1))', start: 0, duration: 4, metadata: createMetadata('Snare Fill', 'Dave') },
-          ]
-        }
-      ]
-    },
-    {
-      id: 'inst-2',
-      name: 'Bass',
-      type: 'audio',
-      ideas: [
-        {
-          id: 'idea-3',
-          name: 'Verses',
-          versions: [
-            { id: 'v3-1', name: 'Verse A Rough', type: 'audio', color: 'hsl(var(--chart-2))', start: 0, duration: 16, metadata: createMetadata('Verse A', 'Sarah') },
-          ]
-        }
-      ]
-    }
-  ]
+  instruments: instruments.map(inst => ({
+    id: nanoid(),
+    name: inst.name,
+    type: inst.type,
+    ideas: ideasPerInstrument.map(ideaName => ({
+      id: nanoid(),
+      name: `${inst.name} ${ideaName}`,
+      versions: generateVersions(`${inst.name} ${ideaName}`, inst.author, inst.type === 'vocal' ? 'vocal' : 'audio', inst.color, inst.duration)
+    }))
+  }))
 };
 
 export interface Track {
@@ -128,8 +122,14 @@ export interface Track {
   clips: Clip[];
 }
 
-export const INITIAL_TRACKS: Track[] = [
-  { id: 't1', name: 'Drums', type: 'audio', volume: 80, pan: 0, muted: false, solo: false, color: 'hsl(var(--chart-1))', clips: [] },
-  { id: 't2', name: 'Bass', type: 'audio', volume: 75, pan: -10, muted: false, solo: false, color: 'hsl(var(--chart-2))', clips: [] },
-  { id: 't3', name: 'Vocals', type: 'vocal', volume: 90, pan: 0, muted: false, solo: false, color: 'hsl(var(--chart-4))', clips: [] }
-];
+export const INITIAL_TRACKS: Track[] = instruments.map(inst => ({
+  id: nanoid(),
+  name: inst.name,
+  type: inst.type,
+  volume: 80,
+  pan: 0,
+  muted: false,
+  solo: false,
+  color: inst.color,
+  clips: []
+}));
