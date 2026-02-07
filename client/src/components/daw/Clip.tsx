@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
-import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive } from 'lucide-react';
+import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
+import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuTrigger,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
 } from "@/components/ui/context-menu";
 import {
   Dialog,
@@ -66,7 +69,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
 
         <ScrollArea className="max-h-[70vh]">
           <div className="p-6 space-y-6">
-            {/* Essential Audio Stats */}
             <div className="grid grid-cols-4 gap-3">
               <InfoStat icon={Clock} label="Duration" value={`${clip.duration} Units`} mono />
               <InfoStat icon={Hash} label="Sample Rate" value={clip.metadata?.sampleRate} mono />
@@ -74,7 +76,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
               <InfoStat icon={HardDrive} label="Format" value={clip.metadata?.format} mono />
             </div>
 
-            {/* Musical Context */}
             <div>
               <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-primary/20" /> Musical Intelligence
@@ -86,7 +87,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
               </div>
             </div>
 
-            {/* Upload & Ownership */}
             <div>
               <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-primary/20" /> Asset Chain
@@ -100,7 +100,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
               </div>
             </div>
 
-            {/* Technical Detail Summary */}
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-4">
                  <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
@@ -132,7 +131,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
               </div>
             </div>
 
-            {/* Comments Section */}
             <div>
               <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-primary/20" /> Session Notes
@@ -199,6 +197,20 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     setNewComment("");
   };
 
+  // Find associated versions for "Replace" menu
+  const findVersions = () => {
+    for (const inst of MOCK_SONG.instruments) {
+      for (const idea of inst.ideas) {
+        if (idea.versions.some(v => v.id === clip.id)) {
+          return idea.versions.filter(v => v.id !== clip.id);
+        }
+      }
+    }
+    return [];
+  };
+
+  const otherVersions = findVersions();
+
   return (
     <>
       <ContextMenu>
@@ -259,7 +271,29 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
           <ContextMenuItem onClick={() => setShowCommentInput(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <MessageSquare size={14} className="text-primary" /> Add Note
           </ContextMenuItem>
+          
           <Separator className="my-1 bg-border/50" />
+          
+          <ContextMenuSub>
+            <ContextMenuSubTrigger className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <RefreshCw size={14} className="text-primary" /> Replace
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="bg-popover border-border min-w-[200px]">
+              {otherVersions.length > 0 ? (
+                otherVersions.map(v => (
+                  <ContextMenuItem key={v.id} className="text-xs flex flex-col items-start gap-1 py-2">
+                    <span className="font-bold">{v.name}</span>
+                    <span className="text-[10px] text-muted-foreground uppercase">{v.metadata?.uploadedBy} • {v.metadata?.uploadedDate}</span>
+                  </ContextMenuItem>
+                ))
+              ) : (
+                <div className="p-4 text-[10px] text-muted-foreground italic text-center">No other versions found</div>
+              )}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+
+          <Separator className="my-1 bg-border/50" />
+          
           <ContextMenuItem className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold">
             Delete Clip
           </ContextMenuItem>
