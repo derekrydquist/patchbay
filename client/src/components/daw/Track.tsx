@@ -18,25 +18,26 @@ export function TimelineTrack({ track, isActive }: TrackProps) {
   });
 
   return (
-    <div className="flex w-full h-24 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group">
+    <div className="flex w-full h-16 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group">
       {/* Track Header (Controls) */}
-      <div className="w-64 shrink-0 bg-card border-r border-border p-3 flex flex-col justify-between relative z-10">
-        <div className="flex items-center gap-2">
-          <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
-          <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
-            {track.type === 'vocal' ? <Mic size={14} className="text-muted-foreground" /> : 
-             track.type === 'instrument' ? <Activity size={14} className="text-muted-foreground" /> :
-             <Headphones size={14} className="text-muted-foreground" />}
-          </div>
-          <span className="font-heading font-bold uppercase tracking-wider text-sm truncate text-foreground">{track.name}</span>
-        </div>
+      <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 relative z-10">
+        <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
         
-        <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-             <button className={cn("text-[10px] w-5 h-5 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.muted && "bg-destructive text-destructive-foreground border-destructive")}>M</button>
-             <button className={cn("text-[10px] w-5 h-5 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.solo && "bg-primary text-primary-foreground border-primary")}>S</button>
+        <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
+          {track.type === 'vocal' ? <Mic size={14} className="text-muted-foreground" /> : 
+           track.type === 'instrument' ? <Activity size={14} className="text-muted-foreground" /> :
+           <Headphones size={14} className="text-muted-foreground" />}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <span className="font-heading font-bold uppercase tracking-wider text-[11px] truncate text-foreground block">{track.name}</span>
+          <div className="flex items-center gap-2 mt-0.5">
+            <div className="flex gap-0.5">
+               <button className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.muted && "bg-destructive text-destructive-foreground border-destructive")}>M</button>
+               <button className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.solo && "bg-primary text-primary-foreground border-primary")}>S</button>
+            </div>
+            <Slider defaultValue={[track.volume]} max={100} step={1} className="w-16 h-1" />
           </div>
-          <Slider defaultValue={[track.volume]} max={100} step={1} className="w-20" />
         </div>
       </div>
 
