@@ -9,7 +9,7 @@ import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 
-export function DAWWorkspace() {
+export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [activeDragClip, setActiveDragClip] = useState<Clip | null>(null);
 
@@ -23,7 +23,6 @@ export function DAWWorkspace() {
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
-    const type = active.data.current?.type;
     const clip = active.data.current?.clip as Clip;
 
     if (clip) {
@@ -60,33 +59,28 @@ export function DAWWorkspace() {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full bg-background text-foreground overflow-hidden">
-      <DndContext 
+    <div className="flex-1 flex flex-col min-w-0 bg-background relative overflow-hidden">
+       <Ruler />
+
+       <DndContext 
         sensors={sensors} 
         onDragStart={handleDragStart} 
         onDragEnd={handleDragEnd}
       >
-        <MediaBucket />
-        <Transport />
-        
-        <div className="flex-1 flex flex-col min-w-0 bg-background relative overflow-hidden">
-           <Ruler />
+        <div className="flex-1 overflow-y-auto overflow-x-auto relative">
+          <div className="min-w-[2000px] pb-32">
+            {tracks.map(track => (
+              <TimelineTrack key={track.id} track={track} />
+            ))}
+            
+            <div className="h-16 flex items-center justify-center border-b border-border/20 border-dashed text-muted-foreground hover:bg-card/10 cursor-pointer transition-colors group">
+              <span className="text-[11px] font-bold uppercase tracking-wider group-hover:text-primary transition-colors">+ Add New Track</span>
+            </div>
+          </div>
 
-           <div className="flex-1 overflow-y-auto overflow-x-auto relative">
-             <div className="min-w-[2000px] pb-32">
-               {tracks.map(track => (
-                 <TimelineTrack key={track.id} track={track} />
-               ))}
-               
-               <div className="h-16 flex items-center justify-center border-b border-border/20 border-dashed text-muted-foreground hover:bg-card/10 cursor-pointer transition-colors group">
-                  <span className="text-[11px] font-bold uppercase tracking-wider group-hover:text-primary transition-colors">+ Add New Track</span>
-               </div>
-             </div>
-
-             <div className="absolute top-0 bottom-0 left-[240px] w-[1px] bg-primary z-40 pointer-events-none shadow-[0_0_10px_rgba(212,175,55,0.5)]">
-               <div className="absolute -top-3 -left-[5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-primary" />
-             </div>
-           </div>
+          <div className="absolute top-0 bottom-0 left-[240px] w-[1px] bg-primary z-40 pointer-events-none shadow-[0_0_10px_rgba(212,175,55,0.5)]">
+            <div className="absolute -top-3 -left-[5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-primary" />
+          </div>
         </div>
 
         <DragOverlay modifiers={[restrictToWindowEdges]}>

@@ -1,3 +1,4 @@
+import React from 'react';
 import { nanoid } from 'nanoid';
 
 export type ClipType = 'audio' | 'midi' | 'drums' | 'vocal';
@@ -57,6 +58,17 @@ export interface Song {
   instruments: InstrumentFolder[];
 }
 
+export type TaskStatus = 'todo' | 'in-progress' | 'review' | 'done';
+
+export interface ProductionTask {
+  id: string;
+  title: string;
+  instrument: string;
+  status: TaskStatus;
+  priority: 'low' | 'medium' | 'high';
+  assignee: string;
+}
+
 const createMetadata = (name: string, author: string, version: number): ClipMetadata => ({
   format: 'WAV',
   sampleRate: '48kHz',
@@ -85,7 +97,7 @@ const generateVersions = (ideaName: string, author: string, type: ClipType, colo
   }));
 };
 
-const instruments: { name: string, type: 'instrument' | 'audio' | 'vocal', color: string, author: string, duration: number }[] = [
+const instrumentConfigs: { name: string, type: 'instrument' | 'audio' | 'vocal', color: string, author: string, duration: number }[] = [
   { name: 'Drums', type: 'audio', color: 'hsl(var(--chart-1))', author: 'Dave', duration: 8 },
   { name: 'Bass', type: 'audio', color: 'hsl(var(--chart-2))', author: 'Sarah', duration: 16 },
   { name: 'Guitar 1', type: 'audio', color: 'hsl(var(--chart-3))', author: 'Mike', duration: 8 },
@@ -98,7 +110,7 @@ const ideasPerInstrument = ['Main Progression', 'Alternative Bridge', 'Outro Con
 export const MOCK_SONG: Song = {
   id: 'song-1',
   name: 'Midnight Horizon',
-  instruments: instruments.map(inst => ({
+  instruments: instrumentConfigs.map(inst => ({
     id: nanoid(),
     name: inst.name,
     type: inst.type,
@@ -109,6 +121,15 @@ export const MOCK_SONG: Song = {
     }))
   }))
 };
+
+export const MOCK_TASKS: ProductionTask[] = [
+  { id: '1', title: 'Record verse kick drum', instrument: 'Drums', status: 'done', priority: 'high', assignee: 'Dave' },
+  { id: '2', title: 'Add fill for transition', instrument: 'Drums', status: 'in-progress', priority: 'medium', assignee: 'Dave' },
+  { id: '3', title: 'Tighten bass in chorus', instrument: 'Bass', status: 'todo', priority: 'high', assignee: 'Sarah' },
+  { id: '4', title: 'Layer bridge melody', instrument: 'Guitar 1', status: 'todo', priority: 'medium', assignee: 'Mike' },
+  { id: '5', title: 'Harmony vocals for outro', instrument: 'Vocals', status: 'review', priority: 'low', assignee: 'Elena' },
+  { id: '6', title: 'Clean up guitar noise', instrument: 'Guitar 2', status: 'todo', priority: 'low', assignee: 'Mike' },
+];
 
 export interface Track {
   id: string;
@@ -122,7 +143,7 @@ export interface Track {
   clips: Clip[];
 }
 
-export const INITIAL_TRACKS: Track[] = instruments.map(inst => ({
+export const INITIAL_TRACKS: Track[] = instrumentConfigs.map(inst => ({
   id: nanoid(),
   name: inst.name,
   type: inst.type,
