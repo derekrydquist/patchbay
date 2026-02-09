@@ -1,4 +1,3 @@
-import React from 'react';
 import { nanoid } from 'nanoid';
 
 export type ClipType = 'audio' | 'midi' | 'drums' | 'vocal';
@@ -37,6 +36,7 @@ export interface Clip {
   src?: string;
   metadata?: ClipMetadata;
   comments?: Comment[];
+  isFinal?: boolean;
 }
 
 export interface Idea {
@@ -67,6 +67,7 @@ export interface ProductionTask {
   status: TaskStatus;
   priority: 'low' | 'medium' | 'high';
   assignee: string;
+  relatedClipId?: string;
 }
 
 const createMetadata = (name: string, author: string, version: number): ClipMetadata => ({
@@ -93,7 +94,8 @@ const generateVersions = (ideaName: string, author: string, type: ClipType, colo
     color,
     start: 0,
     duration,
-    metadata: createMetadata(ideaName, author, i + 1)
+    metadata: createMetadata(ideaName, author, i + 1),
+    isFinal: false
   }));
 };
 

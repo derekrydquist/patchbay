@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
 import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw, CheckCircle2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -56,7 +56,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
               </div>
               <div className="flex flex-col">
                 <DialogTitle className="text-2xl font-heading font-bold text-white tracking-tight uppercase">
-                  {clip.name}
+                  {clip.name} {clip.isFinal && <span className="text-primary ml-2">(FINAL)</span>}
                 </DialogTitle>
                 <div className="flex items-center gap-2 mt-1">
                    <Badge variant="outline" className="text-[10px] bg-primary/10 border-primary/20 text-primary uppercase">{clip.type}</Badge>
@@ -172,6 +172,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [newComment, setNewComment] = useState("");
+  const [isFinal, setIsFinal] = useState(clip.isFinal);
   
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
@@ -197,14 +198,14 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     setNewComment("");
   };
 
-  // Improved version finding logic
+  const handleMarkFinal = () => {
+    setIsFinal(!isFinal);
+  };
+
   const findVersions = () => {
-    // Extract base name from version name (e.g., "Guitar 1 Idea V1" -> "Guitar 1 Idea")
     const baseName = clip.name.split(' V')[0];
-    
     for (const inst of MOCK_SONG.instruments) {
       for (const idea of inst.ideas) {
-        // Match by idea name since we're in mock mode
         if (idea.name === baseName) {
           return idea.versions.filter(v => v.id !== clip.id);
         }
@@ -227,7 +228,8 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             className={cn(
               "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm z-10",
               isDragging && "opacity-50 ring-2 ring-primary ring-offset-2 ring-offset-background z-50",
-              isOverlay && "shadow-2xl scale-105 opacity-90 z-50"
+              isOverlay && "shadow-2xl scale-105 opacity-90 z-50",
+              isFinal && "ring-1 ring-primary/50"
             )}
           >
             <div 
@@ -235,6 +237,12 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
               style={{ backgroundColor: clip.color }}
             />
             
+            {isFinal && (
+              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-lg">
+                <CheckCircle2 size={10} className="text-black" />
+              </div>
+            )}
+
             <div className="absolute inset-0 flex items-center justify-center opacity-30 pointer-events-none">
                <svg width="100%" height="100%" preserveAspectRatio="none">
                   <path d={`M0,${50 + Math.random() * 10} Q${width/4},${20} ${width/2},${50} T${width},${50}`} fill="none" stroke="black" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
@@ -244,7 +252,10 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between">
               <div className="flex items-center gap-1 truncate">
                 <GripVertical size={12} className="text-black/50 opacity-0 group-hover:opacity-100 transition-opacity" />
-                <span className="text-xs font-medium text-black truncate select-none mix-blend-multiply">
+                <span className={cn(
+                  "text-xs font-medium text-black truncate select-none mix-blend-multiply",
+                  isFinal && "font-bold"
+                )}>
                   {clip.name}
                 </span>
               </div>
@@ -256,16 +267,6 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
                 </div>
               )}
             </div>
-            
-            <div 
-              className="absolute inset-0 z-20 cursor-text opacity-0 hover:opacity-100 bg-white/5 transition-opacity flex items-center justify-center"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowCommentInput(true);
-              }}
-            >
-              <MessageSquare size={14} className="text-white drop-shadow-lg" />
-            </div>
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">
@@ -276,6 +277,11 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             <MessageSquare size={14} className="text-primary" /> Add Note
           </ContextMenuItem>
           
+          <ContextMenuItem onClick={handleMarkFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} /> 
+            {isFinal ? "Unmark Final" : "Mark as Final"}
+          </ContextMenuItem>
+
           <Separator className="my-1 bg-border/50" />
           
           <ContextMenuSub>
@@ -304,7 +310,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
         </ContextMenuContent>
       </ContextMenu>
 
-      <ClipInfoWindow clip={clip} open={showInfo} onOpenChange={setShowInfo} />
+      <ClipInfoWindow clip={{...clip, isFinal}} open={showInfo} onOpenChange={setShowInfo} />
 
       <Dialog open={showCommentInput} onOpenChange={setShowCommentInput}>
         <DialogContent className="max-w-sm bg-card border-primary/20">
@@ -332,14 +338,21 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 
 export function BucketClip({ clip }: { clip: Clip }) {
   const [showInfo, setShowInfo] = useState(false);
+  const [isFinal, setIsFinal] = useState(clip.isFinal);
+
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
-    data: { clip, type: 'bucket-clip' },
+    data: { clip: {...clip, isFinal}, type: 'bucket-clip' },
   });
 
   const style = transform ? {
     transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
   } : undefined;
+
+  const handleToggleFinal = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsFinal(!isFinal);
+  };
 
   return (
     <>
@@ -351,8 +364,9 @@ export function BucketClip({ clip }: { clip: Clip }) {
             {...listeners}
             {...attributes}
             className={cn(
-              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full",
-              isDragging && "opacity-0"
+              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden",
+              isDragging && "opacity-0",
+              isFinal && "border-primary/50 bg-primary/5"
             )}
           >
             <div 
@@ -360,7 +374,13 @@ export function BucketClip({ clip }: { clip: Clip }) {
               style={{ backgroundColor: clip.color }}
             />
             <div className="flex flex-1 items-center justify-between min-w-0">
-              <span className="text-xs font-bold truncate text-foreground group-hover:text-primary transition-colors">{clip.name}</span>
+              <div className="flex items-center gap-2 truncate">
+                <span className={cn(
+                  "text-xs font-bold truncate transition-colors",
+                  isFinal ? "text-primary" : "text-foreground group-hover:text-primary"
+                )}>{clip.name}</span>
+                {isFinal && <CheckCircle2 size={10} className="text-primary" />}
+              </div>
               <div className="flex items-center gap-2 shrink-0 ml-2">
                 {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
                 <span className="text-[10px] text-muted-foreground uppercase font-mono">{clip.duration}s</span>
@@ -372,10 +392,14 @@ export function BucketClip({ clip }: { clip: Clip }) {
           <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Info size={14} className="text-primary" /> More Info
           </ContextMenuItem>
+          <ContextMenuItem onClick={handleToggleFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} />
+            {isFinal ? "Unmark Final" : "Mark as Final"}
+          </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
       
-      <ClipInfoWindow clip={clip} open={showInfo} onOpenChange={setShowInfo} />
+      <ClipInfoWindow clip={{...clip, isFinal}} open={showInfo} onOpenChange={setShowInfo} />
     </>
   );
 }

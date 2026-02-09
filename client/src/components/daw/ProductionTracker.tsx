@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { MOCK_TASKS, ProductionTask, TaskStatus } from '@/lib/daw-data';
+import React, { useState, useMemo } from 'react';
+import { MOCK_TASKS, ProductionTask, TaskStatus, MOCK_SONG } from '@/lib/daw-data';
 import { 
   CheckCircle2, 
   Circle, 
@@ -10,7 +10,8 @@ import {
   LayoutDashboard,
   Calendar,
   User as UserIcon,
-  Filter
+  Filter,
+  ArrowRight
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -38,7 +39,10 @@ function TaskCard({ task }: { task: ProductionTask }) {
   const StatusIcon = statusConfig[task.status].icon;
   
   return (
-    <div className="group bg-black/40 border border-white/5 rounded-lg p-3 hover:border-primary/30 transition-all cursor-pointer">
+    <div className="group bg-black/40 border border-white/5 rounded-lg p-3 hover:border-primary/30 transition-all cursor-pointer relative overflow-hidden">
+      {task.relatedClipId && (
+        <div className="absolute top-0 right-0 w-1 h-full bg-primary/40" />
+      )}
       <div className="flex justify-between items-start mb-2">
         <StatusIcon size={14} className={cn(statusConfig[task.status].color)} />
         <Button variant="ghost" size="icon" className="h-6 w-6 opacity-0 group-hover:opacity-100">
@@ -62,7 +66,32 @@ function TaskCard({ task }: { task: ProductionTask }) {
 }
 
 export function ProductionTracker() {
-  const [tasks, setTasks] = useState(MOCK_TASKS);
+  const [manualTasks, setManualTasks] = useState(MOCK_TASKS);
+
+  // Derive "Final Asset" tasks from MOCK_SONG
+  const finalTasks = useMemo(() => {
+    const tasks: ProductionTask[] = [];
+    MOCK_SONG.instruments.forEach(inst => {
+      inst.ideas.forEach(idea => {
+        idea.versions.forEach(version => {
+          if (version.isFinal) {
+            tasks.push({
+              id: `final-${version.id}`,
+              title: `Finalized: ${idea.name} (${version.name})`,
+              instrument: inst.name,
+              status: 'done',
+              priority: 'high',
+              assignee: version.metadata?.uploadedBy || 'System',
+              relatedClipId: version.id
+            });
+          }
+        });
+      });
+    });
+    return tasks;
+  }, []);
+
+  const allTasks = [...manualTasks, ...finalTasks];
 
   return (
     <div className="flex flex-col h-full bg-[#09090b]">
@@ -89,7 +118,7 @@ export function ProductionTracker() {
       <ScrollArea className="flex-1">
         <div className="flex h-full p-6 gap-6 min-w-max">
           {instruments.map(inst => {
-            const instTasks = tasks.filter(t => t.instrument === inst);
+            const instTasks = allTasks.filter(t => t.instrument === inst);
             
             return (
               <div key={inst} className="w-72 flex flex-col gap-4">
