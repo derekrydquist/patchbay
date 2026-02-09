@@ -197,11 +197,15 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     setNewComment("");
   };
 
-  // Find associated versions for "Replace" menu
+  // Improved version finding logic
   const findVersions = () => {
+    // Extract base name from version name (e.g., "Guitar 1 Idea V1" -> "Guitar 1 Idea")
+    const baseName = clip.name.split(' V')[0];
+    
     for (const inst of MOCK_SONG.instruments) {
       for (const idea of inst.ideas) {
-        if (idea.versions.some(v => v.id === clip.id)) {
+        // Match by idea name since we're in mock mode
+        if (idea.name === baseName) {
           return idea.versions.filter(v => v.id !== clip.id);
         }
       }
@@ -347,20 +351,20 @@ export function BucketClip({ clip }: { clip: Clip }) {
             {...listeners}
             {...attributes}
             className={cn(
-              "p-2 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group",
+              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full",
               isDragging && "opacity-0"
             )}
           >
             <div 
-              className="w-3 h-8 rounded-sm shrink-0" 
+              className="w-1.5 h-full rounded-full shrink-0" 
               style={{ backgroundColor: clip.color }}
             />
-            <div className="flex flex-col min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-sm font-medium truncate text-foreground group-hover:text-primary transition-colors">{clip.name}</span>
+            <div className="flex flex-1 items-center justify-between min-w-0">
+              <span className="text-xs font-bold truncate text-foreground group-hover:text-primary transition-colors">{clip.name}</span>
+              <div className="flex items-center gap-2 shrink-0 ml-2">
                 {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
+                <span className="text-[10px] text-muted-foreground uppercase font-mono">{clip.duration}s</span>
               </div>
-              <span className="text-xs text-muted-foreground uppercase">{clip.type} • {clip.duration}s</span>
             </div>
           </div>
         </ContextMenuTrigger>

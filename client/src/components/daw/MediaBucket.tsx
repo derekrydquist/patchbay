@@ -78,15 +78,15 @@ export function MediaBucket() {
           </ScrollArea>
         </div>
 
-        {/* Column 3: Versions (Draggable Items) */}
+        {/* Column 3: Versions (Draggable Items) - FIXED TO ONE LINE */}
         <div className="flex-1 flex flex-col bg-black/20">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Versions</div>
           <ScrollArea className="flex-1">
-            <div className="p-4 grid grid-cols-2 gap-3">
+            <div className="p-2 space-y-1">
               {selectedIdea ? selectedIdea.versions.map(version => (
                 <BucketClip key={version.id} clip={version} />
               )) : (
-                <div className="col-span-2 h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10">Select an idea</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10">Select an idea</div>
               )}
             </div>
           </ScrollArea>
