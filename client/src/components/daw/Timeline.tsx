@@ -45,6 +45,8 @@ export function Timeline() {
     if (activeType === 'bucket-clip') {
       setTracks(prev => prev.map(t => {
         if (t.id === trackId) {
+          // Check if clip already exists (to avoid duplicate IDs if dropped twice)
+          // For demo, we just add it
           const lastClip = t.clips[t.clips.length - 1];
           const start = lastClip ? lastClip.start + lastClip.duration : 0;
           

@@ -67,6 +67,10 @@ export interface ProductionTask {
   status: TaskStatus;
   priority: 'low' | 'medium' | 'high';
   assignee: string;
+  dueDate?: string;
+  description?: string;
+  subtasks?: { id: string, text: string, completed: boolean }[];
+  comments?: Comment[];
   relatedClipId?: string;
 }
 
@@ -125,12 +129,33 @@ export const MOCK_SONG: Song = {
 };
 
 export const MOCK_TASKS: ProductionTask[] = [
-  { id: '1', title: 'Record verse kick drum', instrument: 'Drums', status: 'done', priority: 'high', assignee: 'Dave' },
-  { id: '2', title: 'Add fill for transition', instrument: 'Drums', status: 'in-progress', priority: 'medium', assignee: 'Dave' },
-  { id: '3', title: 'Tighten bass in chorus', instrument: 'Bass', status: 'todo', priority: 'high', assignee: 'Sarah' },
-  { id: '4', title: 'Layer bridge melody', instrument: 'Guitar 1', status: 'todo', priority: 'medium', assignee: 'Mike' },
-  { id: '5', title: 'Harmony vocals for outro', instrument: 'Vocals', status: 'review', priority: 'low', assignee: 'Elena' },
-  { id: '6', title: 'Clean up guitar noise', instrument: 'Guitar 2', status: 'todo', priority: 'low', assignee: 'Mike' },
+  { 
+    id: '1', 
+    title: 'Finalize chorus rhythm', 
+    instrument: 'Drums', 
+    status: 'done', 
+    priority: 'high', 
+    assignee: 'Dave',
+    dueDate: '2024-02-15',
+    description: 'The main driving beat for the second chorus.',
+    subtasks: [
+      { id: 's1', text: 'Quantize kick', completed: true },
+      { id: 's2', text: 'Layer room mics', completed: true }
+    ]
+  },
+  { 
+    id: '2', 
+    title: 'Add verse fills', 
+    instrument: 'Drums', 
+    status: 'in-progress', 
+    priority: 'medium', 
+    assignee: 'Dave',
+    dueDate: '2024-02-18'
+  },
+  { id: '3', title: 'Record bridge bassline', instrument: 'Bass', status: 'todo', priority: 'high', assignee: 'Sarah' },
+  { id: '4', title: 'Double track chorus guitars', instrument: 'Guitar 1', status: 'todo', priority: 'medium', assignee: 'Mike' },
+  { id: '5', title: 'Main vocal comps', instrument: 'Vocals', status: 'review', priority: 'high', assignee: 'Elena' },
+  { id: '6', title: 'Atmospheric textures', instrument: 'Guitar 2', status: 'todo', priority: 'low', assignee: 'Mike' },
 ];
 
 export interface Track {
