@@ -1,13 +1,14 @@
-import React, { useState } from 'react';
-import { DndContext, DragOverlay, DragStartEvent, DragEndEvent, useSensor, useSensors, PointerSensor } from '@dnd-kit/core';
+import React, { useState, useEffect } from 'react';
+import { DndContext, DragOverlay, DragStartEvent, DragEndEvent, useSensor, useSensors, PointerSensor, TouchSensor } from '@dnd-kit/core';
 import { restrictToWindowEdges } from '@dnd-kit/modifiers';
-import { INITIAL_TRACKS, Track, Clip } from '@/lib/daw-data';
+import { INITIAL_TRACKS, Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { TimelineTrack } from './Track';
 import { MediaBucket } from './MediaBucket';
 import { Transport } from './Transport';
 import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
+import { Music2 } from 'lucide-react';
 
 export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
@@ -16,10 +17,32 @@ export function Timeline() {
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
-        distance: 8,
+        distance: 2,
+      },
+    }),
+    useSensor(TouchSensor, {
+      activationConstraint: {
+        delay: 150,
+        tolerance: 5,
       },
     })
   );
+
+  useEffect(() => {
+    const handleAddClip = (e: any) => {
+      const clip = e.detail as Clip;
+      // Find the track for the instrument
+      const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
+      if (track) {
+        addClipToTrack(track.id, clip);
+      } else {
+        addClipToTrack(tracks[0].id, clip);
+      }
+    };
+
+    window.addEventListener('add-clip-to-timeline', handleAddClip);
+    return () => window.removeEventListener('add-clip-to-timeline', handleAddClip);
+  }, [tracks]);
 
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
@@ -28,6 +51,21 @@ export function Timeline() {
     if (clip) {
       setActiveDragClip(clip);
     }
+  };
+
+  const addClipToTrack = (trackId: string, clip: Clip) => {
+    setTracks(prev => prev.map(t => {
+      if (t.id === trackId) {
+        const lastClip = t.clips[t.clips.length - 1];
+        const start = lastClip ? lastClip.start + lastClip.duration : 0;
+        
+        return {
+          ...t,
+          clips: [...t.clips, { ...clip, id: nanoid(), start }]
+        };
+      }
+      return t;
+    }));
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -42,21 +80,8 @@ export function Timeline() {
 
     if (!trackId || !clip) return;
 
-    if (activeType === 'bucket-clip') {
-      setTracks(prev => prev.map(t => {
-        if (t.id === trackId) {
-          // Check if clip already exists (to avoid duplicate IDs if dropped twice)
-          // For demo, we just add it
-          const lastClip = t.clips[t.clips.length - 1];
-          const start = lastClip ? lastClip.start + lastClip.duration : 0;
-          
-          return {
-            ...t,
-            clips: [...t.clips, { ...clip, id: nanoid(), start }]
-          };
-        }
-        return t;
-      }));
+    if (activeType === 'bucket-clip' || activeType === 'clip') {
+      addClipToTrack(trackId, clip);
     }
   };
 
@@ -85,9 +110,19 @@ export function Timeline() {
           </div>
         </div>
 
-        <DragOverlay modifiers={[restrictToWindowEdges]}>
+        <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
           {activeDragClip ? (
-            <TimelineClip clip={activeDragClip} isOverlay />
+            <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
+              <div 
+                className="h-10 rounded border-2 border-primary shadow-[0_0_20px_rgba(212,175,55,0.4)] flex items-center px-3 gap-2"
+                style={{ backgroundColor: activeDragClip.color, width: Math.max(120, activeDragClip.duration * 20) }}
+              >
+                <Music2 size={14} className="text-black/70" />
+                <span className="text-xs font-black text-black truncate uppercase tracking-tighter">
+                  {activeDragClip.name}
+                </span>
+              </div>
+            </div>
           ) : null}
         </DragOverlay>
       </DndContext>

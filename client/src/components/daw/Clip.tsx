@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
 import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw, CheckCircle2, Plus } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -336,7 +336,12 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
   );
 }
 
-export function BucketClip({ clip }: { clip: Clip }) {
+interface BucketClipProps {
+  clip: Clip;
+  onAddToTimeline?: (clip: Clip) => void;
+}
+
+export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
 
@@ -347,57 +352,71 @@ export function BucketClip({ clip }: { clip: Clip }) {
 
   const style = transform ? {
     transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-  } : undefined;
+    zIndex: 9999,
+    position: 'fixed' as const,
+    width: '240px',
+    pointerEvents: 'none' as const,
+  } : {
+    position: 'relative' as const,
+  };
 
   const handleToggleFinal = (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsFinal(!isFinal);
   };
 
+  const handleAddClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onAddToTimeline?.(clip);
+  };
+
   return (
     <>
-      <ContextMenu>
-        <ContextMenuTrigger>
-          <div
-            ref={setNodeRef}
-            style={style}
-            {...listeners}
-            {...attributes}
-            className={cn(
-              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none",
-              isDragging && "opacity-0",
-              isFinal && "border-primary/50 bg-primary/5"
-            )}
-          >
-            <div 
-              className="w-1.5 h-full rounded-full shrink-0" 
-              style={{ backgroundColor: clip.color }}
-            />
-            <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none">
-              <div className="flex items-center gap-2 truncate">
-                <span className={cn(
-                  "text-xs font-bold truncate transition-colors",
-                  isFinal ? "text-primary" : "text-foreground group-hover:text-primary"
-                )}>{clip.name}</span>
-                {isFinal && <CheckCircle2 size={10} className="text-primary" />}
-              </div>
-              <div className="flex items-center gap-2 shrink-0 ml-2">
-                {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
-                <span className="text-[10px] text-muted-foreground uppercase font-mono">{clip.duration}s</span>
-              </div>
-            </div>
+      <div
+        ref={setNodeRef}
+        style={style}
+        {...listeners}
+        {...attributes}
+        className={cn(
+          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
+          isDragging && "opacity-50",
+          isFinal && "border-primary/50 bg-primary/5"
+        )}
+      >
+        <div 
+          className="w-1.5 h-full rounded-full shrink-0" 
+          style={{ backgroundColor: clip.color }}
+        />
+        <div className="flex flex-1 items-center justify-between min-w-0">
+          <div className="flex items-center gap-2 truncate">
+            <span className={cn(
+              "text-xs font-bold truncate transition-colors",
+              isFinal ? "text-primary" : "text-foreground group-hover:text-primary"
+            )}>{clip.name}</span>
+            {isFinal && <CheckCircle2 size={10} className="text-primary" />}
           </div>
-        </ContextMenuTrigger>
-        <ContextMenuContent className="bg-popover border-border min-w-[160px]">
-          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-            <Info size={14} className="text-primary" /> More Info
-          </ContextMenuItem>
-          <ContextMenuItem onClick={handleToggleFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} />
-            {isFinal ? "Unmark Final" : "Mark as Final"}
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+          <div className="flex items-center gap-2 shrink-0 ml-2">
+            {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
+            <span className="text-[10px] text-muted-foreground uppercase font-mono">{clip.duration}s</span>
+          </div>
+        </div>
+
+        <ContextMenu>
+          <ContextMenuTrigger className="absolute inset-0" />
+          <ContextMenuContent className="bg-popover border-border min-w-[160px]">
+            <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Info size={14} className="text-primary" /> More Info
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleToggleFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} />
+              {isFinal ? "Unmark Final" : "Mark as Final"}
+            </ContextMenuItem>
+            <ContextMenuItem onClick={handleAddClick} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Plus size={14} className="text-primary" /> Add to Timeline
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      </div>
       
       <ClipInfoWindow clip={{...clip, isFinal}} open={showInfo} onOpenChange={setShowInfo} />
     </>

@@ -6,9 +6,11 @@ import { ProductionTracker } from '@/components/daw/ProductionTracker';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Layout, CheckSquare, Settings, Share2, Music2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Clip } from '@/lib/daw-data';
 
 export default function Workspace() {
   const [activeTab, setActiveTab] = useState('timeline');
+  const [timelineKey, setTimelineKey] = useState(0);
 
   return (
     <div className="h-screen flex flex-col bg-[#09090b] text-foreground overflow-hidden font-sans selection:bg-primary/30">
@@ -59,8 +61,14 @@ export default function Workspace() {
       <main className="flex-1 flex flex-col min-h-0 relative">
         <Tabs value={activeTab} className="h-full">
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
-            <MediaBucket />
-            <Timeline />
+            <div className="flex-1 flex flex-col overflow-hidden">
+               <MediaBucket onAddToTimeline={(clip) => {
+                 // In a real app, we'd use a shared state manager or context
+                 // For the mock, we can use a custom event or a ref if they were in the same file
+                 window.dispatchEvent(new CustomEvent('add-clip-to-timeline', { detail: clip }));
+               }} />
+               <Timeline />
+            </div>
             <div className="p-4 bg-black/40 border-t border-white/5">
               <Transport />
             </div>

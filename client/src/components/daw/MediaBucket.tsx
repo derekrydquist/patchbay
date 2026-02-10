@@ -9,7 +9,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
-export function MediaBucket() {
+interface MediaBucketProps {
+  onAddToTimeline?: (clip: Clip) => void;
+}
+
+export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
   const [selectedInst, setSelectedInst] = useState<InstrumentFolder | null>(null);
   const [selectedIdea, setSelectedIdea] = useState<Idea | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
@@ -180,7 +184,11 @@ export function MediaBucket() {
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
               {selectedIdea ? selectedIdea.versions.map(version => (
-                <BucketClip key={version.id} clip={version} />
+                <BucketClip 
+                  key={version.id} 
+                  clip={version} 
+                  onAddToTimeline={onAddToTimeline}
+                />
               )) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10">Select an idea</div>
               )}
