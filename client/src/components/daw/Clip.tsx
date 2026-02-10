@@ -364,7 +364,7 @@ export function BucketClip({ clip }: { clip: Clip }) {
             {...listeners}
             {...attributes}
             className={cn(
-              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden",
+              "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 cursor-grab active:cursor-grabbing flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none",
               isDragging && "opacity-0",
               isFinal && "border-primary/50 bg-primary/5"
             )}
@@ -373,7 +373,7 @@ export function BucketClip({ clip }: { clip: Clip }) {
               className="w-1.5 h-full rounded-full shrink-0" 
               style={{ backgroundColor: clip.color }}
             />
-            <div className="flex flex-1 items-center justify-between min-w-0">
+            <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none">
               <div className="flex items-center gap-2 truncate">
                 <span className={cn(
                   "text-xs font-bold truncate transition-colors",
