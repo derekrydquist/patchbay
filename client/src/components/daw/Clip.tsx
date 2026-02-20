@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Tag, Clock, User, Calendar, Music, Hash, Activity, HardDrive, RefreshCw, CheckCircle2, Plus } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -17,7 +18,6 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,7 +52,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
     if (!newComment.trim()) return;
     const comment: Comment = {
       id: Math.random().toString(36).substr(2, 9),
-      author: "Current User", // In a real app, this would be the logged-in user
+      author: "Current User",
       text: newComment,
       timestamp: Date.now(),
       createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -65,7 +65,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0">
+      <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0" onPointerDown={e => e.stopPropagation()}>
         <div className="bg-gradient-to-r from-primary/20 to-transparent p-6 border-b border-primary/10">
           <DialogHeader>
             <div className="flex items-center gap-3 mb-2">
@@ -216,9 +216,9 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     data: { clip: { ...clip, isFinal, comments }, type: 'clip' },
   });
 
-  const style = transform ? {
-    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-  } : undefined;
+  const style = {
+    transform: CSS.Translate.toString(transform),
+  };
 
   const width = clip.duration * 20;
   
@@ -275,7 +275,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             {...listeners}
             {...attributes}
             className={cn(
-              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm z-10",
+              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm z-10 touch-none select-none",
               isDragging && "opacity-50 ring-2 ring-primary ring-offset-2 ring-offset-background z-50",
               isOverlay && "shadow-2xl scale-105 opacity-90 z-50",
               isFinal && "ring-1 ring-primary/50"
@@ -298,7 +298,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
                </svg>
             </div>
 
-            <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between">
+            <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between pointer-events-none">
               <div className="flex items-center gap-1 truncate">
                 <GripVertical size={12} className="text-black/50 opacity-0 group-hover:opacity-100 transition-opacity" />
                 <span className={cn(
@@ -409,18 +409,9 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
     setComments(newComments);
   };
 
-  // Re-fixed style to be rock solid for drag-and-drop
-  const style = transform ? {
-    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-    zIndex: 10000,
-    position: 'fixed' as const,
-    width: '240px',
-    pointerEvents: 'none' as const,
-    opacity: 0.9,
-    cursor: 'grabbing',
-  } : {
-    position: 'relative' as const,
-    cursor: 'grab',
+  // Fixed drag style - ensures transform is applied correctly for dnd-kit
+  const style = {
+    transform: CSS.Translate.toString(transform),
   };
 
   const handleToggleFinal = (e: React.MouseEvent) => {
@@ -441,8 +432,8 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         {...listeners}
         {...attributes}
         className={cn(
-          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none",
-          isDragging && "opacity-0",
+          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
+          isDragging && "z-[9999] opacity-50 border-primary/50",
           isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]"
         )}
       >
@@ -450,7 +441,7 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
           className="w-1.5 h-full rounded-full shrink-0" 
           style={{ backgroundColor: clip.color }}
         />
-        <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none">
+        <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none select-none">
           <div className="flex items-center gap-2 truncate">
             <span className={cn(
               "text-xs font-bold truncate transition-colors uppercase tracking-tight",
@@ -465,13 +456,19 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         </div>
 
         <ContextMenu>
-          <ContextMenuTrigger className="absolute inset-0" />
+          <ContextMenuTrigger 
+            className="absolute inset-0 z-0" 
+            onMouseDown={(e) => {
+              // Ensure context menu doesn't steal the drag event
+              if (e.button !== 2) e.stopPropagation();
+            }}
+          />
           <ContextMenuContent className="bg-popover border-border min-w-[160px]">
             <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <Info size={14} className="text-primary" /> More Info
             </ContextMenuItem>
             <ContextMenuItem onClick={handleToggleFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} />
+              <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
               {isFinal ? "Unmark Final" : "Mark as Final"}
             </ContextMenuItem>
             <ContextMenuItem onClick={handleAddClick} className="gap-2 text-xs uppercase tracking-wider font-semibold">
