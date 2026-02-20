@@ -161,7 +161,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
           </div>
         </ScrollArea>
         <div className="p-4 bg-black/40 border-t border-white/5 flex justify-end">
-           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-[10px] uppercase tracking-widest h-8">Close Inspector</Button>
+           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-[10px] uppercase tracking-widest h-8 font-bold">Close Inspector</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -297,7 +297,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
                   </ContextMenuItem>
                 ))
               ) : (
-                <div className="p-4 text-[10px] text-muted-foreground italic text-center">No other versions found</div>
+                <div className="p-4 text-[10px] text-muted-foreground italic text-center uppercase tracking-widest">No other versions found</div>
               )}
             </ContextMenuSubContent>
           </ContextMenuSub>
@@ -350,14 +350,18 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
     data: { clip: {...clip, isFinal}, type: 'bucket-clip' },
   });
 
+  // Re-fixed style to be rock solid for drag-and-drop
   const style = transform ? {
     transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
-    zIndex: 9999,
+    zIndex: 10000,
     position: 'fixed' as const,
     width: '240px',
     pointerEvents: 'none' as const,
+    opacity: 0.9,
+    cursor: 'grabbing',
   } : {
     position: 'relative' as const,
+    cursor: 'grab',
   };
 
   const handleToggleFinal = (e: React.MouseEvent) => {
@@ -378,26 +382,26 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         {...listeners}
         {...attributes}
         className={cn(
-          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
-          isDragging && "opacity-50",
-          isFinal && "border-primary/50 bg-primary/5"
+          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none",
+          isDragging && "opacity-0",
+          isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]"
         )}
       >
         <div 
           className="w-1.5 h-full rounded-full shrink-0" 
           style={{ backgroundColor: clip.color }}
         />
-        <div className="flex flex-1 items-center justify-between min-w-0">
+        <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none">
           <div className="flex items-center gap-2 truncate">
             <span className={cn(
-              "text-xs font-bold truncate transition-colors",
+              "text-xs font-bold truncate transition-colors uppercase tracking-tight",
               isFinal ? "text-primary" : "text-foreground group-hover:text-primary"
             )}>{clip.name}</span>
             {isFinal && <CheckCircle2 size={10} className="text-primary" />}
           </div>
           <div className="flex items-center gap-2 shrink-0 ml-2">
             {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
-            <span className="text-[10px] text-muted-foreground uppercase font-mono">{clip.duration}s</span>
+            <span className="text-[10px] text-muted-foreground uppercase font-mono tracking-tighter">{clip.duration}s</span>
           </div>
         </div>
 

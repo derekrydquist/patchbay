@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MOCK_SONG, InstrumentFolder, Idea, Clip } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
-import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2 } from 'lucide-react';
+import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2, Plus } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,12 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
   const [selectedIdea, setSelectedIdea] = useState<Idea | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<{name: string, size: string}[]>([]);
+  
+  // New entry states
+  const [isNewInstOpen, setIsNewInstOpen] = useState(false);
+  const [newInstName, setNewInstName] = useState('');
+  const [isNewIdeaOpen, setIsNewIdeaOpen] = useState(false);
+  const [newIdeaName, setNewIdeaName] = useState('');
 
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
@@ -26,6 +32,18 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
       size: (f.size / 1024 / 1024).toFixed(2) + ' MB'
     }));
     setUploadFiles(prev => [...prev, ...files]);
+  };
+
+  const handleAddInstrument = () => {
+    if (!newInstName.trim()) return;
+    setIsNewInstOpen(false);
+    setNewInstName('');
+  };
+
+  const handleAddIdea = () => {
+    if (!newIdeaName.trim()) return;
+    setIsNewIdeaOpen(false);
+    setNewIdeaName('');
   };
 
   return (
@@ -128,7 +146,36 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
       <div className="flex-1 flex overflow-hidden divide-x divide-white/5">
         {/* Column 1: Instruments */}
         <div className="w-1/4 flex flex-col">
-          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Instruments</div>
+          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
+            <span>Instruments</span>
+            <Dialog open={isNewInstOpen} onOpenChange={setIsNewInstOpen}>
+              <DialogTrigger asChild>
+                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
+                  <Plus size={12} />
+                </button>
+              </DialogTrigger>
+              <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
+                <DialogHeader className="mb-4">
+                  <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">New Instrument</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Instrument Name</label>
+                    <Input 
+                      placeholder="e.g. Lead Vocals, Bass Synth" 
+                      value={newInstName}
+                      onChange={(e) => setNewInstName(e.target.value)}
+                      className="bg-black/40 border-white/10 text-xs h-10"
+                      autoFocus
+                    />
+                  </div>
+                  <Button onClick={handleAddInstrument} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
+                    Create Instrument
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
               {MOCK_SONG.instruments.map(inst => (
@@ -137,12 +184,12 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                   onClick={() => { setSelectedInst(inst); setSelectedIdea(null); }}
                   className={cn(
                     "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
-                    selectedInst?.id === inst.id ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-white/5 hover:text-white"
+                    selectedInst?.id === inst.id ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]" : "text-muted-foreground hover:bg-white/5 hover:text-white"
                   )}
                 >
                   <div className="flex items-center gap-2">
                     <Folder size={14} className={selectedInst?.id === inst.id ? "text-primary" : "text-muted-foreground"} />
-                    <span className="font-medium">{inst.name}</span>
+                    <span className="font-bold tracking-tight">{inst.name}</span>
                   </div>
                   <ChevronRight size={12} className="opacity-40" />
                 </button>
@@ -153,7 +200,42 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
 
         {/* Column 2: Ideas/Patterns */}
         <div className="w-1/4 flex flex-col bg-black/10">
-          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Ideas</div>
+          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
+            <span>Ideas</span>
+            <Dialog open={isNewIdeaOpen} onOpenChange={setIsNewIdeaOpen}>
+              <DialogTrigger asChild>
+                <button 
+                  disabled={!selectedInst}
+                  className={cn(
+                    "opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5",
+                    !selectedInst && "cursor-not-allowed opacity-0"
+                  )}
+                >
+                  <Plus size={12} />
+                </button>
+              </DialogTrigger>
+              <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
+                <DialogHeader className="mb-4">
+                  <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">New Idea Pattern</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Idea Name</label>
+                    <Input 
+                      placeholder="e.g. Chorus Hook, Verse 2 Alt" 
+                      value={newIdeaName}
+                      onChange={(e) => setNewIdeaName(e.target.value)}
+                      className="bg-black/40 border-white/10 text-xs h-10"
+                      autoFocus
+                    />
+                  </div>
+                  <Button onClick={handleAddIdea} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
+                    Add Idea
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
               {selectedInst ? selectedInst.ideas.map(idea => (
@@ -162,17 +244,17 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                   onClick={() => setSelectedIdea(idea)}
                   className={cn(
                     "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
-                    selectedIdea?.id === idea.id ? "bg-primary/20 text-primary" : "text-muted-foreground hover:bg-white/5 hover:text-white"
+                    selectedIdea?.id === idea.id ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]" : "text-muted-foreground hover:bg-white/5 hover:text-white"
                   )}
                 >
                   <div className="flex items-center gap-2">
                     <Music size={14} className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"} />
-                    <span className="font-medium">{idea.name}</span>
+                    <span className="font-bold tracking-tight">{idea.name}</span>
                   </div>
                   <ChevronRight size={12} className="opacity-40" />
                 </button>
               )) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10">Select an instrument</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select an instrument to view or add ideas</div>
               )}
             </div>
           </ScrollArea>
@@ -190,7 +272,7 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                   onAddToTimeline={onAddToTimeline}
                 />
               )) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10">Select an idea</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest">Select an idea</div>
               )}
             </div>
           </ScrollArea>
@@ -206,7 +288,7 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                  </div>
                  <div className="flex flex-col gap-0.5">
                     <span className="text-[10px] font-bold text-white">Dave uploaded V2</span>
-                    <span className="text-[9px] text-muted-foreground">2 hours ago</span>
+                    <span className="text-[9px] text-muted-foreground uppercase">2 hours ago</span>
                  </div>
               </div>
               <div className="flex gap-3">
@@ -215,7 +297,7 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                  </div>
                  <div className="flex flex-col gap-0.5">
                     <span className="text-[10px] font-bold text-white">Sarah added a note</span>
-                    <span className="text-[9px] text-muted-foreground">Yesterday</span>
+                    <span className="text-[9px] text-muted-foreground uppercase">Yesterday</span>
                  </div>
               </div>
            </div>
