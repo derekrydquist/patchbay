@@ -44,7 +44,25 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
   );
 }
 
-export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void }) {
+export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void }) {
+  const [newComment, setNewComment] = useState("");
+  const [comments, setComments] = useState(clip.comments || []);
+
+  const handleAddComment = () => {
+    if (!newComment.trim()) return;
+    const comment: Comment = {
+      id: Math.random().toString(36).substr(2, 9),
+      author: "Current User", // In a real app, this would be the logged-in user
+      text: newComment,
+      timestamp: Date.now(),
+      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    const updatedComments = [comment, ...comments];
+    setComments(updatedComments);
+    onCommentsChange?.(updatedComments);
+    setNewComment("");
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0">
@@ -132,30 +150,48 @@ export function ClipInfoWindow({ clip, open, onOpenChange }: { clip: Clip, open:
             </div>
 
             <div>
-              <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
-                <div className="h-px flex-1 bg-primary/20" /> Session Notes
-              </h4>
-              <div className="bg-black/30 rounded border border-white/5 p-1">
-                {clip.comments && clip.comments.length > 0 ? (
-                  <div className="space-y-1">
-                    {clip.comments.map(c => (
-                      <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
-                            <User size={10} /> {c.author}
-                          </span>
-                          <span className="text-[9px] text-muted-foreground font-mono opacity-50">{c.createdAt}</span>
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2 flex-1">
+                  <div className="h-px flex-1 bg-primary/20" /> Session Notes
+                </h4>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="flex gap-2">
+                  <Input 
+                    placeholder="Add a collaboration note..." 
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
+                    className="bg-black/40 border-white/10 text-xs h-9"
+                  />
+                  <Button size="sm" onClick={handleAddComment} className="h-9 px-3">
+                    <Plus size={14} />
+                  </Button>
+                </div>
+
+                <div className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
+                  {comments.length > 0 ? (
+                    <div className="space-y-1">
+                      {comments.map(c => (
+                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
+                              <User size={10} /> {c.author}
+                            </span>
+                            <span className="text-[9px] text-muted-foreground font-mono opacity-50">{c.createdAt}</span>
+                          </div>
+                          <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
                         </div>
-                        <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="py-8 flex flex-col items-center justify-center text-muted-foreground text-[11px] italic opacity-40">
-                    <MessageSquare size={16} className="mb-2" />
-                    No collaboration notes for this asset.
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="py-8 flex flex-col items-center justify-center text-muted-foreground text-[11px] italic opacity-40">
+                      <MessageSquare size={16} className="mb-2" />
+                      No collaboration notes for this asset.
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -173,10 +209,11 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [newComment, setNewComment] = useState("");
   const [isFinal, setIsFinal] = useState(clip.isFinal);
+  const [comments, setComments] = useState(clip.comments || []);
   
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
-    data: { clip, type: 'clip' },
+    data: { clip: { ...clip, isFinal, comments }, type: 'clip' },
   });
 
   const style = transform ? {
@@ -194,8 +231,20 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 
   const handleAddComment = () => {
     if (!newComment.trim()) return;
+    const comment: Comment = {
+      id: Math.random().toString(36).substr(2, 9),
+      author: "Current User",
+      text: newComment,
+      timestamp: Date.now(),
+      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    setComments([comment, ...comments]);
     setShowCommentInput(false);
     setNewComment("");
+  };
+
+  const handleUpdateComments = (newComments: Comment[]) => {
+    setComments(newComments);
   };
 
   const handleMarkFinal = () => {
@@ -310,7 +359,12 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
         </ContextMenuContent>
       </ContextMenu>
 
-      <ClipInfoWindow clip={{...clip, isFinal}} open={showInfo} onOpenChange={setShowInfo} />
+      <ClipInfoWindow 
+        clip={{...clip, isFinal, comments}} 
+        open={showInfo} 
+        onOpenChange={setShowInfo} 
+        onCommentsChange={handleUpdateComments}
+      />
 
       <Dialog open={showCommentInput} onOpenChange={setShowCommentInput}>
         <DialogContent className="max-w-sm bg-card border-primary/20">
@@ -344,11 +398,16 @@ interface BucketClipProps {
 export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
+  const [comments, setComments] = useState(clip.comments || []);
 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
-    data: { clip: {...clip, isFinal}, type: 'bucket-clip' },
+    data: { clip: { ...clip, isFinal, comments }, type: 'bucket-clip' },
   });
+
+  const handleUpdateComments = (newComments: Comment[]) => {
+    setComments(newComments);
+  };
 
   // Re-fixed style to be rock solid for drag-and-drop
   const style = transform ? {
@@ -422,7 +481,12 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         </ContextMenu>
       </div>
       
-      <ClipInfoWindow clip={{...clip, isFinal}} open={showInfo} onOpenChange={setShowInfo} />
+      <ClipInfoWindow 
+        clip={{...clip, isFinal, comments}} 
+        open={showInfo} 
+        onOpenChange={setShowInfo} 
+        onCommentsChange={handleUpdateComments}
+      />
     </>
   );
 }
