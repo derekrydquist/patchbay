@@ -9,8 +9,8 @@ import {
   PointerSensor, 
   TouchSensor, 
   MouseSensor,
-  restrictToWindowEdges
 } from '@dnd-kit/core';
+import { restrictToWindowEdges } from '@dnd-kit/modifiers';
 import { INITIAL_TRACKS, Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { TimelineTrack } from './Track';
 import { TimelineClip } from './Clip';
