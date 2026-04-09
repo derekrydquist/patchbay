@@ -3,7 +3,7 @@ import { MOCK_SONG, ProductionTask, TaskStatus, addSongSection } from '@/lib/daw
 import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 
@@ -74,6 +74,7 @@ export function ProductionTracker() {
   const [grid, setGrid] = useState<Record<string, CellState>>(() => initialGrid());
   const [activeCell, setActiveCell] = useState<{ instrument: string; section: string; value: CellState } | null>(null);
   const [newSection, setNewSection] = useState('');
+  const [isNewSectionOpen, setIsNewSectionOpen] = useState(false);
   const [sectionsVersion, setSectionsVersion] = useState(0);
 
   const columns = useMemo(() => MOCK_SONG.instruments, [sectionsVersion]);
@@ -87,6 +88,7 @@ export function ProductionTracker() {
   const handleAddSection = () => {
     if (!newSection.trim()) return;
     addSongSection(newSection);
+    setIsNewSectionOpen(false);
     setNewSection('');
     setSectionsVersion((v) => v + 1);
   };
@@ -104,10 +106,34 @@ export function ProductionTracker() {
           <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each instrument against the song structure</p>
         </div>
         <div className="flex items-center gap-2">
-          <Input value={newSection} onChange={(e) => setNewSection(e.target.value)} placeholder="Add section" className="h-8 w-40 bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em]" />
-          <Button size="sm" className="h-8 text-[10px] uppercase tracking-[0.2em] font-bold" onClick={handleAddSection}>
-            <Plus size={12} className="mr-2" /> Section
-          </Button>
+          <Dialog open={isNewSectionOpen} onOpenChange={setIsNewSectionOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="h-8 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/20">
+                <Plus size={14} className="mr-2" /> New Section
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
+              <DialogHeader className="mb-4">
+                <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">Add Song Section</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] uppercase font-bold text-muted-foreground">Section Name</label>
+                  <Input 
+                    placeholder="e.g. Pre-Chorus, Solo, Outro 2" 
+                    value={newSection}
+                    onChange={(e) => setNewSection(e.target.value)}
+                    className="bg-black/40 border-white/10 text-xs h-10"
+                    autoFocus
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddSection()}
+                  />
+                </div>
+                <Button onClick={handleAddSection} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
+                  Add Section
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
           <Badge variant="outline" className="bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em] text-primary">Grid View</Badge>
         </div>
       </div>
