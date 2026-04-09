@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { MOCK_SONG, Clip, ProductionTask, TaskStatus } from '@/lib/daw-data';
-import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, X } from 'lucide-react';
+import { MOCK_SONG, ProductionTask, TaskStatus, addSongSection } from '@/lib/daw-data';
+import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 
-const sectionRows = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 const cellStates = ['todo', 'in-progress', 'complete', 'not-applicable'] as const;
 
 type CellState = typeof cellStates[number];
@@ -21,7 +21,7 @@ const stateConfig: Record<CellState, { label: string; icon: any; className: stri
 function initialGrid() {
   const grid: Record<string, CellState> = {};
   MOCK_SONG.instruments.forEach((inst) => {
-    sectionRows.forEach((row) => {
+    MOCK_SONG.sections.forEach((row) => {
       const key = `${inst.id}:${row}`;
       grid[key] = Math.random() > 0.72 ? 'complete' : Math.random() > 0.82 ? 'in-progress' : 'todo';
     });
@@ -73,12 +73,22 @@ function CellModal({ open, onOpenChange, instrument, section, value, onSelect }:
 export function ProductionTracker() {
   const [grid, setGrid] = useState<Record<string, CellState>>(() => initialGrid());
   const [activeCell, setActiveCell] = useState<{ instrument: string; section: string; value: CellState } | null>(null);
+  const [newSection, setNewSection] = useState('');
+  const [sectionsVersion, setSectionsVersion] = useState(0);
 
-  const columns = useMemo(() => MOCK_SONG.instruments, []);
+  const columns = useMemo(() => MOCK_SONG.instruments, [sectionsVersion]);
+  const sections = useMemo(() => MOCK_SONG.sections, [sectionsVersion]);
 
   const updateCell = (instrumentId: string, section: string, value: CellState) => {
     const key = `${instrumentId}:${section}`;
     setGrid((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleAddSection = () => {
+    if (!newSection.trim()) return;
+    addSongSection(newSection);
+    setNewSection('');
+    setSectionsVersion((v) => v + 1);
   };
 
   return (
@@ -93,7 +103,13 @@ export function ProductionTracker() {
           </div>
           <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each instrument against the song structure</p>
         </div>
-        <Badge variant="outline" className="bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em] text-primary">Grid View</Badge>
+        <div className="flex items-center gap-2">
+          <Input value={newSection} onChange={(e) => setNewSection(e.target.value)} placeholder="Add section" className="h-8 w-40 bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em]" />
+          <Button size="sm" className="h-8 text-[10px] uppercase tracking-[0.2em] font-bold" onClick={handleAddSection}>
+            <Plus size={12} className="mr-2" /> Section
+          </Button>
+          <Badge variant="outline" className="bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em] text-primary">Grid View</Badge>
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto p-6">
@@ -108,7 +124,7 @@ export function ProductionTracker() {
               </div>
             ))}
 
-            {sectionRows.map((section) => (
+            {sections.map((section) => (
               <React.Fragment key={section}>
                 <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-between gap-3">
                   <div>
@@ -118,7 +134,7 @@ export function ProductionTracker() {
                 </div>
                 {columns.map((inst) => {
                   const key = `${inst.id}:${section}`;
-                  const value = grid[key];
+                  const value = grid[key] ?? 'todo';
                   const Icon = stateConfig[value].icon;
                   return (
                     <button

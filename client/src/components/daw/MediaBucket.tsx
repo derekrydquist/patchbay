@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { MOCK_SONG, InstrumentFolder, Idea, Clip } from '@/lib/daw-data';
+import React, { useState } from 'react';
+import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
 import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2, Plus } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -11,15 +11,14 @@ import { cn } from '@/lib/utils';
 
 interface MediaBucketProps {
   onAddToTimeline?: (clip: Clip) => void;
+  onInstrumentAdded?: () => void;
 }
 
-export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
+export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketProps) {
   const [selectedInst, setSelectedInst] = useState<InstrumentFolder | null>(null);
   const [selectedIdea, setSelectedIdea] = useState<Idea | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<{name: string, size: string}[]>([]);
-  
-  // New entry states
   const [isNewInstOpen, setIsNewInstOpen] = useState(false);
   const [newInstName, setNewInstName] = useState('');
   const [isNewIdeaOpen, setIsNewIdeaOpen] = useState(false);
@@ -36,12 +35,15 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
 
   const handleAddInstrument = () => {
     if (!newInstName.trim()) return;
+    addInstrument(newInstName);
     setIsNewInstOpen(false);
     setNewInstName('');
+    onInstrumentAdded?.();
   };
 
   const handleAddIdea = () => {
-    if (!newIdeaName.trim()) return;
+    if (!newIdeaName.trim() || !selectedInst) return;
+    selectedInst.ideas = [...selectedInst.ideas, { id: crypto.randomUUID(), name: newIdeaName.trim(), versions: [] }];
     setIsNewIdeaOpen(false);
     setNewIdeaName('');
   };
@@ -60,7 +62,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
             <Search size={14} className="absolute left-2.5 top-2.5 text-muted-foreground" />
             <Input placeholder="Search project assets..." className="h-8 pl-8 text-xs bg-black/40 border-white/5 focus:border-primary/50" />
           </div>
-          
           <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
             <DialogTrigger asChild>
               <Button size="sm" className="h-8 text-[10px] uppercase tracking-widest font-bold">
@@ -72,7 +73,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                 <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
                 <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
               </div>
-              
               <div className="p-6 space-y-6">
                 <div 
                   onDragOver={(e) => e.preventDefault()}
@@ -87,7 +87,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                     <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
                   </div>
                 </div>
-
                 {uploadFiles.length > 0 && (
                   <div className="space-y-3">
                     <h4 className="text-[10px] uppercase font-bold text-muted-foreground">Pending Uploads ({uploadFiles.length})</h4>
@@ -109,7 +108,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
                         ))}
                       </div>
                     </ScrollArea>
-                    
                     <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
                       <div className="space-y-2">
                         <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Idea</label>
@@ -144,7 +142,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
       </div>
 
       <div className="flex-1 flex overflow-hidden divide-x divide-white/5">
-        {/* Column 1: Instruments */}
         <div className="w-1/4 flex flex-col">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Instruments</span>
@@ -198,7 +195,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
           </ScrollArea>
         </div>
 
-        {/* Column 2: Ideas/Patterns */}
         <div className="w-1/4 flex flex-col bg-black/10">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Ideas</span>
@@ -260,7 +256,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
           </ScrollArea>
         </div>
 
-        {/* Column 3: Versions (Draggable Items) */}
         <div className="flex-1 flex flex-col bg-black/20">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Versions</div>
           <ScrollArea className="flex-1">
@@ -278,7 +273,6 @@ export function MediaBucket({ onAddToTimeline }: MediaBucketProps) {
           </ScrollArea>
         </div>
 
-        {/* Column 4: Context/Preview */}
         <div className="w-1/5 flex flex-col bg-black/30 p-4 border-l border-white/5">
            <div className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold mb-4">Activity</div>
            <div className="space-y-4">

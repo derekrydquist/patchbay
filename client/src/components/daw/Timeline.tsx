@@ -22,6 +22,7 @@ import { MediaBucket } from './MediaBucket';
 export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [activeDragClip, setActiveDragClip] = useState<Clip | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -104,15 +105,18 @@ export function Timeline() {
       onDragEnd={handleDragEnd}
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* MediaBucket MUST be inside DndContext for drag-and-drop to work */}
-        <MediaBucket onAddToTimeline={(clip) => {
-          const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
-          if (track) {
-            addClipToTrack(track.id, clip);
-          } else {
-            addClipToTrack(tracks[0].id, clip);
-          }
-        }} />
+        <MediaBucket
+          key={refreshKey}
+          onAddToTimeline={(clip) => {
+            const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
+            if (track) {
+              addClipToTrack(track.id, clip);
+            } else {
+              addClipToTrack(tracks[0].id, clip);
+            }
+          }}
+          onInstrumentAdded={() => setRefreshKey((v) => v + 1)}
+        />
 
         <div className="flex-1 flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none">
           <Ruler />

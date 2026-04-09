@@ -56,6 +56,7 @@ export interface Song {
   id: string;
   name: string;
   instruments: InstrumentFolder[];
+  sections: string[];
 }
 
 export type TaskStatus = 'todo' | 'in-progress' | 'review' | 'done';
@@ -112,10 +113,12 @@ const instrumentConfigs: { name: string, type: 'instrument' | 'audio' | 'vocal',
 ];
 
 const ideasPerInstrument = ['Main Progression', 'Alternative Bridge', 'Outro Concept'];
+const defaultSections = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 
 export const MOCK_SONG: Song = {
   id: 'song-1',
   name: 'Midnight Horizon',
+  sections: [...defaultSections],
   instruments: instrumentConfigs.map(inst => ({
     id: nanoid(),
     name: inst.name,
@@ -126,6 +129,30 @@ export const MOCK_SONG: Song = {
       versions: generateVersions(`${inst.name} ${ideaName}`, inst.author, inst.type === 'vocal' ? 'vocal' : 'audio', inst.color, inst.duration)
     }))
   }))
+};
+
+export const addSongSection = (section: string) => {
+  const trimmed = section.trim();
+  if (!trimmed) return;
+  if (!MOCK_SONG.sections.includes(trimmed)) {
+    MOCK_SONG.sections = [...MOCK_SONG.sections, trimmed];
+  }
+};
+
+export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))') => {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  if (!MOCK_SONG.instruments.some(inst => inst.name.toLowerCase() === trimmed.toLowerCase())) {
+    MOCK_SONG.instruments = [
+      ...MOCK_SONG.instruments,
+      {
+        id: nanoid(),
+        name: trimmed,
+        type: 'audio',
+        ideas: [],
+      },
+    ];
+  }
 };
 
 export const MOCK_TASKS: ProductionTask[] = [
