@@ -12,10 +12,18 @@ const cellStates = ['todo', 'in-progress', 'complete', 'not-applicable'] as cons
 
 type CellState = typeof cellStates[number];
 
+type Comment = {
+  id: string;
+  author: string;
+  text: string;
+  timestamp: string;
+  avatarColor: string;
+};
+
 type CellData = {
   state: CellState;
   versionName?: string;
-  note?: string;
+  comments: Comment[];
 };
 
 const stateConfig: Record<CellState, { label: string; icon: any; className: string }> = {
@@ -45,10 +53,22 @@ function initialGrid() {
         state = 'in-progress';
       }
       
+      const comments: Comment[] = [];
+      if (rand > 0.95) {
+        comments.push(
+          { id: '1', author: 'Alex', text: 'Are we still using the vintage synth for this?', timestamp: '2 hours ago', avatarColor: 'bg-blue-500' },
+          { id: '2', author: 'Dave', text: '@Alex yeah, I\'ll track it tomorrow morning.', timestamp: '1 hour ago', avatarColor: 'bg-green-500' }
+        );
+      } else if (rand > 0.85) {
+        comments.push(
+          { id: '1', author: 'Sarah', text: 'Needs more low end.', timestamp: 'Yesterday', avatarColor: 'bg-purple-500' }
+        );
+      }
+
       grid[key] = { 
         state, 
         versionName,
-        note: rand > 0.9 ? "@Dave are you tracking this tomorrow?" : ""
+        comments
       };
     });
   });
@@ -70,22 +90,35 @@ function CellModal({
   data: CellData; 
   onUpdate: (data: CellData) => void 
 }) {
-  const [note, setNote] = useState(data.note || '');
+  const [newComment, setNewComment] = useState('');
 
   const handleStateSelect = (state: CellState) => {
-    onUpdate({ ...data, state, note });
+    onUpdate({ ...data, state });
     onOpenChange(false);
   };
 
-  const handleSaveNote = () => {
-    onUpdate({ ...data, note });
-    onOpenChange(false);
+  const handleAddComment = () => {
+    if (!newComment.trim()) return;
+    
+    const comment: Comment = {
+      id: Math.random().toString(36).substr(2, 9),
+      author: 'You',
+      text: newComment,
+      timestamp: 'Just now',
+      avatarColor: 'bg-primary'
+    };
+    
+    onUpdate({ 
+      ...data, 
+      comments: [...(data.comments || []), comment] 
+    });
+    setNewComment('');
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md bg-[#0c0c0e] border-primary/20 p-0 overflow-hidden">
-        <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
+      <DialogContent className="max-w-md bg-[#0c0c0e] border-primary/20 p-0 overflow-hidden flex flex-col max-h-[85vh]">
+        <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent shrink-0">
           <DialogHeader>
             <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading text-white">Mark Board Cell</DialogTitle>
           </DialogHeader>
@@ -95,48 +128,85 @@ function CellModal({
           </div>
         </div>
 
-        <div className="p-4 space-y-6">
-          <div className="space-y-2">
-            <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Status</label>
-            <div className="space-y-1.5">
-              {cellStates.map((state) => {
-                const Icon = stateConfig[state].icon;
-                return (
-                  <button
-                    key={state}
-                    data-testid={`button-state-${instrument}-${section}-${state}`}
-                    onClick={() => handleStateSelect(state)}
-                    className={cn(
-                      'w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-all',
-                      data.state === state ? 'border-primary/60 bg-primary/10' : 'border-white/5 bg-white/[0.03] hover:border-white/10 hover:bg-white/[0.05]'
-                    )}
-                  >
-                    <div className="flex items-center gap-3">
-                      <Icon size={14} className={stateConfig[state].className} />
-                      <span className="text-xs uppercase tracking-[0.2em] font-bold text-white/80">{stateConfig[state].label}</span>
+        <div className="overflow-y-auto flex-1">
+          <div className="p-4 space-y-6">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Status</label>
+              <div className="space-y-1.5">
+                {cellStates.map((state) => {
+                  const Icon = stateConfig[state].icon;
+                  return (
+                    <button
+                      key={state}
+                      data-testid={`button-state-${instrument}-${section}-${state}`}
+                      onClick={() => handleStateSelect(state)}
+                      className={cn(
+                        'w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-all',
+                        data.state === state ? 'border-primary/60 bg-primary/10' : 'border-white/5 bg-white/[0.03] hover:border-white/10 hover:bg-white/[0.05]'
+                      )}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Icon size={14} className={stateConfig[state].className} />
+                        <span className="text-xs uppercase tracking-[0.2em] font-bold text-white/80">{stateConfig[state].label}</span>
+                      </div>
+                      {data.state === state && <CheckCircle2 size={14} className="text-primary" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-4 pt-4 border-t border-white/5">
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center gap-2">
+                <MessageSquare size={12} /> Comments ({(data.comments || []).length})
+              </label>
+              
+              <div className="space-y-4">
+                {(data.comments || []).map((comment) => (
+                  <div key={comment.id} className="flex gap-3">
+                    <div className={cn("w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold text-white", comment.avatarColor)}>
+                      {comment.author.charAt(0)}
                     </div>
-                    {data.state === state && <CheckCircle2 size={14} className="text-primary" />}
-                  </button>
-                );
-              })}
+                    <div className="space-y-1 flex-1">
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-xs font-bold text-white/90">{comment.author}</span>
+                        <span className="text-[9px] text-white/40">{comment.timestamp}</span>
+                      </div>
+                      <p className="text-xs text-white/70 leading-relaxed bg-white/[0.02] p-3 rounded-r-lg rounded-bl-lg border border-white/5">
+                        {comment.text}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+                
+                {(!data.comments || data.comments.length === 0) && (
+                  <div className="text-center py-4 border border-dashed border-white/10 rounded-lg">
+                    <p className="text-xs text-white/40">No comments yet.</p>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
+        </div>
 
-          <div className="space-y-3 pt-4 border-t border-white/5">
-            <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center gap-2">
-              <MessageSquare size={12} /> Task Notes
-            </label>
-            <Textarea 
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Add a note or @mention a bandmate to notify them..."
-              className="bg-black/40 border-white/10 text-xs min-h-[80px] text-white/80 focus:border-primary/50"
+        <div className="p-4 border-t border-white/5 bg-[#0a0a0c] shrink-0">
+          <div className="flex gap-2">
+            <Input 
+              value={newComment}
+              onChange={(e) => setNewComment(e.target.value)}
+              placeholder="Add a comment or @mention someone..."
+              className="bg-white/[0.03] border-white/10 text-xs h-9 flex-1 focus-visible:ring-1 focus-visible:ring-primary/50"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleAddComment();
+              }}
             />
             <Button 
-              onClick={handleSaveNote} 
-              className="w-full h-9 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10"
+              onClick={handleAddComment} 
+              size="sm"
+              className="h-9 px-4 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10"
+              disabled={!newComment.trim()}
             >
-               Save Changes
+              Post
             </Button>
           </div>
         </div>
@@ -239,7 +309,7 @@ export function ProductionTracker() {
                 </div>
                 {columns.map((inst) => {
                   const key = `${inst.id}:${section}`;
-                  const data = grid[key] ?? { state: 'todo' };
+                  const data = grid[key] ?? { state: 'todo', comments: [] };
                   const Icon = stateConfig[data.state].icon;
                   return (
                     <button
@@ -275,9 +345,10 @@ export function ProductionTracker() {
                         
                         <div className="flex flex-col items-end gap-2 shrink-0">
                           <MoreHorizontal size={14} className="text-white/15" />
-                          {data.note && (
-                            <div className="flex items-center justify-center w-4 h-4 rounded-full bg-white/10" title={data.note}>
+                          {(data.comments || []).length > 0 && (
+                            <div className="flex items-center justify-center gap-1 px-1.5 h-4 rounded-full bg-white/10" title={`${data.comments.length} comments`}>
                               <MessageSquare size={8} className="text-white/70" />
+                              <span className="text-[8px] font-bold text-white/70">{data.comments.length}</span>
                             </div>
                           )}
                         </div>
