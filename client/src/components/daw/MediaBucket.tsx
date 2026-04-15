@@ -175,7 +175,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {MOCK_SONG.instruments.map(inst => (
+              {MOCK_SONG.instruments.map(inst => {
+                const hasFiles = inst.ideas.some(idea => idea.versions.length > 0);
+                return (
                 <button
                   key={inst.id}
                   onClick={() => { setSelectedInst(inst); setSelectedIdea(null); }}
@@ -185,12 +187,16 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   )}
                 >
                   <div className="flex items-center gap-2">
-                    <Folder size={14} className={selectedInst?.id === inst.id ? "text-primary" : "text-muted-foreground"} />
+                    <Folder 
+                      size={14} 
+                      className={selectedInst?.id === inst.id ? "text-primary" : "text-muted-foreground"} 
+                      fill={hasFiles ? "currentColor" : "none"} 
+                    />
                     <span className="font-bold tracking-tight">{inst.name}</span>
                   </div>
                   <ChevronRight size={12} className="opacity-40" />
                 </button>
-              ))}
+              )})}
             </div>
           </ScrollArea>
         </div>
@@ -234,7 +240,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {selectedInst ? selectedInst.ideas.map(idea => (
+              {selectedInst ? selectedInst.ideas.map(idea => {
+                const hasFiles = idea.versions.length > 0;
+                return (
                 <button
                   key={idea.id}
                   onClick={() => setSelectedIdea(idea)}
@@ -244,12 +252,16 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   )}
                 >
                   <div className="flex items-center gap-2">
-                    <Music size={14} className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"} />
+                    <Folder 
+                      size={14} 
+                      className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"} 
+                      fill={hasFiles ? "currentColor" : "none"} 
+                    />
                     <span className="font-bold tracking-tight">{idea.name}</span>
                   </div>
                   <ChevronRight size={12} className="opacity-40" />
                 </button>
-              )) : (
+              )}) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select an instrument to view or add ideas</div>
               )}
             </div>

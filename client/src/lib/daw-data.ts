@@ -123,12 +123,18 @@ export const MOCK_SONG: Song = {
     id: nanoid(),
     name: inst.name,
     type: inst.type,
-    ideas: ideasPerInstrument.map(ideaName => ({
-      id: nanoid(),
-      name: `${inst.name} ${ideaName}`,
-      versions: generateVersions(`${inst.name} ${ideaName}`, inst.author, inst.type === 'vocal' ? 'vocal' : 'audio', inst.color, inst.duration)
-    }))
-  }))
+    ideas: ideasPerInstrument.map((ideaName, index) => {
+      const isEmpty = (inst.name === 'Guitar 2' && index === 1) || 
+                      (inst.name === 'Vocals' && index === 2) ||
+                      (inst.name === 'Bass' && index === 0);
+      
+      return {
+        id: nanoid(),
+        name: `${inst.name} ${ideaName}`,
+        versions: isEmpty ? [] : generateVersions(`${inst.name} ${ideaName}`, inst.author, inst.type === 'vocal' ? 'vocal' : 'audio', inst.color, inst.duration)
+      };
+    })
+  })).sort((a, b) => a.name.localeCompare(b.name))
 };
 
 export const addSongSection = (section: string) => {
@@ -151,7 +157,7 @@ export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))
         type: 'audio',
         ideas: [],
       },
-    ];
+    ].sort((a, b) => a.name.localeCompare(b.name));
   }
 };
 
