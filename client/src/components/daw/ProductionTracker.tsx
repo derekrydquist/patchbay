@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import { MOCK_SONG, addSongSection } from '@/lib/daw-data';
-import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare } from 'lucide-react';
+import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare, UserPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const cellStates = ['todo', 'in-progress', 'complete', 'not-applicable'] as const;
 
@@ -20,11 +21,25 @@ type Comment = {
   avatarColor: string;
 };
 
+type User = {
+  id: string;
+  name: string;
+  avatarColor: string;
+};
+
+const BAND_MEMBERS: User[] = [
+  { id: 'u1', name: 'JD (You)', avatarColor: 'bg-primary' },
+  { id: 'u2', name: 'Alex', avatarColor: 'bg-blue-500' },
+  { id: 'u3', name: 'Dave', avatarColor: 'bg-green-500' },
+  { id: 'u4', name: 'Sarah', avatarColor: 'bg-purple-500' },
+];
+
 type CellData = {
   state: CellState;
   versionName?: string;
   comments: Comment[];
   dueDate?: string;
+  assigneeId?: string;
 };
 
 const stateConfig: Record<CellState, { label: string; icon: any; className: string }> = {
@@ -56,25 +71,30 @@ function initialGrid() {
       
       const comments: Comment[] = [];
       let dueDate;
+      let assigneeId;
       if (rand > 0.95) {
         comments.push(
           { id: '1', author: 'Alex', text: 'Are we still using the vintage synth for this?', timestamp: '2 hours ago', avatarColor: 'bg-blue-500' },
           { id: '2', author: 'Dave', text: '@Alex yeah, I\'ll track it tomorrow morning.', timestamp: '1 hour ago', avatarColor: 'bg-green-500' }
         );
         dueDate = '2026-05-12';
+        assigneeId = 'u2'; // Alex
       } else if (rand > 0.85) {
         comments.push(
           { id: '1', author: 'Sarah', text: 'Needs more low end.', timestamp: 'Yesterday', avatarColor: 'bg-purple-500' }
         );
+        assigneeId = 'u4'; // Sarah
       } else if (rand > 0.6) {
         dueDate = '2026-04-20';
+        if (rand > 0.7) assigneeId = 'u1'; // JD
       }
 
       grid[key] = { 
         state, 
         versionName,
         comments,
-        dueDate
+        dueDate,
+        assigneeId
       };
     });
   });
@@ -159,6 +179,39 @@ function CellModal({
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            <div className="space-y-4 pt-4 border-t border-white/5">
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Assignee</label>
+              <div className="px-1">
+                <Select
+                  value={data.assigneeId || "unassigned"}
+                  onValueChange={(val) => onUpdate({ ...data, assigneeId: val === "unassigned" ? undefined : val })}
+                >
+                  <SelectTrigger className="w-full bg-black/40 border-white/10 text-xs h-10">
+                    <SelectValue placeholder="Select band member" />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#0c0c0e] border-white/10">
+                    <SelectItem value="unassigned" className="text-xs text-muted-foreground focus:bg-white/5 focus:text-white">
+                      Unassigned
+                    </SelectItem>
+                    {BAND_MEMBERS.map(member => (
+                      <SelectItem 
+                        key={member.id} 
+                        value={member.id}
+                        className="text-xs focus:bg-white/5 focus:text-white"
+                      >
+                        <div className="flex items-center gap-2">
+                          <div className={cn("w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white", member.avatarColor)}>
+                            {member.name.charAt(0)}
+                          </div>
+                          {member.name}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -364,11 +417,24 @@ export function ProductionTracker() {
                         <div className="flex flex-col items-end gap-2 shrink-0">
                           <MoreHorizontal size={14} className="text-white/15" />
                           <div className="flex flex-col gap-1 items-end">
-                            {data.dueDate && (
-                              <div className="text-[9px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded">
-                                {new Date(data.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                              </div>
-                            )}
+                            <div className="flex items-center gap-1.5">
+                              {data.assigneeId && (
+                                <div 
+                                  className={cn(
+                                    "w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shadow-sm",
+                                    BAND_MEMBERS.find(m => m.id === data.assigneeId)?.avatarColor || "bg-white/20"
+                                  )}
+                                  title={`Assigned to ${BAND_MEMBERS.find(m => m.id === data.assigneeId)?.name}`}
+                                >
+                                  {BAND_MEMBERS.find(m => m.id === data.assigneeId)?.name.charAt(0)}
+                                </div>
+                              )}
+                              {data.dueDate && (
+                                <div className="text-[9px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded">
+                                  {new Date(data.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                </div>
+                              )}
+                            </div>
                             {(data.comments || []).length > 0 && (
                               <div className="flex items-center justify-center gap-1 px-1.5 h-4 rounded-full bg-white/10" title={`${data.comments.length} comments`}>
                                 <MessageSquare size={8} className="text-white/70" />
