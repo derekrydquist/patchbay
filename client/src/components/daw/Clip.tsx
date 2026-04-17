@@ -3,7 +3,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -353,6 +353,20 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 
           <Separator className="my-1 bg-border/50" />
           
+          <ContextMenuItem onClick={(e) => {
+            e.stopPropagation();
+            const link = document.createElement('a');
+            link.href = clip.src || '#'; // In a real app this would be the actual audio URL
+            link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Download size={14} className="text-primary" /> Download
+          </ContextMenuItem>
+
+          <Separator className="my-1 bg-border/50" />
+          
           <ContextMenuItem className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold">
             Delete Clip
           </ContextMenuItem>
@@ -473,6 +487,18 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
             </ContextMenuItem>
             <ContextMenuItem onClick={handleAddClick} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <Plus size={14} className="text-primary" /> Add to Timeline
+            </ContextMenuItem>
+            <Separator className="my-1 bg-border/50" />
+            <ContextMenuItem onClick={(e) => {
+              e.stopPropagation();
+              const link = document.createElement('a');
+              link.href = clip.src || '#'; // In a real app this would be the actual audio URL
+              link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+            }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Download size={14} className="text-primary" /> Download
             </ContextMenuItem>
           </ContextMenuContent>
         </ContextMenu>
