@@ -24,6 +24,7 @@ type CellData = {
   state: CellState;
   versionName?: string;
   comments: Comment[];
+  dueDate?: string;
 };
 
 const stateConfig: Record<CellState, { label: string; icon: any; className: string }> = {
@@ -54,21 +55,26 @@ function initialGrid() {
       }
       
       const comments: Comment[] = [];
+      let dueDate;
       if (rand > 0.95) {
         comments.push(
           { id: '1', author: 'Alex', text: 'Are we still using the vintage synth for this?', timestamp: '2 hours ago', avatarColor: 'bg-blue-500' },
           { id: '2', author: 'Dave', text: '@Alex yeah, I\'ll track it tomorrow morning.', timestamp: '1 hour ago', avatarColor: 'bg-green-500' }
         );
+        dueDate = '2026-05-12';
       } else if (rand > 0.85) {
         comments.push(
           { id: '1', author: 'Sarah', text: 'Needs more low end.', timestamp: 'Yesterday', avatarColor: 'bg-purple-500' }
         );
+      } else if (rand > 0.6) {
+        dueDate = '2026-04-20';
       }
 
       grid[key] = { 
         state, 
         versionName,
-        comments
+        comments,
+        dueDate
       };
     });
   });
@@ -153,6 +159,18 @@ function CellModal({
                     </button>
                   );
                 })}
+              </div>
+            </div>
+
+            <div className="space-y-4 pt-4 border-t border-white/5">
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Due Date</label>
+              <div className="px-1">
+                <Input
+                  type="date"
+                  value={data.dueDate || ''}
+                  onChange={(e) => onUpdate({ ...data, dueDate: e.target.value })}
+                  className="bg-black/40 border-white/10 text-xs h-10 w-full"
+                />
               </div>
             </div>
 
@@ -345,12 +363,19 @@ export function ProductionTracker() {
                         
                         <div className="flex flex-col items-end gap-2 shrink-0">
                           <MoreHorizontal size={14} className="text-white/15" />
-                          {(data.comments || []).length > 0 && (
-                            <div className="flex items-center justify-center gap-1 px-1.5 h-4 rounded-full bg-white/10" title={`${data.comments.length} comments`}>
-                              <MessageSquare size={8} className="text-white/70" />
-                              <span className="text-[8px] font-bold text-white/70">{data.comments.length}</span>
-                            </div>
-                          )}
+                          <div className="flex flex-col gap-1 items-end">
+                            {data.dueDate && (
+                              <div className="text-[9px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded">
+                                {new Date(data.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              </div>
+                            )}
+                            {(data.comments || []).length > 0 && (
+                              <div className="flex items-center justify-center gap-1 px-1.5 h-4 rounded-full bg-white/10" title={`${data.comments.length} comments`}>
+                                <MessageSquare size={8} className="text-white/70" />
+                                <span className="text-[8px] font-bold text-white/70">{data.comments.length}</span>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </button>
