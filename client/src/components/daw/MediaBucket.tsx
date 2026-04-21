@@ -329,8 +329,35 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                 <button
                   key={idea.id}
                   onClick={() => setSelectedIdea(idea)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
+                    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                      Array.from(e.dataTransfer.files).forEach(file => {
+                        if (file.type.startsWith('audio/')) {
+                          addVersionToIdea(idea.id, file, file.name);
+                        }
+                      });
+                      
+                      // Trigger a re-render to show the new files
+                      window.dispatchEvent(new CustomEvent('song-updated'));
+                      
+                      // Auto-select this idea if it wasn't already selected
+                      if (selectedIdea?.id !== idea.id) {
+                        setSelectedIdea(idea);
+                      }
+                    }
+                  }}
                   className={cn(
-                    "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
+                    "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
                     selectedIdea?.id === idea.id ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]" : "text-muted-foreground hover:bg-white/5 hover:text-white"
                   )}
                 >
