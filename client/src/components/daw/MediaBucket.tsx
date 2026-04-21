@@ -189,6 +189,12 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                       placeholder="e.g. Lead Vocals, Bass Synth" 
                       value={newInstName}
                       onChange={(e) => setNewInstName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddInstrument();
+                        }
+                      }}
                       className="bg-black/40 border-white/10 text-xs h-10"
                       autoFocus
                     />
@@ -248,6 +254,12 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                       placeholder="e.g. Chorus 3, Outro Alt" 
                       value={newIdeaName}
                       onChange={(e) => setNewIdeaName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAddIdea();
+                        }
+                      }}
                       className="bg-black/40 border-white/10 text-xs h-10"
                       autoFocus
                     />
