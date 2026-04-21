@@ -55,6 +55,7 @@ export interface InstrumentFolder {
 export interface Song {
   id: string;
   name: string;
+  sections: string[];
   instruments: InstrumentFolder[];
 }
 
@@ -111,17 +112,17 @@ const instrumentConfigs: { name: string, type: 'instrument' | 'audio' | 'vocal',
   { name: 'Vocals', type: 'vocal', color: 'hsl(var(--chart-4))', author: 'Elena', duration: 16 }
 ];
 
-const ideasPerInstrument = ['Intro', 'Verse 1', 'Chorus 1', 'Bridge', 'Outro'];
-const defaultSections = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
+export const DEFAULT_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 
 export const MOCK_SONG: Song = {
   id: 'song-1',
   name: 'Midnight Horizon',
+  sections: [...DEFAULT_SECTIONS],
   instruments: instrumentConfigs.map(inst => ({
     id: nanoid(),
     name: inst.name,
     type: inst.type,
-    ideas: ideasPerInstrument.map((ideaName, index) => {
+    ideas: DEFAULT_SECTIONS.map((ideaName, index) => {
       const isEmpty = (inst.name === 'Guitar 2' && index === 1) || 
                       (inst.name === 'Vocals' && index === 2) ||
                       (inst.name === 'Bass' && index === 0);
@@ -145,9 +146,30 @@ export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))
         id: nanoid(),
         name: trimmed,
         type: 'audio',
-        ideas: [],
+        ideas: MOCK_SONG.sections.map(sec => ({
+          id: nanoid(),
+          name: `${trimmed} ${sec}`,
+          versions: []
+        })),
       },
     ].sort((a, b) => a.name.localeCompare(b.name));
+    window.dispatchEvent(new CustomEvent('song-updated'));
+  }
+};
+
+export const addSection = (name: string) => {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  if (!MOCK_SONG.sections.some(s => s.toLowerCase() === trimmed.toLowerCase())) {
+    MOCK_SONG.sections.push(trimmed);
+    MOCK_SONG.instruments.forEach(inst => {
+      inst.ideas.push({
+        id: nanoid(),
+        name: `${inst.name} ${trimmed}`,
+        versions: []
+      });
+    });
+    window.dispatchEvent(new CustomEvent('song-updated'));
   }
 };
 

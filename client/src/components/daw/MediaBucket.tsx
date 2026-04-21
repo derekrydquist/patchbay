@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument } from '@/lib/daw-data';
+import React, { useState, useEffect } from 'react';
+import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument, addSection } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
 import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2, Plus } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -39,14 +39,41 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     setIsNewInstOpen(false);
     setNewInstName('');
     onInstrumentAdded?.();
+    window.dispatchEvent(new CustomEvent('song-updated'));
   };
 
   const handleAddIdea = () => {
     if (!newIdeaName.trim() || !selectedInst) return;
-    selectedInst.ideas = [...selectedInst.ideas, { id: crypto.randomUUID(), name: newIdeaName.trim(), versions: [] }];
+    
+    // Add section globally to sync with timeline and production whiteboard
+    addSection(newIdeaName.trim());
+    
     setIsNewIdeaOpen(false);
     setNewIdeaName('');
   };
+
+  useEffect(() => {
+    const handleSongUpdated = () => {
+      // Force a re-render to pick up new sections/instruments
+      setSelectedInst(prev => {
+        if (!prev) return null;
+        const updatedInst = MOCK_SONG.instruments.find(i => i.id === prev.id);
+        return updatedInst || null;
+      });
+      
+      setSelectedIdea(prev => {
+        if (!prev) return null;
+        // Find the idea in any instrument
+        for (const inst of MOCK_SONG.instruments) {
+          const updatedIdea = inst.ideas.find(i => i.id === prev.id);
+          if (updatedIdea) return updatedIdea;
+        }
+        return null;
+      });
+    };
+    window.addEventListener('song-updated', handleSongUpdated);
+    return () => window.removeEventListener('song-updated', handleSongUpdated);
+  }, []);
 
   return (
     <div className="w-full h-80 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20">

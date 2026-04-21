@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { MOCK_SONG } from '@/lib/daw-data';
+import React, { useMemo, useState, useEffect } from 'react';
+import { MOCK_SONG, addSection } from '@/lib/daw-data';
 import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare, UserPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -296,7 +296,15 @@ export function ProductionTracker() {
   const [sectionsVersion, setSectionsVersion] = useState(0);
 
   const columns = useMemo(() => MOCK_SONG.instruments, [sectionsVersion]);
-  const sections = useMemo(() => DEFAULT_SECTIONS, [sectionsVersion]);
+  const sections = useMemo(() => MOCK_SONG.sections, [sectionsVersion]);
+
+  useEffect(() => {
+    const handleSongUpdated = () => {
+      setSectionsVersion(v => v + 1);
+    };
+    window.addEventListener('song-updated', handleSongUpdated);
+    return () => window.removeEventListener('song-updated', handleSongUpdated);
+  }, []);
 
   const updateCell = (instrumentId: string, section: string, data: CellData) => {
     const key = `${instrumentId}:${section}`;
@@ -309,10 +317,9 @@ export function ProductionTracker() {
 
   const handleAddSection = () => {
     if (!newSection.trim()) return;
-    // Section adding logic removed based on user request
+    addSection(newSection);
     setIsNewSectionOpen(false);
     setNewSection('');
-    setSectionsVersion((v) => v + 1);
   };
 
   return (

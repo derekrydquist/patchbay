@@ -46,10 +46,19 @@ export function Timeline() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [playheadPosition, setPlayheadPosition] = useState(256); // Initial position matches left-[256px]
   const [isPlaying, setIsPlaying] = useState(false);
+  const [tracksVersion, setTracksVersion] = useState(0);
 
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleSongUpdated = () => {
+      setTracksVersion(v => v + 1);
+    };
+    window.addEventListener('song-updated', handleSongUpdated);
+    return () => window.removeEventListener('song-updated', handleSongUpdated);
+  }, []);
 
   const checkAudioMuteState = React.useCallback((pos: number) => {
     const playheadTime = (pos - 256) / 20;
