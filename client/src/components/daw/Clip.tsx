@@ -378,8 +378,16 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
 
           <Separator className="my-1 bg-border/50" />
           
-          <ContextMenuItem className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold">
-            Delete Clip
+          <ContextMenuItem 
+            onClick={(e) => {
+              e.stopPropagation();
+              window.dispatchEvent(new CustomEvent('remove-clip', { 
+                detail: { clipId: clip.id } 
+              }));
+            }}
+            className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold"
+          >
+            Remove Clip
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>

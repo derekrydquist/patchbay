@@ -201,7 +201,6 @@ export function Timeline() {
     const handleReplaceClip = (e: any) => {
       const { oldClipId, newClip } = e.detail;
       setTracks(prev => prev.map(t => {
-        // Find if this track has the clip we're replacing
         const hasClip = t.clips.some(c => c.id === oldClipId);
         if (!hasClip) return t;
 
@@ -209,10 +208,9 @@ export function Timeline() {
           ...t,
           clips: t.clips.map(c => {
             if (c.id === oldClipId) {
-              // Maintain the same position and duration in the timeline, just swap the metadata/name
               return {
                 ...newClip,
-                id: c.id, // Keep the same timeline ID so React keys don't mess up
+                id: c.id,
                 start: c.start,
                 duration: c.duration,
                 sectionName: c.sectionName,
@@ -224,16 +222,26 @@ export function Timeline() {
       }));
     };
 
+    const handleRemoveClip = (e: any) => {
+      const { clipId } = e.detail;
+      setTracks(prev => prev.map(t => ({
+        ...t,
+        clips: t.clips.filter(c => c.id !== clipId)
+      })));
+    };
+
     window.addEventListener('toggle-track-mute', handleToggleMute);
     window.addEventListener('toggle-track-solo', handleToggleSolo);
     window.addEventListener('update-track-volume', handleUpdateVolume);
     window.addEventListener('replace-clip', handleReplaceClip);
+    window.addEventListener('remove-clip', handleRemoveClip);
 
     return () => {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
       window.removeEventListener('update-track-volume', handleUpdateVolume);
       window.removeEventListener('replace-clip', handleReplaceClip);
+      window.removeEventListener('remove-clip', handleRemoveClip);
     };
   }, []);
 
