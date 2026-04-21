@@ -9,14 +9,33 @@ export function Transport() {
   const [isRecording, setIsRecording] = React.useState(false);
   const audioRef = React.useRef<HTMLAudioElement | null>(null);
 
+  // Use refs to access the latest state inside the keydown listener
+  // without needing to re-run the effect and recreate the Audio object
+  const isPlayingRef = React.useRef(isPlaying);
+  const audioRefMuted = React.useRef(true); // Track intended mute state
+
+  React.useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
   React.useEffect(() => {
     // We'll just use a placeholder audio file for the mockup
     audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3');
     audioRef.current.loop = true;
+    audioRef.current.volume = 0.8;
+    audioRef.current.muted = true; // Start muted until playhead is over a clip
+    audioRefMuted.current = true;
     
     const handleSeek = (e: any) => {
       if (audioRef.current) {
         audioRef.current.currentTime = e.detail.time;
+      }
+    };
+    
+    const handleMuteState = (e: any) => {
+      if (audioRef.current) {
+        audioRef.current.muted = e.detail.muted;
+        audioRefMuted.current = e.detail.muted;
       }
     };
     
@@ -29,22 +48,38 @@ export function Transport() {
         e.target.tagName !== 'TEXTAREA'
       ) {
         e.preventDefault();
-        togglePlay();
+        
+        if (!audioRef.current) return;
+        
+        if (isPlayingRef.current) {
+          audioRef.current.pause();
+          setIsPlaying(false);
+          window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: false } }));
+        } else {
+          // IMPORTANT: Only try to play if we actually have audio ready
+          // and we restore the intended mute state when playing
+          audioRef.current.muted = audioRefMuted.current;
+          audioRef.current.play().catch(err => console.error("Audio play failed:", err));
+          setIsPlaying(true);
+          window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: true } }));
+        }
       }
     };
     
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('seek-audio', handleSeek);
+    window.addEventListener('audio-mute-state', handleMuteState);
     
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('seek-audio', handleSeek);
+      window.removeEventListener('audio-mute-state', handleMuteState);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
       }
     };
-  }, [isPlaying]); // Added isPlaying to dependency array so togglePlay has fresh state
+  }, []);
 
   const togglePlay = () => {
     if (!audioRef.current) return;
@@ -54,6 +89,7 @@ export function Transport() {
       setIsPlaying(false);
       window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: false } }));
     } else {
+      audioRef.current.muted = audioRefMuted.current;
       audioRef.current.play().catch(e => console.error("Audio play failed:", e));
       setIsPlaying(true);
       window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: true } }));

@@ -55,6 +55,23 @@ export function Timeline() {
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
 
+  const checkAudioMuteState = React.useCallback((pos: number) => {
+    const playheadTime = (pos - 240) / 20;
+    let isOverClip = false;
+    
+    for (const track of tracks) {
+      for (const clip of track.clips) {
+        if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
+          isOverClip = true;
+          break;
+        }
+      }
+      if (isOverClip) break;
+    }
+    
+    window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { muted: !isOverClip } }));
+  }, [tracks]);
+
   const handlePlayheadPointerDown = (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -65,6 +82,7 @@ export function Timeline() {
         let newPos = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
         newPos = Math.max(240, newPos);
         setPlayheadPosition(newPos);
+        checkAudioMuteState(newPos);
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, (newPos - 240) / 20) } }));
       }
     };
@@ -97,7 +115,28 @@ export function Timeline() {
           const delta = time - lastTimeRef.current;
           // 20 pixels per second roughly matches the 20px per second width in Clip.tsx
           // width: Math.max(160, activeDragClip.duration * 20)
-          setPlayheadPosition(prev => prev + (delta / 1000) * 20); 
+          setPlayheadPosition(prev => {
+            const newPos = prev + (delta / 1000) * 20;
+            
+            // Check if playhead is over any clip
+            const playheadTime = (newPos - 240) / 20;
+            let isOverClip = false;
+            
+            for (const track of tracks) {
+              for (const clip of track.clips) {
+                if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
+                  isOverClip = true;
+                  break;
+                }
+              }
+              if (isOverClip) break;
+            }
+            
+            // Dispatch event to mute/unmute audio based on whether we're over a clip
+            window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { muted: !isOverClip } }));
+            
+            return newPos;
+          }); 
         }
         lastTimeRef.current = time;
         animationRef.current = requestAnimationFrame(animate);
@@ -114,7 +153,7 @@ export function Timeline() {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isPlaying]);
+  }, [isPlaying, tracks]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
