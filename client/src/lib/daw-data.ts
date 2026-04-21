@@ -112,7 +112,7 @@ const instrumentConfigs: { name: string, type: 'instrument' | 'audio' | 'vocal',
   { name: 'Vocals', type: 'vocal', color: 'hsl(var(--chart-4))', author: 'Elena', duration: 16 }
 ];
 
-const ideasPerInstrument = ['Main Progression', 'Alternative Bridge', 'Outro Concept'];
+const ideasPerInstrument = ['Intro', 'Verse 1', 'Chorus 1', 'Bridge', 'Outro'];
 const defaultSections = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 
 export const MOCK_SONG: Song = {

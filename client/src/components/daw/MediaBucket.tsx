@@ -110,7 +110,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                     </ScrollArea>
                     <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
                       <div className="space-y-2">
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Idea</label>
+                        <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
                         <Select>
                           <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
                             <SelectValue placeholder="Select Destination" />
@@ -203,7 +203,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
         <div className="w-1/4 flex flex-col bg-black/10">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
-            <span>Ideas</span>
+            <span>Sections</span>
             <Dialog open={isNewIdeaOpen} onOpenChange={setIsNewIdeaOpen}>
               <DialogTrigger asChild>
                 <button 
@@ -218,13 +218,13 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
               </DialogTrigger>
               <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
                 <DialogHeader className="mb-4">
-                  <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">New Idea Pattern</DialogTitle>
+                  <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">New Section</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4">
                   <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Idea Name</label>
+                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Section Name</label>
                     <Input 
-                      placeholder="e.g. Chorus Hook, Verse 2 Alt" 
+                      placeholder="e.g. Chorus 3, Outro Alt" 
                       value={newIdeaName}
                       onChange={(e) => setNewIdeaName(e.target.value)}
                       className="bg-black/40 border-white/10 text-xs h-10"
@@ -232,7 +232,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                     />
                   </div>
                   <Button onClick={handleAddIdea} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
-                    Add Idea
+                    Add Section
                   </Button>
                 </div>
               </DialogContent>
@@ -262,7 +262,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   <ChevronRight size={12} className="opacity-40" />
                 </button>
               )}) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select an instrument to view or add ideas</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select an instrument to view or add sections</div>
               )}
             </div>
           </ScrollArea>
@@ -279,7 +279,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   onAddToTimeline={onAddToTimeline}
                 />
               )) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest">Select an idea</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest">Select a section</div>
               )}
             </div>
           </ScrollArea>

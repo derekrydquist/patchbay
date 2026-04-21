@@ -18,6 +18,27 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { Music2 } from 'lucide-react';
 import { MediaBucket } from './MediaBucket';
+import { 
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+
+interface TimelineSection {
+  id: string;
+  name: string;
+  start: number;
+  duration: number;
+}
 
 export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
@@ -25,6 +46,11 @@ export function Timeline() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [playheadPosition, setPlayheadPosition] = useState(240); // Initial position matches left-[240px]
   const [isPlaying, setIsPlaying] = useState(false);
+  
+  const [timelineSections, setTimelineSections] = useState<TimelineSection[]>([]);
+  const [addingSectionAt, setAddingSectionAt] = useState<number | null>(null);
+  const [newSectionName, setNewSectionName] = useState<string>("");
+
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
@@ -132,11 +158,26 @@ export function Timeline() {
     }
   };
 
-  const addClipToTrack = (trackId: string, clip: Clip) => {
+  const addClipToTrack = (trackId: string, clip: any) => {
     setTracks(prev => prev.map(t => {
       if (t.id === trackId) {
-        const lastClip = t.clips[t.clips.length - 1];
-        const start = lastClip ? lastClip.start + lastClip.duration : 0;
+        let start = 0;
+        
+        if (timelineSections.length > 0) {
+          const matchingSection = clip.sectionName 
+            ? timelineSections.find(s => clip.sectionName.includes(s.name))
+            : null;
+            
+          if (matchingSection) {
+            start = matchingSection.start;
+          } else {
+            alert(`Cannot add: The timeline only accepts clips for existing sections. Please add the corresponding section to the timeline first.`);
+            return t;
+          }
+        } else {
+          const lastClip = t.clips[t.clips.length - 1];
+          start = lastClip ? lastClip.start + lastClip.duration : 0;
+        }
         
         return {
           ...t,
@@ -160,7 +201,8 @@ export function Timeline() {
     if (!trackId || !clip) return;
 
     if (activeType === 'bucket-clip' || activeType === 'clip') {
-      addClipToTrack(trackId, clip);
+      const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
+      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
     }
   };
 
@@ -181,10 +223,12 @@ export function Timeline() {
           key={refreshKey}
           onAddToTimeline={(clip) => {
             const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
+            const clipIdeaName = clip.name.replace(track?.name + ' ', '').split(' V')[0];
+            
             if (track) {
-              addClipToTrack(track.id, clip);
+              addClipToTrack(track.id, { ...clip, sectionName: clipIdeaName });
             } else {
-              addClipToTrack(tracks[0].id, clip);
+              addClipToTrack(tracks[0].id, { ...clip, sectionName: clipIdeaName });
             }
           }}
           onInstrumentAdded={() => setRefreshKey((v) => v + 1)}
@@ -194,6 +238,36 @@ export function Timeline() {
           <div className="flex-1 overflow-y-auto overflow-x-auto relative scrollbar-hide" ref={timelineRef}>
             <div className="min-w-[2000px] pb-32">
               <Ruler onSeek={handleRulerSeek} />
+              
+              {/* Sections Track */}
+              <div className="flex w-full h-8 border-b border-border bg-primary/5 group/sections relative">
+                <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center sticky left-0 z-20">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Song Sections</span>
+                </div>
+                <div 
+                  className="flex-1 relative cursor-pointer"
+                  onClick={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const start = Math.max(0, Math.floor(x / 20)); // 20px per second
+                    setAddingSectionAt(start);
+                  }}
+                >
+                  <div className="absolute inset-0 opacity-0 group-hover/sections:opacity-100 pointer-events-none flex items-center px-4 transition-opacity">
+                    <span className="text-[10px] text-muted-foreground uppercase tracking-widest">Click empty space to add section</span>
+                  </div>
+                  {timelineSections.map(sec => (
+                    <div 
+                      key={sec.id}
+                      className="absolute top-0 bottom-0 bg-primary/20 border-x border-primary/50 flex items-center px-2 z-10 hover:bg-primary/30 transition-colors"
+                      style={{ left: sec.start * 20, width: sec.duration * 20 }}
+                      onClick={(e) => e.stopPropagation()} // Prevent adding section when clicking an existing one
+                    >
+                      <span className="text-[10px] font-bold text-primary uppercase tracking-widest drop-shadow-md">{sec.name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
               
               {tracks.map(track => (
                 <TimelineTrack key={track.id} track={track} />
@@ -235,6 +309,45 @@ export function Timeline() {
           </div>
         ) : null}
       </DragOverlay>
+
+      <Dialog open={addingSectionAt !== null} onOpenChange={(open) => !open && setAddingSectionAt(null)}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
+          <DialogHeader className="mb-4">
+            <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">Add Section to Timeline</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Select Section</label>
+              <Select value={newSectionName} onValueChange={setNewSectionName}>
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-10">
+                  <SelectValue placeholder="Choose a section..." />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  {MOCK_SONG.sections.map(sec => (
+                    <SelectItem key={sec} value={sec} className="text-xs">{sec}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button 
+              disabled={!newSectionName}
+              onClick={() => {
+                if (addingSectionAt !== null && newSectionName) {
+                  setTimelineSections(prev => [
+                    ...prev, 
+                    { id: nanoid(), name: newSectionName, start: addingSectionAt, duration: 16 }
+                  ]);
+                  setAddingSectionAt(null);
+                  setNewSectionName("");
+                }
+              }} 
+              className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10"
+            >
+              Add Section
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </DndContext>
   );
 }
