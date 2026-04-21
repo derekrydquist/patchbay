@@ -27,6 +27,30 @@ export function Timeline() {
   const [isPlaying, setIsPlaying] = useState(false);
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
+  const timelineRef = React.useRef<HTMLDivElement>(null);
+
+  const handlePlayheadPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      if (timelineRef.current) {
+        const rect = timelineRef.current.getBoundingClientRect();
+        let newPos = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
+        newPos = Math.max(240, newPos);
+        setPlayheadPosition(newPos);
+        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, (newPos - 240) / 20) } }));
+      }
+    };
+    
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+    
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
 
   useEffect(() => {
     const handlePlayToggle = (e: any) => {
@@ -140,6 +164,12 @@ export function Timeline() {
     }
   };
 
+  const handleRulerSeek = (pos: number) => {
+    const newPos = Math.max(240, pos + 240);
+    setPlayheadPosition(newPos);
+    window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, pos / 20) } }));
+  };
+
   return (
     <DndContext 
       sensors={sensors} 
@@ -161,9 +191,10 @@ export function Timeline() {
         />
 
         <div className="flex-1 flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none">
-          <Ruler />
-          <div className="flex-1 overflow-y-auto overflow-x-auto relative scrollbar-hide">
+          <div className="flex-1 overflow-y-auto overflow-x-auto relative scrollbar-hide" ref={timelineRef}>
             <div className="min-w-[2000px] pb-32">
+              <Ruler onSeek={handleRulerSeek} />
+              
               {tracks.map(track => (
                 <TimelineTrack key={track.id} track={track} />
               ))}
@@ -176,13 +207,15 @@ export function Timeline() {
 
           {/* Global Playhead */}
           <div 
-            className="absolute top-0 bottom-0 w-[1px] bg-primary z-50 pointer-events-none shadow-[0_0_15px_rgba(212,175,55,0.6)]"
-            style={{ left: `${playheadPosition}px` }}
+            className="absolute top-0 bottom-0 w-[16px] z-50 flex justify-center cursor-ew-resize group"
+            style={{ left: `${playheadPosition}px`, transform: 'translateX(-50%)' }}
+            onPointerDown={handlePlayheadPointerDown}
           >
-            <div className="absolute top-0 -left-[6px] w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center">
+            <div className="w-[1px] h-full bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)] group-hover:w-[2px] transition-all" />
+            <div className="absolute top-0 w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center pointer-events-none">
               <div className="w-[1px] h-[8px] bg-black/50" />
             </div>
-            <div className="absolute top-[14px] -left-[6px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary" />
+            <div className="absolute top-[14px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary pointer-events-none" />
           </div>
         </div>
       </div>

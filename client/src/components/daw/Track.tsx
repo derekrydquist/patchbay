@@ -20,7 +20,7 @@ export function TimelineTrack({ track, isActive }: TrackProps) {
   return (
     <div className="flex w-full h-16 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group">
       {/* Track Header (Controls) */}
-      <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 relative z-10">
+      <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 sticky left-0 z-20">
         <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
         
         <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">

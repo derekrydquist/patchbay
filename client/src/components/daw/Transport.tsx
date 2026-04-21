@@ -14,7 +14,16 @@ export function Transport() {
     audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3');
     audioRef.current.loop = true;
     
+    const handleSeek = (e: any) => {
+      if (audioRef.current) {
+        audioRef.current.currentTime = e.detail.time;
+      }
+    };
+    
+    window.addEventListener('seek-audio', handleSeek);
+    
     return () => {
+      window.removeEventListener('seek-audio', handleSeek);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
