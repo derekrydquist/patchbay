@@ -198,14 +198,42 @@ export function Timeline() {
       ));
     };
 
+    const handleReplaceClip = (e: any) => {
+      const { oldClipId, newClip } = e.detail;
+      setTracks(prev => prev.map(t => {
+        // Find if this track has the clip we're replacing
+        const hasClip = t.clips.some(c => c.id === oldClipId);
+        if (!hasClip) return t;
+
+        return {
+          ...t,
+          clips: t.clips.map(c => {
+            if (c.id === oldClipId) {
+              // Maintain the same position and duration in the timeline, just swap the metadata/name
+              return {
+                ...newClip,
+                id: c.id, // Keep the same timeline ID so React keys don't mess up
+                start: c.start,
+                duration: c.duration,
+                sectionName: c.sectionName,
+              };
+            }
+            return c;
+          })
+        };
+      }));
+    };
+
     window.addEventListener('toggle-track-mute', handleToggleMute);
     window.addEventListener('toggle-track-solo', handleToggleSolo);
     window.addEventListener('update-track-volume', handleUpdateVolume);
+    window.addEventListener('replace-clip', handleReplaceClip);
 
     return () => {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
       window.removeEventListener('update-track-volume', handleUpdateVolume);
+      window.removeEventListener('replace-clip', handleReplaceClip);
     };
   }, []);
 

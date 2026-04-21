@@ -340,7 +340,18 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
             <ContextMenuSubContent className="bg-popover border-border min-w-[200px]">
               {otherVersions.length > 0 ? (
                 otherVersions.map(v => (
-                  <ContextMenuItem key={v.id} className="text-xs flex flex-col items-start gap-1 py-2">
+                  <ContextMenuItem 
+                    key={v.id} 
+                    className="text-xs flex flex-col items-start gap-1 py-2"
+                    onClick={() => {
+                      window.dispatchEvent(new CustomEvent('replace-clip', { 
+                        detail: { 
+                          oldClipId: clip.id, 
+                          newClip: v 
+                        } 
+                      }));
+                    }}
+                  >
                     <span className="font-bold">{v.name}</span>
                     <span className="text-[10px] text-muted-foreground uppercase">{v.metadata?.uploadedBy} • {v.metadata?.uploadedDate}</span>
                   </ContextMenuItem>
