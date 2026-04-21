@@ -173,6 +173,43 @@ export const addSection = (name: string) => {
   }
 };
 
+export const addVersionToIdea = (ideaId: string, file: File, fileName: string) => {
+  for (const inst of MOCK_SONG.instruments) {
+    const idea = inst.ideas.find(i => i.id === ideaId);
+    if (idea) {
+      const versionNum = idea.versions.length + 1;
+      const newClip: Clip = {
+        id: nanoid(),
+        name: `${idea.name} V${versionNum}`,
+        type: inst.type === 'vocal' ? 'vocal' : 'audio',
+        color: inst.color,
+        start: 0,
+        duration: 16, // Default duration, in a real app we'd parse the audio file
+        src: URL.createObjectURL(file), // Local object URL for playback simulation
+        metadata: {
+          format: fileName.split('.').pop()?.toUpperCase() || 'WAV',
+          sampleRate: '48kHz',
+          bitDepth: '24-bit',
+          description: `Uploaded file: ${fileName}`,
+          tags: ['upload', 'raw'],
+          originalFileName: fileName,
+          uploadedBy: 'You',
+          uploadedDate: new Date().toISOString().split('T')[0],
+          timeSignature: '4/4',
+          key: 'Unknown',
+          bpm: MOCK_SONG.bpm || 120,
+          channels: 'Stereo',
+          peakLevel: '-1.0 dBFS'
+        },
+        isFinal: false
+      };
+      idea.versions.push(newClip);
+      window.dispatchEvent(new CustomEvent('song-updated'));
+      break;
+    }
+  }
+};
+
 export const MOCK_TASKS: ProductionTask[] = [
   { 
     id: '1', 

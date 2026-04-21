@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument, addSection } from '@/lib/daw-data';
+import React, { useState, useEffect, useRef } from 'react';
+import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument, addSection, addVersionToIdea } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
 import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2, Plus } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -18,19 +18,56 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [selectedInst, setSelectedInst] = useState<InstrumentFolder | null>(null);
   const [selectedIdea, setSelectedIdea] = useState<Idea | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
-  const [uploadFiles, setUploadFiles] = useState<{name: string, size: string}[]>([]);
+  const [uploadFiles, setUploadFiles] = useState<{name: string, size: string, file: File}[]>([]);
+  const [uploadDestination, setUploadDestination] = useState<string>('');
   const [isNewInstOpen, setIsNewInstOpen] = useState(false);
   const [newInstName, setNewInstName] = useState('');
   const [isNewIdeaOpen, setIsNewIdeaOpen] = useState(false);
   const [newIdeaName, setNewIdeaName] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files).map(f => ({
       name: f.name,
-      size: (f.size / 1024 / 1024).toFixed(2) + ' MB'
+      size: (f.size / 1024 / 1024).toFixed(2) + ' MB',
+      file: f
     }));
     setUploadFiles(prev => [...prev, ...files]);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files).map(f => ({
+      name: f.name,
+      size: (f.size / 1024 / 1024).toFixed(2) + ' MB',
+      file: f
+    }));
+    setUploadFiles(prev => [...prev, ...files]);
+    // Reset input so the same file can be selected again
+    e.target.value = '';
+  };
+
+  const handleConfirmUpload = () => {
+    if (!uploadDestination || uploadFiles.length === 0) return;
+    
+    uploadFiles.forEach(f => {
+      addVersionToIdea(uploadDestination, f.file, f.name);
+    });
+    
+    setIsUploadOpen(false);
+    setUploadFiles([]);
+    setUploadDestination('');
+    
+    // Automatically select the instrument and idea we just uploaded to
+    for (const inst of MOCK_SONG.instruments) {
+      const idea = inst.ideas.find(i => i.id === uploadDestination);
+      if (idea) {
+        setSelectedInst(inst);
+        setSelectedIdea(idea);
+        break;
+      }
+    }
   };
 
   const handleAddInstrument = () => {
@@ -104,13 +141,22 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                 <div 
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={handleFileDrop}
+                  onClick={() => fileInputRef.current?.click()}
                   className="border-2 border-dashed border-white/10 rounded-xl p-10 flex flex-col items-center justify-center gap-4 hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer group"
                 >
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    className="hidden" 
+                    multiple 
+                    accept="audio/*" 
+                    onChange={handleFileSelect} 
+                  />
                   <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform">
                     <Upload size={24} className="text-primary" />
                   </div>
                   <div className="text-center">
-                    <p className="text-sm font-bold text-white">Drag audio files here</p>
+                    <p className="text-sm font-bold text-white">Click or drag audio files here</p>
                     <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
                   </div>
                 </div>
@@ -138,7 +184,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                     <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
                       <div className="space-y-2">
                         <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
-                        <Select>
+                        <Select value={uploadDestination} onValueChange={setUploadDestination}>
                           <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
                             <SelectValue placeholder="Select Destination" />
                           </SelectTrigger>
@@ -155,7 +201,11 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                         </Select>
                       </div>
                       <div className="flex items-end">
-                        <Button className="w-full h-9 uppercase tracking-widest text-[10px] font-bold" onClick={() => { setIsUploadOpen(false); setUploadFiles([]); }}>
+                        <Button 
+                          className="w-full h-9 uppercase tracking-widest text-[10px] font-bold" 
+                          onClick={handleConfirmUpload}
+                          disabled={!uploadDestination || uploadFiles.length === 0}
+                        >
                           Confirm Ingestion
                         </Button>
                       </div>
