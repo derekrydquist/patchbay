@@ -283,7 +283,7 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
           >
             <div 
               className="absolute inset-0 opacity-80" 
-              style={{ backgroundColor: clip.color }}
+              style={{ backgroundColor: clip.color || 'hsl(var(--primary))' }}
             />
             
             {isFinal && (
@@ -472,7 +472,7 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
       >
         <div 
           className="w-1.5 h-full rounded-full shrink-0" 
-          style={{ backgroundColor: clip.color }}
+          style={{ backgroundColor: clip.color || 'hsl(var(--primary))' }}
         />
         <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none select-none">
           <div className="flex items-center gap-2 truncate">

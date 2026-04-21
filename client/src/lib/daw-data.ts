@@ -49,6 +49,7 @@ export interface InstrumentFolder {
   id: string;
   name: string;
   type: 'instrument' | 'audio' | 'vocal';
+  color?: string;
   ideas: Idea[];
 }
 
@@ -122,6 +123,7 @@ export const MOCK_SONG: Song = {
     id: nanoid(),
     name: inst.name,
     type: inst.type,
+    color: inst.color,
     ideas: DEFAULT_SECTIONS.map((ideaName, index) => {
       const isEmpty = (inst.name === 'Guitar 2' && index === 1) || 
                       (inst.name === 'Vocals' && index === 2) ||
@@ -146,6 +148,7 @@ export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))
         id: nanoid(),
         name: trimmed,
         type: 'audio',
+        color,
         ideas: MOCK_SONG.sections.map(sec => ({
           id: nanoid(),
           name: `${trimmed} ${sec}`,
@@ -182,7 +185,7 @@ export const addVersionToIdea = (ideaId: string, file: File, fileName: string) =
         id: nanoid(),
         name: `${idea.name} V${versionNum}`,
         type: inst.type === 'vocal' ? 'vocal' : 'audio',
-        color: inst.color,
+        color: inst.color || 'hsl(var(--primary))',
         start: 0,
         duration: 16, // Default duration, in a real app we'd parse the audio file
         src: URL.createObjectURL(file), // Local object URL for playback simulation

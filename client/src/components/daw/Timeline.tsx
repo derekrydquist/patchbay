@@ -212,6 +212,12 @@ export function Timeline() {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
+      // Ensure all custom audio is paused when transport stops
+      Object.values(customAudioRefs.current).forEach(audio => {
+        if (audio && !audio.paused) {
+          audio.pause();
+        }
+      });
     }
 
     return () => {
@@ -219,7 +225,7 @@ export function Timeline() {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isPlaying, tracks]);
+  }, [isPlaying, tracks, bpm]);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
