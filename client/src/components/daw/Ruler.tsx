@@ -2,7 +2,7 @@ import React from 'react';
 
 export function Ruler() {
   return (
-    <div className="h-8 border-b border-border bg-card/50 ml-64 flex items-end pb-1 relative overflow-hidden select-none">
+    <div className="h-8 border-b border-border bg-card/50 ml-[240px] flex items-end pb-1 relative overflow-hidden select-none">
        {/* Just a visual ruler */}
        {Array.from({ length: 100 }).map((_, i) => (
          <div key={i} className="absolute bottom-0 h-4 border-l border-muted-foreground/30 text-[9px] text-muted-foreground pl-1 font-mono" style={{ left: i * 80 }}>

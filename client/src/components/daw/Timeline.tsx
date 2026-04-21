@@ -23,6 +23,48 @@ export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [activeDragClip, setActiveDragClip] = useState<Clip | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [playheadPosition, setPlayheadPosition] = useState(240); // Initial position matches left-[240px]
+  const [isPlaying, setIsPlaying] = useState(false);
+  const animationRef = React.useRef<number>();
+  const lastTimeRef = React.useRef<number>();
+
+  useEffect(() => {
+    const handlePlayToggle = (e: any) => {
+      setIsPlaying(e.detail.isPlaying);
+      if (e.detail.isPlaying) {
+        lastTimeRef.current = performance.now();
+      }
+    };
+
+    window.addEventListener('toggle-play', handlePlayToggle);
+    return () => window.removeEventListener('toggle-play', handlePlayToggle);
+  }, []);
+
+  useEffect(() => {
+    if (isPlaying) {
+      const animate = (time: number) => {
+        if (lastTimeRef.current) {
+          const delta = time - lastTimeRef.current;
+          // 20 pixels per second roughly matches the 20px per second width in Clip.tsx
+          // width: Math.max(160, activeDragClip.duration * 20)
+          setPlayheadPosition(prev => prev + (delta / 1000) * 20); 
+        }
+        lastTimeRef.current = time;
+        animationRef.current = requestAnimationFrame(animate);
+      };
+      animationRef.current = requestAnimationFrame(animate);
+    } else {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    }
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, [isPlaying]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -130,10 +172,17 @@ export function Timeline() {
                 <span className="text-[10px] font-bold uppercase tracking-[0.2em] group-hover:text-primary transition-colors opacity-40 group-hover:opacity-100">+ Add New Track</span>
               </div>
             </div>
+          </div>
 
-            <div className="absolute top-0 bottom-0 left-[240px] w-[1px] bg-primary/40 z-40 pointer-events-none shadow-[0_0_15px_rgba(212,175,55,0.2)]">
-              <div className="absolute -top-3 -left-[5px] w-0 h-0 border-l-[5px] border-l-transparent border-r-[5px] border-r-transparent border-t-[8px] border-t-primary" />
+          {/* Global Playhead */}
+          <div 
+            className="absolute top-0 bottom-0 w-[1px] bg-primary z-50 pointer-events-none shadow-[0_0_15px_rgba(212,175,55,0.6)]"
+            style={{ left: `${playheadPosition}px` }}
+          >
+            <div className="absolute top-0 -left-[6px] w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center">
+              <div className="w-[1px] h-[8px] bg-black/50" />
             </div>
+            <div className="absolute top-[14px] -left-[6px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary" />
           </div>
         </div>
       </div>

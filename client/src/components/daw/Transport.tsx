@@ -28,9 +28,11 @@ export function Transport() {
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
+      window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: false } }));
     } else {
       audioRef.current.play().catch(e => console.error("Audio play failed:", e));
       setIsPlaying(true);
+      window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: true } }));
     }
   };
 
