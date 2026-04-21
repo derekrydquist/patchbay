@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { MOCK_SONG, addSongSection } from '@/lib/daw-data';
+import { MOCK_SONG } from '@/lib/daw-data';
 import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare, UserPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -49,10 +49,12 @@ const stateConfig: Record<CellState, { label: string; icon: any; className: stri
   'not-applicable': { label: 'Won\'t Play', icon: Minus, className: 'text-white/20' },
 };
 
+const DEFAULT_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
+
 function initialGrid() {
   const grid: Record<string, CellData> = {};
   MOCK_SONG.instruments.forEach((inst) => {
-    MOCK_SONG.sections.forEach((row) => {
+    DEFAULT_SECTIONS.forEach((row) => {
       const key = `${inst.id}:${row}`;
       const rand = Math.random();
       let state: CellState = 'todo';
@@ -294,7 +296,7 @@ export function ProductionTracker() {
   const [sectionsVersion, setSectionsVersion] = useState(0);
 
   const columns = useMemo(() => MOCK_SONG.instruments, [sectionsVersion]);
-  const sections = useMemo(() => MOCK_SONG.sections, [sectionsVersion]);
+  const sections = useMemo(() => DEFAULT_SECTIONS, [sectionsVersion]);
 
   const updateCell = (instrumentId: string, section: string, data: CellData) => {
     const key = `${instrumentId}:${section}`;
@@ -307,7 +309,7 @@ export function ProductionTracker() {
 
   const handleAddSection = () => {
     if (!newSection.trim()) return;
-    addSongSection(newSection);
+    // Section adding logic removed based on user request
     setIsNewSectionOpen(false);
     setNewSection('');
     setSectionsVersion((v) => v + 1);

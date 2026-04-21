@@ -56,7 +56,6 @@ export interface Song {
   id: string;
   name: string;
   instruments: InstrumentFolder[];
-  sections: string[];
 }
 
 export type TaskStatus = 'todo' | 'in-progress' | 'review' | 'done';
@@ -118,7 +117,6 @@ const defaultSections = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 
 export const MOCK_SONG: Song = {
   id: 'song-1',
   name: 'Midnight Horizon',
-  sections: [...defaultSections],
   instruments: instrumentConfigs.map(inst => ({
     id: nanoid(),
     name: inst.name,
@@ -135,14 +133,6 @@ export const MOCK_SONG: Song = {
       };
     })
   })).sort((a, b) => a.name.localeCompare(b.name))
-};
-
-export const addSongSection = (section: string) => {
-  const trimmed = section.trim();
-  if (!trimmed) return;
-  if (!MOCK_SONG.sections.includes(trimmed)) {
-    MOCK_SONG.sections = [...MOCK_SONG.sections, trimmed];
-  }
 };
 
 export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))') => {
