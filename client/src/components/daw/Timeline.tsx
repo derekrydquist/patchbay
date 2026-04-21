@@ -53,20 +53,25 @@ export function Timeline() {
 
   const checkAudioMuteState = React.useCallback((pos: number) => {
     const playheadTime = (pos - 240) / 20;
-    let isOverClip = false;
+    const trackMuteStates: Record<string, boolean> = {};
     
     for (const track of tracks) {
-      if (track.muted) continue;
+      if (track.muted) {
+        trackMuteStates[track.id] = true;
+        continue;
+      }
+      
+      let isOverClip = false;
       for (const clip of track.clips) {
         if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
           isOverClip = true;
           break;
         }
       }
-      if (isOverClip) break;
+      trackMuteStates[track.id] = !isOverClip;
     }
     
-    window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { muted: !isOverClip } }));
+    window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
   }, [tracks]);
 
   const handlePlayheadPointerDown = (e: React.PointerEvent) => {
@@ -117,21 +122,26 @@ export function Timeline() {
             
             // Check if playhead is over any clip
             const playheadTime = (newPos - 240) / 20;
-            let isOverClip = false;
+            const trackMuteStates: Record<string, boolean> = {};
             
             for (const track of tracks) {
-              if (track.muted) continue;
+              if (track.muted) {
+                trackMuteStates[track.id] = true;
+                continue;
+              }
+              
+              let isOverClip = false;
               for (const clip of track.clips) {
                 if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
                   isOverClip = true;
                   break;
                 }
               }
-              if (isOverClip) break;
+              trackMuteStates[track.id] = !isOverClip;
             }
             
             // Dispatch event to mute/unmute audio based on whether we're over a clip
-            window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { muted: !isOverClip } }));
+            window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
             
             return newPos;
           }); 

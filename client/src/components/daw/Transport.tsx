@@ -3,16 +3,17 @@ import { Play, Square, Circle, Mic, SkipBack, SkipForward, Repeat, Volume2 } fro
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
+import { INITIAL_TRACKS } from '@/lib/daw-data';
 
 export function Transport() {
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
-  const audioRef = React.useRef<HTMLAudioElement | null>(null);
-
-  // Use refs to access the latest state inside the keydown listener
-  // without needing to re-run the effect and recreate the Audio object
+  
   const isPlayingRef = React.useRef(isPlaying);
-  const audioRefMuted = React.useRef(true); // Track intended mute state
+  const audioRefMuted = React.useRef<{ [trackId: string]: boolean }>({});
+  const audioRefs = React.useRef<{ [trackId: string]: HTMLAudioElement }>({});
+  const masterVolumeRef = React.useRef(80);
+  const trackVolumesRef = React.useRef<{ [trackId: string]: number }>({});
 
   React.useEffect(() => {
     isPlayingRef.current = isPlaying;
@@ -22,38 +23,63 @@ export function Transport() {
   
   React.useEffect(() => {
     const handleMasterVolume = (e: any) => {
-      setMasterVolume(e.detail.volume);
-      if (audioRef.current) {
-        audioRef.current.volume = e.detail.volume / 100;
-      }
+      const newVol = e.detail.volume;
+      setMasterVolume(newVol);
+      masterVolumeRef.current = newVol;
+      Object.entries(audioRefs.current).forEach(([id, audio]) => {
+        const trackVol = trackVolumesRef.current[id] ?? 80;
+        audio.volume = (newVol / 100) * (trackVol / 100);
+      });
     };
     window.addEventListener('update-master-volume', handleMasterVolume);
     return () => window.removeEventListener('update-master-volume', handleMasterVolume);
   }, []);
 
   React.useEffect(() => {
-    // We'll just use a placeholder audio file for the mockup
-    audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3');
-    audioRef.current.loop = true;
-    audioRef.current.volume = 0.8;
-    audioRef.current.muted = true; // Start muted until playhead is over a clip
-    audioRefMuted.current = true;
+    const sources = [
+      'https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3', // Drums
+      'https://assets.mixkit.co/active_storage/sfx/123/123-preview.mp3', // Bass
+      'https://assets.mixkit.co/active_storage/sfx/144/144-preview.mp3', // Guitar 1
+      'https://assets.mixkit.co/active_storage/sfx/143/143-preview.mp3', // Guitar 2
+      'https://assets.mixkit.co/active_storage/sfx/141/141-preview.mp3'  // Vocals
+    ];
+
+    INITIAL_TRACKS.forEach((track, index) => {
+      const audio = new Audio(sources[index % sources.length]);
+      audio.loop = true;
+      audio.volume = (track.volume / 100) * (masterVolumeRef.current / 100);
+      audio.muted = true;
+      audioRefs.current[track.id] = audio;
+      trackVolumesRef.current[track.id] = track.volume;
+      audioRefMuted.current[track.id] = true;
+    });
     
     const handleSeek = (e: any) => {
-      if (audioRef.current) {
-        audioRef.current.currentTime = e.detail.time;
-      }
+      Object.values(audioRefs.current).forEach(audio => {
+        audio.currentTime = e.detail.time;
+      });
     };
     
     const handleMuteState = (e: any) => {
-      if (audioRef.current) {
-        audioRef.current.muted = e.detail.muted;
-        audioRefMuted.current = e.detail.muted;
+      const states = e.detail.trackMuteStates;
+      if (!states) return;
+      Object.entries(states).forEach(([trackId, muted]) => {
+        if (audioRefs.current[trackId]) {
+          audioRefs.current[trackId].muted = muted as boolean;
+        }
+        audioRefMuted.current[trackId] = muted as boolean;
+      });
+    };
+
+    const handleTrackVolume = (e: any) => {
+      const { trackId, volume } = e.detail;
+      trackVolumesRef.current[trackId] = volume;
+      if (audioRefs.current[trackId]) {
+        audioRefs.current[trackId].volume = (volume / 100) * (masterVolumeRef.current / 100);
       }
     };
     
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't toggle play if user is typing in an input or textarea
       if (
         e.code === 'Space' && 
         e.target instanceof HTMLElement && 
@@ -62,17 +88,15 @@ export function Transport() {
       ) {
         e.preventDefault();
         
-        if (!audioRef.current) return;
-        
         if (isPlayingRef.current) {
-          audioRef.current.pause();
+          Object.values(audioRefs.current).forEach(audio => audio.pause());
           setIsPlaying(false);
           window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: false } }));
         } else {
-          // IMPORTANT: Only try to play if we actually have audio ready
-          // and we restore the intended mute state when playing
-          audioRef.current.muted = audioRefMuted.current;
-          audioRef.current.play().catch(err => console.error("Audio play failed:", err));
+          Object.entries(audioRefs.current).forEach(([trackId, audio]) => {
+            audio.muted = audioRefMuted.current[trackId] ?? true;
+            audio.play().catch(err => console.error("Audio play failed:", err));
+          });
           setIsPlaying(true);
           window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: true } }));
         }
@@ -82,28 +106,30 @@ export function Transport() {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('seek-audio', handleSeek);
     window.addEventListener('audio-mute-state', handleMuteState);
+    window.addEventListener('update-track-volume', handleTrackVolume);
     
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('seek-audio', handleSeek);
       window.removeEventListener('audio-mute-state', handleMuteState);
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
+      window.removeEventListener('update-track-volume', handleTrackVolume);
+      Object.values(audioRefs.current).forEach(audio => {
+        audio.pause();
+      });
+      audioRefs.current = {};
     };
   }, []);
 
   const togglePlay = () => {
-    if (!audioRef.current) return;
-    
     if (isPlaying) {
-      audioRef.current.pause();
+      Object.values(audioRefs.current).forEach(audio => audio.pause());
       setIsPlaying(false);
       window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: false } }));
     } else {
-      audioRef.current.muted = audioRefMuted.current;
-      audioRef.current.play().catch(e => console.error("Audio play failed:", e));
+      Object.entries(audioRefs.current).forEach(([trackId, audio]) => {
+        audio.muted = audioRefMuted.current[trackId] ?? true;
+        audio.play().catch(e => console.error("Audio play failed:", e));
+      });
       setIsPlaying(true);
       window.dispatchEvent(new CustomEvent('toggle-play', { detail: { isPlaying: true } }));
     }
