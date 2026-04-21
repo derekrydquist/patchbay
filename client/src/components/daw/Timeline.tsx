@@ -540,9 +540,35 @@ export function Timeline() {
                 </div>
               )}
               
-              {tracks.map(track => (
-                <TimelineTrack key={track.id} track={track} />
-              ))}
+              {tracks.map(track => {
+                let isInvalidTarget = false;
+                if (activeDragClip) {
+                  const activeType = activeDragClip.type as any;
+                  if (activeType === 'bucket-clip') {
+                    // Check if it belongs to a different instrument
+                    const sourceInstrument = MOCK_SONG.instruments.find(inst => 
+                      inst.ideas.some(idea => idea.versions.some(v => v.id === activeDragClip.id))
+                    );
+                    if (sourceInstrument && sourceInstrument.name !== track.name) {
+                      isInvalidTarget = true;
+                    }
+                  } else if (activeType === 'clip') {
+                    // Check if it came from a different track
+                    const sourceTrack = tracks.find(t => t.clips.some(c => c.id === activeDragClip.id));
+                    if (sourceTrack && sourceTrack.id !== track.id) {
+                      isInvalidTarget = true;
+                    }
+                  }
+                }
+                
+                return (
+                  <TimelineTrack 
+                    key={track.id} 
+                    track={track} 
+                    isInvalidTarget={isInvalidTarget}
+                  />
+                );
+              })}
               
               <div className="h-16 flex items-center justify-center border-b border-white/5 border-dashed text-muted-foreground hover:bg-white/5 cursor-pointer transition-colors group">
                 <span className="text-[10px] font-bold uppercase tracking-[0.2em] group-hover:text-primary transition-colors opacity-40 group-hover:opacity-100">+ Add New Track</span>

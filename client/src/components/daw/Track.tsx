@@ -9,16 +9,20 @@ import { Slider } from '@/components/ui/slider';
 interface TrackProps {
   track: Track;
   isActive?: boolean;
+  isInvalidTarget?: boolean;
 }
 
-export function TimelineTrack({ track, isActive }: TrackProps) {
+export function TimelineTrack({ track, isActive, isInvalidTarget }: TrackProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: track.id,
     data: { track, type: 'track' },
   });
 
   return (
-    <div className="flex w-full h-16 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group">
+    <div className={cn(
+      "flex w-full h-16 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group",
+      isInvalidTarget && "opacity-30 grayscale saturate-50 pointer-events-none"
+    )}>
       {/* Track Header (Controls) */}
       <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 sticky left-0 z-20">
         <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
