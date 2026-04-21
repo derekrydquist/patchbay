@@ -181,21 +181,12 @@ export function Timeline() {
           if (t.id === e.detail.trackId) {
             return { ...t, solo: willBeSolo, muted: false };
           }
-          // If we are turning ON solo for a track, mute all others (that aren't also soloed)
-          // If we are turning OFF solo for a track, we need to check if there are any other soloed tracks
-          // If there are other soloed tracks, this track becomes muted. 
-          // If this was the last soloed track, unmute everything that wasn't explicitly muted.
-          // For simplicity in this mockup, turning on solo mutes others, turning off solo unmutes others
+          // Only one track can be solo'd at a time
           if (willBeSolo) {
-            return { ...t, muted: !t.solo };
+            return { ...t, solo: false, muted: true };
           } else {
-            // Unsoloing the last track unmutes all
-            const otherSoloTracks = prev.filter(other => other.solo && other.id !== e.detail.trackId);
-            if (otherSoloTracks.length === 0) {
-              return { ...t, muted: false }; 
-            } else {
-              return { ...t, muted: !t.solo };
-            }
+            // Unsoloing the only soloed track unmutes all
+            return { ...t, solo: false, muted: false }; 
           }
         });
       });
