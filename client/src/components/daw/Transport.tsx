@@ -20,16 +20,31 @@ export function Transport() {
       }
     };
     
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't toggle play if user is typing in an input or textarea
+      if (
+        e.code === 'Space' && 
+        e.target instanceof HTMLElement && 
+        e.target.tagName !== 'INPUT' && 
+        e.target.tagName !== 'TEXTAREA'
+      ) {
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('seek-audio', handleSeek);
     
     return () => {
+      window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('seek-audio', handleSeek);
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
       }
     };
-  }, []);
+  }, [isPlaying]); // Added isPlaying to dependency array so togglePlay has fresh state
 
   const togglePlay = () => {
     if (!audioRef.current) return;
