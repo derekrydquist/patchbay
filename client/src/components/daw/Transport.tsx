@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
 import { INITIAL_TRACKS } from '@/lib/daw-data';
+import { ExportDialog } from './ExportDialog';
 
 export function Transport() {
   const [isPlaying, setIsPlaying] = React.useState(false);
@@ -212,9 +213,11 @@ export function Transport() {
             max={100} step={1} className="w-full" 
           />
         </div>
-        <Button variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
-          Export
-        </Button>
+        <ExportDialog>
+          <Button variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
+            Export
+          </Button>
+        </ExportDialog>
       </div>
     </div>
   );
