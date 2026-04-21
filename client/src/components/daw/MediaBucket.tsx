@@ -24,6 +24,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [newInstName, setNewInstName] = useState('');
   const [isNewIdeaOpen, setIsNewIdeaOpen] = useState(false);
   const [newIdeaName, setNewIdeaName] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileDrop = (e: React.DragEvent) => {
@@ -124,7 +125,12 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
         <div className="flex items-center gap-3">
           <div className="relative w-64">
             <Search size={14} className="absolute left-2.5 top-2.5 text-muted-foreground" />
-            <Input placeholder="Search project assets..." className="h-8 pl-8 text-xs bg-black/40 border-white/5 focus:border-primary/50" />
+            <Input 
+              placeholder="Search project assets..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-8 pl-8 text-xs bg-black/40 border-white/5 focus:border-primary/50" 
+            />
           </div>
           <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
             <DialogTrigger asChild>
@@ -259,7 +265,21 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
               {MOCK_SONG.instruments.map(inst => {
-                const hasFiles = inst.ideas.some(idea => idea.versions.length > 0);
+                const filteredIdeas = searchQuery 
+                  ? inst.ideas.filter(idea => 
+                      idea.versions.some(version => {
+                        const query = searchQuery.toLowerCase();
+                        const matchName = version.name.toLowerCase().includes(query);
+                        const matchOriginalFile = version.metadata?.originalFileName?.toLowerCase().includes(query);
+                        return matchName || matchOriginalFile;
+                      })
+                    )
+                  : inst.ideas;
+                
+                const hasFiles = filteredIdeas.some(idea => idea.versions.length > 0);
+                
+                if (searchQuery && filteredIdeas.length === 0) return null;
+                
                 return (
                 <button
                   key={inst.id}
@@ -323,7 +343,15 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {selectedInst ? selectedInst.ideas.map(idea => {
+              {selectedInst ? selectedInst.ideas.filter(idea => {
+                if (!searchQuery) return true;
+                return idea.versions.some(version => {
+                  const query = searchQuery.toLowerCase();
+                  const matchName = version.name.toLowerCase().includes(query);
+                  const matchOriginalFile = version.metadata?.originalFileName?.toLowerCase().includes(query);
+                  return matchName || matchOriginalFile;
+                });
+              }).map(idea => {
                 const hasFiles = idea.versions.length > 0;
                 return (
                 <button
@@ -407,14 +435,35 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Versions</div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {selectedIdea ? selectedIdea.versions.map(version => (
-                <BucketClip 
-                  key={version.id} 
-                  clip={version} 
-                  onAddToTimeline={onAddToTimeline}
-                />
-              )) : (
+              {selectedIdea ? (
+                selectedIdea.versions
+                  .filter(version => {
+                    if (!searchQuery) return true;
+                    const query = searchQuery.toLowerCase();
+                    const matchName = version.name.toLowerCase().includes(query);
+                    const matchOriginalFile = version.metadata?.originalFileName?.toLowerCase().includes(query);
+                    return matchName || matchOriginalFile;
+                  })
+                  .map(version => (
+                    <BucketClip 
+                      key={version.id} 
+                      clip={version} 
+                      onAddToTimeline={onAddToTimeline}
+                    />
+                  ))
+              ) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select a section to view or add versions</div>
+              )}
+              {selectedIdea && selectedIdea.versions.filter(version => {
+                  if (!searchQuery) return true;
+                  const query = searchQuery.toLowerCase();
+                  const matchName = version.name.toLowerCase().includes(query);
+                  const matchOriginalFile = version.metadata?.originalFileName?.toLowerCase().includes(query);
+                  return matchName || matchOriginalFile;
+                }).length === 0 && (
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
+                  No versions match your search
+                </div>
               )}
             </div>
           </ScrollArea>
