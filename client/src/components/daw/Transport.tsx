@@ -3,14 +3,27 @@ import { Play, Square, Circle, Mic, SkipBack, SkipForward, Repeat, Volume2 } fro
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
-import { INITIAL_TRACKS } from '@/lib/daw-data';
+import { INITIAL_TRACKS, MOCK_SONG } from '@/lib/daw-data';
 import { ExportDialog } from './ExportDialog';
 
 export function Transport() {
+  const [bpm, setBpm] = React.useState(MOCK_SONG.bpm || 120);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
-  
+
+  const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newBpm = parseInt(e.target.value);
+    if (!isNaN(newBpm) && newBpm > 0) {
+      setBpm(newBpm);
+      window.dispatchEvent(new CustomEvent('update-bpm', { detail: { bpm: newBpm } }));
+    }
+  };
+
+  const handleBpmBlur = () => {
+    if (bpm < 20) setBpm(20);
+    if (bpm > 300) setBpm(300);
+  };
   const isPlayingRef = React.useRef(isPlaying);
   const audioRefMuted = React.useRef<{ [trackId: string]: boolean }>({});
   const audioRefs = React.useRef<{ [trackId: string]: HTMLAudioElement }>({});
@@ -36,6 +49,15 @@ export function Transport() {
     window.addEventListener('update-master-volume', handleMasterVolume);
     return () => window.removeEventListener('update-master-volume', handleMasterVolume);
   }, []);
+
+  React.useEffect(() => {
+    Object.values(audioRefs.current).forEach(audio => {
+      // Base rate is 1.0 at 120 BPM
+      // For example, at 60 BPM the playback rate should be 0.5 (half speed)
+      // At 240 BPM it should be 2.0 (double speed)
+      audio.playbackRate = bpm / 120;
+    });
+  }, [bpm]);
 
   React.useEffect(() => {
     const sources = [
@@ -162,7 +184,15 @@ export function Transport() {
         </div>
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">BPM</span>
-          <span className="text-xl font-mono text-foreground">120.00</span>
+          <input 
+            type="number" 
+            value={bpm} 
+            onChange={handleBpmChange}
+            onBlur={handleBpmBlur}
+            className="text-xl font-mono text-foreground bg-transparent border-none outline-none w-16 p-0 hover:bg-white/5 focus:bg-white/10 rounded transition-colors text-center"
+            min="20"
+            max="300"
+          />
         </div>
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Sign</span>

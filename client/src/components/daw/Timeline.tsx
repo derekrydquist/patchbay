@@ -47,10 +47,19 @@ export function Timeline() {
   const [playheadPosition, setPlayheadPosition] = useState(256); // Initial position matches left-[256px]
   const [isPlaying, setIsPlaying] = useState(false);
   const [tracksVersion, setTracksVersion] = useState(0);
+  const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
 
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleBpmUpdated = (e: any) => {
+      setBpm(e.detail.bpm);
+    };
+    window.addEventListener('update-bpm', handleBpmUpdated);
+    return () => window.removeEventListener('update-bpm', handleBpmUpdated);
+  }, []);
 
   useEffect(() => {
     const handleSongUpdated = () => {
@@ -126,10 +135,13 @@ export function Timeline() {
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
-          // 20 pixels per second roughly matches the 20px per second width in Clip.tsx
-          // width: Math.max(160, activeDragClip.duration * 20)
+          // Calculate pixels per second based on BPM (assuming 120 BPM = 20px/sec as baseline)
+          // At 120 BPM, 1 beat = 0.5s. If 4 beats = 1 measure = 2s = 40px
+          // Base rate: 20px per second at 120 BPM
+          const pixelsPerSecond = (bpm / 120) * 20;
+          
           setPlayheadPosition(prev => {
-            const newPos = prev + (delta / 1000) * 20;
+            const newPos = prev + (delta / 1000) * pixelsPerSecond;
             
             // Check if playhead is over any clip
             const playheadTime = (newPos - 256) / 20;
