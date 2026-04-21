@@ -8,21 +8,34 @@ import { ExportDialog } from './ExportDialog';
 
 export function Transport() {
   const [bpm, setBpm] = React.useState(MOCK_SONG.bpm || 120);
+  const [bpmInput, setBpmInput] = React.useState(String(bpm));
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
 
-  const handleBpmChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newBpm = parseInt(e.target.value);
-    if (!isNaN(newBpm) && newBpm > 0) {
-      setBpm(newBpm);
-      window.dispatchEvent(new CustomEvent('update-bpm', { detail: { bpm: newBpm } }));
+  React.useEffect(() => {
+    setBpmInput(String(bpm));
+  }, [bpm]);
+
+  const commitBpm = () => {
+    let newBpm = parseInt(bpmInput);
+    if (isNaN(newBpm)) {
+      setBpmInput(String(bpm));
+      return;
     }
+    if (newBpm < 20) newBpm = 20;
+    if (newBpm > 300) newBpm = 300;
+    
+    setBpm(newBpm);
+    setBpmInput(String(newBpm));
+    window.dispatchEvent(new CustomEvent('update-bpm', { detail: { bpm: newBpm } }));
   };
 
-  const handleBpmBlur = () => {
-    if (bpm < 20) setBpm(20);
-    if (bpm > 300) setBpm(300);
+  const handleBpmKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.currentTarget.blur();
+    }
   };
   const isPlayingRef = React.useRef(isPlaying);
   const audioRefMuted = React.useRef<{ [trackId: string]: boolean }>({});
@@ -185,13 +198,12 @@ export function Transport() {
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">BPM</span>
           <input 
-            type="number" 
-            value={bpm} 
-            onChange={handleBpmChange}
-            onBlur={handleBpmBlur}
+            type="text" 
+            value={bpmInput} 
+            onChange={(e) => setBpmInput(e.target.value)}
+            onBlur={commitBpm}
+            onKeyDown={handleBpmKeyDown}
             className="text-xl font-mono text-foreground bg-transparent border-none outline-none w-16 p-0 hover:bg-white/5 focus:bg-white/10 rounded transition-colors text-center"
-            min="20"
-            max="300"
           />
         </div>
         <div className="flex flex-col">
