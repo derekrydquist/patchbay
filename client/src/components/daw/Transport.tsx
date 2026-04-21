@@ -7,6 +7,32 @@ import { cn } from '@/lib/utils';
 export function Transport() {
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
+  const audioRef = React.useRef<HTMLAudioElement | null>(null);
+
+  React.useEffect(() => {
+    // We'll just use a placeholder audio file for the mockup
+    audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3');
+    audioRef.current.loop = true;
+    
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().catch(e => console.error("Audio play failed:", e));
+      setIsPlaying(true);
+    }
+  };
 
   return (
     <div className="h-16 border-b border-border bg-card/50 backdrop-blur-md flex items-center justify-between px-6 select-none z-50 relative shadow-md">
@@ -45,7 +71,7 @@ export function Transport() {
             "h-12 w-12 rounded-full border-2 border-primary/20 shadow-[0_0_15px_rgba(212,175,55,0.2)] hover:shadow-[0_0_25px_rgba(212,175,55,0.4)] transition-all",
             isPlaying ? "bg-primary text-primary-foreground" : "bg-transparent text-primary hover:bg-primary/10"
           )}
-          onClick={() => setIsPlaying(!isPlaying)}
+          onClick={togglePlay}
         >
           {isPlaying ? <Square fill="currentColor" size={20} /> : <Play fill="currentColor" className="ml-1" size={20} />}
         </Button>
