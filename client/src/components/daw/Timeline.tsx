@@ -52,6 +52,21 @@ export function Timeline() {
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
+  const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
+
+  useEffect(() => {
+    // Sync custom audio refs when tracks change
+    tracks.forEach(track => {
+      track.clips.forEach(clip => {
+        if (clip.src && !customAudioRefs.current[clip.id]) {
+          const audio = new Audio(clip.src);
+          // Required for some browsers to allow playback of object URLs
+          audio.preload = 'auto'; 
+          customAudioRefs.current[clip.id] = audio;
+        }
+      });
+    });
+  }, [tracks]);
 
   useEffect(() => {
     const handleBpmUpdated = (e: any) => {
@@ -148,19 +163,38 @@ export function Timeline() {
             const trackMuteStates: Record<string, boolean> = {};
             
             for (const track of tracks) {
-              if (track.muted) {
-                trackMuteStates[track.id] = true;
-                continue;
-              }
+              const isTrackMuted = track.muted || (tracks.some(t => t.solo) && !track.solo);
               
               let isOverClip = false;
               for (const clip of track.clips) {
+                const audio = clip.src ? customAudioRefs.current[clip.id] : null;
+                
                 if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
                   isOverClip = true;
-                  break;
+                  
+                  // Handle custom audio playback for uploaded files
+                  if (audio) {
+                    audio.playbackRate = bpm / 120;
+                    audio.volume = track.volume / 100;
+                    audio.muted = isTrackMuted;
+                    
+                    // If it's paused or drifted out of sync by more than 0.2 seconds, re-sync
+                    if (audio.paused || Math.abs(audio.currentTime - (playheadTime - clip.start)) > 0.2) {
+                      audio.currentTime = playheadTime - clip.start;
+                      if (isPlaying) {
+                        audio.play().catch(e => console.error("Custom audio play failed:", e));
+                      }
+                    }
+                  }
+                } else {
+                  // Pause custom audio if playhead is not over this clip
+                  if (audio && !audio.paused) {
+                    audio.pause();
+                  }
                 }
               }
-              trackMuteStates[track.id] = !isOverClip;
+              
+              trackMuteStates[track.id] = isTrackMuted ? true : !isOverClip;
             }
             
             // Dispatch event to mute/unmute audio based on whether we're over a clip
