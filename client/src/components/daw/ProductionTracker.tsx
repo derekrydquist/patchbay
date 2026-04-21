@@ -332,13 +332,13 @@ export function ProductionTracker() {
       <div className="flex-1 overflow-auto p-6">
         <div className="min-w-[1100px] rounded-2xl border border-white/5 bg-white/[0.02] shadow-2xl shadow-black/40 overflow-hidden">
           <div className="grid" style={{ gridTemplateColumns: `220px repeat(${columns.length}, minmax(150px, 1fr))` }}>
-            <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center justify-between">
-              <div className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">Song Sections</div>
+            <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center justify-between group/header">
+              <span className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">Song Sections</span>
               <Dialog open={isNewSectionOpen} onOpenChange={setIsNewSectionOpen}>
                 <DialogTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-white transition-colors">
-                    <Plus size={14} />
-                  </Button>
+                  <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5 text-muted-foreground">
+                    <Plus size={12} />
+                  </button>
                 </DialogTrigger>
                 <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
                   <DialogHeader className="mb-4">
