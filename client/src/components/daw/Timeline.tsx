@@ -384,9 +384,30 @@ export function Timeline() {
     if (!trackId || !clip) return;
 
     if (activeType === 'bucket-clip') {
+      // Find the instrument this clip belongs to
+      const sourceInstrument = MOCK_SONG.instruments.find(inst => 
+        inst.ideas.some(idea => idea.versions.some(v => v.id === clip.id))
+      );
+      
+      const targetTrack = tracks.find(t => t.id === trackId);
+      
+      // Restrict dropping to the matching instrument track
+      if (sourceInstrument && targetTrack && sourceInstrument.name !== targetTrack.name) {
+        console.warn(`Cannot drop ${clip.name} onto ${targetTrack.name} track. Must match instrument.`);
+        return;
+      }
+
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
     } else if (activeType === 'clip') {
+      const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
+      const targetTrack = tracks.find(t => t.id === trackId);
+      
+      // Restrict moving between different instrument tracks
+      if (sourceTrack && targetTrack && sourceTrack.id !== targetTrack.id) {
+         console.warn(`Cannot move clip from ${sourceTrack.name} to ${targetTrack.name}.`);
+         return;
+      }
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
       // Calculate new start time based on drop position relative to track
