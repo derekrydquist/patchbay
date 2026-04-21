@@ -8,6 +8,7 @@ import { INITIAL_TRACKS } from '@/lib/daw-data';
 export function Transport() {
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
+  const [currentTime, setCurrentTime] = React.useState(0);
   
   const isPlayingRef = React.useRef(isPlaying);
   const audioRefMuted = React.useRef<{ [trackId: string]: boolean }>({});
@@ -108,11 +109,17 @@ export function Transport() {
     window.addEventListener('audio-mute-state', handleMuteState);
     window.addEventListener('update-track-volume', handleTrackVolume);
     
+    const handleTimeUpdate = (e: any) => {
+      setCurrentTime(e.detail.time);
+    };
+    window.addEventListener('time-update', handleTimeUpdate);
+    
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('seek-audio', handleSeek);
       window.removeEventListener('audio-mute-state', handleMuteState);
       window.removeEventListener('update-track-volume', handleTrackVolume);
+      window.removeEventListener('time-update', handleTimeUpdate);
       Object.values(audioRefs.current).forEach(audio => {
         audio.pause();
       });
@@ -135,13 +142,22 @@ export function Transport() {
     }
   };
 
+  const formatTimecode = (seconds: number) => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const frames = Math.floor((seconds % 1) * 30); // Assuming 30fps
+
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}:${frames.toString().padStart(2, '0')}`;
+  };
+
   return (
     <div className="h-16 border-b border-border bg-card/50 backdrop-blur-md flex items-center justify-between px-6 select-none z-50 relative shadow-md">
       {/* Left: Time Display */}
       <div className="flex items-center gap-6 w-1/3">
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Timecode</span>
-          <span className="text-2xl font-mono text-primary font-bold tracking-tight shadow-glow">00:00:12:04</span>
+          <span className="text-2xl font-mono text-primary font-bold tracking-tight shadow-glow">{formatTimecode(currentTime)}</span>
         </div>
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">BPM</span>

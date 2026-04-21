@@ -44,7 +44,7 @@ export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [activeDragClip, setActiveDragClip] = useState<Clip | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [playheadPosition, setPlayheadPosition] = useState(240); // Initial position matches left-[240px]
+  const [playheadPosition, setPlayheadPosition] = useState(256); // Initial position matches left-[256px]
   const [isPlaying, setIsPlaying] = useState(false);
 
   const animationRef = React.useRef<number>();
@@ -52,7 +52,7 @@ export function Timeline() {
   const timelineRef = React.useRef<HTMLDivElement>(null);
 
   const checkAudioMuteState = React.useCallback((pos: number) => {
-    const playheadTime = (pos - 240) / 20;
+    const playheadTime = (pos - 256) / 20;
     const trackMuteStates: Record<string, boolean> = {};
     
     for (const track of tracks) {
@@ -82,10 +82,12 @@ export function Timeline() {
       if (timelineRef.current) {
         const rect = timelineRef.current.getBoundingClientRect();
         let newPos = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
-        newPos = Math.max(240, newPos);
+        newPos = Math.max(256, newPos);
         setPlayheadPosition(newPos);
         checkAudioMuteState(newPos);
-        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, (newPos - 240) / 20) } }));
+        const time = Math.max(0, (newPos - 256) / 20);
+        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
+        window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
       }
     };
     
@@ -121,7 +123,7 @@ export function Timeline() {
             const newPos = prev + (delta / 1000) * 20;
             
             // Check if playhead is over any clip
-            const playheadTime = (newPos - 240) / 20;
+            const playheadTime = (newPos - 256) / 20;
             const trackMuteStates: Record<string, boolean> = {};
             
             for (const track of tracks) {
@@ -142,6 +144,7 @@ export function Timeline() {
             
             // Dispatch event to mute/unmute audio based on whether we're over a clip
             window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
+            window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadTime } }));
             
             return newPos;
           }); 
@@ -321,9 +324,11 @@ export function Timeline() {
   };
 
   const handleRulerSeek = (pos: number) => {
-    const newPos = Math.max(240, pos + 240);
+    const newPos = Math.max(256, pos + 256);
     setPlayheadPosition(newPos);
-    window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, pos / 20) } }));
+    const time = Math.max(0, pos / 20);
+    window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
+    window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
 
   const endOfTimeline = React.useMemo(() => {
