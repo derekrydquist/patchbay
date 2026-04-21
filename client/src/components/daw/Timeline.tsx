@@ -317,9 +317,40 @@ export function Timeline() {
 
     if (!trackId || !clip) return;
 
-    if (activeType === 'bucket-clip' || activeType === 'clip') {
+    if (activeType === 'bucket-clip') {
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
+    } else if (activeType === 'clip') {
+      const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
+      
+      // Calculate new start time based on drop position relative to track
+      // Get the x-coordinate of the drop relative to the timeline container
+      const trackElement = document.getElementById(`track-${trackId}`);
+      let newStart = clip.start;
+      
+      if (trackElement && event.delta.x !== 0) {
+        // We moved it horizontally, adjust the start time (20px = 1 second)
+        newStart = Math.max(0, clip.start + (event.delta.x / 20));
+      }
+      
+      setTracks(prev => {
+        // First remove the clip from wherever it was
+        const withoutClip = prev.map(t => ({
+          ...t,
+          clips: t.clips.filter(c => c.id !== clip.id)
+        }));
+        
+        // Then add it to the new track at the new position
+        return withoutClip.map(t => {
+          if (t.id === trackId) {
+            return {
+              ...t,
+              clips: [...t.clips, { ...clip, start: newStart, sectionName: clipIdeaName }]
+            };
+          }
+          return t;
+        });
+      });
     }
   };
 
