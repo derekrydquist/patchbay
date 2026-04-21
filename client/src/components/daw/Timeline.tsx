@@ -16,7 +16,7 @@ import { TimelineTrack } from './Track';
 import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
-import { Music2 } from 'lucide-react';
+import { Music2, Plus } from 'lucide-react';
 import { MediaBucket } from './MediaBucket';
 import { 
   Dialog,
@@ -212,6 +212,19 @@ export function Timeline() {
     window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: Math.max(0, pos / 20) } }));
   };
 
+  const endOfTimeline = React.useMemo(() => {
+    let max = 0;
+    tracks.forEach(t => {
+      t.clips.forEach(c => {
+        max = Math.max(max, c.start + c.duration);
+      });
+    });
+    timelineSections.forEach(s => {
+      max = Math.max(max, s.start + s.duration);
+    });
+    return max;
+  }, [tracks, timelineSections]);
+
   return (
     <DndContext 
       sensors={sensors} 
@@ -239,33 +252,41 @@ export function Timeline() {
             <div className="min-w-[2000px] pb-32">
               <Ruler onSeek={handleRulerSeek} />
               
-              {/* Sections Track */}
               <div className="flex w-full h-8 border-b border-border bg-primary/5 group/sections relative">
                 <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center sticky left-0 z-20">
                   <span className="text-[10px] font-bold uppercase tracking-widest text-primary">Song Sections</span>
                 </div>
-                <div 
-                  className="flex-1 relative cursor-pointer"
-                  onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const x = e.clientX - rect.left;
-                    const start = Math.max(0, Math.floor(x / 20)); // 20px per second
-                    setAddingSectionAt(start);
-                  }}
-                >
-                  <div className="absolute inset-0 opacity-0 group-hover/sections:opacity-100 pointer-events-none flex items-center px-4 transition-opacity">
-                    <span className="text-[10px] text-muted-foreground uppercase tracking-widest">Click empty space to add section</span>
-                  </div>
+                <div className="flex-1 relative">
                   {timelineSections.map(sec => (
                     <div 
                       key={sec.id}
-                      className="absolute top-0 bottom-0 bg-primary/20 border-x border-primary/50 flex items-center px-2 z-10 hover:bg-primary/30 transition-colors"
+                      className="absolute top-0 bottom-0 bg-primary/20 border-x border-primary/50 flex items-center px-2 z-10 hover:bg-primary/30 transition-colors cursor-pointer"
                       style={{ left: sec.start * 20, width: sec.duration * 20 }}
-                      onClick={(e) => e.stopPropagation()} // Prevent adding section when clicking an existing one
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // Optional: Handle section click in the future (e.g. to delete or select)
+                      }} 
                     >
                       <span className="text-[10px] font-bold text-primary uppercase tracking-widest drop-shadow-md">{sec.name}</span>
                     </div>
                   ))}
+
+                  {/* Empty space clickable area for adding next section */}
+                  <div 
+                    className="absolute top-0 bottom-0 right-0 group/blank cursor-pointer z-0"
+                    style={{ left: endOfTimeline * 20 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAddingSectionAt(endOfTimeline);
+                    }}
+                  >
+                    <div className="opacity-0 group-hover/blank:opacity-100 transition-opacity absolute top-0 bottom-0 left-0 flex items-center justify-center bg-primary/5 border-x border-primary/30 border-dashed pointer-events-none" style={{ width: 16 * 20 }}>
+                      <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/20 border border-primary/30 text-primary drop-shadow-md">
+                        <Plus size={10} strokeWidth={3} />
+                        <span className="text-[9px] font-bold uppercase tracking-widest whitespace-nowrap">Add Section</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
               
