@@ -56,6 +56,7 @@ export function Timeline() {
     let isOverClip = false;
     
     for (const track of tracks) {
+      if (track.muted) continue;
       for (const clip of track.clips) {
         if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
           isOverClip = true;
@@ -119,6 +120,7 @@ export function Timeline() {
             let isOverClip = false;
             
             for (const track of tracks) {
+              if (track.muted) continue;
               for (const clip of track.clips) {
                 if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
                   isOverClip = true;
@@ -150,6 +152,61 @@ export function Timeline() {
       }
     };
   }, [isPlaying, tracks]);
+
+  useEffect(() => {
+    const handleToggleMute = (e: any) => {
+      setTracks(prev => prev.map(t => 
+        t.id === e.detail.trackId ? { ...t, muted: !t.muted } : t
+      ));
+    };
+
+    const handleToggleSolo = (e: any) => {
+      setTracks(prev => {
+        const trackToToggle = prev.find(t => t.id === e.detail.trackId);
+        if (!trackToToggle) return prev;
+        
+        const willBeSolo = !trackToToggle.solo;
+        
+        return prev.map(t => {
+          if (t.id === e.detail.trackId) {
+            return { ...t, solo: willBeSolo, muted: false };
+          }
+          // If we are turning ON solo for a track, mute all others (that aren't also soloed)
+          // If we are turning OFF solo for a track, we need to check if there are any other soloed tracks
+          // If there are other soloed tracks, this track becomes muted. 
+          // If this was the last soloed track, unmute everything that wasn't explicitly muted.
+          // For simplicity in this mockup, turning on solo mutes others, turning off solo unmutes others
+          if (willBeSolo) {
+            return { ...t, muted: !t.solo };
+          } else {
+            // Unsoloing the last track unmutes all
+            const otherSoloTracks = prev.filter(other => other.solo && other.id !== e.detail.trackId);
+            if (otherSoloTracks.length === 0) {
+              return { ...t, muted: false }; 
+            } else {
+              return { ...t, muted: !t.solo };
+            }
+          }
+        });
+      });
+    };
+
+    const handleUpdateVolume = (e: any) => {
+      setTracks(prev => prev.map(t => 
+        t.id === e.detail.trackId ? { ...t, volume: e.detail.volume } : t
+      ));
+    };
+
+    window.addEventListener('toggle-track-mute', handleToggleMute);
+    window.addEventListener('toggle-track-solo', handleToggleSolo);
+    window.addEventListener('update-track-volume', handleUpdateVolume);
+
+    return () => {
+      window.removeEventListener('toggle-track-mute', handleToggleMute);
+      window.removeEventListener('toggle-track-solo', handleToggleSolo);
+      window.removeEventListener('update-track-volume', handleUpdateVolume);
+    };
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {

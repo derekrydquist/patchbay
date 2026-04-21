@@ -33,10 +33,24 @@ export function TimelineTrack({ track, isActive }: TrackProps) {
           <span className="font-heading font-bold uppercase tracking-wider text-[11px] truncate text-foreground block">{track.name}</span>
           <div className="flex items-center gap-2 mt-0.5">
             <div className="flex gap-0.5">
-               <button className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.muted && "bg-destructive text-destructive-foreground border-destructive")}>M</button>
-               <button className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.solo && "bg-primary text-primary-foreground border-primary")}>S</button>
+               <button 
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('toggle-track-mute', { detail: { trackId: track.id } }));
+                }}
+                className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.muted && "bg-destructive text-destructive-foreground border-destructive")}>M</button>
+               <button 
+                onClick={() => {
+                  window.dispatchEvent(new CustomEvent('toggle-track-solo', { detail: { trackId: track.id } }));
+                }}
+                className={cn("text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors", track.solo && "bg-primary text-primary-foreground border-primary")}>S</button>
             </div>
-            <Slider defaultValue={[track.volume]} max={100} step={1} className="w-16 h-1" />
+            <Slider 
+              value={[track.volume ?? 80]} 
+              onValueChange={([val]) => {
+                window.dispatchEvent(new CustomEvent('update-track-volume', { detail: { trackId: track.id, volume: val } }));
+              }}
+              max={100} step={1} className="w-16 h-1" 
+            />
           </div>
         </div>
       </div>

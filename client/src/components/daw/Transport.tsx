@@ -18,6 +18,19 @@ export function Transport() {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
 
+  const [masterVolume, setMasterVolume] = React.useState(80);
+  
+  React.useEffect(() => {
+    const handleMasterVolume = (e: any) => {
+      setMasterVolume(e.detail.volume);
+      if (audioRef.current) {
+        audioRef.current.volume = e.detail.volume / 100;
+      }
+    };
+    window.addEventListener('update-master-volume', handleMasterVolume);
+    return () => window.removeEventListener('update-master-volume', handleMasterVolume);
+  }, []);
+
   React.useEffect(() => {
     // We'll just use a placeholder audio file for the mockup
     audioRef.current = new Audio('https://assets.mixkit.co/active_storage/sfx/135/135-preview.mp3');
@@ -149,7 +162,13 @@ export function Transport() {
       <div className="flex items-center justify-end gap-4 w-1/3">
         <div className="flex items-center gap-2 w-48">
           <Volume2 size={16} className="text-muted-foreground" />
-          <Slider defaultValue={[80]} max={100} step={1} className="w-full" />
+          <Slider 
+            defaultValue={[80]} 
+            onValueChange={([val]) => {
+              window.dispatchEvent(new CustomEvent('update-master-volume', { detail: { volume: val } }));
+            }}
+            max={100} step={1} className="w-full" 
+          />
         </div>
         <Button variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
           Export
