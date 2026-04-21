@@ -378,7 +378,32 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           </ScrollArea>
         </div>
 
-        <div className="flex-1 flex flex-col bg-black/20">
+        <div 
+          className="flex-1 flex flex-col bg-black/20 transition-all border border-transparent"
+          onDragOver={(e) => {
+            if (!selectedIdea) return;
+            e.preventDefault();
+            e.currentTarget.classList.add('bg-primary/5', 'border-primary/30');
+          }}
+          onDragLeave={(e) => {
+            if (!selectedIdea) return;
+            e.preventDefault();
+            e.currentTarget.classList.remove('bg-primary/5', 'border-primary/30');
+          }}
+          onDrop={(e) => {
+            if (!selectedIdea) return;
+            e.preventDefault();
+            e.currentTarget.classList.remove('bg-primary/5', 'border-primary/30');
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              Array.from(e.dataTransfer.files).forEach(file => {
+                if (file.type.startsWith('audio/')) {
+                  addVersionToIdea(selectedIdea.id, file, file.name);
+                }
+              });
+              window.dispatchEvent(new CustomEvent('song-updated'));
+            }
+          }}
+        >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">Versions</div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
@@ -389,7 +414,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   onAddToTimeline={onAddToTimeline}
                 />
               )) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest">Select a section</div>
+                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">Select a section to view or add versions</div>
               )}
             </div>
           </ScrollArea>
