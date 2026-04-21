@@ -166,6 +166,8 @@ export function Timeline() {
               const isTrackMuted = track.muted || (tracks.some(t => t.solo) && !track.solo);
               
               let isOverClip = false;
+              let isOverCustomAudioClip = false;
+              
               for (const clip of track.clips) {
                 const audio = clip.src ? customAudioRefs.current[clip.id] : null;
                 
@@ -174,6 +176,7 @@ export function Timeline() {
                   
                   // Handle custom audio playback for uploaded files
                   if (audio) {
+                    isOverCustomAudioClip = true;
                     audio.playbackRate = bpm / 120;
                     audio.volume = track.volume / 100;
                     audio.muted = isTrackMuted;
@@ -194,7 +197,9 @@ export function Timeline() {
                 }
               }
               
-              trackMuteStates[track.id] = isTrackMuted ? true : !isOverClip;
+              // Mute the mock transport audio if we're over a custom audio clip (to avoid playing both)
+              // Otherwise, mute it if the track is muted, or if we're NOT over any clip at all
+              trackMuteStates[track.id] = isTrackMuted || isOverCustomAudioClip ? true : !isOverClip;
             }
             
             // Dispatch event to mute/unmute audio based on whether we're over a clip
