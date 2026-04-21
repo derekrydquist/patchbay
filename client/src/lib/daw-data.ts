@@ -133,7 +133,7 @@ export const MOCK_SONG: Song = {
         versions: isEmpty ? [] : generateVersions(`${inst.name} ${ideaName}`, inst.author, inst.type === 'vocal' ? 'vocal' : 'audio', inst.color, inst.duration)
       };
     })
-  })).sort((a, b) => a.name.localeCompare(b.name))
+  }))
 };
 
 export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))') => {
@@ -152,7 +152,7 @@ export const addInstrument = (name: string, color: string = 'hsl(var(--chart-1))
           versions: []
         })),
       },
-    ].sort((a, b) => a.name.localeCompare(b.name));
+    ];
     window.dispatchEvent(new CustomEvent('song-updated'));
   }
 };

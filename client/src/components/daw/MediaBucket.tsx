@@ -43,7 +43,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   };
 
   const handleAddIdea = () => {
-    if (!newIdeaName.trim() || !selectedInst) return;
+    if (!newIdeaName.trim()) return;
     
     // Add section globally to sync with timeline and production whiteboard
     addSection(newIdeaName.trim());
@@ -233,13 +233,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
             <span>Sections</span>
             <Dialog open={isNewIdeaOpen} onOpenChange={setIsNewIdeaOpen}>
               <DialogTrigger asChild>
-                <button 
-                  disabled={!selectedInst}
-                  className={cn(
-                    "opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5",
-                    !selectedInst && "cursor-not-allowed opacity-0"
-                  )}
-                >
+                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
                   <Plus size={12} />
                 </button>
               </DialogTrigger>
