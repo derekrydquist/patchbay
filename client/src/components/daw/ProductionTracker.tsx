@@ -327,44 +327,41 @@ export function ProductionTracker() {
           </div>
           <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each instrument against the song structure</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Dialog open={isNewSectionOpen} onOpenChange={setIsNewSectionOpen}>
-            <DialogTrigger asChild>
-              <Button size="sm" className="h-8 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/20">
-                <Plus size={14} className="mr-2" /> New Section
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
-              <DialogHeader className="mb-4">
-                <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">Add Song Section</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-[10px] uppercase font-bold text-muted-foreground">Section Name</label>
-                  <Input 
-                    placeholder="e.g. Pre-Chorus, Solo, Outro 2" 
-                    value={newSection}
-                    onChange={(e) => setNewSection(e.target.value)}
-                    className="bg-black/40 border-white/10 text-xs h-10"
-                    autoFocus
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddSection()}
-                  />
-                </div>
-                <Button onClick={handleAddSection} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
-                  Add Section
-                </Button>
-              </div>
-            </DialogContent>
-          </Dialog>
-          <Badge variant="outline" className="bg-white/[0.03] border-white/10 text-[10px] uppercase tracking-[0.2em] text-primary">Grid View</Badge>
-        </div>
       </div>
 
       <div className="flex-1 overflow-auto p-6">
         <div className="min-w-[1100px] rounded-2xl border border-white/5 bg-white/[0.02] shadow-2xl shadow-black/40 overflow-hidden">
           <div className="grid" style={{ gridTemplateColumns: `220px repeat(${columns.length}, minmax(150px, 1fr))` }}>
-            <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4">
+            <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center justify-between">
               <div className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">Song Sections</div>
+              <Dialog open={isNewSectionOpen} onOpenChange={setIsNewSectionOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="ghost" size="icon" className="h-5 w-5 text-muted-foreground hover:text-white transition-colors">
+                    <Plus size={14} />
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm p-6">
+                  <DialogHeader className="mb-4">
+                    <DialogTitle className="text-sm uppercase tracking-widest font-heading font-bold text-white">Add Song Section</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-[10px] uppercase font-bold text-muted-foreground">Section Name</label>
+                      <Input 
+                        placeholder="e.g. Pre-Chorus, Solo, Outro 2" 
+                        value={newSection}
+                        onChange={(e) => setNewSection(e.target.value)}
+                        className="bg-black/40 border-white/10 text-xs h-10"
+                        autoFocus
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddSection()}
+                      />
+                    </div>
+                    <Button onClick={handleAddSection} className="w-full h-10 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10">
+                      Add Section
+                    </Button>
+                  </div>
+                </DialogContent>
+              </Dialog>
             </div>
             {columns.map((inst) => (
               <div key={inst.id} className="border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
