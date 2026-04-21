@@ -42,7 +42,7 @@ interface TimelineSection {
 
 export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
-  const [activeDragClip, setActiveDragClip] = useState<Clip | null>(null);
+  const [activeDragData, setActiveDragData] = useState<{clip: Clip, type: string} | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [playheadPosition, setPlayheadPosition] = useState(256); // Initial position matches left-[256px]
   const [isPlaying, setIsPlaying] = useState(false);
@@ -351,8 +351,9 @@ export function Timeline() {
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
     const clip = active.data.current?.clip as Clip;
-    if (clip) {
-      setActiveDragClip(clip);
+    const type = active.data.current?.type as string;
+    if (clip && type) {
+      setActiveDragData({ clip, type });
     }
   };
 
@@ -373,7 +374,7 @@ export function Timeline() {
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    setActiveDragClip(null);
+    setActiveDragData(null);
 
     if (!over) return;
 
@@ -542,19 +543,20 @@ export function Timeline() {
               
               {tracks.map(track => {
                 let isInvalidTarget = false;
-                if (activeDragClip) {
-                  const activeType = activeDragClip.type as any;
-                  if (activeType === 'bucket-clip') {
+                if (activeDragData) {
+                  const { clip, type } = activeDragData;
+                  
+                  if (type === 'bucket-clip') {
                     // Check if it belongs to a different instrument
                     const sourceInstrument = MOCK_SONG.instruments.find(inst => 
-                      inst.ideas.some(idea => idea.versions.some(v => v.id === activeDragClip.id))
+                      inst.ideas.some(idea => idea.versions.some(v => v.id === clip.id))
                     );
                     if (sourceInstrument && sourceInstrument.name !== track.name) {
                       isInvalidTarget = true;
                     }
-                  } else if (activeType === 'clip') {
+                  } else if (type === 'clip') {
                     // Check if it came from a different track
-                    const sourceTrack = tracks.find(t => t.clips.some(c => c.id === activeDragClip.id));
+                    const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
                     if (sourceTrack && sourceTrack.id !== track.id) {
                       isInvalidTarget = true;
                     }
@@ -592,15 +594,15 @@ export function Timeline() {
       </div>
 
       <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
-        {activeDragClip ? (
+        {activeDragData ? (
           <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
             <div 
               className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e]"
-              style={{ width: Math.max(160, activeDragClip.duration * 20) }}
+              style={{ width: Math.max(160, activeDragData.clip.duration * 20) }}
             >
-              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragClip.color }} />
+              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
               <span className="text-xs font-black text-white truncate uppercase tracking-widest font-heading">
-                {activeDragClip.name}
+                {activeDragData.clip.name}
               </span>
             </div>
           </div>

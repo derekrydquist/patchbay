@@ -16,12 +16,13 @@ export function TimelineTrack({ track, isActive, isInvalidTarget }: TrackProps) 
   const { setNodeRef, isOver } = useDroppable({
     id: track.id,
     data: { track, type: 'track' },
+    disabled: isInvalidTarget,
   });
 
   return (
     <div className={cn(
-      "flex w-full h-16 border-b border-border bg-card/20 hover:bg-card/40 transition-colors group",
-      isInvalidTarget && "opacity-30 grayscale saturate-50 pointer-events-none"
+      "flex w-full h-16 border-b border-border bg-card/20 transition-all duration-300 group",
+      isInvalidTarget ? "opacity-30 grayscale pointer-events-none" : "hover:bg-card/40"
     )}>
       {/* Track Header (Controls) */}
       <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 sticky left-0 z-20">
