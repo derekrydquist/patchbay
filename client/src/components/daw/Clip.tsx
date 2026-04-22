@@ -252,11 +252,15 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
   };
 
   const findVersions = () => {
+    // A timeline clip gets a new ID, so we can't match by ID against the original idea versions.
+    // Instead, we find the idea by base name or if the idea contains a version with this clip's name.
     const baseName = clip.name.split(' V')[0];
+    
     for (const inst of MOCK_SONG.instruments) {
       for (const idea of inst.ideas) {
-        if (idea.name === baseName) {
-          return idea.versions.filter(v => v.id !== clip.id);
+        if (idea.name === baseName || idea.versions.some(v => v.name === clip.name)) {
+          // Return all other versions of this idea (filtering out the one with the same name)
+          return idea.versions.filter(v => v.name !== clip.name);
         }
       }
     }
