@@ -601,7 +601,7 @@ export function Timeline() {
               style={{ width: Math.max(160, activeDragData.clip.duration * 20) }}
             >
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
-              <span className="text-xs font-black text-white truncate uppercase tracking-widest font-heading">
+              <span className="text-xs font-bold text-white truncate tracking-tight">
                 {activeDragData.clip.name}
               </span>
             </div>

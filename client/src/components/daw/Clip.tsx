@@ -481,8 +481,8 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none select-none">
           <div className="flex items-center gap-2 truncate">
             <span className={cn(
-              "text-xs font-bold truncate transition-colors uppercase tracking-tight",
-              isFinal ? "text-primary" : "text-foreground group-hover:text-primary"
+              "text-xs font-bold truncate transition-colors tracking-tight",
+              isFinal ? "text-primary" : "text-white group-hover:text-primary"
             )}>{clip.name}</span>
             {isFinal && <CheckCircle2 size={10} className="text-primary" />}
           </div>
