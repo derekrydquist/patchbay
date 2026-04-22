@@ -11,11 +11,17 @@ export function Transport() {
   const [bpmInput, setBpmInput] = React.useState(String(bpm));
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isRecording, setIsRecording] = React.useState(false);
+  const [isLooping, setIsLooping] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
 
   React.useEffect(() => {
-    setBpmInput(String(bpm));
-  }, [bpm]);
+    const handleUpdateBpm = (e: any) => {
+      setBpm(e.detail.bpm);
+      setBpmInput(e.detail.bpm.toString());
+    };
+    window.addEventListener('update-bpm', handleUpdateBpm);
+    return () => window.removeEventListener('update-bpm', handleUpdateBpm);
+  }, []);
 
   const commitBpm = () => {
     let newBpm = parseInt(bpmInput);
@@ -238,7 +244,15 @@ export function Transport() {
         <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
           <SkipForward size={18} />
         </Button>
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
+        <Button 
+          variant="ghost" 
+          size="icon" 
+          className={cn("text-muted-foreground hover:text-foreground", isLooping && "text-primary hover:text-primary/80")}
+          onClick={() => {
+            setIsLooping(!isLooping);
+            window.dispatchEvent(new CustomEvent('toggle-loop', { detail: { isLooping: !isLooping } }));
+          }}
+        >
           <Repeat size={18} />
         </Button>
       </div>

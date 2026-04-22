@@ -49,10 +49,44 @@ export function Timeline() {
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
 
+  const [isLooping, setIsLooping] = useState(false);
+
   const animationRef = React.useRef<number>();
   const lastTimeRef = React.useRef<number>();
   const timelineRef = React.useRef<HTMLDivElement>(null);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
+
+  // Extract unique sections from clips in the timeline to render markers
+  const timelineSections = React.useMemo(() => {
+    const sections: { id: string, name: string, start: number, duration: number }[] = [];
+    
+    tracks.forEach(track => {
+      track.clips.forEach(clip => {
+        if (clip.sectionName) {
+          // Check if we already have a section marker that overlaps
+          const existingSection = sections.find(s => 
+            s.name === clip.sectionName && 
+            Math.abs(s.start - clip.start) < 2 // Group clips that start roughly at the same time
+          );
+          
+          if (!existingSection) {
+            sections.push({
+              id: `section-${clip.id}`,
+              name: clip.sectionName,
+              start: clip.start,
+              // We'll calculate duration based on the longest clip in this section
+              duration: clip.duration 
+            });
+          } else {
+            // Update duration if this clip extends further
+            existingSection.duration = Math.max(existingSection.duration, (clip.start + clip.duration) - existingSection.start);
+          }
+        }
+      });
+    });
+    
+    return sections.sort((a, b) => a.start - b.start);
+  }, [tracks]);
 
   useEffect(() => {
     // Sync custom audio refs when tracks change
@@ -134,6 +168,15 @@ export function Timeline() {
   };
 
   useEffect(() => {
+    const handleLoopToggle = (e: any) => {
+      setIsLooping(e.detail.isLooping);
+    };
+
+    window.addEventListener('toggle-loop', handleLoopToggle);
+    return () => window.removeEventListener('toggle-loop', handleLoopToggle);
+  }, []);
+
+  useEffect(() => {
     const handlePlayToggle = (e: any) => {
       setIsPlaying(e.detail.isPlaying);
       if (e.detail.isPlaying) {
@@ -160,6 +203,32 @@ export function Timeline() {
             
             // Check if playhead is over any clip
             const playheadTime = (newPos - 256) / 20;
+            
+            // Check for looping logic
+            if (isLooping) {
+              // Find the section we are currently in
+              const currentSection = timelineSections.find(sec => 
+                playheadTime >= sec.start && playheadTime <= sec.start + sec.duration
+              );
+              
+              if (currentSection) {
+                // If we've reached the end of the current section, loop back to the start
+                if (playheadTime >= currentSection.start + currentSection.duration) {
+                  const loopStartPos = 256 + (currentSection.start * 20);
+                  
+                  // Reset custom audio to start of section
+                  Object.values(customAudioRefs.current).forEach(audio => {
+                    if (audio && !audio.paused) {
+                       audio.currentTime = currentSection.start;
+                    }
+                  });
+                  
+                  window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: currentSection.start } }));
+                  return loopStartPos;
+                }
+              }
+            }
+            
             const trackMuteStates: Record<string, boolean> = {};
             
             for (const track of tracks) {
@@ -458,38 +527,6 @@ export function Timeline() {
       });
     });
     return max;
-  }, [tracks]);
-
-  // Extract unique sections from clips in the timeline to render markers
-  const timelineSections = React.useMemo(() => {
-    const sections: { id: string, name: string, start: number, duration: number }[] = [];
-    
-    tracks.forEach(track => {
-      track.clips.forEach(clip => {
-        if (clip.sectionName) {
-          // Check if we already have a section marker that overlaps
-          const existingSection = sections.find(s => 
-            s.name === clip.sectionName && 
-            Math.abs(s.start - clip.start) < 2 // Group clips that start roughly at the same time
-          );
-          
-          if (!existingSection) {
-            sections.push({
-              id: `section-${clip.id}`,
-              name: clip.sectionName,
-              start: clip.start,
-              // We'll calculate duration based on the longest clip in this section
-              duration: clip.duration 
-            });
-          } else {
-            // Update duration if this clip extends further
-            existingSection.duration = Math.max(existingSection.duration, (clip.start + clip.duration) - existingSection.start);
-          }
-        }
-      });
-    });
-    
-    return sections.sort((a, b) => a.start - b.start);
   }, [tracks]);
 
   return (
