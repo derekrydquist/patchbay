@@ -119,7 +119,7 @@ export function Timeline() {
   }, []);
 
   const checkAudioMuteState = React.useCallback((pos: number) => {
-    const playheadTime = (pos - 256) / 20;
+    const playheadTime = (pos - 256) / 80;
     const trackMuteStates: Record<string, boolean> = {};
     
     for (const track of tracks) {
@@ -152,7 +152,7 @@ export function Timeline() {
         newPos = Math.max(256, newPos);
         setPlayheadPosition(newPos);
         checkAudioMuteState(newPos);
-        const time = Math.max(0, (newPos - 256) / 20);
+        const time = Math.max(0, (newPos - 256) / 80);
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
       }
@@ -193,16 +193,15 @@ export function Timeline() {
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
-          // Calculate pixels per second based on BPM (assuming 120 BPM = 20px/sec as baseline)
-          // At 120 BPM, 1 beat = 0.5s. If 4 beats = 1 measure = 2s = 40px
-          // Base rate: 20px per second at 120 BPM
-          const pixelsPerSecond = (bpm / 120) * 20;
+          // Calculate pixels per second based on BPM
+          // 80px per second for 1 unit = 1 second, since Ruler marks are every 80px
+          const pixelsPerSecond = 80;
           
           setPlayheadPosition(prev => {
             const newPos = prev + (delta / 1000) * pixelsPerSecond;
             
-            const prevTime = (prev - 256) / 20;
-            const playheadTime = (newPos - 256) / 20;
+            const prevTime = (prev - 256) / 80;
+            const playheadTime = (newPos - 256) / 80;
             
             // Check for looping logic
             if (isLooping) {
@@ -214,7 +213,7 @@ export function Timeline() {
               if (currentSection) {
                 // If the new time would exceed the section end, loop back
                 if (playheadTime >= currentSection.start + currentSection.duration) {
-                  const loopStartPos = 256 + (currentSection.start * 20);
+                  const loopStartPos = 256 + (currentSection.start * 80);
                   
                   // Reset custom audio to start of section
                   Object.values(customAudioRefs.current).forEach(audio => {
@@ -486,8 +485,8 @@ export function Timeline() {
       let newStart = clip.start;
       
       if (trackElement && event.delta.x !== 0) {
-        // We moved it horizontally, adjust the start time (20px = 1 second)
-        newStart = Math.max(0, clip.start + (event.delta.x / 20));
+        // We moved it horizontally, adjust the start time (80px = 1 second)
+        newStart = Math.max(0, clip.start + (event.delta.x / 80));
       }
       
       setTracks(prev => {
@@ -514,7 +513,7 @@ export function Timeline() {
   const handleRulerSeek = (pos: number) => {
     const newPos = Math.max(256, pos + 256);
     setPlayheadPosition(newPos);
-    const time = Math.max(0, pos / 20);
+    const time = Math.max(0, pos / 80);
     window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
@@ -567,7 +566,7 @@ export function Timeline() {
                       <div 
                         key={sec.id}
                         className="absolute top-0 bottom-0 border-l border-primary/30 flex items-start pt-1 px-2 z-10"
-                        style={{ left: sec.start * 20, width: sec.duration * 20 }}
+                        style={{ left: sec.start * 80, width: sec.duration * 80 }}
                       >
                         <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm">
                           {sec.name}
@@ -635,7 +634,7 @@ export function Timeline() {
           <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
             <div 
               className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e]"
-              style={{ width: Math.max(160, activeDragData.clip.duration * 20) }}
+              style={{ width: Math.max(160, activeDragData.clip.duration * 80) }}
             >
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
               <span className="text-xs font-bold text-white truncate tracking-tight">

@@ -220,11 +220,11 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     transform: CSS.Translate.toString(transform),
   };
 
-  const width = clip.duration * 20;
+  const width = clip.duration * 80;
   
   const positionStyle: React.CSSProperties = isOverlay ? { width } : {
     width,
-    left: clip.start * 20,
+    left: clip.start * 80,
     position: 'absolute',
     ...style,
   };
