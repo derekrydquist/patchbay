@@ -56,21 +56,37 @@ export function Timeline() {
   const timelineRef = React.useRef<HTMLDivElement>(null);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
 
-  // Define sections based on the song's predefined structure (each 16s long)
+  // Extract unique sections from clips in the timeline to render markers
   const timelineSections = React.useMemo(() => {
-    let currentStart = 0;
-    return MOCK_SONG.sections.map((name, index) => {
-      const duration = 16; // 16 seconds per section
-      const section = {
-        id: `section-${index}`,
-        name,
-        start: currentStart,
-        duration
-      };
-      currentStart += duration;
-      return section;
+    const sections: { id: string, name: string, start: number, duration: number }[] = [];
+    
+    tracks.forEach(track => {
+      track.clips.forEach(clip => {
+        if (clip.sectionName) {
+          // Check if we already have a section marker that overlaps
+          const existingSection = sections.find(s => 
+            s.name === clip.sectionName && 
+            Math.abs(s.start - clip.start) < 2 // Group clips that start roughly at the same time
+          );
+          
+          if (!existingSection) {
+            sections.push({
+              id: `section-${clip.id}`,
+              name: clip.sectionName,
+              start: clip.start,
+              // We'll calculate duration based on the longest clip in this section
+              duration: clip.duration 
+            });
+          } else {
+            // Update duration if this clip extends further
+            existingSection.duration = Math.max(existingSection.duration, (clip.start + clip.duration) - existingSection.start);
+          }
+        }
+      });
     });
-  }, [tracksVersion]);
+    
+    return sections.sort((a, b) => a.start - b.start);
+  }, [tracks]);
 
   useEffect(() => {
     // Sync custom audio refs when tracks change
