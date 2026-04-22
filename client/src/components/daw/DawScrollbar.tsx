@@ -35,23 +35,22 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
     if (!timelineRef.current || !trackRef.current) {
       return { leftSec: 0, widthSec: 10, maxSec: 120, trackWidth: 1000, clientWidth: 1000 };
     }
-    const { scrollLeft, clientWidth } = timelineRef.current;
+    const { scrollLeft, clientWidth, scrollWidth } = timelineRef.current;
     const trackWidth = trackRef.current.clientWidth;
     
     const leftSec = scrollLeft / zoom;
-    const widthSec = clientWidth / zoom;
+    const widthSec = Math.max(1, clientWidth - 256) / zoom;
     
-    // The timeline track visually represents at least the project duration, 
-    // or whatever is currently visible if we're zoomed far out.
-    const maxSec = Math.max(projectDuration, leftSec + widthSec);
+    const totalTimelineWidth = scrollWidth - 256;
+    const maxSec = Math.max(projectDuration, totalTimelineWidth / zoom);
     
     return { leftSec, widthSec, maxSec, trackWidth, clientWidth };
   };
 
   const { leftSec, widthSec, maxSec, trackWidth, clientWidth } = getMetrics();
 
-  const leftPercent = (leftSec / maxSec) * 100;
-  const widthPercent = (widthSec / maxSec) * 100;
+  const leftPercent = Math.max(0, Math.min(100, (leftSec / maxSec) * 100));
+  const widthPercent = Math.max(2, Math.min(100, (widthSec / maxSec) * 100));
 
   const handlePointerDown = (e: React.PointerEvent, type: 'pan' | 'left' | 'right') => {
     e.preventDefault();
@@ -74,7 +73,8 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
       else if (type === 'right') {
         const newRightSec = Math.max(startMetrics.leftSec + 1, startMetrics.leftSec + startMetrics.widthSec + deltaSec);
         const newWidthSec = newRightSec - startMetrics.leftSec;
-        let newZoom = startMetrics.clientWidth / newWidthSec;
+        const targetClientWidth = startMetrics.clientWidth - 256;
+        let newZoom = targetClientWidth / newWidthSec;
         newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
         setZoom(newZoom);
       }
@@ -83,7 +83,8 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
         const newLeftSec = Math.max(0, Math.min(maxLeftSec, startMetrics.leftSec + deltaSec));
         const newWidthSec = (startMetrics.leftSec + startMetrics.widthSec) - newLeftSec;
         
-        let newZoom = startMetrics.clientWidth / newWidthSec;
+        const targetClientWidth = startMetrics.clientWidth - 256;
+        let newZoom = targetClientWidth / newWidthSec;
         newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newZoom));
         setZoom(newZoom);
         
@@ -103,30 +104,41 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
   };
 
   return (
-    <div className="h-5 bg-[#09090b] border-t border-border/50 flex items-center px-2 sticky bottom-0 z-40 w-full shrink-0">
-      <div 
-        ref={trackRef}
-        className="relative w-full h-2.5 bg-white/5 rounded-full overflow-hidden"
-      >
+    <div className="h-16 bg-[#09090b] border-t border-border/20 flex items-center pr-6 sticky bottom-0 z-40 w-full shrink-0 shadow-[0_-5px_20px_rgba(0,0,0,0.3)]">
+      <div className="w-64 shrink-0 border-r border-border/10 h-full bg-card/20 flex items-center px-4">
+        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Zoom / Pan</span>
+      </div>
+      <div className="flex-1 pl-6">
         <div 
-          className="absolute top-0 bottom-0 bg-primary/30 hover:bg-primary/40 border border-primary/40 rounded-full flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
-          style={{
-            left: `${leftPercent}%`,
-            width: `${widthPercent}%`
-          }}
-          onPointerDown={(e) => handlePointerDown(e, 'pan')}
+          ref={trackRef}
+          className="relative w-full h-8 bg-black/60 rounded-full overflow-hidden border border-white/5"
         >
           <div 
-            className="w-4 h-full hover:bg-primary cursor-ew-resize flex items-center justify-center rounded-l-full"
-            onPointerDown={(e) => handlePointerDown(e, 'left')}
+            className="absolute top-0 bottom-0 bg-primary/30 hover:bg-primary/40 border border-primary/40 rounded-full flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
+            style={{
+              left: `${leftPercent}%`,
+              width: `${widthPercent}%`
+            }}
+            onPointerDown={(e) => handlePointerDown(e, 'pan')}
           >
-            <div className="w-[2px] h-[50%] bg-black/50" />
-          </div>
-          <div 
-            className="w-4 h-full hover:bg-primary cursor-ew-resize flex items-center justify-center rounded-r-full"
-            onPointerDown={(e) => handlePointerDown(e, 'right')}
-          >
-            <div className="w-[2px] h-[50%] bg-black/50" />
+            <div 
+              className="w-10 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-l-full transition-colors"
+              onPointerDown={(e) => handlePointerDown(e, 'left')}
+            >
+              <div className="flex gap-1">
+                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
+                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
+              </div>
+            </div>
+            <div 
+              className="w-10 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-r-full transition-colors"
+              onPointerDown={(e) => handlePointerDown(e, 'right')}
+            >
+              <div className="flex gap-1">
+                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
+                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
+              </div>
+            </div>
           </div>
         </div>
       </div>
