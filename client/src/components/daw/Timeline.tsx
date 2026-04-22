@@ -16,6 +16,7 @@ import { TimelineTrack } from './Track';
 import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
+import { DawScrollbar } from './DawScrollbar';
 import { Music2, Plus } from 'lucide-react';
 import { MediaBucket } from './MediaBucket';
 import { 
@@ -48,6 +49,7 @@ export function Timeline() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
+  const [zoom, setZoom] = useState(80); // 80px per second default
 
   const [isLooping, setIsLooping] = useState(false);
 
@@ -119,7 +121,7 @@ export function Timeline() {
   }, []);
 
   const checkAudioMuteState = React.useCallback((pos: number) => {
-    const playheadTime = (pos - 256) / 80;
+    const playheadTime = (pos - 256) / zoom;
     const trackMuteStates: Record<string, boolean> = {};
     
     for (const track of tracks) {
@@ -152,7 +154,7 @@ export function Timeline() {
         newPos = Math.max(256, newPos);
         setPlayheadPosition(newPos);
         checkAudioMuteState(newPos);
-        const time = Math.max(0, (newPos - 256) / 80);
+        const time = Math.max(0, (newPos - 256) / zoom);
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
       }
@@ -194,14 +196,14 @@ export function Timeline() {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
           // Calculate pixels per second based on BPM
-          // 80px per second for 1 unit = 1 second, since Ruler marks are every 80px
-          const pixelsPerSecond = 80;
+          // zoom px per second for 1 unit = 1 second
+          const pixelsPerSecond = zoom;
           
           setPlayheadPosition(prev => {
             const newPos = prev + (delta / 1000) * pixelsPerSecond;
             
-            const prevTime = (prev - 256) / 80;
-            const playheadTime = (newPos - 256) / 80;
+            const prevTime = (prev - 256) / zoom;
+            const playheadTime = (newPos - 256) / zoom;
             
             // Check for looping logic
             if (isLooping) {
@@ -213,7 +215,7 @@ export function Timeline() {
               if (currentSection) {
                 // If the new time would exceed the section end, loop back
                 if (playheadTime >= currentSection.start + currentSection.duration) {
-                  const loopStartPos = 256 + (currentSection.start * 80);
+                  const loopStartPos = 256 + (currentSection.start * zoom);
                   
                   // Reset custom audio to start of section
                   Object.values(customAudioRefs.current).forEach(audio => {
@@ -485,8 +487,8 @@ export function Timeline() {
       let newStart = clip.start;
       
       if (trackElement && event.delta.x !== 0) {
-        // We moved it horizontally, adjust the start time (80px = 1 second)
-        newStart = Math.max(0, clip.start + (event.delta.x / 80));
+        // We moved it horizontally, adjust the start time
+        newStart = Math.max(0, clip.start + (event.delta.x / zoom));
       }
       
       setTracks(prev => {
@@ -513,7 +515,7 @@ export function Timeline() {
   const handleRulerSeek = (pos: number) => {
     const newPos = Math.max(256, pos + 256);
     setPlayheadPosition(newPos);
-    const time = Math.max(0, pos / 80);
+    const time = Math.max(0, pos / zoom);
     window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
@@ -552,8 +554,11 @@ export function Timeline() {
 
         <div className="flex-1 flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none">
           <div className="flex-1 overflow-y-auto overflow-x-auto relative scrollbar-hide" ref={timelineRef}>
-            <div className="min-w-[2000px] pb-32">
-              <Ruler onSeek={handleRulerSeek} />
+            <div 
+              className="pb-32" 
+              style={{ width: Math.max(2000, Math.max(120, endOfTimeline + 30) * zoom) }}
+            >
+              <Ruler onSeek={handleRulerSeek} zoom={zoom} />
               
               {/* Dynamic Section Headers based on clips */}
               {timelineSections.length > 0 && (
@@ -566,7 +571,7 @@ export function Timeline() {
                       <div 
                         key={sec.id}
                         className="absolute top-0 bottom-0 border-l border-primary/30 flex items-start pt-1 px-2 z-10"
-                        style={{ left: sec.start * 80, width: sec.duration * 80 }}
+                        style={{ left: sec.start * zoom, width: sec.duration * zoom }}
                       >
                         <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm">
                           {sec.name}
@@ -604,6 +609,7 @@ export function Timeline() {
                     key={track.id} 
                     track={track} 
                     isInvalidTarget={isInvalidTarget}
+                    zoom={zoom}
                   />
                 );
               })}
@@ -627,6 +633,13 @@ export function Timeline() {
             <div className="absolute top-[14px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary pointer-events-none" />
           </div>
         </div>
+
+        <DawScrollbar 
+          timelineRef={timelineRef}
+          zoom={zoom}
+          setZoom={setZoom}
+          projectDuration={Math.max(120, endOfTimeline + 30)} 
+        />
       </div>
 
       <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
@@ -634,7 +647,7 @@ export function Timeline() {
           <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
             <div 
               className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e]"
-              style={{ width: Math.max(160, activeDragData.clip.duration * 80) }}
+              style={{ width: Math.max(160, activeDragData.clip.duration * zoom) }}
             >
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
               <span className="text-xs font-bold text-white truncate tracking-tight">

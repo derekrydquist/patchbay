@@ -10,9 +10,10 @@ interface TrackProps {
   track: Track;
   isActive?: boolean;
   isInvalidTarget?: boolean;
+  zoom: number;
 }
 
-export function TimelineTrack({ track, isActive, isInvalidTarget }: TrackProps) {
+export function TimelineTrack({ track, isActive, isInvalidTarget, zoom }: TrackProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: track.id,
     data: { track, type: 'track' },
@@ -64,12 +65,13 @@ export function TimelineTrack({ track, isActive, isInvalidTarget }: TrackProps) 
       <div 
         ref={setNodeRef}
         className={cn(
-          "flex-1 relative overflow-hidden bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)] bg-[size:20px_100%]",
+          "flex-1 relative overflow-hidden bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]",
           isOver && "bg-primary/5 ring-inset ring-2 ring-primary/20"
         )}
+        style={{ backgroundSize: `${zoom / 4}px 100%` }}
       >
         {track.clips.map(clip => (
-          <TimelineClip key={clip.id} clip={clip} />
+          <TimelineClip key={clip.id} clip={clip} zoom={zoom} />
         ))}
       </div>
     </div>

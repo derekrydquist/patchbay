@@ -28,6 +28,7 @@ import { Separator } from "@/components/ui/separator";
 interface ClipProps {
   clip: Clip;
   isOverlay?: boolean;
+  zoom?: number;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -204,7 +205,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
   );
 }
 
-export function TimelineClip({ clip, isOverlay }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [newComment, setNewComment] = useState("");
@@ -220,11 +221,11 @@ export function TimelineClip({ clip, isOverlay }: ClipProps) {
     transform: CSS.Translate.toString(transform),
   };
 
-  const width = clip.duration * 80;
+  const width = clip.duration * zoom;
   
   const positionStyle: React.CSSProperties = isOverlay ? { width } : {
     width,
-    left: clip.start * 80,
+    left: clip.start * zoom,
     position: 'absolute',
     ...style,
   };
