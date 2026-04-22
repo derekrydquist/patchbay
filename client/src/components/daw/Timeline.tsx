@@ -56,37 +56,21 @@ export function Timeline() {
   const timelineRef = React.useRef<HTMLDivElement>(null);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
 
-  // Extract unique sections from clips in the timeline to render markers
+  // Define sections based on the song's predefined structure (each 16s long)
   const timelineSections = React.useMemo(() => {
-    const sections: { id: string, name: string, start: number, duration: number }[] = [];
-    
-    tracks.forEach(track => {
-      track.clips.forEach(clip => {
-        if (clip.sectionName) {
-          // Check if we already have a section marker that overlaps
-          const existingSection = sections.find(s => 
-            s.name === clip.sectionName && 
-            Math.abs(s.start - clip.start) < 2 // Group clips that start roughly at the same time
-          );
-          
-          if (!existingSection) {
-            sections.push({
-              id: `section-${clip.id}`,
-              name: clip.sectionName,
-              start: clip.start,
-              // We'll calculate duration based on the longest clip in this section
-              duration: clip.duration 
-            });
-          } else {
-            // Update duration if this clip extends further
-            existingSection.duration = Math.max(existingSection.duration, (clip.start + clip.duration) - existingSection.start);
-          }
-        }
-      });
+    let currentStart = 0;
+    return MOCK_SONG.sections.map((name, index) => {
+      const duration = 16; // 16 seconds per section
+      const section = {
+        id: `section-${index}`,
+        name,
+        start: currentStart,
+        duration
+      };
+      currentStart += duration;
+      return section;
     });
-    
-    return sections.sort((a, b) => a.start - b.start);
-  }, [tracks]);
+  }, [tracksVersion]);
 
   useEffect(() => {
     // Sync custom audio refs when tracks change
@@ -201,18 +185,18 @@ export function Timeline() {
           setPlayheadPosition(prev => {
             const newPos = prev + (delta / 1000) * pixelsPerSecond;
             
-            // Check if playhead is over any clip
+            const prevTime = (prev - 256) / 20;
             const playheadTime = (newPos - 256) / 20;
             
             // Check for looping logic
             if (isLooping) {
-              // Find the section we are currently in
+              // Find the section that prevTime was in
               const currentSection = timelineSections.find(sec => 
-                playheadTime >= sec.start && playheadTime <= sec.start + sec.duration
+                prevTime >= sec.start && prevTime < sec.start + sec.duration
               );
               
               if (currentSection) {
-                // If we've reached the end of the current section, loop back to the start
+                // If the new time would exceed the section end, loop back
                 if (playheadTime >= currentSection.start + currentSection.duration) {
                   const loopStartPos = 256 + (currentSection.start * 20);
                   
@@ -299,7 +283,7 @@ export function Timeline() {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isPlaying, tracks, bpm]);
+  }, [isPlaying, tracks, bpm, isLooping, timelineSections]);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
