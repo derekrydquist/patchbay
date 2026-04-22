@@ -104,41 +104,30 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
   };
 
   return (
-    <div className="h-16 bg-[#09090b] border-t border-border/20 flex items-center pr-6 sticky bottom-0 z-40 w-full shrink-0 shadow-[0_-5px_20px_rgba(0,0,0,0.3)]">
-      <div className="w-64 shrink-0 border-r border-border/10 h-full bg-card/20 flex items-center px-4">
-        <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Zoom / Pan</span>
-      </div>
-      <div className="flex-1 pl-6">
+    <div className="absolute bottom-4 left-[264px] right-6 z-40 h-4 flex items-center pointer-events-none">
+      <div 
+        ref={trackRef}
+        className="relative w-full h-full bg-black/40 backdrop-blur-sm rounded-full overflow-hidden border border-white/10 pointer-events-auto shadow-sm"
+      >
         <div 
-          ref={trackRef}
-          className="relative w-full h-8 bg-black/60 rounded-full overflow-hidden border border-white/5"
+          className="absolute top-0 bottom-0 bg-primary/40 hover:bg-primary/50 border border-primary/50 rounded-full flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
+          style={{
+            left: `${leftPercent}%`,
+            width: `${widthPercent}%`
+          }}
+          onPointerDown={(e) => handlePointerDown(e, 'pan')}
         >
           <div 
-            className="absolute top-0 bottom-0 bg-primary/30 hover:bg-primary/40 border border-primary/40 rounded-full flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
-            style={{
-              left: `${leftPercent}%`,
-              width: `${widthPercent}%`
-            }}
-            onPointerDown={(e) => handlePointerDown(e, 'pan')}
+            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-l-full transition-colors"
+            onPointerDown={(e) => handlePointerDown(e, 'left')}
           >
-            <div 
-              className="w-10 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-l-full transition-colors"
-              onPointerDown={(e) => handlePointerDown(e, 'left')}
-            >
-              <div className="flex gap-1">
-                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
-                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
-              </div>
-            </div>
-            <div 
-              className="w-10 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-r-full transition-colors"
-              onPointerDown={(e) => handlePointerDown(e, 'right')}
-            >
-              <div className="flex gap-1">
-                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
-                <div className="w-[1.5px] h-4 bg-white/50 rounded-full" />
-              </div>
-            </div>
+            <div className="w-[1px] h-2 bg-white/60 rounded-full" />
+          </div>
+          <div 
+            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center rounded-r-full transition-colors"
+            onPointerDown={(e) => handlePointerDown(e, 'right')}
+          >
+            <div className="w-[1px] h-2 bg-white/60 rounded-full" />
           </div>
         </div>
       </div>

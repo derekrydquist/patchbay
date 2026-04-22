@@ -559,7 +559,10 @@ export function Timeline() {
           >
             <div 
               className="pb-32" 
-              style={{ width: Math.max(2000, Math.max(120, endOfTimeline + 30) * zoom) }}
+              style={{ 
+                width: `${Math.max(endOfTimeline + 15, 0) * zoom}px`,
+                minWidth: '100%'
+              }}
             >
               <Ruler onSeek={handleRulerSeek} zoom={zoom} />
               
@@ -635,14 +638,14 @@ export function Timeline() {
             </div>
             <div className="absolute top-[14px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary pointer-events-none" />
           </div>
-        </div>
 
-        <DawScrollbar 
-          timelineRef={timelineRef}
-          zoom={zoom}
-          setZoom={setZoom}
-          projectDuration={Math.max(120, endOfTimeline + 30)} 
-        />
+          <DawScrollbar 
+            timelineRef={timelineRef}
+            zoom={zoom}
+            setZoom={setZoom}
+            projectDuration={Math.max(60, endOfTimeline + 15)} 
+          />
+        </div>
       </div>
 
       <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
