@@ -530,13 +530,39 @@ export function Timeline() {
     return max;
   }, [tracks]);
 
+  const [timelineHeight, setTimelineHeight] = useState(600); // Default height
+  const resizeRef = React.useRef<HTMLDivElement>(null);
+
+  const handleResizePointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const startY = e.clientY;
+    const startHeight = timelineHeight;
+    
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      // Calculate new height (moving UP increases timeline height since it's at the bottom)
+      const deltaY = startY - moveEvent.clientY;
+      const newHeight = Math.max(200, Math.min(startHeight + deltaY, window.innerHeight - 100));
+      setTimelineHeight(newHeight);
+    };
+    
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+    
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
+
   return (
     <DndContext 
       sensors={sensors} 
       onDragStart={handleDragStart} 
       onDragEnd={handleDragEnd}
     >
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
         <MediaBucket
           key={refreshKey}
           onAddToTimeline={(clip) => {
@@ -552,9 +578,18 @@ export function Timeline() {
           onInstrumentAdded={() => setRefreshKey((v) => v + 1)}
         />
 
-        <div className="flex-1 flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none">
+        <div 
+          className="flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none shrink-0"
+          style={{ height: `${timelineHeight}px` }}
+        >
+          {/* Resize Handle */}
           <div 
-            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]" 
+            ref={resizeRef}
+            className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-50"
+            onPointerDown={handleResizePointerDown}
+          />
+          <div 
+            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] mt-1.5" 
             ref={timelineRef}
           >
             <div 
