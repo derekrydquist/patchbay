@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { MOCK_SONG, addSection } from '@/lib/daw-data';
-import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare, UserPlus } from 'lucide-react';
+import { CheckCircle2, Circle, Clock, Minus, Music2, MoreHorizontal, Plus, MessageSquare, UserPlus, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
@@ -229,58 +229,51 @@ function CellModal({
               </div>
             </div>
 
-            <div className="space-y-4 pt-4 border-t border-white/5">
-              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center gap-2">
-                <MessageSquare size={12} /> Comments ({(data.comments || []).length})
-              </label>
+            <div className="pt-4 border-t border-white/5">
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2 flex-1">
+                  <div className="h-px flex-1 bg-primary/20" /> Session Notes
+                </h4>
+              </div>
               
               <div className="space-y-4">
-                {(data.comments || []).map((comment) => (
-                  <div key={comment.id} className="flex gap-3">
-                    <div className={cn("w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold text-white", comment.avatarColor)}>
-                      {comment.author.charAt(0)}
+                <div className="flex gap-2">
+                  <Input 
+                    placeholder="Add a collaboration note..." 
+                    value={newComment}
+                    onChange={(e) => setNewComment(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
+                    className="bg-black/40 border-white/10 text-xs h-9"
+                  />
+                  <Button size="sm" onClick={handleAddComment} className="h-9 px-3">
+                    <Plus size={14} />
+                  </Button>
+                </div>
+
+                <div className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
+                  {(data.comments || []).length > 0 ? (
+                    <div className="space-y-1">
+                      {(data.comments || []).map(c => (
+                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
+                          <div className="flex justify-between items-center mb-1">
+                            <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
+                              <User size={10} /> {c.author}
+                            </span>
+                            <span className="text-[9px] text-muted-foreground font-mono opacity-50">{c.timestamp}</span>
+                          </div>
+                          <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
+                        </div>
+                      ))}
                     </div>
-                    <div className="space-y-1 flex-1">
-                      <div className="flex items-baseline justify-between">
-                        <span className="text-xs font-bold text-white/90">{comment.author}</span>
-                        <span className="text-[9px] text-white/40">{comment.timestamp}</span>
-                      </div>
-                      <p className="text-xs text-white/70 leading-relaxed bg-white/[0.02] p-3 rounded-r-lg rounded-bl-lg border border-white/5">
-                        {comment.text}
-                      </p>
+                  ) : (
+                    <div className="py-8 flex flex-col items-center justify-center text-muted-foreground text-[11px] italic opacity-40">
+                      <MessageSquare size={16} className="mb-2" />
+                      No collaboration notes for this cell.
                     </div>
-                  </div>
-                ))}
-                
-                {(!data.comments || data.comments.length === 0) && (
-                  <div className="text-center py-4 border border-dashed border-white/10 rounded-lg">
-                    <p className="text-xs text-white/40">No comments yet.</p>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             </div>
-          </div>
-        </div>
-
-        <div className="p-4 border-t border-white/5 bg-[#0a0a0c] shrink-0">
-          <div className="flex gap-2">
-            <Input 
-              value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
-              placeholder="Add a comment or @mention someone..."
-              className="bg-white/[0.03] border-white/10 text-xs h-9 flex-1 focus-visible:ring-1 focus-visible:ring-primary/50"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAddComment();
-              }}
-            />
-            <Button 
-              onClick={handleAddComment} 
-              size="sm"
-              className="h-9 px-4 text-[10px] uppercase tracking-[0.2em] font-bold shadow-lg shadow-primary/10"
-              disabled={!newComment.trim()}
-            >
-              Post
-            </Button>
           </div>
         </div>
       </DialogContent>
