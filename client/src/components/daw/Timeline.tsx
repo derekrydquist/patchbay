@@ -643,7 +643,7 @@ export function Timeline() {
             timelineRef={timelineRef}
             zoom={zoom}
             setZoom={setZoom}
-            projectDuration={Math.max(60, endOfTimeline + 15)} 
+            projectDuration={Math.max(30, endOfTimeline + 5)} 
           />
         </div>
       </div>
