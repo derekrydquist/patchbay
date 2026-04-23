@@ -390,9 +390,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
                 detail: { clipId: clip.id } 
               }));
             }}
-            className="text-foreground gap-2 text-xs uppercase tracking-wider font-semibold focus:text-destructive focus:bg-destructive/10"
+            className="text-red-400 gap-2 text-xs uppercase tracking-wider font-semibold focus:text-red-300 focus:bg-red-400/10"
           >
-            <XCircle size={14} className="text-destructive" />
+            <XCircle size={14} className="text-red-400" />
             Remove Clip
           </ContextMenuItem>
         </ContextMenuContent>
