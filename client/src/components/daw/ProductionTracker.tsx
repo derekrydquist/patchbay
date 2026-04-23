@@ -370,11 +370,8 @@ export function ProductionTracker() {
 
             {sections.map((section) => (
               <React.Fragment key={section}>
-                <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-[0.25em] text-white/80 font-bold">{section}</div>
-                    <div className="text-[9px] uppercase tracking-[0.2em] text-muted-foreground">Arrangement</div>
-                  </div>
+                <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
+                  <div className="text-[10px] uppercase tracking-[0.25em] text-white/80 font-bold">{section}</div>
                 </div>
                 {columns.map((inst) => {
                   const key = `${inst.id}:${section}`;
