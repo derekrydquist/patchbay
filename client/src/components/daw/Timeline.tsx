@@ -536,7 +536,7 @@ export function Timeline() {
       onDragStart={handleDragStart} 
       onDragEnd={handleDragEnd}
     >
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <MediaBucket
           key={refreshKey}
           onAddToTimeline={(clip) => {
