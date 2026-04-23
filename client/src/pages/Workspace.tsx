@@ -165,77 +165,8 @@ export default function Workspace() {
               </div>
               
               <div className="p-6 space-y-8">
-                {/* Share Link Section */}
-                <div className="space-y-3">
-                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
-                    <LinkIcon size={12} /> Share Link
-                  </h4>
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <Globe size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                      <Input 
-                        readOnly 
-                        value="https://studiolux.app/s/8f92a1b" 
-                        className="pl-9 bg-black/40 border-white/10 text-xs font-mono text-white/80 focus-visible:ring-primary/50 h-9"
-                      />
-                    </div>
-                    <Select defaultValue="view">
-                      <SelectTrigger className="w-[130px] h-9 bg-black/40 border-white/10 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0c0c0e] border-white/10">
-                        <SelectItem value="view" className="text-xs">Anyone can view</SelectItem>
-                        <SelectItem value="edit" className="text-xs">Anyone can edit</SelectItem>
-                        <SelectItem value="none" className="text-xs">No public access</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button variant="outline" className="h-9 px-4 border-white/10 hover:bg-white/5 hover:text-white shrink-0">
-                      <Copy size={14} className="mr-2" /> Copy
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Invite Section */}
-                <div className="space-y-3 pt-2">
-                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
-                    <UserPlus size={12} /> Invite Collaborators
-                  </h4>
-                  <div className="flex items-center gap-2">
-                    <Input 
-                      placeholder="Email address..." 
-                      className="flex-1 bg-black/40 border-white/10 text-xs focus-visible:ring-primary/50 h-9"
-                    />
-                    <Select defaultValue="instrument">
-                      <SelectTrigger className="w-[140px] h-9 bg-black/40 border-white/10 text-xs">
-                        <SelectValue placeholder="Assign Instrument" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0c0c0e] border-white/10 max-h-[200px]">
-                        <SelectItem value="instrument" disabled className="text-xs font-bold text-primary/70">Assign Instrument</SelectItem>
-                        <SelectItem value="all" className="text-xs">All Tracks</SelectItem>
-                        <SelectItem value="vocals" className="text-xs">Vocals</SelectItem>
-                        <SelectItem value="guitar" className="text-xs">Guitar</SelectItem>
-                        <SelectItem value="bass" className="text-xs">Bass</SelectItem>
-                        <SelectItem value="drums" className="text-xs">Drums</SelectItem>
-                        <SelectItem value="keys" className="text-xs">Keys</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Select defaultValue="editor">
-                      <SelectTrigger className="w-[110px] h-9 bg-black/40 border-white/10 text-xs">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent className="bg-[#0c0c0e] border-white/10">
-                        <SelectItem value="editor" className="text-xs">Editor</SelectItem>
-                        <SelectItem value="viewer" className="text-xs">Viewer</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <Button className="h-9 px-4 bg-primary text-black hover:bg-primary/90 shrink-0 font-bold text-xs">
-                      Invite
-                    </Button>
-                  </div>
-                </div>
-
                 {/* Members List */}
-                <div className="space-y-3 pt-4 border-t border-white/5">
+                <div className="space-y-3">
                   <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2 mb-4">
                     <Shield size={12} /> Current Members
                   </h4>
@@ -281,6 +212,75 @@ export default function Workspace() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                </div>
+
+                {/* Invite Section */}
+                <div className="space-y-3 pt-4 border-t border-white/5">
+                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
+                    <UserPlus size={12} /> Invite Collaborators
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <Input 
+                      placeholder="Email address..." 
+                      className="flex-1 bg-black/40 border-white/10 text-xs focus-visible:ring-primary/50 h-9"
+                    />
+                    <Select defaultValue="instrument">
+                      <SelectTrigger className="w-[140px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue placeholder="Assign Instrument" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10 max-h-[200px]">
+                        <SelectItem value="instrument" disabled className="text-xs font-bold text-primary/70">Assign Instrument</SelectItem>
+                        <SelectItem value="all" className="text-xs">All Tracks</SelectItem>
+                        <SelectItem value="vocals" className="text-xs">Vocals</SelectItem>
+                        <SelectItem value="guitar" className="text-xs">Guitar</SelectItem>
+                        <SelectItem value="bass" className="text-xs">Bass</SelectItem>
+                        <SelectItem value="drums" className="text-xs">Drums</SelectItem>
+                        <SelectItem value="keys" className="text-xs">Keys</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select defaultValue="editor">
+                      <SelectTrigger className="w-[110px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10">
+                        <SelectItem value="editor" className="text-xs">Editor</SelectItem>
+                        <SelectItem value="viewer" className="text-xs">Viewer</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button className="h-9 px-4 bg-primary text-black hover:bg-primary/90 shrink-0 font-bold text-xs">
+                      Invite
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Share Link Section */}
+                <div className="space-y-3 pt-4 border-t border-white/5">
+                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
+                    <LinkIcon size={12} /> Share Link
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Globe size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                      <Input 
+                        readOnly 
+                        value="https://studiolux.app/s/8f92a1b" 
+                        className="pl-9 bg-black/40 border-white/10 text-xs font-mono text-white/80 focus-visible:ring-primary/50 h-9"
+                      />
+                    </div>
+                    <Select defaultValue="view">
+                      <SelectTrigger className="w-[130px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10">
+                        <SelectItem value="view" className="text-xs">Anyone can view</SelectItem>
+                        <SelectItem value="edit" className="text-xs">Anyone can edit</SelectItem>
+                        <SelectItem value="none" className="text-xs">No public access</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" className="h-9 px-4 border-white/10 hover:bg-white/5 hover:text-white shrink-0">
+                      <Copy size={14} className="mr-2" /> Copy
+                    </Button>
                   </div>
                 </div>
               </div>
