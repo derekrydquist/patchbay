@@ -110,7 +110,7 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
         className="relative w-full h-full pointer-events-auto"
       >
         <div 
-          className="absolute top-0 bottom-0 bg-primary/40 hover:bg-primary/50 border-x border-primary/50 flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
+          className="absolute top-0 bottom-0 bg-primary/40 hover:bg-primary/50 border border-primary/50 rounded-full flex items-center justify-between group cursor-grab active:cursor-grabbing transition-colors"
           style={{
             left: `${leftPercent}%`,
             width: `${widthPercent}%`
@@ -118,13 +118,13 @@ export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: Da
           onPointerDown={(e) => handlePointerDown(e, 'pan')}
         >
           <div 
-            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center transition-colors"
+            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center transition-colors rounded-l-full"
             onPointerDown={(e) => handlePointerDown(e, 'left')}
           >
             <div className="w-[1px] h-1.5 bg-white/60 rounded-full" />
           </div>
           <div 
-            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center transition-colors"
+            className="w-4 h-full hover:bg-white/20 cursor-ew-resize flex items-center justify-center transition-colors rounded-r-full"
             onPointerDown={(e) => handlePointerDown(e, 'right')}
           >
             <div className="w-[1px] h-1.5 bg-white/60 rounded-full" />
