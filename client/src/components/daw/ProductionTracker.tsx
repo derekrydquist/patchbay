@@ -460,7 +460,10 @@ export function ProductionTracker() {
           data={activeCell.data}
           onUpdate={(newData) => {
             const inst = columns.find((c) => c.name === activeCell.instrument);
-            if (inst) updateCell(inst.id, activeCell.section, newData);
+            if (inst) {
+              updateCell(inst.id, activeCell.section, newData);
+              setActiveCell({ ...activeCell, data: newData });
+            }
           }}
         />
       )}
