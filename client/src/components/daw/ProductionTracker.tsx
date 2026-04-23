@@ -148,12 +148,11 @@ function CellModal({
       <DialogContent className="max-w-md bg-[#0c0c0e] border-primary/20 p-0 overflow-hidden flex flex-col max-h-[85vh]">
         <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent shrink-0">
           <DialogHeader>
-            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading text-white">Mark Board Cell</DialogTitle>
+            <div className="space-y-1">
+              <div className="text-[10px] uppercase tracking-widest text-primary/70">{instrument}</div>
+              <DialogTitle className="text-xl font-heading font-bold text-white uppercase">{section}</DialogTitle>
+            </div>
           </DialogHeader>
-          <div className="mt-3 space-y-1">
-            <div className="text-[10px] uppercase tracking-widest text-primary/70">{instrument}</div>
-            <div className="text-xl font-heading font-bold text-white uppercase">{section}</div>
-          </div>
         </div>
 
         <div className="overflow-y-auto flex-1">
