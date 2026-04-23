@@ -17,6 +17,28 @@ export default function Workspace() {
   const [activeTab, setActiveTab] = useState('timeline');
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(400); // Default height
+
+  const handleTimelineResizeStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = timelineHeight;
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      // Calculate new height based on mouse movement (moving up increases height)
+      const deltaY = startY - moveEvent.clientY;
+      const newHeight = Math.max(200, Math.min(800, startHeight + deltaY));
+      setTimelineHeight(newHeight);
+    };
+
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+  };
 
   const [members, setMembers] = useState([
     { id: 1, name: 'John Doe (You)', email: 'john@example.com', role: 'Owner', instrument: 'All Tracks', initials: 'JD', color: 'bg-primary/20 text-primary' },
@@ -294,17 +316,34 @@ export default function Workspace() {
       </header>
 
       <main className="flex-1 flex flex-col min-h-0 relative">
-        <Tabs value={activeTab} className="h-full">
+        <Tabs value={activeTab} className="h-full flex flex-col">
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
-            <div className="flex-1 flex flex-col overflow-hidden">
+            {/* Upper workspace area that takes up remaining space */}
+            <div className="flex-1 p-4 flex items-center justify-center opacity-30 text-xs font-mono uppercase tracking-widest text-muted-foreground bg-[#09090b]">
+              Upper Zone Workspace Available
+            </div>
+
+            {/* Resizable handle for Timeline's top border */}
+            <div 
+              className="h-2 w-full bg-[#0c0c0e] border-y border-white/5 cursor-ns-resize hover:bg-primary/20 hover:border-primary/50 transition-colors flex items-center justify-center shrink-0 z-[60] group relative"
+              onPointerDown={handleTimelineResizeStart}
+            >
+              <div className="w-12 h-0.5 bg-white/20 rounded-full group-hover:bg-primary/50 transition-colors" />
+            </div>
+
+            <div 
+              className="flex flex-col overflow-hidden relative bg-[#09090b] shrink-0"
+              style={{ height: `${timelineHeight}px` }}
+            >
                {/* Timeline now contains MediaBucket to ensure both share the same DndContext */}
                <Timeline />
             </div>
-            <div className="p-4 bg-black/40 border-t border-white/5">
+            
+            <div className="p-4 bg-black/40 border-t border-white/5 shrink-0">
               <Transport />
             </div>
           </TabsContent>
-          <TabsContent value="tasks" className="m-0 h-full outline-none">
+          <TabsContent value="tasks" className="m-0 h-full outline-none flex-1 overflow-hidden">
             <ProductionTracker />
           </TabsContent>
         </Tabs>
