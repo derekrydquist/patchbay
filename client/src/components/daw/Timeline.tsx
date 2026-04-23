@@ -530,7 +530,7 @@ export function Timeline() {
     return max;
   }, [tracks]);
 
-  const [timelineHeight, setTimelineHeight] = useState(600); // Default height
+  const [timelineHeight, setTimelineHeight] = useState(typeof window !== 'undefined' ? window.innerHeight / 2 : 600); // Default 50% height
   const resizeRef = React.useRef<HTMLDivElement>(null);
 
   const handleResizePointerDown = (e: React.PointerEvent) => {
