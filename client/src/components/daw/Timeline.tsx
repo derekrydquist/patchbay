@@ -533,18 +533,25 @@ export function Timeline() {
   // Calculate available height: window height minus header (56px) and transport (~80px)
   const [timelineHeight, setTimelineHeight] = useState(typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400); // Default exactly 50% of available space
   const resizeRef = React.useRef<HTMLDivElement>(null);
+  const containerRef = React.useRef<HTMLDivElement>(null);
 
   const handleResizePointerDown = (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
     
+    if (!containerRef.current) return;
+    
     const startY = e.clientY;
     const startHeight = timelineHeight;
+    const containerHeight = containerRef.current.clientHeight;
     
     const handlePointerMove = (moveEvent: PointerEvent) => {
       // Calculate new height (moving UP increases timeline height since it's at the bottom)
       const deltaY = startY - moveEvent.clientY;
-      const newHeight = Math.max(200, Math.min(startHeight + deltaY, window.innerHeight - 100));
+      
+      // Min timeline height: ~144px (ruler 24px + section headers 24px + 1 track 96px)
+      // Max timeline height: container height minus MediaBucket header (exactly 56px now)
+      const newHeight = Math.max(144, Math.min(startHeight + deltaY, containerHeight - 56));
       setTimelineHeight(newHeight);
     };
     
@@ -563,7 +570,7 @@ export function Timeline() {
       onDragStart={handleDragStart} 
       onDragEnd={handleDragEnd}
     >
-      <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
           key={refreshKey}
           onAddToTimeline={(clip) => {

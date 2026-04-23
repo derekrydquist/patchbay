@@ -115,7 +115,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
   return (
     <div className="w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0">
-      <div className="flex items-center justify-between px-6 py-3 border-b border-white/5">
+      <div className="flex items-center justify-between px-6 h-14 border-b border-white/5 shrink-0">
         <div className="flex items-center gap-3">
           <Library size={18} className="text-primary" />
           <h2 className="text-sm font-heading font-bold uppercase tracking-widest text-white">
