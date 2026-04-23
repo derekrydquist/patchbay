@@ -8,12 +8,21 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
-import { Layout, CheckSquare, Settings, Share2, Music2, Bell, AtSign, Clock, MessageSquare } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Layout, CheckSquare, Settings, Share2, Music2, Bell, AtSign, Clock, MessageSquare, Users, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function Workspace() {
   const [activeTab, setActiveTab] = useState('timeline');
   const [showNotifications, setShowNotifications] = useState(false);
+  const [showAccessModal, setShowAccessModal] = useState(false);
+
+  const [members, setMembers] = useState([
+    { id: 1, name: 'John Doe (You)', email: 'john@example.com', role: 'Owner', instrument: 'All Tracks', initials: 'JD', color: 'bg-primary/20 text-primary' },
+    { id: 2, name: 'Sarah Smith', email: 'sarah@example.com', role: 'Editor', instrument: 'Vocals', initials: 'SS', color: 'bg-blue-500/20 text-blue-400' },
+    { id: 3, name: 'Mike Johnson', email: 'mike@example.com', role: 'Viewer', instrument: 'Drums', initials: 'MJ', color: 'bg-purple-500/20 text-purple-400' },
+  ]);
 
   return (
     <div className="h-screen flex flex-col bg-[#09090b] text-foreground overflow-hidden font-sans selection:bg-primary/30">
@@ -48,40 +57,38 @@ export default function Workspace() {
         </div>
 
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" className="text-[10px] uppercase tracking-widest hover:bg-white/5">
-            <Share2 size={14} className="mr-2 text-primary" /> Share Session
-          </Button>
-          <div className="h-4 w-px bg-white/10 mx-1" />
-          
-          <Dialog open={showNotifications} onOpenChange={setShowNotifications}>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="rounded-full hover:bg-white/5">
-                  <Settings size={18} className="text-muted-foreground" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56 bg-[#0c0c0e] border-white/10">
-                <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Workspace</DropdownMenuLabel>
-                <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
-                  Project Settings
-                </DropdownMenuItem>
-                <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
-                  Manage Members
-                </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-white/10" />
-                <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">User</DropdownMenuLabel>
-                <DropdownMenuItem 
-                  className="text-xs focus:bg-white/5 focus:text-white cursor-pointer"
-                  onClick={() => setShowNotifications(true)}
-                >
-                  <Bell size={14} className="mr-2 text-primary/70" /> Notification Settings
-                </DropdownMenuItem>
-                <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
-                  Profile Settings
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" size="icon" className="rounded-full hover:bg-white/5">
+                <Settings size={18} className="text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 bg-[#0c0c0e] border-white/10">
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Workspace</DropdownMenuLabel>
+              <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
+                Project Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem 
+                className="text-xs focus:bg-white/5 focus:text-white cursor-pointer"
+                onClick={() => setShowAccessModal(true)}
+              >
+                <Users size={14} className="mr-2 text-primary/70" /> Manage Access
+              </DropdownMenuItem>
+              <DropdownMenuSeparator className="bg-white/10" />
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">User</DropdownMenuLabel>
+              <DropdownMenuItem 
+                className="text-xs focus:bg-white/5 focus:text-white cursor-pointer"
+                onClick={() => setShowNotifications(true)}
+              >
+                <Bell size={14} className="mr-2 text-primary/70" /> Notification Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
+                Profile Settings
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
 
+          <Dialog open={showNotifications} onOpenChange={setShowNotifications}>
             <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-md p-0 overflow-hidden">
               <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
                 <DialogHeader>
@@ -138,6 +145,142 @@ export default function Workspace() {
                       <p className="text-[10px] text-muted-foreground">When a new version is added to the Bucket</p>
                     </div>
                     <Switch defaultChecked className="data-[state=checked]:bg-primary" />
+                  </div>
+                </div>
+              </div>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={showAccessModal} onOpenChange={setShowAccessModal}>
+            <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-2xl p-0 overflow-hidden">
+              <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
+                <DialogHeader>
+                  <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white flex items-center gap-2">
+                    <Users size={16} className="text-primary" /> Manage Access
+                  </DialogTitle>
+                </DialogHeader>
+                <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-2">
+                  Share your session and manage collaborator permissions
+                </p>
+              </div>
+              
+              <div className="p-6 space-y-8">
+                {/* Share Link Section */}
+                <div className="space-y-3">
+                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
+                    <LinkIcon size={12} /> Share Link
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Globe size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                      <Input 
+                        readOnly 
+                        value="https://studiolux.app/s/8f92a1b" 
+                        className="pl-9 bg-black/40 border-white/10 text-xs font-mono text-white/80 focus-visible:ring-primary/50 h-9"
+                      />
+                    </div>
+                    <Select defaultValue="view">
+                      <SelectTrigger className="w-[130px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10">
+                        <SelectItem value="view" className="text-xs">Anyone can view</SelectItem>
+                        <SelectItem value="edit" className="text-xs">Anyone can edit</SelectItem>
+                        <SelectItem value="none" className="text-xs">No public access</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" className="h-9 px-4 border-white/10 hover:bg-white/5 hover:text-white shrink-0">
+                      <Copy size={14} className="mr-2" /> Copy
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Invite Section */}
+                <div className="space-y-3 pt-2">
+                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2">
+                    <UserPlus size={12} /> Invite Collaborators
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <Input 
+                      placeholder="Email address..." 
+                      className="flex-1 bg-black/40 border-white/10 text-xs focus-visible:ring-primary/50 h-9"
+                    />
+                    <Select defaultValue="instrument">
+                      <SelectTrigger className="w-[140px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue placeholder="Assign Instrument" />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10 max-h-[200px]">
+                        <SelectItem value="instrument" disabled className="text-xs font-bold text-primary/70">Assign Instrument</SelectItem>
+                        <SelectItem value="all" className="text-xs">All Tracks</SelectItem>
+                        <SelectItem value="vocals" className="text-xs">Vocals</SelectItem>
+                        <SelectItem value="guitar" className="text-xs">Guitar</SelectItem>
+                        <SelectItem value="bass" className="text-xs">Bass</SelectItem>
+                        <SelectItem value="drums" className="text-xs">Drums</SelectItem>
+                        <SelectItem value="keys" className="text-xs">Keys</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Select defaultValue="editor">
+                      <SelectTrigger className="w-[110px] h-9 bg-black/40 border-white/10 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent className="bg-[#0c0c0e] border-white/10">
+                        <SelectItem value="editor" className="text-xs">Editor</SelectItem>
+                        <SelectItem value="viewer" className="text-xs">Viewer</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button className="h-9 px-4 bg-primary text-black hover:bg-primary/90 shrink-0 font-bold text-xs">
+                      Invite
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Members List */}
+                <div className="space-y-3 pt-4 border-t border-white/5">
+                  <h4 className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold flex items-center gap-2 mb-4">
+                    <Shield size={12} /> Current Members
+                  </h4>
+                  <div className="space-y-2 max-h-[240px] overflow-y-auto pr-2 scrollbar-hide">
+                    {members.map(member => (
+                      <div key={member.id} className="flex items-center justify-between p-2 rounded-md hover:bg-white/5 transition-colors border border-transparent hover:border-white/5">
+                        <div className="flex items-center gap-3">
+                          <div className={cn("w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold border border-white/5 shadow-sm", member.color)}>
+                            {member.initials}
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium text-white/90 flex items-center gap-2">
+                              {member.name}
+                              {member.role === 'Owner' && <span className="text-[9px] bg-primary/20 text-primary px-1.5 py-0.5 rounded uppercase tracking-wider">Owner</span>}
+                            </div>
+                            <div className="text-xs text-muted-foreground">{member.email}</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="px-2 py-1 rounded bg-black/40 border border-white/5 text-[10px] uppercase tracking-widest text-white/60 w-[90px] text-center">
+                            {member.instrument}
+                          </div>
+                          {member.role !== 'Owner' ? (
+                            <>
+                              <Select defaultValue={member.role.toLowerCase()}>
+                                <SelectTrigger className="w-[100px] h-8 bg-black/40 border-white/10 text-xs shadow-none">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                                  <SelectItem value="editor" className="text-xs">Editor</SelectItem>
+                                  <SelectItem value="viewer" className="text-xs">Viewer</SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-muted-foreground hover:text-destructive hover:bg-destructive/10" onClick={() => setMembers(members.filter(m => m.id !== member.id))}>
+                                <X size={14} />
+                              </Button>
+                            </>
+                          ) : (
+                            <div className="w-[140px] text-right text-xs text-muted-foreground italic pr-2">
+                              Cannot modify owner
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
