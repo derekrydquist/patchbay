@@ -3,7 +3,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -390,8 +390,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
                 detail: { clipId: clip.id } 
               }));
             }}
-            className="text-destructive gap-2 text-xs uppercase tracking-wider font-semibold"
+            className="text-foreground gap-2 text-xs uppercase tracking-wider font-semibold focus:text-destructive focus:bg-destructive/10"
           >
+            <XCircle size={14} className="text-destructive" />
             Remove Clip
           </ContextMenuItem>
         </ContextMenuContent>
