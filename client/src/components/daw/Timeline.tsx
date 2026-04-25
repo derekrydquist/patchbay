@@ -204,6 +204,11 @@ export function Timeline() {
 
   useEffect(() => {
     if (isPlaying) {
+      // Ensure lastTimeRef has a value when starting the animation
+      if (!lastTimeRef.current) {
+        lastTimeRef.current = performance.now();
+      }
+
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
@@ -264,11 +269,18 @@ export function Timeline() {
                     audio.muted = isTrackMuted;
                     
                     // If it's paused or drifted out of sync by more than 0.2 seconds, re-sync
-                    if (audio.paused || Math.abs(audio.currentTime - (playheadTime - clip.start)) > 0.2) {
-                      audio.currentTime = playheadTime - clip.start;
-                      if (isPlaying) {
-                        audio.play().catch(e => console.error("Custom audio play failed:", e));
+                    try {
+                      // Only attempt to set currentTime if audio has loaded metadata (readyState >= 1)
+                      if (audio.readyState >= 1) {
+                        if (audio.paused || Math.abs(audio.currentTime - (playheadTime - clip.start)) > 0.2) {
+                          audio.currentTime = Math.max(0, playheadTime - clip.start);
+                          if (isPlaying) {
+                            audio.play().catch(e => console.warn("Custom audio play failed:", e));
+                          }
+                        }
                       }
+                    } catch (err) {
+                      console.warn("Could not set audio currentTime:", err);
                     }
                   }
                 } else {
@@ -568,7 +580,7 @@ export function Timeline() {
     return max;
   }, [tracks]);
 
-  const location = useLocation();
+  const [location] = useLocation();
   const hasAutoScrolled = React.useRef<string | null>(null);
 
   useEffect(() => {
@@ -576,8 +588,9 @@ export function Timeline() {
     const searchParams = new URLSearchParams(window.location.search);
     const instrument = searchParams.get('instrument');
     const section = searchParams.get('section');
+    const currentSearch = window.location.search;
     
-    if (section && timelineSections.length > 0 && hasAutoScrolled.current !== location) {
+    if (section && timelineSections.length > 0 && hasAutoScrolled.current !== currentSearch) {
       const targetSection = timelineSections.find(s => s.name.toLowerCase() === section.toLowerCase());
       if (targetSection && timelineRef.current) {
         // Scroll timeline to center the section
@@ -594,7 +607,7 @@ export function Timeline() {
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
         
-        hasAutoScrolled.current = location;
+        hasAutoScrolled.current = currentSearch;
       }
     }
   }, [location, timelineSections, zoom, setPlayheadPosition, checkAudioMuteState]);
