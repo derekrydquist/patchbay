@@ -460,9 +460,32 @@ export function Timeline() {
           start = lastClip ? lastClip.start + lastClip.duration : 0;
         }
         
+        let finalStart = Math.max(0, start);
+        const snapThreshold = 0.5; // 0.5 seconds snap
+        const sortedClips = [...t.clips].sort((a, b) => a.start - b.start);
+        
+        const prevClip = sortedClips.slice().reverse().find(c => c.start + c.duration <= finalStart + snapThreshold);
+        const nextClip = sortedClips.find(c => c.start >= finalStart - snapThreshold);
+
+        if (finalStart <= snapThreshold) {
+          finalStart = 0;
+        } else if (prevClip && Math.abs(finalStart - (prevClip.start + prevClip.duration)) <= snapThreshold) {
+          finalStart = prevClip.start + prevClip.duration;
+        } else if (nextClip && Math.abs(finalStart - nextClip.start) <= snapThreshold) {
+          finalStart = nextClip.start;
+        }
+
+        const shiftedClips = t.clips.map(c => {
+          const overlaps = (finalStart < c.start + c.duration) && (finalStart + clip.duration > c.start);
+          if (overlaps || c.start >= finalStart) {
+             return { ...c, start: c.start + clip.duration };
+          }
+          return c;
+        });
+
         return {
           ...t,
-          clips: [...t.clips, { ...clip, id: nanoid(), start }]
+          clips: [...shiftedClips, { ...clip, id: nanoid(), start: finalStart }]
         };
       }
       return t;
@@ -498,20 +521,21 @@ export function Timeline() {
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
       // Calculate new start time based on drop position relative to track
-      const trackElement = document.getElementById(`track-${trackId}`);
       let newStart = 0;
       
-      if (trackElement && timelineRef.current) {
-        const rect = trackElement.getBoundingClientRect();
-        // The x coordinate of the pointer when drag ends, relative to the viewport
-        const clientX = (event.activatorEvent as any)?.clientX;
-        if (clientX !== undefined) {
-          // Calculate position relative to the timeline container's left edge
+      if (timelineRef.current) {
+        const activatorEvent = event.activatorEvent as any;
+        let startClientX = activatorEvent?.clientX;
+        
+        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
+          startClientX = activatorEvent.touches[0].clientX;
+        }
+
+        if (startClientX !== undefined) {
+          const dropClientX = startClientX + event.delta.x;
           const containerLeft = timelineRef.current.getBoundingClientRect().left;
-          // Add current scroll position to get absolute pixel position
           const scrollLeft = timelineRef.current.scrollLeft;
-          // Calculate the pixel offset where the drop happened
-          const dropX = clientX - containerLeft + scrollLeft - 256; // 256 is the track header width
+          const dropX = dropClientX - containerLeft + scrollLeft - 256; // 256 is the track header width
           
           if (dropX > 0) {
             newStart = dropX / zoom;
@@ -532,13 +556,28 @@ export function Timeline() {
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
       // Calculate new start time based on drop position relative to track
-      // Get the x-coordinate of the drop relative to the timeline container
-      const trackElement = document.getElementById(`track-${trackId}`);
       let newStart = clip.start;
       
-      if (trackElement && event.delta.x !== 0) {
-        // We moved it horizontally, adjust the start time
-        newStart = Math.max(0, clip.start + (event.delta.x / zoom));
+      if (timelineRef.current) {
+        const activatorEvent = event.activatorEvent as any;
+        let startClientX = activatorEvent?.clientX;
+        
+        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
+          startClientX = activatorEvent.touches[0].clientX;
+        }
+
+        if (startClientX !== undefined) {
+          const dropClientX = startClientX + event.delta.x;
+          const containerLeft = timelineRef.current.getBoundingClientRect().left;
+          const scrollLeft = timelineRef.current.scrollLeft;
+          const dropX = dropClientX - containerLeft + scrollLeft - 256;
+          
+          if (dropX > 0) {
+            newStart = dropX / zoom;
+          } else {
+            newStart = 0;
+          }
+        }
       }
       
       setTracks(prev => {
@@ -551,9 +590,44 @@ export function Timeline() {
         // Then add it to the new track at the new position
         return withoutClip.map(t => {
           if (t.id === trackId) {
+            let finalStart = Math.max(0, newStart);
+            const snapThreshold = 0.5;
+            const sortedClips = [...t.clips].sort((a, b) => a.start - b.start);
+            
+            // Allow dropping anywhere
+            // Snapping logic
+            const prevClip = sortedClips.slice().reverse().find(c => c.start + c.duration <= finalStart + snapThreshold);
+            const nextClip = sortedClips.find(c => c.start >= finalStart - snapThreshold);
+
+            if (finalStart <= snapThreshold) {
+              finalStart = 0;
+            } else if (prevClip && Math.abs(finalStart - (prevClip.start + prevClip.duration)) <= snapThreshold) {
+              finalStart = prevClip.start + prevClip.duration;
+            } else if (nextClip && Math.abs(finalStart - nextClip.start) <= snapThreshold) {
+              // Snap to start of next clip
+              finalStart = nextClip.start;
+            }
+
+            // Pushing logic (if we drop before or on an existing clip)
+            const shiftedClips = t.clips.map(c => {
+              // If clip is exactly at or after where we drop, push it by the duration of the new clip
+              if (c.start >= finalStart && c.id !== clip.id) {
+                // To avoid shifting things unnecessarily, let's only shift if there's an overlap
+                // Actually, standard DAW behavior is to just allow overlap or replace, but user requested "pushing subsequent clips to the right"
+                // Let's implement insert behavior: if we drop *on* a clip or right before it, push everything after drop point.
+                // Wait, only push if there's an overlap to avoid pushing everything every time we move something to empty space.
+                const overlaps = (finalStart < c.start + c.duration) && (finalStart + clip.duration > c.start);
+                
+                if (overlaps || c.start >= finalStart) {
+                   return { ...c, start: c.start + clip.duration };
+                }
+              }
+              return c;
+            });
+
             return {
               ...t,
-              clips: [...t.clips, { ...clip, start: newStart, sectionName: clipIdeaName }]
+              clips: [...shiftedClips, { ...clip, start: finalStart, sectionName: clipIdeaName }]
             };
           }
           return t;
