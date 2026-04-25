@@ -236,7 +236,7 @@ MOCK_SONG.instruments.forEach(inst => {
         instrument: inst.name,
         status,
         priority: status === 'todo' ? 'medium' : 'high',
-        assignee: inst.name === 'Drums' ? 'Dave' : (inst.name === 'Vocals' ? 'Elena' : (inst.name === 'Bass' ? 'Sarah' : 'Mike'))
+        assignee: inst.name === 'Drums' ? 'Dave' : (inst.name === 'Vocals' ? 'Elena' : (inst.name === 'Bass' ? 'JD (You)' : 'Mike'))
       });
     }
   });

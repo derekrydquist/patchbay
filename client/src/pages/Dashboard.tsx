@@ -131,7 +131,7 @@ export default function Dashboard() {
               </div>
               <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
                 <div className="divide-y divide-white/5">
-                  {MOCK_TASKS.slice(0, 8).map(task => (
+                  {MOCK_TASKS.filter(task => task.assignee === 'JD' || task.assignee === 'JD (You)').slice(0, 8).map(task => (
                     <div 
                       key={task.id}
                       onClick={() => openArrangement({ instrument: task.instrument, section: task.title.split(' - ')[0] })}
