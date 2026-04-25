@@ -55,13 +55,17 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
         // Find idea/section
         if (urlSection) {
-          targetIdea = targetInst.ideas.find(i => i.name.toLowerCase() === urlSection.toLowerCase());
+          targetIdea = targetInst.ideas.find(i => i.name.toLowerCase().includes(urlSection.toLowerCase()));
         } else if (urlFile) {
           targetIdea = targetInst.ideas.find(idea => idea.versions.some(v => v.id === urlFile));
         }
 
         if (targetIdea) {
           setSelectedIdea(targetIdea);
+        } else {
+          // Fallback: If section doesn't match an idea (maybe it's spelled differently),
+          // don't leave selectedIdea null if we successfully found an instrument
+          setSelectedIdea(null);
         }
       }
     }
