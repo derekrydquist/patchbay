@@ -439,11 +439,14 @@ export function Timeline() {
     }
   };
 
-  const addClipToTrack = (trackId: string, clip: any) => {
+  const addClipToTrack = (trackId: string, clip: any, requestedStart?: number) => {
     setTracks(prev => prev.map(t => {
       if (t.id === trackId) {
-        const lastClip = t.clips[t.clips.length - 1];
-        const start = lastClip ? lastClip.start + lastClip.duration : 0;
+        let start = requestedStart;
+        if (start === undefined) {
+          const lastClip = t.clips[t.clips.length - 1];
+          start = lastClip ? lastClip.start + lastClip.duration : 0;
+        }
         
         return {
           ...t,
@@ -481,7 +484,30 @@ export function Timeline() {
       }
 
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
-      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
+      
+      // Calculate new start time based on drop position relative to track
+      const trackElement = document.getElementById(`track-${trackId}`);
+      let newStart = 0;
+      
+      if (trackElement && timelineRef.current) {
+        const rect = trackElement.getBoundingClientRect();
+        // The x coordinate of the pointer when drag ends, relative to the viewport
+        const clientX = (event.activatorEvent as any)?.clientX;
+        if (clientX !== undefined) {
+          // Calculate position relative to the timeline container's left edge
+          const containerLeft = timelineRef.current.getBoundingClientRect().left;
+          // Add current scroll position to get absolute pixel position
+          const scrollLeft = timelineRef.current.scrollLeft;
+          // Calculate the pixel offset where the drop happened
+          const dropX = clientX - containerLeft + scrollLeft - 256; // 256 is the track header width
+          
+          if (dropX > 0) {
+            newStart = dropX / zoom;
+          }
+        }
+      }
+
+      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName }, newStart);
     } else if (activeType === 'clip') {
       const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
       const targetTrack = tracks.find(t => t.id === trackId);
@@ -543,6 +569,7 @@ export function Timeline() {
   }, [tracks]);
 
   const location = useLocation();
+  const hasAutoScrolled = React.useRef<string | null>(null);
 
   useEffect(() => {
     // Parse URL params for context to auto-scroll timeline
@@ -550,7 +577,7 @@ export function Timeline() {
     const instrument = searchParams.get('instrument');
     const section = searchParams.get('section');
     
-    if (section && timelineSections.length > 0) {
+    if (section && timelineSections.length > 0 && hasAutoScrolled.current !== location) {
       const targetSection = timelineSections.find(s => s.name.toLowerCase() === section.toLowerCase());
       if (targetSection && timelineRef.current) {
         // Scroll timeline to center the section
@@ -559,9 +586,18 @@ export function Timeline() {
         
         // Also move playhead to start of section
         setPlayheadPosition(Math.max(256, targetSection.start * zoom + 256));
+        
+        // Force the checkAudioMuteState to update after setting playhead, so we don't accidentally silence everything
+        const newPos = Math.max(256, targetSection.start * zoom + 256);
+        checkAudioMuteState(newPos);
+        const time = Math.max(0, (newPos - 256) / zoom);
+        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
+        window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
+        
+        hasAutoScrolled.current = location;
       }
     }
-  }, [location, timelineSections, zoom]);
+  }, [location, timelineSections, zoom, setPlayheadPosition, checkAudioMuteState]);
 
   // Calculate available height: window height minus header (56px) and transport (~80px)
   const [timelineHeight, setTimelineHeight] = useState(typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400); // Default exactly 50% of available space
