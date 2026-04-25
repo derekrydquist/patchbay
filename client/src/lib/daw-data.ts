@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 
-export type ClipType = 'audio' | 'midi' | 'drums' | 'vocal';
+export type ClipType = 'audio' | 'midi' | 'drums' | 'vocal' | 'custom-audio';
 
 export interface Comment {
   id: string;
@@ -37,6 +37,7 @@ export interface Clip {
   metadata?: ClipMetadata;
   comments?: Comment[];
   isFinal?: boolean;
+  sectionName?: string;
 }
 
 export interface Idea {
@@ -56,6 +57,7 @@ export interface InstrumentFolder {
 export interface Song {
   id: string;
   name: string;
+  bpm?: number;
   sections: string[];
   instruments: InstrumentFolder[];
 }

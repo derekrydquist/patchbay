@@ -46,17 +46,28 @@ export function Timeline() {
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
   const [activeDragData, setActiveDragData] = useState<{clip: Clip, type: string} | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [playheadPosition, setPlayheadPosition] = useState(256); // Initial position matches left-[256px]
+  const [playheadPositionState, setPlayheadPositionState] = useState(256); // Initial position matches left-[256px]
+  const playheadRef = React.useRef(256);
   const [isPlaying, setIsPlaying] = useState(false);
+  
+  // Helper to sync ref and state
+  const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
+    if (typeof val === 'function') {
+      playheadRef.current = val(playheadRef.current);
+    } else {
+      playheadRef.current = val;
+    }
+    setPlayheadPositionState(playheadRef.current);
+  }, []);
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
   const [zoom, setZoom] = useState(80); // 80px per second default
 
   const [isLooping, setIsLooping] = useState(false);
 
-  const animationRef = React.useRef<number>();
-  const lastTimeRef = React.useRef<number>();
-  const timelineRef = React.useRef<HTMLDivElement>(null);
+  const animationRef = React.useRef<number | null>(null);
+  const lastTimeRef = React.useRef<number | null>(null);
+  const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
 
   // Extract unique sections from clips in the timeline to render markers
@@ -232,12 +243,12 @@ export function Timeline() {
             }
             
             const trackMuteStates: Record<string, boolean> = {};
+            let isOverCustomAudioClip = false;
             
             for (const track of tracks) {
               const isTrackMuted = track.muted || (tracks.some(t => t.solo) && !track.solo);
               
               let isOverClip = false;
-              let isOverCustomAudioClip = false;
               
               for (const clip of track.clips) {
                 const audio = clip.src ? customAudioRefs.current[clip.id] : null;
@@ -301,7 +312,7 @@ export function Timeline() {
         cancelAnimationFrame(animationRef.current);
       }
     };
-  }, [isPlaying, tracks, bpm, isLooping, timelineSections]);
+  }, [isPlaying, tracks, bpm, isLooping, timelineSections, zoom, setPlayheadPosition]);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
@@ -694,7 +705,7 @@ export function Timeline() {
           {/* Global Playhead */}
           <div 
             className="absolute top-0 bottom-0 w-[16px] z-50 flex justify-center cursor-ew-resize group"
-            style={{ left: `${playheadPosition}px`, transform: 'translateX(-50%)' }}
+            style={{ left: `${playheadPositionState}px`, transform: 'translateX(-50%)' }}
             onPointerDown={handlePlayheadPointerDown}
           >
             <div className="w-[1px] h-full bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)] group-hover:w-[2px] transition-all" />
