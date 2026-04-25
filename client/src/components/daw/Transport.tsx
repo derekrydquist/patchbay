@@ -202,7 +202,7 @@ export function Transport() {
           <span className="text-2xl font-mono text-primary font-bold tracking-tight shadow-glow">{formatTimecode(currentTime)}</span>
         </div>
         <div className="flex flex-col">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">BPM</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Tempo</span>
           <input 
             type="text" 
             value={bpmInput} 
@@ -222,14 +222,6 @@ export function Transport() {
       <div className="flex items-center justify-center gap-2 w-1/3">
         <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
           <SkipBack size={18} />
-        </Button>
-        <Button 
-          variant="ghost" 
-          size="icon" 
-          className={cn("text-muted-foreground hover:text-foreground", isRecording && "text-destructive hover:text-destructive/80")}
-          onClick={() => setIsRecording(!isRecording)}
-        >
-          <Circle size={18} fill={isRecording ? "currentColor" : "none"} />
         </Button>
         <Button 
           size="icon" 
