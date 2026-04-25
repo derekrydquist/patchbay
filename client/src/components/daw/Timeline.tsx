@@ -488,31 +488,8 @@ export function Timeline() {
 
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
-      // Calculate new start time based on drop position relative to track
-      let newStart = 0;
-      
-      if (timelineRef.current) {
-        const activatorEvent = event.activatorEvent as any;
-        let startClientX = activatorEvent?.clientX;
-        
-        // Handle touch events
-        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
-          startClientX = activatorEvent.touches[0].clientX;
-        }
-
-        if (startClientX !== undefined) {
-          const dropClientX = startClientX + event.delta.x;
-          const containerLeft = timelineRef.current.getBoundingClientRect().left;
-          const scrollLeft = timelineRef.current.scrollLeft;
-          const dropX = dropClientX - containerLeft + scrollLeft - 256; // 256 is the track header width
-          
-          if (dropX > 0) {
-            newStart = dropX / zoom;
-          }
-        }
-      }
-
-      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName }, newStart);
+      // Snap to the end of the previous clip in the timeline automatically
+      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
     } else if (activeType === 'clip') {
       const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
       const targetTrack = tracks.find(t => t.id === trackId);
