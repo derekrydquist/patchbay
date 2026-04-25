@@ -427,21 +427,6 @@ export function Timeline() {
     })
   );
 
-  useEffect(() => {
-    const handleAddClip = (e: any) => {
-      const clip = e.detail as Clip;
-      const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
-      if (track) {
-        addClipToTrack(track.id, clip);
-      } else {
-        addClipToTrack(tracks[0].id, clip);
-      }
-    };
-
-    window.addEventListener('add-clip-to-timeline', handleAddClip);
-    return () => window.removeEventListener('add-clip-to-timeline', handleAddClip);
-  }, [tracks]);
-
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
     const clip = active.data.current?.clip as Clip;
@@ -452,44 +437,27 @@ export function Timeline() {
   };
 
   const addClipToTrack = (trackId: string, clip: any, requestedStart?: number) => {
-    setTracks(prev => prev.map(t => {
-      if (t.id === trackId) {
-        let start = requestedStart;
-        if (start === undefined) {
-          const lastClip = t.clips[t.clips.length - 1];
-          start = lastClip ? lastClip.start + lastClip.duration : 0;
-        }
-        
-        let finalStart = Math.max(0, start);
-        const snapThreshold = 0.5; // 0.5 seconds snap
-        const sortedClips = [...t.clips].sort((a, b) => a.start - b.start);
-        
-        const prevClip = sortedClips.slice().reverse().find(c => c.start + c.duration <= finalStart + snapThreshold);
-        const nextClip = sortedClips.find(c => c.start >= finalStart - snapThreshold);
-
-        if (finalStart <= snapThreshold) {
-          finalStart = 0;
-        } else if (prevClip && Math.abs(finalStart - (prevClip.start + prevClip.duration)) <= snapThreshold) {
-          finalStart = prevClip.start + prevClip.duration;
-        } else if (nextClip && Math.abs(finalStart - nextClip.start) <= snapThreshold) {
-          finalStart = nextClip.start;
-        }
-
-        const shiftedClips = t.clips.map(c => {
-          const overlaps = (finalStart < c.start + c.duration) && (finalStart + clip.duration > c.start);
-          if (overlaps || c.start >= finalStart) {
-             return { ...c, start: c.start + clip.duration };
+    console.log("addClipToTrack called", { trackId, clipName: clip.name, requestedStart });
+    setTracks(prev => {
+      console.log("Previous tracks state:", prev);
+      const newTracks = prev.map(t => {
+        if (t.id === trackId) {
+          let start = requestedStart;
+          if (start === undefined) {
+            const lastClip = t.clips[t.clips.length - 1];
+            start = lastClip ? lastClip.start + lastClip.duration : 0;
           }
-          return c;
-        });
-
-        return {
-          ...t,
-          clips: [...shiftedClips, { ...clip, id: nanoid(), start: finalStart }]
-        };
-      }
-      return t;
-    }));
+          console.log(`Adding to track ${t.name}, current clips count: ${t.clips.length}, start: ${start}`);
+          return {
+            ...t,
+            clips: [...t.clips, { ...clip, id: nanoid(), start }]
+          };
+        }
+        return t;
+      });
+      console.log("New tracks state:", newTracks);
+      return newTracks;
+    });
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -527,6 +495,7 @@ export function Timeline() {
         const activatorEvent = event.activatorEvent as any;
         let startClientX = activatorEvent?.clientX;
         
+        // Handle touch events
         if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
           startClientX = activatorEvent.touches[0].clientX;
         }
@@ -558,26 +527,9 @@ export function Timeline() {
       // Calculate new start time based on drop position relative to track
       let newStart = clip.start;
       
-      if (timelineRef.current) {
-        const activatorEvent = event.activatorEvent as any;
-        let startClientX = activatorEvent?.clientX;
-        
-        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
-          startClientX = activatorEvent.touches[0].clientX;
-        }
-
-        if (startClientX !== undefined) {
-          const dropClientX = startClientX + event.delta.x;
-          const containerLeft = timelineRef.current.getBoundingClientRect().left;
-          const scrollLeft = timelineRef.current.scrollLeft;
-          const dropX = dropClientX - containerLeft + scrollLeft - 256;
-          
-          if (dropX > 0) {
-            newStart = dropX / zoom;
-          } else {
-            newStart = 0;
-          }
-        }
+      if (event.delta.x !== 0) {
+        // We moved it horizontally, adjust the start time
+        newStart = Math.max(0, clip.start + (event.delta.x / zoom));
       }
       
       setTracks(prev => {
@@ -590,44 +542,9 @@ export function Timeline() {
         // Then add it to the new track at the new position
         return withoutClip.map(t => {
           if (t.id === trackId) {
-            let finalStart = Math.max(0, newStart);
-            const snapThreshold = 0.5;
-            const sortedClips = [...t.clips].sort((a, b) => a.start - b.start);
-            
-            // Allow dropping anywhere
-            // Snapping logic
-            const prevClip = sortedClips.slice().reverse().find(c => c.start + c.duration <= finalStart + snapThreshold);
-            const nextClip = sortedClips.find(c => c.start >= finalStart - snapThreshold);
-
-            if (finalStart <= snapThreshold) {
-              finalStart = 0;
-            } else if (prevClip && Math.abs(finalStart - (prevClip.start + prevClip.duration)) <= snapThreshold) {
-              finalStart = prevClip.start + prevClip.duration;
-            } else if (nextClip && Math.abs(finalStart - nextClip.start) <= snapThreshold) {
-              // Snap to start of next clip
-              finalStart = nextClip.start;
-            }
-
-            // Pushing logic (if we drop before or on an existing clip)
-            const shiftedClips = t.clips.map(c => {
-              // If clip is exactly at or after where we drop, push it by the duration of the new clip
-              if (c.start >= finalStart && c.id !== clip.id) {
-                // To avoid shifting things unnecessarily, let's only shift if there's an overlap
-                // Actually, standard DAW behavior is to just allow overlap or replace, but user requested "pushing subsequent clips to the right"
-                // Let's implement insert behavior: if we drop *on* a clip or right before it, push everything after drop point.
-                // Wait, only push if there's an overlap to avoid pushing everything every time we move something to empty space.
-                const overlaps = (finalStart < c.start + c.duration) && (finalStart + clip.duration > c.start);
-                
-                if (overlaps || c.start >= finalStart) {
-                   return { ...c, start: c.start + clip.duration };
-                }
-              }
-              return c;
-            });
-
             return {
               ...t,
-              clips: [...shiftedClips, { ...clip, start: finalStart, sectionName: clipIdeaName }]
+              clips: [...t.clips, { ...clip, start: newStart, sectionName: clipIdeaName }]
             };
           }
           return t;
@@ -800,6 +717,7 @@ export function Timeline() {
                     if (sourceInstrument && sourceInstrument.name !== track.name) {
                       isInvalidTarget = true;
                     }
+                    console.log(`Bucket-clip drag over ${track.name}: sourceInst=${sourceInstrument?.name}, isInvalidTarget=${isInvalidTarget}`);
                   } else if (type === 'clip') {
                     // Check if it came from a different track
                     const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
