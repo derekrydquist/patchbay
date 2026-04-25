@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useLocation } from 'wouter';
 import { MediaBucket } from '@/components/daw/MediaBucket';
 import { Timeline } from '@/components/daw/Timeline';
 import { Transport } from '@/components/daw/Transport';
@@ -10,13 +11,26 @@ import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Layout, CheckSquare, Settings, Share2, Music2, Bell, AtSign, Clock, MessageSquare, Users, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe } from 'lucide-react';
+import { Layout, CheckSquare, Settings, Share2, Music2, Bell, AtSign, Clock, MessageSquare, Users, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe, Info } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export default function Workspace() {
+  const [location, setLocation] = useLocation();
   const [activeTab, setActiveTab] = useState('timeline');
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
+  const [workingContext, setWorkingContext] = useState<{ instrument: string | null, section: string | null }>({ instrument: null, section: null });
+
+  useEffect(() => {
+    // Parse URL params for context
+    const searchParams = new URLSearchParams(window.location.search);
+    const instrument = searchParams.get('instrument');
+    const section = searchParams.get('section');
+    
+    if (instrument || section) {
+      setWorkingContext({ instrument, section });
+    }
+  }, [location]);
 
   const [members, setMembers] = useState([
     { id: 1, name: 'John Doe (You)', email: 'john@example.com', role: 'Owner', instrument: 'All Tracks', initials: 'JD', color: 'bg-primary/20 text-primary' },
@@ -294,6 +308,20 @@ export default function Workspace() {
       </header>
 
       <main className="flex-1 flex flex-col min-h-0 relative">
+        {/* Context Banner */}
+        {workingContext.section && workingContext.instrument && (
+          <div className="absolute top-0 left-0 right-0 h-8 bg-primary text-black z-40 flex items-center justify-center gap-2 font-bold text-xs uppercase tracking-widest shadow-lg shadow-primary/20 animate-in slide-in-from-top">
+            <Info size={14} />
+            Working on: {workingContext.section} <span className="mx-2 opacity-50">—</span> {workingContext.instrument}
+            <button 
+              onClick={() => setWorkingContext({ instrument: null, section: null })}
+              className="absolute right-4 p-1 hover:bg-black/10 rounded-full transition-colors"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         <Tabs value={activeTab} className="h-full">
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
             <div className="flex-1 flex flex-col overflow-hidden">

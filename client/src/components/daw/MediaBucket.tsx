@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useLocation } from 'wouter';
 import { MOCK_SONG, InstrumentFolder, Idea, Clip, addInstrument, addSection, addVersionToIdea } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
 import { ChevronRight, Folder, Music, User, Library, Search, Upload, FileAudio, X, CheckCircle2, Plus } from 'lucide-react';
@@ -26,6 +27,45 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [newIdeaName, setNewIdeaName] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [location] = useLocation();
+
+  useEffect(() => {
+    // Parse URL params for context
+    const searchParams = new URLSearchParams(window.location.search);
+    const urlInstrument = searchParams.get('instrument');
+    const urlSection = searchParams.get('section');
+    const urlFile = searchParams.get('file');
+
+    if (urlInstrument || urlSection || urlFile) {
+      let targetInst = null;
+      let targetIdea = null;
+
+      // Find instrument
+      if (urlInstrument) {
+        targetInst = MOCK_SONG.instruments.find(i => i.name.toLowerCase() === urlInstrument.toLowerCase());
+      } else if (urlFile) {
+        // If file provided but no instrument, try to find the instrument containing this file
+        targetInst = MOCK_SONG.instruments.find(inst => 
+          inst.ideas.some(idea => idea.versions.some(v => v.id === urlFile))
+        );
+      }
+
+      if (targetInst) {
+        setSelectedInst(targetInst);
+
+        // Find idea/section
+        if (urlSection) {
+          targetIdea = targetInst.ideas.find(i => i.name.toLowerCase() === urlSection.toLowerCase());
+        } else if (urlFile) {
+          targetIdea = targetInst.ideas.find(idea => idea.versions.some(v => v.id === urlFile));
+        }
+
+        if (targetIdea) {
+          setSelectedIdea(targetIdea);
+        }
+      }
+    }
+  }, [location]);
 
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLocation } from 'wouter';
 import { 
   DndContext, 
   DragOverlay, 
@@ -520,15 +521,26 @@ export function Timeline() {
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
 
-  const endOfTimeline = React.useMemo(() => {
-    let max = 0;
-    tracks.forEach(t => {
-      t.clips.forEach(c => {
-        max = Math.max(max, c.start + c.duration);
-      });
-    });
-    return max;
-  }, [tracks]);
+  const location = useLocation();
+
+  useEffect(() => {
+    // Parse URL params for context to auto-scroll timeline
+    const searchParams = new URLSearchParams(window.location.search);
+    const instrument = searchParams.get('instrument');
+    const section = searchParams.get('section');
+    
+    if (section && timelineSections.length > 0) {
+      const targetSection = timelineSections.find(s => s.name.toLowerCase() === section.toLowerCase());
+      if (targetSection && timelineRef.current) {
+        // Scroll timeline to center the section
+        const scrollX = (targetSection.start * zoom) - (timelineRef.current.clientWidth / 2) + ((targetSection.duration * zoom) / 2);
+        timelineRef.current.scrollTo({ left: Math.max(0, scrollX), behavior: 'smooth' });
+        
+        // Also move playhead to start of section
+        setPlayheadPosition(Math.max(256, targetSection.start * zoom + 256));
+      }
+    }
+  }, [location, timelineSections, zoom]);
 
   // Calculate available height: window height minus header (56px) and transport (~80px)
   const [timelineHeight, setTimelineHeight] = useState(typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400); // Default exactly 50% of available space

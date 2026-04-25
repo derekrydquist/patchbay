@@ -434,10 +434,25 @@ interface BucketClipProps {
   onAddToTimeline?: (clip: Clip) => void;
 }
 
+import { useLocation } from 'wouter';
+
 export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [comments, setComments] = useState(clip.comments || []);
+  const [location] = useLocation();
+
+  const [isHighlighted, setIsHighlighted] = useState(false);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const urlFile = searchParams.get('file');
+    if (urlFile === clip.id) {
+      setIsHighlighted(true);
+      const timer = setTimeout(() => setIsHighlighted(false), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [location, clip.id]);
 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
@@ -471,9 +486,10 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         {...listeners}
         {...attributes}
         className={cn(
-          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-colors group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
+          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-all duration-500 group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
           isDragging && "z-[9999] opacity-50 border-primary/50",
-          isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]"
+          isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]",
+          isHighlighted && "bg-primary/20 border-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]"
         )}
       >
         <div 

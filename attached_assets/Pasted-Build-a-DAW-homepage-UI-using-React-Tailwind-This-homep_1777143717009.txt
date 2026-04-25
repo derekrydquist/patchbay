@@ -1,0 +1,109 @@
+Build a DAW homepage UI using React + Tailwind. This homepage should act as a control center that launches users directly into a pre-configured Arrangement view.
+The Arrangement view already exists and includes:
+
+Instrument tracks (Bass, Drums, Guitar, etc.)
+Version panel (ideas and iterations)
+Timeline
+Activity panel
+The homepage should NOT replicate this. Instead, it should help users quickly jump into the correct working context.
+Layout Structure
+Create a clean dashboard with 3 main sections:
+1. Continue Working (Top Priority Section)
+Display 3–5 items representing recent or in-progress work.
+Each item is a card containing:
+
+Project name
+Instrument (e.g. Drums)
+Section (e.g. Outro)
+Task status (To Do / In Progress / Complete)
+Last updated time
+On click:
+Simulate navigation to Arrangement view
+Pass context:
+instrument
+section
+Show a banner in the destination view:
+“Working on: {Section} – {Instrument}”
+2. Your Tasks (From Production Whiteboard)
+Display actionable tasks assigned to the user.
+Each task row shows:
+
+Section + Instrument (e.g. Chorus 1 – Guitar 1)
+Status
+Due date
+Assigned user avatar
+On click:
+Open Arrangement view pre-scoped to that task
+Pass context (instrument + section)
+3. Recent Files / Ideas
+Show recently used assets:
+File name (e.g. “Drums Outro Concept V3”)
+Instrument tag
+Timestamp
+On click:
+Open Arrangement view
+Pre-select:
+Instrument
+Highlight that file in version panel
+Core Behavior (Critical)
+Simulate a function:
+openArrangement({ instrument, section, fileId })
+
+This should:
+
+Navigate to Arrangement page
+Highlight correct instrument track
+Highlight relevant section on timeline
+Pre-select file in version panel (if fileId exists)
+UI Design
+Match a modern DAW aesthetic:
+Dark mode
+Gold/yellow accent color
+Minimal, professional
+Cards:
+Background: #181C26
+Border radius: 12px
+Padding: 16px
+Hover: subtle lift + glow
+Typography:
+Clean sans-serif (Inter or system font)
+Clear hierarchy (titles, metadata, timestamps)
+Spacing:
+Use 8px spacing system
+Mock Data
+Create:
+3 projects
+8–10 tasks
+6–8 recent files
+Each task should include:
+section
+instrument
+status
+assignedUser
+dueDate (optional)
+Each file should include:
+name
+instrument tag
+timestamp
+UX Requirements
+Every item must be clickable and actionable
+Prioritize speed and clarity
+No empty decorative elements
+Smooth transitions between states
+Show clear visual feedback on hover and click
+Additional Feature
+Add a “Resume Last Session” card at the top:
+Display:
+
+Project name
+Instrument
+Section
+Last opened version
+On click:
+Call openArrangement with saved context
+Focus on interaction and state flow, not backend or real audio functionality.
+
+You’ve reached the Free limit for chats with attachments
+Upgrade now or wait until 4:14 PM to keep using files, or chat now without files.
+
+New chat
