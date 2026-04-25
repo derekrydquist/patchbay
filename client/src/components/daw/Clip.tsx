@@ -273,7 +273,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
   return (
     <>
       <ContextMenu>
-        <ContextMenuTrigger>
+        <ContextMenuTrigger asChild>
           <div
             ref={setNodeRef}
             style={positionStyle}

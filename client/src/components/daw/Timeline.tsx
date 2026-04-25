@@ -427,21 +427,6 @@ export function Timeline() {
     })
   );
 
-  useEffect(() => {
-    const handleAddClip = (e: any) => {
-      const clip = e.detail as Clip;
-      const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
-      if (track) {
-        addClipToTrack(track.id, clip);
-      } else {
-        addClipToTrack(tracks[0].id, clip);
-      }
-    };
-
-    window.addEventListener('add-clip-to-timeline', handleAddClip);
-    return () => window.removeEventListener('add-clip-to-timeline', handleAddClip);
-  }, [tracks]);
-
   const handleDragStart = (event: DragStartEvent) => {
     const { active } = event;
     const clip = active.data.current?.clip as Clip;
@@ -452,21 +437,27 @@ export function Timeline() {
   };
 
   const addClipToTrack = (trackId: string, clip: any, requestedStart?: number) => {
-    setTracks(prev => prev.map(t => {
-      if (t.id === trackId) {
-        let start = requestedStart;
-        if (start === undefined) {
-          const lastClip = t.clips[t.clips.length - 1];
-          start = lastClip ? lastClip.start + lastClip.duration : 0;
+    console.log("addClipToTrack called", { trackId, clipName: clip.name, requestedStart });
+    setTracks(prev => {
+      console.log("Previous tracks state:", prev);
+      const newTracks = prev.map(t => {
+        if (t.id === trackId) {
+          let start = requestedStart;
+          if (start === undefined) {
+            const lastClip = t.clips[t.clips.length - 1];
+            start = lastClip ? lastClip.start + lastClip.duration : 0;
+          }
+          console.log(`Adding to track ${t.name}, current clips count: ${t.clips.length}, start: ${start}`);
+          return {
+            ...t,
+            clips: [...t.clips, { ...clip, id: nanoid(), start }]
+          };
         }
-        
-        return {
-          ...t,
-          clips: [...t.clips, { ...clip, id: nanoid(), start }]
-        };
-      }
-      return t;
-    }));
+        return t;
+      });
+      console.log("New tracks state:", newTracks);
+      return newTracks;
+    });
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -498,20 +489,22 @@ export function Timeline() {
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
       // Calculate new start time based on drop position relative to track
-      const trackElement = document.getElementById(`track-${trackId}`);
       let newStart = 0;
       
-      if (trackElement && timelineRef.current) {
-        const rect = trackElement.getBoundingClientRect();
-        // The x coordinate of the pointer when drag ends, relative to the viewport
-        const clientX = (event.activatorEvent as any)?.clientX;
-        if (clientX !== undefined) {
-          // Calculate position relative to the timeline container's left edge
+      if (timelineRef.current) {
+        const activatorEvent = event.activatorEvent as any;
+        let startClientX = activatorEvent?.clientX;
+        
+        // Handle touch events
+        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
+          startClientX = activatorEvent.touches[0].clientX;
+        }
+
+        if (startClientX !== undefined) {
+          const dropClientX = startClientX + event.delta.x;
           const containerLeft = timelineRef.current.getBoundingClientRect().left;
-          // Add current scroll position to get absolute pixel position
           const scrollLeft = timelineRef.current.scrollLeft;
-          // Calculate the pixel offset where the drop happened
-          const dropX = clientX - containerLeft + scrollLeft - 256; // 256 is the track header width
+          const dropX = dropClientX - containerLeft + scrollLeft - 256; // 256 is the track header width
           
           if (dropX > 0) {
             newStart = dropX / zoom;
@@ -532,11 +525,9 @@ export function Timeline() {
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
       // Calculate new start time based on drop position relative to track
-      // Get the x-coordinate of the drop relative to the timeline container
-      const trackElement = document.getElementById(`track-${trackId}`);
       let newStart = clip.start;
       
-      if (trackElement && event.delta.x !== 0) {
+      if (event.delta.x !== 0) {
         // We moved it horizontally, adjust the start time
         newStart = Math.max(0, clip.start + (event.delta.x / zoom));
       }
@@ -726,6 +717,7 @@ export function Timeline() {
                     if (sourceInstrument && sourceInstrument.name !== track.name) {
                       isInvalidTarget = true;
                     }
+                    console.log(`Bucket-clip drag over ${track.name}: sourceInst=${sourceInstrument?.name}, isInvalidTarget=${isInvalidTarget}`);
                   } else if (type === 'clip') {
                     // Check if it came from a different track
                     const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
