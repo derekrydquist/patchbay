@@ -448,9 +448,21 @@ export function Timeline() {
             start = lastClip ? lastClip.start + lastClip.duration : 0;
           }
           console.log(`Adding to track ${t.name}, current clips count: ${t.clips.length}, start: ${start}`);
+          
+          // Shift existing clips to the right if they overlap or are after the new clip's start
+          const shiftedClips = t.clips.map(c => {
+            if (c.start >= start!) {
+              return { ...c, start: c.start + clip.duration };
+            } else if (c.start < start! && c.start + c.duration > start!) {
+              // If it overlaps, push it to start right after the new clip
+              return { ...c, start: start! + clip.duration };
+            }
+            return c;
+          });
+
           return {
             ...t,
-            clips: [...t.clips, { ...clip, id: nanoid(), start }]
+            clips: [...shiftedClips, { ...clip, id: nanoid(), start }]
           };
         }
         return t;
@@ -488,8 +500,31 @@ export function Timeline() {
 
       const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
       
-      // Snap to the end of the previous clip in the timeline automatically
-      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName });
+      // Calculate new start time based on drop position relative to track
+      let newStart = 0;
+      
+      if (timelineRef.current) {
+        const activatorEvent = event.activatorEvent as any;
+        let startClientX = activatorEvent?.clientX;
+        
+        // Handle touch events
+        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
+          startClientX = activatorEvent.touches[0].clientX;
+        }
+
+        if (startClientX !== undefined) {
+          const dropClientX = startClientX + event.delta.x;
+          const containerLeft = timelineRef.current.getBoundingClientRect().left;
+          const scrollLeft = timelineRef.current.scrollLeft;
+          const dropX = dropClientX - containerLeft + scrollLeft - 256; // 256 is the track header width
+          
+          if (dropX > 0) {
+            newStart = dropX / zoom;
+          }
+        }
+      }
+
+      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName }, newStart);
     } else if (activeType === 'clip') {
       const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
       const targetTrack = tracks.find(t => t.id === trackId);
@@ -519,9 +554,20 @@ export function Timeline() {
         // Then add it to the new track at the new position
         return withoutClip.map(t => {
           if (t.id === trackId) {
+            // Shift existing clips to the right if they overlap or are after the new clip's start
+            const shiftedClips = t.clips.map(c => {
+              if (c.start >= newStart) {
+                return { ...c, start: c.start + clip.duration };
+              } else if (c.start < newStart && c.start + c.duration > newStart) {
+                // If it overlaps, push it to start right after the new clip
+                return { ...c, start: newStart + clip.duration };
+              }
+              return c;
+            });
+
             return {
               ...t,
-              clips: [...t.clips, { ...clip, start: newStart, sectionName: clipIdeaName }]
+              clips: [...shiftedClips, { ...clip, start: newStart, sectionName: clipIdeaName }]
             };
           }
           return t;
