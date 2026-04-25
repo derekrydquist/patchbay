@@ -43,7 +43,10 @@ export default function Workspace() {
       {/* Premium Header */}
       <header className="h-14 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-6 z-50">
         <div className="flex items-center gap-8">
-          <div className="flex items-center gap-2.5">
+          <div 
+            className="flex items-center gap-2.5 cursor-pointer hover:opacity-80 transition-opacity"
+            onClick={() => setLocation('/')}
+          >
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center shadow-lg shadow-primary/20">
               <Music2 size={18} className="text-black" />
             </div>
@@ -308,20 +311,6 @@ export default function Workspace() {
       </header>
 
       <main className="flex-1 flex flex-col min-h-0 relative">
-        {/* Context Banner */}
-        {workingContext.section && workingContext.instrument && (
-          <div className="absolute top-0 left-0 right-0 h-8 bg-primary text-black z-40 flex items-center justify-center gap-2 font-bold text-xs uppercase tracking-widest shadow-lg shadow-primary/20 animate-in slide-in-from-top">
-            <Info size={14} />
-            Working on: {workingContext.section} <span className="mx-2 opacity-50">—</span> {workingContext.instrument}
-            <button 
-              onClick={() => setWorkingContext({ instrument: null, section: null })}
-              className="absolute right-4 p-1 hover:bg-black/10 rounded-full transition-colors"
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
         <Tabs value={activeTab} className="h-full">
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
             <div className="flex-1 flex flex-col overflow-hidden">

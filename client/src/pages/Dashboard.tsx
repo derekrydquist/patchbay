@@ -40,7 +40,10 @@ export default function Dashboard() {
         
         {/* Header */}
         <header className="flex items-center justify-between pb-4 border-b border-white/5">
-          <div className="flex items-center gap-3">
+          <div 
+            className="flex items-center gap-3 cursor-pointer hover:opacity-80 transition-opacity"
+            onClick={() => setLocation('/')}
+          >
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center shadow-lg shadow-primary/20">
               <Music2 size={20} className="text-black" />
             </div>
