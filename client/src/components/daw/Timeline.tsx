@@ -521,6 +521,16 @@ export function Timeline() {
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
 
+  const endOfTimeline = React.useMemo(() => {
+    let max = 0;
+    tracks.forEach(t => {
+      t.clips.forEach(c => {
+        max = Math.max(max, c.start + c.duration);
+      });
+    });
+    return max;
+  }, [tracks]);
+
   const location = useLocation();
 
   useEffect(() => {

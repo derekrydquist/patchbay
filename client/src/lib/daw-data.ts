@@ -213,35 +213,34 @@ export const addVersionToIdea = (ideaId: string, file: File, fileName: string) =
   }
 };
 
-export const MOCK_TASKS: ProductionTask[] = [
-  { 
-    id: '1', 
-    title: 'Finalize chorus rhythm', 
-    instrument: 'Drums', 
-    status: 'done', 
-    priority: 'high', 
-    assignee: 'Dave',
-    dueDate: '2024-02-15',
-    description: 'The main driving beat for the second chorus.',
-    subtasks: [
-      { id: 's1', text: 'Quantize kick', completed: true },
-      { id: 's2', text: 'Layer room mics', completed: true }
-    ]
-  },
-  { 
-    id: '2', 
-    title: 'Add verse fills', 
-    instrument: 'Drums', 
-    status: 'in-progress', 
-    priority: 'medium', 
-    assignee: 'Dave',
-    dueDate: '2024-02-18'
-  },
-  { id: '3', title: 'Record bridge bassline', instrument: 'Bass', status: 'todo', priority: 'high', assignee: 'Sarah' },
-  { id: '4', title: 'Double track chorus guitars', instrument: 'Guitar 1', status: 'todo', priority: 'medium', assignee: 'Mike' },
-  { id: '5', title: 'Main vocal comps', instrument: 'Vocals', status: 'review', priority: 'high', assignee: 'Elena' },
-  { id: '6', title: 'Atmospheric textures', instrument: 'Guitar 2', status: 'todo', priority: 'low', assignee: 'Mike' },
-];
+export const MOCK_TASKS: ProductionTask[] = [];
+
+// Generate tasks based on the production grid (1:1 with instrument and song section)
+MOCK_SONG.instruments.forEach(inst => {
+  MOCK_SONG.sections.forEach((section, index) => {
+    // Let's create a mix of statuses to make it look realistic
+    let status: TaskStatus = 'todo';
+    if (index === 0) status = 'done'; // Intro is usually done first
+    else if (index === 1 && inst.name === 'Drums') status = 'in-progress';
+    else if (index === 2 && inst.name === 'Vocals') status = 'review';
+    
+    // Skip creating tasks for "empty" ideas that we defined earlier
+    const isEmpty = (inst.name === 'Guitar 2' && index === 1) || 
+                    (inst.name === 'Vocals' && index === 2) ||
+                    (inst.name === 'Bass' && index === 0);
+                    
+    if (!isEmpty) {
+      MOCK_TASKS.push({
+        id: nanoid(),
+        title: `${section} - ${inst.name}`,
+        instrument: inst.name,
+        status,
+        priority: status === 'todo' ? 'medium' : 'high',
+        assignee: inst.name === 'Drums' ? 'Dave' : (inst.name === 'Vocals' ? 'Elena' : (inst.name === 'Bass' ? 'Sarah' : 'Mike'))
+      });
+    }
+  });
+});
 
 export interface Track {
   id: string;

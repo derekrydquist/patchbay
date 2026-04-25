@@ -5,30 +5,21 @@ import { cn } from '@/lib/utils';
 
 // Mock Data
 const RECENT_PROJECTS = [
-  { id: '1', name: 'Neon Nights', instrument: 'Synth Lead', section: 'Chorus 2', status: 'In Progress', lastUpdated: '2 hours ago' },
-  { id: '2', name: 'Midnight Drive', instrument: 'Drums', section: 'Intro', status: 'To Do', lastUpdated: '5 hours ago' },
-  { id: '3', name: 'Summer Breeze', instrument: 'Bass', section: 'Bridge', status: 'Complete', lastUpdated: '1 day ago' },
+  { id: '1', name: 'Midnight Horizon', instrument: 'Vocals', section: 'Chorus 1', status: 'In Progress', lastUpdated: '2 hours ago' },
+  { id: '2', name: 'Midnight Horizon', instrument: 'Drums', section: 'Intro', status: 'To Do', lastUpdated: '5 hours ago' },
+  { id: '3', name: 'Midnight Horizon', instrument: 'Bass', section: 'Verse 1', status: 'Complete', lastUpdated: '1 day ago' },
 ];
 
-const YOUR_TASKS = [
-  { id: 't1', title: 'Record harmony layers', section: 'Chorus 1', instrument: 'Vocals', status: 'To Do', dueDate: 'Today', assignee: 'JD' },
-  { id: 't2', title: 'Quantize drum fills', section: 'Outro', instrument: 'Drums', status: 'In Progress', dueDate: 'Tomorrow', assignee: 'JD' },
-  { id: 't3', title: 'Fix bass timing', section: 'Verse 2', instrument: 'Bass', status: 'To Do', dueDate: 'Next Week', assignee: 'JD' },
-  { id: 't4', title: 'Add ambient textures', section: 'Bridge', instrument: 'Keys', status: 'In Progress', dueDate: 'Today', assignee: 'JD' },
-  { id: 't5', title: 'Re-amp rhythm guitars', section: 'Chorus 2', instrument: 'Guitar', status: 'To Do', dueDate: 'Friday', assignee: 'JD' },
-  { id: 't6', title: 'Edit vocal breath noises', section: 'Verse 1', instrument: 'Vocals', status: 'Complete', dueDate: 'Yesterday', assignee: 'JD' },
-  { id: 't7', title: 'Write synth arp', section: 'Intro', instrument: 'Synth Lead', status: 'To Do', dueDate: 'Next Mon', assignee: 'JD' },
-  { id: 't8', title: 'Check sub frequencies', section: 'Drop', instrument: 'Bass', status: 'In Progress', dueDate: 'Tomorrow', assignee: 'JD' },
-];
+import { MOCK_TASKS } from '../lib/daw-data';
 
 const RECENT_FILES = [
-  { id: 'f1', name: 'Synth Lead Take 4.wav', instrument: 'Keys', timestamp: '10 mins ago' },
-  { id: 'f2', name: 'Drum Loop Alt.wav', instrument: 'Drums', timestamp: '1 hour ago' },
-  { id: 'f3', name: 'Bass DI.wav', instrument: 'Bass', timestamp: '3 hours ago' },
-  { id: 'f4', name: 'Vocal Scratch.mp3', instrument: 'Vocals', timestamp: 'Yesterday' },
-  { id: 'f5', name: 'Guitar Solo Concept.wav', instrument: 'Guitar', timestamp: '2 days ago' },
-  { id: 'f6', name: 'Ambient Pad 01.wav', instrument: 'Keys', timestamp: '3 days ago' },
-  { id: 'f7', name: 'Snare One Shot.wav', instrument: 'Drums', timestamp: 'Last week' },
+  { id: 'f1', name: 'Drums V1.wav', instrument: 'Drums', timestamp: '10 mins ago' },
+  { id: 'f2', name: 'Bass V2.wav', instrument: 'Bass', timestamp: '1 hour ago' },
+  { id: 'f3', name: 'Guitar 1 V1.wav', instrument: 'Guitar 1', timestamp: '3 hours ago' },
+  { id: 'f4', name: 'Vocals V3.mp3', instrument: 'Vocals', timestamp: 'Yesterday' },
+  { id: 'f5', name: 'Guitar 2 V1.wav', instrument: 'Guitar 2', timestamp: '2 days ago' },
+  { id: 'f6', name: 'Drums V2.wav', instrument: 'Drums', timestamp: '3 days ago' },
+  { id: 'f7', name: 'Vocals V1.wav', instrument: 'Vocals', timestamp: 'Last week' },
 ];
 
 export default function Dashboard() {
@@ -65,7 +56,7 @@ export default function Dashboard() {
         {/* Resume Last Session (Featured Card) */}
         <section>
           <div 
-            onClick={() => openArrangement({ instrument: 'Synth Lead', section: 'Chorus 2' })}
+            onClick={() => openArrangement({ instrument: 'Vocals', section: 'Chorus 1' })}
             className="bg-gradient-to-r from-[#181C26] to-[#181C26]/80 rounded-2xl p-6 border border-white/5 hover:border-primary/30 hover:shadow-[0_0_30px_rgba(212,175,55,0.1)] transition-all cursor-pointer group relative overflow-hidden"
           >
             <div className="absolute right-0 top-0 bottom-0 w-64 bg-gradient-to-l from-primary/5 to-transparent pointer-events-none" />
@@ -73,11 +64,11 @@ export default function Dashboard() {
             <div className="flex items-center justify-between relative z-10">
               <div>
                 <p className="text-xs font-bold tracking-widest uppercase text-primary mb-2">Resume Last Session</p>
-                <h2 className="text-3xl font-heading font-black tracking-tight mb-2 group-hover:text-primary transition-colors">Neon Nights</h2>
+                <h2 className="text-3xl font-heading font-black tracking-tight mb-2 group-hover:text-primary transition-colors">Midnight Horizon</h2>
                 <div className="flex items-center gap-4 text-sm text-muted-foreground font-medium">
-                  <span className="flex items-center gap-1.5"><Folder size={14} className="text-primary/60" /> Synth Lead</span>
+                  <span className="flex items-center gap-1.5"><Folder size={14} className="text-primary/60" /> Vocals</span>
                   <span className="w-1 h-1 rounded-full bg-white/20" />
-                  <span className="flex items-center gap-1.5"><Play size={14} className="text-primary/60" /> Chorus 2</span>
+                  <span className="flex items-center gap-1.5"><Play size={14} className="text-primary/60" /> Chorus 1</span>
                 </div>
               </div>
               <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 group-hover:bg-primary transition-all">
@@ -137,32 +128,38 @@ export default function Dashboard() {
               </div>
               <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
                 <div className="divide-y divide-white/5">
-                  {YOUR_TASKS.map(task => (
+                  {MOCK_TASKS.slice(0, 8).map(task => (
                     <div 
                       key={task.id}
-                      onClick={() => openArrangement({ instrument: task.instrument, section: task.section })}
+                      onClick={() => openArrangement({ instrument: task.instrument, section: task.title.split(' - ')[0] })}
                       className="flex items-center justify-between p-4 hover:bg-white/[0.02] transition-colors cursor-pointer group"
                     >
                       <div className="flex items-center gap-4">
                         <div className={cn(
                           "w-5 h-5 rounded-full border flex items-center justify-center shrink-0",
-                          task.status === 'Complete' ? "bg-primary border-primary text-black" : "border-white/20 group-hover:border-primary/50"
+                          task.status === 'done' ? "bg-primary border-primary text-black" : "border-white/20 group-hover:border-primary/50"
                         )}>
-                          {task.status === 'Complete' && <CheckCircle2 size={12} />}
+                          {task.status === 'done' && <CheckCircle2 size={12} />}
                         </div>
                         <div>
                           <p className="text-sm font-bold text-white mb-1 group-hover:text-primary transition-colors">{task.title}</p>
                           <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-muted-foreground font-bold">
-                            <span>{task.section}</span>
+                            <span>{task.title.split(' - ')[0]}</span>
                             <span className="text-white/20">—</span>
                             <span className="text-primary/70">{task.instrument}</span>
                           </div>
                         </div>
                       </div>
                       <div className="flex items-center gap-6">
-                        <span className="text-xs text-muted-foreground font-medium flex items-center gap-1.5">
-                          <Clock size={12} /> {task.dueDate}
-                        </span>
+                        <div className={cn(
+                          "text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-full border",
+                          task.status === 'done' ? "bg-primary/10 text-primary border-primary/20" :
+                          task.status === 'in-progress' ? "bg-blue-500/10 text-blue-400 border-blue-500/20" :
+                          task.status === 'review' ? "bg-purple-500/10 text-purple-400 border-purple-500/20" :
+                          "bg-white/5 text-white/60 border-white/10"
+                        )}>
+                          {task.status.replace('-', ' ')}
+                        </div>
                         <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center text-[9px] font-bold text-primary border border-primary/20">
                           {task.assignee}
                         </div>
