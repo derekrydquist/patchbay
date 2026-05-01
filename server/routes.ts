@@ -1,5 +1,6 @@
 import path from "path";
 import fs from "fs";
+import { randomUUID } from "crypto";
 import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
@@ -7,6 +8,7 @@ import { parseBuffer } from "music-metadata";
 import { storage } from "./storage";
 import {
   insertSongSchema,
+  insertInstrumentTrackSchema,
   insertTimelineClipSchema,
   insertIdeaSchema,
   insertClipSchema,
@@ -85,6 +87,24 @@ export async function registerRoutes(
     res.json(song);
   });
 
+  // ─── Tracks ─────────────────────────────────────────────────────────────────
+
+  app.post("/api/songs/:songId/tracks", async (req, res) => {
+    const parsed = insertInstrumentTrackSchema.safeParse({
+      id: randomUUID(),
+      type: "audio",
+      color: "hsl(var(--chart-1))",
+      sortOrder: 999,
+      ...req.body,
+      songId: req.params.songId,
+    });
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0].message });
+    }
+    const track = await storage.createTrack(parsed.data);
+    res.status(201).json(track);
+  });
+
   // ─── Timeline ───────────────────────────────────────────────────────────────
 
   app.get("/api/songs/:id/timeline", async (req, res) => {
@@ -130,6 +150,8 @@ export async function registerRoutes(
   /** POST /api/tracks/:trackId/ideas — create an idea (section slot) under a track */
   app.post("/api/tracks/:trackId/ideas", async (req, res) => {
     const parsed = insertIdeaSchema.safeParse({
+      id: randomUUID(),
+      sortOrder: 0,
       ...req.body,
       trackId: req.params.trackId,
     });

@@ -4,7 +4,7 @@ import { db } from "./db";
 import {
   type User, type InsertUser,
   type Song, type InsertSong,
-  type InstrumentTrack,
+  type InstrumentTrack, type InsertInstrumentTrack,
   type Idea, type InsertIdea,
   type Clip, type InsertClip,
   type TimelineClip, type InsertTimelineClip,
@@ -84,6 +84,9 @@ export interface IStorage {
 
   // Bucket
   getBucket(songId: string): Promise<BucketTrack[]>;
+
+  // Tracks
+  createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
 
   // Ideas
   createIdea(data: InsertIdea): Promise<Idea>;
@@ -269,6 +272,24 @@ export class SQLiteStorage implements IStorage {
           clips: allClips.filter((clip) => clip.ideaId === idea.id),
         })),
     }));
+  }
+
+  // ── Tracks ─────────────────────────────────────────────────────────────────
+
+  async createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack> {
+    db.insert(instrumentTracks).values(data).run();
+    const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, data.id)).get()!;
+    // Create one idea per default section so the new instrument is immediately usable
+    for (let i = 0; i < DEFAULT_SECTIONS.length; i++) {
+      await this.createIdea({
+        id: randomUUID(),
+        trackId: track.id,
+        name: `${track.name} ${DEFAULT_SECTIONS[i]}`,
+        sectionName: DEFAULT_SECTIONS[i],
+        sortOrder: i,
+      });
+    }
+    return track;
   }
 
   // ── Ideas ──────────────────────────────────────────────────────────────────

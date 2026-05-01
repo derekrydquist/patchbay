@@ -169,6 +169,8 @@ in route handlers.
 
 `server/storage.ts` exports `DEFAULT_SONG_ID = "patchbay-default"`. The first call to `GET /api/songs/:id/timeline` auto-creates this song and its five default instrument tracks if they don't exist yet (using `INSERT OR IGNORE`). The default track IDs are stable strings: `track-drums`, `track-bass`, `track-guitar-1`, `track-guitar-2`, `track-vocals`.
 
+`storage.ts` also exports `DEFAULT_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"]`. The bootstrap inserts 35 idea rows (5 tracks × 7 sections) using stable IDs like `idea-track-drums-0`. All inserts use `onConflictDoNothing()` so the bootstrap is safe to call on every request — it's idempotent.
+
 ### Track IDs must be stable
 
 `INITIAL_TRACKS` in `daw-data.ts` uses the same stable string IDs (`track-drums`, etc.) — **not** `nanoid()`. This is required because `Transport.tsx` keys its `audioRefs` map by track ID, and `Timeline.tsx` dispatches `audio-mute-state` events using the DB track IDs. If these diverge, audio muting silently breaks. Do not change `INITIAL_TRACKS` to use generated IDs.
@@ -262,6 +264,12 @@ There is one active insertion indicator during drag:
 - **The track-level overlay is the single source of truth for all drag visual feedback.** `SectionCell` must never have drag-aware styling of any kind — no opacity, no grayscale, no filter, no className conditions that reference drag state. Clips and cells always render at full brightness regardless of drag state. (A previous `isInvalid && 'opacity-25 grayscale'` on `SectionCell` caused hard-to-trace clip dimming and was removed — do not reintroduce it.)
 - **`Clip.tsx` must have zero drag-aware styling.** No `isDragging &&` conditional classes on `TimelineClip` or `BucketClip`. The `DragOverlay` renders the floating ghost separately; the original clip element in the track must not change appearance during drag.
 - **The timeline itself does not change during drag.** No ghost section columns are injected speculatively. `sectionLayout` is used directly for all rendering; the old `effectiveSectionLayout` speculative-injection memo has been removed.
+
+### Bucket clip drag data — `trackId`
+
+`BucketClip` embeds `trackId` in its dnd-kit drag data: `{ clip: {...}, type: 'bucket-clip', trackId }`. `Timeline.handleDragStart` reads this as `dragTrackId` and stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render) uses `draggedTrackId !== track.id` when `draggedTrackId` is present. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
+
+`clipSectionName` in `handleDragEnd` is read as `dragData?.clip?.sectionName ?? dragData?.sectionName` — the double path is needed because real API clips store `sectionName` at the top level of `dragData` while mock clips carry it on `dragData.clip`.
 
 ### Stale closure rule
 
@@ -366,19 +374,19 @@ When implementing auth or any permission checks, always consult this table.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard page | ✅ UI done | Layout and components complete; data is still hardcoded mock data |
-| Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Media Bucket, Transport, and Production Tracker still use mock data |
+| Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport and Production Tracker still use mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
 | Right-click context menu (timeline) | ✅ Done | Right-click on timeline background opens menu with "Clear Timeline" action; AlertDialog confirmation required; extensible — see Planned Features section |
-| Media Bucket (file browser) | ✅ UI done | Upload dialog exists but doesn't persist |
+| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously |
+| File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
 | Production Tracker (Kanban) | ✅ UI done | Mock tasks only |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
-| Real API endpoints | 🔄 In progress | Songs CRUD + timeline clip CRUD built; file upload/tasks pending |
+| Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
-| File upload (persist files) | ❌ Not built | |
-| Audio playback from real files | ❌ Not built | Clips need real `src` URLs |
+| Audio playback from real files | 🔄 Partial | Clips have real `src` URLs; `<audio>` loads them; full transport sync needs testing |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions | ❌ Not built | Spec item for future |
 | Video → audio stripping | ❌ Not built | Spec item for future |
@@ -408,28 +416,38 @@ GET    /api/songs/:id/timeline           — get instrument tracks with their pl
 POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body: InsertTimelineClip
 PATCH  /api/timeline-clips/:id           — update a placed clip (e.g. new start position)
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
+
+GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips
+POST   /api/tracks/:trackId/ideas        — create an idea (section slot) under a track
+POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
+
+POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
+                                           section, ideaId; returns { url, duration, format, originalFileName }
 ```
 
 ### Planned endpoints (not yet built)
 
 ```
 POST   /api/songs/:id/tracks   — add a new instrument track
-
-POST   /api/upload             — upload an audio/video file; returns { url, metadata }
 ```
 
 ---
 
 ## File Uploads
 
-Audio files are the core of PatchBay. When implementing uploads:
+The upload pipeline is fully implemented. Here's how it works end-to-end:
 
-1. Use `multer` for handling multipart file uploads on the Express side
-2. Store files in a local `uploads/` directory during development
-3. Return the file URL and any extracted metadata (duration, format) in the response
-4. The `src` field on a Clip should be an absolute URL that the browser's `<audio>` tag can fetch
-5. Video files should have their audio extracted using `ffmpeg` (install via `ffmpeg-static` npm package)
-6. Uploaded files should be renamed to PatchBay's naming convention: `{instrument}_{section}_v{n}.{ext}`
+1. **Client** (`MediaBucket.tsx`) — `POST /api/upload` as multipart with fields: `file`, `instrument`, `section`, `ideaId`. On success, immediately fires `POST /api/ideas/:ideaId/clips` to persist the clip record to the DB.
+2. **Server** (`server/routes.ts`) — multer uses memory storage (50MB limit, audio/* filter). The handler:
+   - Counts existing clips for the idea to assign the next version number
+   - Writes the buffer to `uploads/{instrument}_{section}_v{n}.{ext}`
+   - Extracts duration via `music-metadata`'s `parseBuffer` — first attempt with mimetype, second without (auto-detect). Falls back to `duration = 5` if result is `< 1`
+   - Returns `{ url: '/uploads/...', duration, format, originalFileName }`
+3. **Static serving** — `server/index.ts` serves `/uploads` via `express.static` so `<audio src="/uploads/...">` works directly in the browser.
+
+Files are stored in `uploads/` in the project root (git-ignored). Naming convention: `{instrument}_{section}_v{n}.{ext}` where instrument and section are lowercased and spaces replaced with hyphens.
+
+Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for now.
 
 ---
 
@@ -512,6 +530,17 @@ Hovering over a clip row in the Media Bucket versions panel should play a short 
 - No waveform or progress indicator needed for the initial implementation
 - Requires real `src` URLs — do not build against mock data
 
+### Media Bucket — "Add Section"
+
+Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that opens a Dialog. Submitting fires `POST /api/tracks/:trackId/ideas` for **all five tracks simultaneously** via `Promise.all`, then invalidates the bucket query. This ensures every instrument always has a slot for every section.
+
+**User-added sections always appear at the bottom of the sections list.** This is enforced at every layer:
+- The mutation sends `sortOrder: track.ideas.length + i`, which is always higher than all existing idea sortOrders for that track
+- `getBucket` in `storage.ts` orders ideas by `asc(ideas.sortOrder)` before returning them
+- MediaBucket renders ideas in the order the API returns them — no client-side re-sort
+
+Do not change this to alphabetical or insertion-point ordering without discussion. Append-to-bottom is the intentional UX.
+
 ### Timeline background right-click context menu
 
 Currently has one action — **"Clear Timeline."** The menu is intentionally minimal and extensible. Future actions may include "Export timeline," "Snap all clips," or other global timeline operations. When adding new actions, extend the existing menu in `Timeline.tsx` (the `contextMenuPos` state + the fixed-position `<div>` rendered near the bottom of the return) rather than creating a new context menu system.
@@ -520,16 +549,9 @@ Currently has one action — **"Clear Timeline."** The menu is intentionally min
 
 ## Version Control
 
-This project does not yet have Git initialized. Setting up Git should be the next priority before adding more features — it provides a safety net for reverting broken changes.
+Git is initialized. The first commit ("Working file upload pipeline — bucket → timeline drag and drop") was made on 2026-05-01 and captures the full working state: timeline, drag-and-drop, Media Bucket with real uploads, all API endpoints.
 
-```bash
-# Initialize Git (run once in the project root)
-git init
-git add .
-git commit -m "Initial commit — PatchBay with working timeline"
-```
-
-After that, commit after every meaningful working milestone:
+Commit after every meaningful working milestone:
 ```bash
 git add .
 git commit -m "Brief description of what was built"
@@ -537,7 +559,7 @@ git commit -m "Brief description of what was built"
 
 If something breaks badly, `git stash` or `git checkout .` can revert all uncommitted changes instantly.
 
-A `.gitignore` should already exist (from Replit scaffold). Confirm it includes: `node_modules/`, `patchbay.db`, `.env`, `uploads/`.
+`.gitignore` includes: `node_modules/`, `dist/`, `.env`, `patchbay.db`, `patchbay.db-shm`, `patchbay.db-wal`, `uploads/`, `.local/`.
 
 ---
 

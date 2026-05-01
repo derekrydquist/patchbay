@@ -146,6 +146,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
   const [addSectionError, setAddSectionError] = useState<string | null>(null);
+  const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
+  const [newInstrumentName, setNewInstrumentName] = useState('');
+  const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [location] = useLocation();
 
@@ -317,6 +320,41 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     },
     onError: (err: Error) => {
       setAddSectionError(err.message);
+    },
+  });
+
+  // ── Add instrument mutation ──────────────────────────────────────────────────
+
+  const addInstrumentMutation = useMutation({
+    mutationFn: async (name: string) => {
+      setAddInstrumentError(null);
+      const res = await fetch(`/api/songs/${DEFAULT_SONG_ID}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to create instrument' }));
+        throw new Error(err.message ?? 'Failed to create instrument');
+      }
+      return res.json() as Promise<ApiTrack>;
+    },
+    onSuccess: async (newTrack) => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      setIsAddInstrumentOpen(false);
+      setNewInstrumentName('');
+      // Auto-select the new instrument after refetch
+      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', DEFAULT_SONG_ID], queryFn: fetchBucket }).then(fresh => {
+        const track = fresh.find(t => t.id === newTrack.id);
+        if (track) { setSelectedTrack(track); setSelectedIdea(null); }
+      });
+      onInstrumentAdded?.();
+      // Wait for the server to finish creating ideas sequentially before refetching timeline
+      await new Promise(resolve => setTimeout(resolve, 300));
+      await queryClient.refetchQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+    },
+    onError: (err: Error) => {
+      setAddInstrumentError(err.message);
     },
   });
 
@@ -533,8 +571,63 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
         {/* ── Instruments column ── */}
         <div className="w-1/4 flex flex-col">
-          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
-            Instruments
+          <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
+            <span>Instruments</span>
+            <Dialog open={isAddInstrumentOpen} onOpenChange={(open) => {
+              setIsAddInstrumentOpen(open);
+              if (!open) { setNewInstrumentName(''); setAddInstrumentError(null); }
+            }}>
+              <DialogTrigger asChild>
+                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
+                  <Plus size={12} />
+                </button>
+              </DialogTrigger>
+              <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+                <DialogHeader>
+                  <DialogTitle className="text-sm uppercase tracking-widest font-heading">Add Instrument</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 pt-2">
+                  <div className="space-y-2">
+                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Instrument Name</label>
+                    <Input
+                      placeholder="e.g. Keys"
+                      value={newInstrumentName}
+                      onChange={(e) => setNewInstrumentName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newInstrumentName.trim()) {
+                          addInstrumentMutation.mutate(newInstrumentName.trim());
+                        }
+                      }}
+                      className="bg-black/40 border-white/10 text-xs h-9"
+                      autoFocus
+                    />
+                    <p className="text-[9px] text-muted-foreground">
+                      All default sections will be created automatically.
+                    </p>
+                  </div>
+                  {addInstrumentError && (
+                    <div className="flex items-center gap-2 text-[10px] text-red-400">
+                      <AlertCircle size={12} /> {addInstrumentError}
+                    </div>
+                  )}
+                  <div className="flex justify-end gap-2 pt-2">
+                    <Button variant="ghost" size="sm" onClick={() => setIsAddInstrumentOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="uppercase tracking-widest text-[10px] font-bold"
+                      onClick={() => newInstrumentName.trim() && addInstrumentMutation.mutate(newInstrumentName.trim())}
+                      disabled={!newInstrumentName.trim() || addInstrumentMutation.isPending}
+                    >
+                      {addInstrumentMutation.isPending
+                        ? <><Loader2 size={12} className="mr-1 animate-spin" /> Adding…</>
+                        : 'Add Instrument'}
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
