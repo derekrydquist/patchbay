@@ -1,38 +1,310 @@
-import { type User, type InsertUser } from "@shared/schema";
 import { randomUUID } from "crypto";
+import { eq, asc, inArray, count } from "drizzle-orm";
+import { db } from "./db";
+import {
+  type User, type InsertUser,
+  type Song, type InsertSong,
+  type InstrumentTrack,
+  type Idea, type InsertIdea,
+  type Clip, type InsertClip,
+  type TimelineClip, type InsertTimelineClip,
+  users, songs, instrumentTracks, ideas, clips, timelineClips,
+} from "@shared/schema";
 
-// modify the interface with any CRUD methods
-// you might need
+export const DEFAULT_SONG_ID = "patchbay-default";
+
+export const DEFAULT_SECTIONS = [
+  "Intro",
+  "Verse 1",
+  "Chorus 1",
+  "Verse 2",
+  "Chorus 2",
+  "Bridge",
+  "Outro",
+];
+
+function defaultIdeaId(trackId: string, sectionIndex: number): string {
+  return `idea-${trackId}-${sectionIndex}`;
+}
+
+const DEFAULT_SONG: Song = {
+  id: DEFAULT_SONG_ID,
+  name: "Midnight Horizon",
+  bpm: 120,
+  sections: DEFAULT_SECTIONS,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
+
+const DEFAULT_TRACKS: (typeof instrumentTracks.$inferInsert)[] = [
+  { id: "track-drums",    songId: DEFAULT_SONG_ID, name: "Drums",    type: "audio",  color: "hsl(var(--chart-1))", sortOrder: 0 },
+  { id: "track-bass",     songId: DEFAULT_SONG_ID, name: "Bass",     type: "audio",  color: "hsl(var(--chart-2))", sortOrder: 1 },
+  { id: "track-guitar-1", songId: DEFAULT_SONG_ID, name: "Guitar 1", type: "audio",  color: "hsl(var(--chart-3))", sortOrder: 2 },
+  { id: "track-guitar-2", songId: DEFAULT_SONG_ID, name: "Guitar 2", type: "audio",  color: "hsl(var(--chart-5))", sortOrder: 3 },
+  { id: "track-vocals",   songId: DEFAULT_SONG_ID, name: "Vocals",   type: "vocal",  color: "hsl(var(--chart-4))", sortOrder: 4 },
+];
+
+// ─── Shared types ─────────────────────────────────────────────────────────────
+
+export type SongWithTracks = Song & {
+  tracks: (InstrumentTrack & {
+    ideas: (Idea & { clips: Clip[] })[];
+  })[];
+};
+
+export type TrackWithTimelineClips = InstrumentTrack & { timelineClips: TimelineClip[] };
+
+/** The shape returned by GET /api/songs/:id/bucket */
+export type BucketTrack = InstrumentTrack & {
+  ideas: (Idea & { clips: Clip[] })[];
+};
+
+// ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface IStorage {
+  // Users
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+
+  // Songs
+  getSongs(): Promise<Song[]>;
+  getSongById(id: string): Promise<SongWithTracks | undefined>;
+  createSong(data: InsertSong): Promise<Song>;
+  updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined>;
+
+  // Bootstrap
+  bootstrapDefaultSong(): Promise<void>;
+
+  // Timeline
+  getTimelineTracks(songId: string): Promise<TrackWithTimelineClips[]>;
+  addTimelineClip(trackId: string, data: InsertTimelineClip): Promise<TimelineClip>;
+  updateTimelineClip(id: string, updates: Partial<InsertTimelineClip>): Promise<TimelineClip | undefined>;
+  deleteTimelineClip(id: string): Promise<void>;
+
+  // Bucket
+  getBucket(songId: string): Promise<BucketTrack[]>;
+
+  // Ideas
+  createIdea(data: InsertIdea): Promise<Idea>;
+
+  // Clips (bucket versions)
+  createClip(data: InsertClip): Promise<Clip>;
+  countClipsForIdea(ideaId: string): Promise<number>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User>;
+// ─── Implementation ───────────────────────────────────────────────────────────
 
-  constructor() {
-    this.users = new Map();
-  }
+export class SQLiteStorage implements IStorage {
+
+  // ── Users ──────────────────────────────────────────────────────────────────
 
   async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+    return db.select().from(users).where(eq(users.id, id)).get();
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find(
-      (user) => user.username === username,
-    );
+    return db.select().from(users).where(eq(users.username, username)).get();
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const user: User = { ...insertUser, id };
-    this.users.set(id, user);
+    const user: User = { ...insertUser, id: randomUUID() };
+    db.insert(users).values(user).run();
     return user;
+  }
+
+  // ── Songs ──────────────────────────────────────────────────────────────────
+
+  async getSongs(): Promise<Song[]> {
+    return db.select().from(songs).orderBy(asc(songs.createdAt)).all();
+  }
+
+  async getSongById(id: string): Promise<SongWithTracks | undefined> {
+    const song = db.select().from(songs).where(eq(songs.id, id)).get();
+    if (!song) return undefined;
+
+    const tracks = db
+      .select()
+      .from(instrumentTracks)
+      .where(eq(instrumentTracks.songId, id))
+      .orderBy(asc(instrumentTracks.sortOrder))
+      .all();
+
+    const allIdeas = tracks.length
+      ? db
+          .select()
+          .from(ideas)
+          .where(inArray(ideas.trackId, tracks.map((t) => t.id)))
+          .orderBy(asc(ideas.sortOrder))
+          .all()
+      : [];
+
+    const allClips = allIdeas.length
+      ? db
+          .select()
+          .from(clips)
+          .where(inArray(clips.ideaId, allIdeas.map((i) => i.id)))
+          .all()
+      : [];
+
+    return {
+      ...song,
+      tracks: tracks.map((track) => ({
+        ...track,
+        ideas: allIdeas
+          .filter((idea) => idea.trackId === track.id)
+          .map((idea) => ({
+            ...idea,
+            clips: allClips.filter((clip) => clip.ideaId === idea.id),
+          })),
+      })),
+    };
+  }
+
+  async createSong(data: InsertSong): Promise<Song> {
+    const now = new Date().toISOString();
+    const song: Song = { bpm: null, ...data, id: randomUUID(), createdAt: now, updatedAt: now };
+    db.insert(songs).values(song).run();
+    return song;
+  }
+
+  async updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined> {
+    const existing = db.select().from(songs).where(eq(songs.id, id)).get();
+    if (!existing) return undefined;
+    db.update(songs).set({ ...updates, updatedAt: new Date().toISOString() }).where(eq(songs.id, id)).run();
+    return db.select().from(songs).where(eq(songs.id, id)).get();
+  }
+
+  // ── Bootstrap ──────────────────────────────────────────────────────────────
+
+  async bootstrapDefaultSong(): Promise<void> {
+    db.insert(songs).values(DEFAULT_SONG).onConflictDoNothing().run();
+    for (const track of DEFAULT_TRACKS) {
+      db.insert(instrumentTracks).values(track).onConflictDoNothing().run();
+      DEFAULT_SECTIONS.forEach((section, i) => {
+        db.insert(ideas).values({
+          id: defaultIdeaId(track.id, i),
+          trackId: track.id,
+          name: `${track.name} ${section}`,
+          sectionName: section,
+          sortOrder: i,
+        }).onConflictDoNothing().run();
+      });
+    }
+  }
+
+  // ── Timeline ───────────────────────────────────────────────────────────────
+
+  async getTimelineTracks(songId: string): Promise<TrackWithTimelineClips[]> {
+    const tracks = db
+      .select()
+      .from(instrumentTracks)
+      .where(eq(instrumentTracks.songId, songId))
+      .orderBy(asc(instrumentTracks.sortOrder))
+      .all();
+
+    if (!tracks.length) return [];
+
+    const allClips = db
+      .select()
+      .from(timelineClips)
+      .where(inArray(timelineClips.trackId, tracks.map((t) => t.id)))
+      .all();
+
+    return tracks.map((track) => ({
+      ...track,
+      timelineClips: allClips.filter((c) => c.trackId === track.id),
+    }));
+  }
+
+  async addTimelineClip(trackId: string, data: InsertTimelineClip): Promise<TimelineClip> {
+    db.insert(timelineClips).values({ ...data, trackId }).run();
+    return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
+  }
+
+  async updateTimelineClip(id: string, updates: Partial<InsertTimelineClip>): Promise<TimelineClip | undefined> {
+    const existing = db.select().from(timelineClips).where(eq(timelineClips.id, id)).get();
+    if (!existing) return undefined;
+    db.update(timelineClips).set(updates).where(eq(timelineClips.id, id)).run();
+    return db.select().from(timelineClips).where(eq(timelineClips.id, id)).get();
+  }
+
+  async deleteTimelineClip(id: string): Promise<void> {
+    db.delete(timelineClips).where(eq(timelineClips.id, id)).run();
+  }
+
+  // ── Bucket ─────────────────────────────────────────────────────────────────
+
+  async getBucket(songId: string): Promise<BucketTrack[]> {
+    const tracks = db
+      .select()
+      .from(instrumentTracks)
+      .where(eq(instrumentTracks.songId, songId))
+      .orderBy(asc(instrumentTracks.sortOrder))
+      .all();
+
+    if (!tracks.length) return [];
+
+    const allIdeas = db
+      .select()
+      .from(ideas)
+      .where(inArray(ideas.trackId, tracks.map((t) => t.id)))
+      .orderBy(asc(ideas.sortOrder))
+      .all();
+
+    const allClips = allIdeas.length
+      ? db
+          .select()
+          .from(clips)
+          .where(inArray(clips.ideaId, allIdeas.map((i) => i.id)))
+          .all()
+      : [];
+
+    return tracks.map((track) => ({
+      ...track,
+      ideas: allIdeas
+        .filter((idea) => idea.trackId === track.id)
+        .map((idea) => ({
+          ...idea,
+          clips: allClips.filter((clip) => clip.ideaId === idea.id),
+        })),
+    }));
+  }
+
+  // ── Ideas ──────────────────────────────────────────────────────────────────
+
+  async createIdea(data: InsertIdea): Promise<Idea> {
+    const idea: Idea = { sortOrder: 0, ...data, id: data.id ?? randomUUID() };
+    db.insert(ideas).values(idea).run();
+    return db.select().from(ideas).where(eq(ideas.id, idea.id)).get()!;
+  }
+
+  // ── Clips (bucket versions) ────────────────────────────────────────────────
+
+  async createClip(data: InsertClip): Promise<Clip> {
+    const now = new Date().toISOString();
+    const clip: Clip = {
+      start: 0,
+      isFinal: false,
+      src: null,
+      sectionName: null,
+      metadata: null,
+      ...data,
+      id: data.id ?? randomUUID(),
+      createdAt: now,
+    };
+    db.insert(clips).values(clip).run();
+    return db.select().from(clips).where(eq(clips.id, clip.id)).get()!;
+  }
+
+  async countClipsForIdea(ideaId: string): Promise<number> {
+    const result = db
+      .select({ value: count() })
+      .from(clips)
+      .where(eq(clips.ideaId, ideaId))
+      .get();
+    return result?.value ?? 0;
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new SQLiteStorage();

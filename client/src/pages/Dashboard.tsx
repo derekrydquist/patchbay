@@ -48,7 +48,7 @@ export default function Dashboard() {
               <Music2 size={20} className="text-black" />
             </div>
             <h1 className="text-2xl font-heading font-black tracking-tighter uppercase text-white italic">
-              Studio <span className="text-primary not-italic">Lux</span>
+              Patch<span className="text-primary not-italic">Bay</span>
             </h1>
           </div>
           <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-primary/20 to-white/10 border border-white/10 flex items-center justify-center cursor-pointer hover:border-primary/50 transition-colors">

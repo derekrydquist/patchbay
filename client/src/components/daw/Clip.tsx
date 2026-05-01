@@ -29,6 +29,7 @@ interface ClipProps {
   clip: Clip;
   isOverlay?: boolean;
   zoom?: number;
+  sectionStart?: number;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -205,7 +206,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
   );
 }
 
-export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [newComment, setNewComment] = useState("");
@@ -225,8 +226,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
   
   const positionStyle: React.CSSProperties = isOverlay ? { width } : {
     width,
-    left: clip.start * zoom,
+    left: (clip.start - sectionStart) * zoom,
     position: 'absolute',
+    zIndex: 1,
     ...style,
   };
 
@@ -280,9 +282,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
             {...listeners}
             {...attributes}
             className={cn(
-              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm z-10 touch-none select-none",
-              isDragging && "opacity-50 ring-2 ring-primary ring-offset-2 ring-offset-background z-50",
-              isOverlay && "shadow-2xl scale-105 opacity-90 z-50",
+              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none",
+              isOverlay && "shadow-2xl scale-105 opacity-90",
               isFinal && "ring-1 ring-primary/50"
             )}
           >
@@ -431,12 +432,13 @@ export function TimelineClip({ clip, isOverlay, zoom = 80 }: ClipProps) {
 
 interface BucketClipProps {
   clip: Clip;
+  trackId?: string;
   onAddToTimeline?: (clip: Clip) => void;
 }
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
+export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [comments, setComments] = useState(clip.comments || []);
@@ -456,7 +458,7 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
-    data: { clip: { ...clip, isFinal, comments }, type: 'bucket-clip' },
+    data: { clip: { ...clip, isFinal, comments }, type: 'bucket-clip', trackId },
   });
 
   const handleUpdateComments = (newComments: Comment[]) => {
@@ -487,7 +489,6 @@ export function BucketClip({ clip, onAddToTimeline }: BucketClipProps) {
         {...attributes}
         className={cn(
           "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-all duration-500 group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
-          isDragging && "z-[9999] opacity-50 border-primary/50",
           isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]",
           isHighlighted && "bg-primary/20 border-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]"
         )}

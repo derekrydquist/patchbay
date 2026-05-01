@@ -51,7 +51,7 @@ export default function Workspace() {
               <Music2 size={18} className="text-black" />
             </div>
             <h1 className="text-lg font-heading font-black tracking-tighter uppercase text-white italic">
-              Studio <span className="text-primary not-italic">Lux</span>
+              Patch<span className="text-primary not-italic">Bay</span>
             </h1>
           </div>
           
@@ -114,7 +114,7 @@ export default function Workspace() {
                   </DialogTitle>
                 </DialogHeader>
                 <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-2">
-                  Manage how Studio Lux alerts you about project updates
+                  Manage how PatchBay alerts you about project updates
                 </p>
               </div>
               
@@ -281,7 +281,7 @@ export default function Workspace() {
                       <Globe size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                       <Input 
                         readOnly 
-                        value="https://studiolux.app/s/8f92a1b" 
+                        value="https://patchbay.app/s/8f92a1b"
                         className="pl-9 bg-black/40 border-white/10 text-xs font-mono text-white/80 focus-visible:ring-primary/50 h-9"
                       />
                     </div>

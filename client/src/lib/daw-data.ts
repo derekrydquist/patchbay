@@ -256,8 +256,10 @@ export interface Track {
   clips: Clip[];
 }
 
-export const INITIAL_TRACKS: Track[] = instrumentConfigs.map(inst => ({
-  id: nanoid(),
+const STABLE_TRACK_IDS = ['track-drums', 'track-bass', 'track-guitar-1', 'track-guitar-2', 'track-vocals'];
+
+export const INITIAL_TRACKS: Track[] = instrumentConfigs.map((inst, i) => ({
+  id: STABLE_TRACK_IDS[i],
   name: inst.name,
   type: inst.type,
   volume: 80,

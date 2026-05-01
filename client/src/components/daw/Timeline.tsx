@@ -1,56 +1,280 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { 
-  DndContext, 
-  DragOverlay, 
-  DragStartEvent, 
-  DragEndEvent, 
-  useSensor, 
-  useSensors, 
-  PointerSensor, 
-  TouchSensor, 
+import { useQuery } from '@tanstack/react-query';
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from '@/components/ui/alert-dialog';
+import {
+  DndContext,
+  DragOverlay,
+  DragStartEvent,
+  DragEndEvent,
+  DragMoveEvent,
+  CollisionDetection,
+  useSensor,
+  useSensors,
+  useDroppable,
+  useDraggable,
+  PointerSensor,
+  TouchSensor,
   MouseSensor,
 } from '@dnd-kit/core';
-import { restrictToWindowEdges } from '@dnd-kit/modifiers';
-import { INITIAL_TRACKS, Track, Clip, MOCK_SONG } from '@/lib/daw-data';
-import { TimelineTrack } from './Track';
+import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
+import { cn } from '@/lib/utils';
+import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
+import { TimelineTrack, SectionInfo } from './Track';
 import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DawScrollbar } from './DawScrollbar';
-import { Music2, Plus } from 'lucide-react';
 import { MediaBucket } from './MediaBucket';
-import { 
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Button } from "@/components/ui/button";
 
-interface TimelineSection {
+const SONG_ID = 'patchbay-default';
+const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
+
+type ApiTrack = {
   id: string;
   name: string;
-  start: number;
-  duration: number;
+  type: string;
+  color: string | null;
+  sortOrder: number;
+  songId: string;
+  timelineClips: {
+    id: string;
+    name: string;
+    type: string;
+    color: string;
+    start: number;
+    duration: number;
+    src: string | null;
+    sectionName: string | null;
+  }[];
+};
+
+type InsertionPoint = { trackId: string; sectionName: string; index: number; x: number };
+
+// Returns the ordered list of sections that have at least one clip anywhere on the tracks.
+// Uses sectionOrder as the authoritative order; sections not yet in sectionOrder are appended.
+function getActiveSections(tracks: Track[], sectionOrder: string[]): string[] {
+  const present = new Set(tracks.flatMap((t) => t.clips.map((c) => c.sectionName).filter(Boolean) as string[]));
+  const ordered = sectionOrder.filter((s) => present.has(s));
+  present.forEach((s) => { if (!ordered.includes(s)) ordered.push(s); });
+  return ordered;
+}
+
+// Computes each section's absolute start time (seconds) and pixel-width (seconds).
+// Section width = max total clip duration in that section across all tracks, floored at MIN_SECTION_WIDTH.
+// This is the single source of truth for section geometry — used by both rendering and recalcAllStarts.
+function computeSectionLayout(tracks: Track[], sectionOrder: string[]): SectionInfo[] {
+  const sections = getActiveSections(tracks, sectionOrder);
+  let cursor = 0;
+  return sections.map((name) => {
+    let maxWidth = MIN_SECTION_WIDTH;
+    for (const t of tracks) {
+      const total = t.clips.filter((c) => c.sectionName === name).reduce((s, c) => s + c.duration, 0);
+      maxWidth = Math.max(maxWidth, total);
+    }
+    const entry: SectionInfo = { name, start: cursor, duration: maxWidth };
+    cursor += maxWidth;
+    return entry;
+  });
+}
+
+// Recalculates every clip's absolute start time. Derives section geometry from computeSectionLayout
+// so rendering and positioning always stay in sync.
+function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
+  const layout = computeSectionLayout(tracks, sectionOrder);
+  const sectionStarts: Record<string, number> = Object.fromEntries(layout.map((s) => [s.name, s.start]));
+  const sections = layout.map((s) => s.name);
+
+  return tracks.map((track) => {
+    const sectioned = sections.flatMap((name) => {
+      const sc = track.clips.filter((c) => c.sectionName === name);
+      let pos = sectionStarts[name];
+      return sc.map((clip) => {
+        const updated = { ...clip, start: pos };
+        pos += clip.duration;
+        return updated;
+      });
+    });
+    const unsectioned = track.clips.filter((c) => !c.sectionName);
+    return { ...track, clips: [...sectioned, ...unsectioned] };
+  });
+}
+
+// Inserts or moves sectionName to gapIndex within activeNames (the section order shown during drag).
+// gapIndex = 0 means before activeNames[0]; gapIndex = activeNames.length means after the last.
+// Returns the new ordered list of all active section names.
+function reorderSectionOrder(
+  _sectionOrder: string[],
+  sectionName: string,
+  gapIndex: number,
+  activeNames: string[]
+): string[] {
+  // Remove the section from its current position (if it's already in the layout).
+  const withoutMoved = activeNames.filter((s) => s !== sectionName);
+  const oldPos = activeNames.indexOf(sectionName);
+
+  // gapIndex references a position in activeNames (which still includes the section if it existed).
+  // Removing the section at oldPos shifts every subsequent index down by 1.
+  let insertAt = gapIndex;
+  if (oldPos !== -1 && oldPos < gapIndex) insertAt = gapIndex - 1;
+  insertAt = Math.min(insertAt, withoutMoved.length);
+
+  return [
+    ...withoutMoved.slice(0, insertAt),
+    sectionName,
+    ...withoutMoved.slice(insertAt),
+  ];
+}
+
+function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSectionOrder: string[] } {
+  const rawTracks = apiTracks.map((t) => ({
+    id: t.id,
+    name: t.name,
+    type: t.type as Track['type'],
+    volume: 80,
+    pan: 0,
+    muted: false,
+    solo: false,
+    color: t.color ?? 'hsl(var(--chart-1))',
+    clips: [...t.timelineClips].sort((a, b) => a.start - b.start).map((c) => ({
+      id: c.id,
+      name: c.name,
+      type: c.type as Clip['type'],
+      color: c.color,
+      start: c.start,
+      duration: c.duration,
+      src: c.src ?? undefined,
+      sectionName: c.sectionName ?? undefined,
+    })),
+  }));
+  const initialSectionOrder = getActiveSections(rawTracks, MOCK_SONG.sections);
+  return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
+}
+
+// Custom collision detection: gap zones require precise pointer intersection (they are narrow);
+// track rows match by vertical overlap only — any X position on the row resolves to that track.
+// This prevents overId from returning null when dropping on empty horizontal track space.
+const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppableRects, pointerCoordinates }) => {
+  if (!pointerCoordinates) return [];
+  const { x, y } = pointerCoordinates;
+
+  // Gap zones first — narrow strips that require the pointer to actually hit them.
+  for (const container of droppableContainers) {
+    if (!String(container.id).startsWith('gap||')) continue;
+    const rect = droppableRects.get(container.id);
+    if (!rect) continue;
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      return [{ id: container.id }];
+    }
+  }
+
+  // Track rows — match by vertical band only; horizontal position is irrelevant.
+  for (const container of droppableContainers) {
+    if (String(container.id).startsWith('gap||')) continue;
+    const rect = droppableRects.get(container.id);
+    if (!rect) continue;
+    if (y >= rect.top && y <= rect.bottom) {
+      return [{ id: container.id }];
+    }
+  }
+
+  return [];
+};
+
+// Draggable section header label — used inside the section-reorder DndContext.
+// id format: sec||${sectionName}
+function DraggableSectionHeader({ name, width }: { name: string; width: number }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: `sec||${name}` });
+  return (
+    <div
+      ref={setNodeRef}
+      {...listeners}
+      {...attributes}
+      className={cn(
+        'border-r border-primary/20 flex items-start pt-1 px-2 shrink-0 cursor-grab active:cursor-grabbing select-none transition-opacity',
+        isDragging && 'opacity-30'
+      )}
+      style={{ width, minWidth: width }}
+    >
+      <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm pointer-events-none">
+        {name}
+      </span>
+    </div>
+  );
+}
+
+// Droppable zone rendered at a section column boundary during clip drag.
+// id format: gap||${gapIndex} where gapIndex = 0 means before section[0].
+// left: pixel offset from the left edge of the content div (includes the 256px track header).
+function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trackAreaHeight: number }) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return (
+    <div
+      ref={setNodeRef}
+      className="absolute z-30 -translate-x-1/2 pointer-events-auto"
+      style={{ left, top: 0, width: 20, height: trackAreaHeight }}
+    >
+      {isOver && (
+        <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_12px_rgba(212,175,55,0.9)] pointer-events-none" />
+      )}
+    </div>
+  );
 }
 
 export function Timeline() {
-  const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
-  const [activeDragData, setActiveDragData] = useState<{clip: Clip, type: string} | null>(null);
+  const { data: apiTracks } = useQuery<ApiTrack[]>({
+    queryKey: [`/api/songs/${SONG_ID}/timeline`],
+  });
+
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const tracksInitialized = useRef(false);
+  const [insertionPoint, setInsertionPoint] = useState<InsertionPoint | null>(null);
+  // Explicit ordered list of section names. This is the authoritative section order;
+  // computeSectionLayout uses it instead of inferring order from MOCK_SONG.sections.
+  const [sectionOrder, setSectionOrder] = useState<string[]>([]);
+  const sectionOrderRef = useRef<string[]>([]);
+  // True when the drag pointer is over a between-column gap zone.
+  const [isOverGap, setIsOverGap] = useState(false);
+
+  // Section-reorder drag state — separate from clip drag state.
+  const [activeSectionName, setActiveSectionName] = useState<string | null>(null);
+  // Which gap index the cursor is nearest to during a section header drag (0 = before first column).
+  const [sectionInsertGap, setSectionInsertGap] = useState<number | null>(null);
+
+  useEffect(() => { sectionOrderRef.current = sectionOrder; }, [sectionOrder]);
+
+  useEffect(() => {
+    if (apiTracks && !tracksInitialized.current) {
+      const { tracks: converted, initialSectionOrder } = apiTracksToTracks(apiTracks);
+      setTracks(converted);
+      setSectionOrder(initialSectionOrder);
+      tracksInitialized.current = true;
+    }
+  }, [apiTracks]);
+
+  // Keep sectionOrder pruned: remove any section that has no clips across all tracks.
+  useEffect(() => {
+    const activeSections = new Set(
+      tracks.flatMap((t) => t.clips.map((c) => c.sectionName).filter(Boolean) as string[])
+    );
+    setSectionOrder((prev) => prev.filter((s) => activeSections.has(s)));
+  }, [tracks]);
+
+  const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [playheadPositionState, setPlayheadPositionState] = useState(256); // Initial position matches left-[256px]
+  const [playheadPositionState, setPlayheadPositionState] = useState(256);
   const playheadRef = React.useRef(256);
   const [isPlaying, setIsPlaying] = useState(false);
-  
-  // Helper to sync ref and state
+
   const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
     if (typeof val === 'function') {
       playheadRef.current = val(playheadRef.current);
@@ -59,10 +283,10 @@ export function Timeline() {
     }
     setPlayheadPositionState(playheadRef.current);
   }, []);
+
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
-  const [zoom, setZoom] = useState(80); // 80px per second default
-
+  const [zoom, setZoom] = useState(80);
   const [isLooping, setIsLooping] = useState(false);
 
   const animationRef = React.useRef<number | null>(null);
@@ -70,46 +294,25 @@ export function Timeline() {
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
 
-  // Extract unique sections from clips in the timeline to render markers
-  const timelineSections = React.useMemo(() => {
-    const sections: { id: string, name: string, start: number, duration: number }[] = [];
-    
-    tracks.forEach(track => {
-      track.clips.forEach(clip => {
-        if (clip.sectionName) {
-          // Check if we already have a section marker that overlaps
-          const existingSection = sections.find(s => 
-            s.name === clip.sectionName && 
-            Math.abs(s.start - clip.start) < 2 // Group clips that start roughly at the same time
-          );
-          
-          if (!existingSection) {
-            sections.push({
-              id: `section-${clip.id}`,
-              name: clip.sectionName,
-              start: clip.start,
-              // We'll calculate duration based on the longest clip in this section
-              duration: clip.duration 
-            });
-          } else {
-            // Update duration if this clip extends further
-            existingSection.duration = Math.max(existingSection.duration, (clip.start + clip.duration) - existingSection.start);
-          }
-        }
-      });
-    });
-    
-    return sections.sort((a, b) => a.start - b.start);
-  }, [tracks]);
+  // Section layout: one entry per section that has at least one clip, in sectionOrder order.
+  // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
+  const sectionLayout = React.useMemo(
+    () => computeSectionLayout(tracks, sectionOrder),
+    [tracks, sectionOrder]
+  );
+
+  const endOfTimeline = React.useMemo(() => {
+    if (sectionLayout.length === 0) return 0;
+    const last = sectionLayout[sectionLayout.length - 1];
+    return last.start + last.duration;
+  }, [sectionLayout]);
 
   useEffect(() => {
-    // Sync custom audio refs when tracks change
-    tracks.forEach(track => {
-      track.clips.forEach(clip => {
+    tracks.forEach((track) => {
+      track.clips.forEach((clip) => {
         if (clip.src && !customAudioRefs.current[clip.id]) {
           const audio = new Audio(clip.src);
-          // Required for some browsers to allow playback of object URLs
-          audio.preload = 'auto'; 
+          audio.preload = 'auto';
           customAudioRefs.current[clip.id] = audio;
         }
       });
@@ -117,48 +320,40 @@ export function Timeline() {
   }, [tracks]);
 
   useEffect(() => {
-    const handleBpmUpdated = (e: any) => {
-      setBpm(e.detail.bpm);
-    };
+    const handleBpmUpdated = (e: any) => setBpm(e.detail.bpm);
     window.addEventListener('update-bpm', handleBpmUpdated);
     return () => window.removeEventListener('update-bpm', handleBpmUpdated);
   }, []);
 
   useEffect(() => {
-    const handleSongUpdated = () => {
-      setTracksVersion(v => v + 1);
-    };
+    const handleSongUpdated = () => setTracksVersion((v) => v + 1);
     window.addEventListener('song-updated', handleSongUpdated);
     return () => window.removeEventListener('song-updated', handleSongUpdated);
   }, []);
 
-  const checkAudioMuteState = React.useCallback((pos: number) => {
-    const playheadTime = (pos - 256) / zoom;
-    const trackMuteStates: Record<string, boolean> = {};
-    
-    for (const track of tracks) {
-      if (track.muted) {
-        trackMuteStates[track.id] = true;
-        continue;
-      }
-      
-      let isOverClip = false;
-      for (const clip of track.clips) {
-        if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
-          isOverClip = true;
-          break;
+  const checkAudioMuteState = React.useCallback(
+    (pos: number) => {
+      const playheadTime = (pos - 256) / zoom;
+      const trackMuteStates: Record<string, boolean> = {};
+      for (const track of tracks) {
+        if (track.muted) { trackMuteStates[track.id] = true; continue; }
+        let isOverClip = false;
+        for (const clip of track.clips) {
+          if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
+            isOverClip = true;
+            break;
+          }
         }
+        trackMuteStates[track.id] = !isOverClip;
       }
-      trackMuteStates[track.id] = !isOverClip;
-    }
-    
-    window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
-  }, [tracks]);
+      window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
+    },
+    [tracks, zoom]
+  );
 
   const handlePlayheadPointerDown = (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    
     const handlePointerMove = (moveEvent: PointerEvent) => {
       if (timelineRef.current) {
         const rect = timelineRef.current.getBoundingClientRect();
@@ -171,21 +366,16 @@ export function Timeline() {
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
       }
     };
-    
     const handlePointerUp = () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-    
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
   };
 
   useEffect(() => {
-    const handleLoopToggle = (e: any) => {
-      setIsLooping(e.detail.isLooping);
-    };
-
+    const handleLoopToggle = (e: any) => setIsLooping(e.detail.isLooping);
     window.addEventListener('toggle-loop', handleLoopToggle);
     return () => window.removeEventListener('toggle-loop', handleLoopToggle);
   }, []);
@@ -193,204 +383,161 @@ export function Timeline() {
   useEffect(() => {
     const handlePlayToggle = (e: any) => {
       setIsPlaying(e.detail.isPlaying);
-      if (e.detail.isPlaying) {
-        lastTimeRef.current = performance.now();
-      }
+      if (e.detail.isPlaying) lastTimeRef.current = performance.now();
     };
-
     window.addEventListener('toggle-play', handlePlayToggle);
     return () => window.removeEventListener('toggle-play', handlePlayToggle);
   }, []);
 
   useEffect(() => {
     if (isPlaying) {
-      // Ensure lastTimeRef has a value when starting the animation
-      if (!lastTimeRef.current) {
-        lastTimeRef.current = performance.now();
-      }
+      if (!lastTimeRef.current) lastTimeRef.current = performance.now();
 
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
-          // Calculate pixels per second based on BPM
-          // zoom px per second for 1 unit = 1 second
           const pixelsPerSecond = zoom;
-          
-          setPlayheadPosition(prev => {
+
+          setPlayheadPosition((prev) => {
             const newPos = prev + (delta / 1000) * pixelsPerSecond;
-            
             const prevTime = (prev - 256) / zoom;
             const playheadTime = (newPos - 256) / zoom;
-            
-            // Check for looping logic
+
             if (isLooping) {
-              // Find the section that prevTime was in
-              const currentSection = timelineSections.find(sec => 
-                prevTime >= sec.start && prevTime < sec.start + sec.duration
+              const currentSection = sectionLayout.find(
+                (sec) => prevTime >= sec.start && prevTime < sec.start + sec.duration
               );
-              
               if (currentSection) {
-                // If the new time would exceed the section end, loop back
                 if (playheadTime >= currentSection.start + currentSection.duration) {
-                  const loopStartPos = 256 + (currentSection.start * zoom);
-                  
-                  // Reset custom audio to start of section
-                  Object.values(customAudioRefs.current).forEach(audio => {
-                    if (audio && !audio.paused) {
-                       audio.currentTime = currentSection.start;
-                    }
+                  const loopStartPos = 256 + currentSection.start * zoom;
+                  Object.values(customAudioRefs.current).forEach((audio) => {
+                    if (audio && !audio.paused) audio.currentTime = currentSection.start;
                   });
-                  
                   window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: currentSection.start } }));
                   return loopStartPos;
                 }
               }
             }
-            
+
             const trackMuteStates: Record<string, boolean> = {};
             let isOverCustomAudioClip = false;
-            
             for (const track of tracks) {
-              const isTrackMuted = track.muted || (tracks.some(t => t.solo) && !track.solo);
-              
+              const isTrackMuted = track.muted || (tracks.some((t) => t.solo) && !track.solo);
               let isOverClip = false;
-              
               for (const clip of track.clips) {
                 const audio = clip.src ? customAudioRefs.current[clip.id] : null;
-                
                 if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
                   isOverClip = true;
-                  
-                  // Handle custom audio playback for uploaded files
                   if (audio) {
                     isOverCustomAudioClip = true;
                     audio.playbackRate = bpm / 120;
                     audio.volume = track.volume / 100;
                     audio.muted = isTrackMuted;
-                    
-                    // If it's paused or drifted out of sync by more than 0.2 seconds, re-sync
                     try {
-                      // Only attempt to set currentTime if audio has loaded metadata (readyState >= 1)
                       if (audio.readyState >= 1) {
                         if (audio.paused || Math.abs(audio.currentTime - (playheadTime - clip.start)) > 0.2) {
                           audio.currentTime = Math.max(0, playheadTime - clip.start);
-                          if (isPlaying) {
-                            audio.play().catch(e => console.warn("Custom audio play failed:", e));
-                          }
+                          if (isPlaying) audio.play().catch((e) => console.warn('Custom audio play failed:', e));
                         }
                       }
                     } catch (err) {
-                      console.warn("Could not set audio currentTime:", err);
+                      console.warn('Could not set audio currentTime:', err);
                     }
                   }
                 } else {
-                  // Pause custom audio if playhead is not over this clip
-                  if (audio && !audio.paused) {
-                    audio.pause();
-                  }
+                  if (audio && !audio.paused) audio.pause();
                 }
               }
-              
-              // Mute the mock transport audio if we're over a custom audio clip (to avoid playing both)
-              // Otherwise, mute it if the track is muted, or if we're NOT over any clip at all
               trackMuteStates[track.id] = isTrackMuted || isOverCustomAudioClip ? true : !isOverClip;
             }
-            
-            // Dispatch event to mute/unmute audio based on whether we're over a clip
             window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
             window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadTime } }));
-            
             return newPos;
-          }); 
+          });
         }
         lastTimeRef.current = time;
         animationRef.current = requestAnimationFrame(animate);
       };
       animationRef.current = requestAnimationFrame(animate);
     } else {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      // Ensure all custom audio is paused when transport stops
-      Object.values(customAudioRefs.current).forEach(audio => {
-        if (audio && !audio.paused) {
-          audio.pause();
-        }
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      Object.values(customAudioRefs.current).forEach((audio) => {
+        if (audio && !audio.paused) audio.pause();
       });
     }
-
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-    };
-  }, [isPlaying, tracks, bpm, isLooping, timelineSections, zoom, setPlayheadPosition]);
+    return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
+  }, [isPlaying, tracks, bpm, isLooping, sectionLayout, zoom, setPlayheadPosition]);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
-      setTracks(prev => prev.map(t => 
-        t.id === e.detail.trackId ? { ...t, muted: !t.muted } : t
-      ));
+      setTracks((prev) => prev.map((t) => (t.id === e.detail.trackId ? { ...t, muted: !t.muted } : t)));
     };
-
     const handleToggleSolo = (e: any) => {
-      setTracks(prev => {
-        const trackToToggle = prev.find(t => t.id === e.detail.trackId);
-        if (!trackToToggle) return prev;
-        
-        const willBeSolo = !trackToToggle.solo;
-        
-        return prev.map(t => {
-          if (t.id === e.detail.trackId) {
-            return { ...t, solo: willBeSolo, muted: false };
-          }
-          // Only one track can be solo'd at a time
-          if (willBeSolo) {
-            return { ...t, solo: false, muted: true };
-          } else {
-            // Unsoloing the only soloed track unmutes all
-            return { ...t, solo: false, muted: false }; 
-          }
+      setTracks((prev) => {
+        const target = prev.find((t) => t.id === e.detail.trackId);
+        if (!target) return prev;
+        const willBeSolo = !target.solo;
+        return prev.map((t) => {
+          if (t.id === e.detail.trackId) return { ...t, solo: willBeSolo, muted: false };
+          return willBeSolo ? { ...t, solo: false, muted: true } : { ...t, solo: false, muted: false };
         });
       });
     };
-
     const handleUpdateVolume = (e: any) => {
-      setTracks(prev => prev.map(t => 
-        t.id === e.detail.trackId ? { ...t, volume: e.detail.volume } : t
-      ));
+      setTracks((prev) =>
+        prev.map((t) => (t.id === e.detail.trackId ? { ...t, volume: e.detail.volume } : t))
+      );
     };
-
     const handleReplaceClip = (e: any) => {
       const { oldClipId, newClip } = e.detail;
-      setTracks(prev => prev.map(t => {
-        const hasClip = t.clips.some(c => c.id === oldClipId);
-        if (!hasClip) return t;
-
-        return {
-          ...t,
-          clips: t.clips.map(c => {
-            if (c.id === oldClipId) {
-              return {
-                ...newClip,
-                id: c.id,
-                start: c.start,
-                duration: c.duration,
-                sectionName: c.sectionName,
-              };
-            }
-            return c;
-          })
-        };
-      }));
+      setTracks((prev) =>
+        prev.map((t) => {
+          if (!t.clips.some((c) => c.id === oldClipId)) return t;
+          return {
+            ...t,
+            clips: t.clips.map((c) =>
+              c.id === oldClipId
+                ? { ...newClip, id: c.id, start: c.start, duration: c.duration, sectionName: c.sectionName }
+                : c
+            ),
+          };
+        })
+      );
+      fetch(`/api/timeline-clips/${oldClipId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newClip.name, type: newClip.type, color: newClip.color, src: newClip.src ?? null }),
+      }).catch((err) => console.error('Failed to update replaced clip:', err));
     };
 
     const handleRemoveClip = (e: any) => {
       const { clipId } = e.detail;
-      setTracks(prev => prev.map(t => ({
-        ...t,
-        clips: t.clips.filter(c => c.id !== clipId)
-      })));
+      setTracks((prev) => {
+        const track = prev.find((t) => t.clips.some((c) => c.id === clipId));
+        if (!track) return prev;
+
+        const draft = prev.map((t) =>
+          t.id === track.id ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t
+        );
+        // Use the ref so this stale-closure handler sees the current sectionOrder.
+        const recalced = recalcAllStarts(draft, sectionOrderRef.current);
+        const finalTrack = recalced.find((t) => t.id === track.id)!;
+
+        fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' }).catch((err) =>
+          console.error('Failed to delete timeline clip:', err)
+        );
+        track.clips.filter((c) => c.id !== clipId).forEach((old) => {
+          const updated = finalTrack.clips.find((c) => c.id === old.id);
+          if (updated && updated.start !== old.start) {
+            fetch(`/api/timeline-clips/${old.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ start: updated.start }),
+            }).catch((err) => console.error('Failed to update clip start after remove:', err));
+          }
+        });
+        return recalced;
+      });
     };
 
     window.addEventListener('toggle-track-mute', handleToggleMute);
@@ -398,7 +545,6 @@ export function Timeline() {
     window.addEventListener('update-track-volume', handleUpdateVolume);
     window.addEventListener('replace-clip', handleReplaceClip);
     window.addEventListener('remove-clip', handleRemoveClip);
-
     return () => {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
@@ -409,147 +555,308 @@ export function Timeline() {
   }, []);
 
   const sensors = useSensors(
-    useSensor(PointerSensor, {
-      activationConstraint: {
-        distance: 5,
-      },
-    }),
-    useSensor(MouseSensor, {
-      activationConstraint: {
-        distance: 5,
-      },
-    }),
-    useSensor(TouchSensor, {
-      activationConstraint: {
-        delay: 250,
-        tolerance: 5,
-      },
-    })
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(MouseSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 250, tolerance: 5 } })
   );
 
-  const handleDragStart = (event: DragStartEvent) => {
-    const { active } = event;
-    const clip = active.data.current?.clip as Clip;
-    const type = active.data.current?.type as string;
-    if (clip && type) {
-      setActiveDragData({ clip, type });
-    }
+  // ── Section-reorder handlers (separate DndContext) ─────────────────────────
+  const handleSectionDragStart = (event: DragStartEvent) => {
+    const id = String(event.active.id);
+    if (id.startsWith('sec||')) setActiveSectionName(id.slice(5));
   };
 
-  const addClipToTrack = (trackId: string, clip: any, requestedStart?: number) => {
-    console.log("addClipToTrack called", { trackId, clipName: clip.name, requestedStart });
-    setTracks(prev => {
-      console.log("Previous tracks state:", prev);
-      const newTracks = prev.map(t => {
-        if (t.id === trackId) {
-          let start = requestedStart;
-          if (start === undefined) {
-            const lastClip = t.clips[t.clips.length - 1];
-            start = lastClip ? lastClip.start + lastClip.duration : 0;
+  const handleSectionDragMove = (event: DragMoveEvent) => {
+    if (!timelineRef.current) return;
+    const { activatorEvent, delta } = event;
+    const startClientX =
+      'clientX' in activatorEvent
+        ? (activatorEvent as MouseEvent).clientX
+        : (activatorEvent as TouchEvent).touches?.[0]?.clientX ?? 0;
+    const cursorClientX = startClientX + delta.x;
+    const containerRect = timelineRef.current.getBoundingClientRect();
+    const scrollLeft = timelineRef.current.scrollLeft;
+    // Cursor position in section-area coordinates (x=0 = left edge of first section).
+    const cursorX = cursorClientX - containerRect.left + scrollLeft - 256;
+
+    // Gap 0 is at x=0; gap i+1 is at the right edge of section[i].
+    const gapXPositions = [0, ...sectionLayout.map((s) => (s.start + s.duration) * zoom)];
+    let nearest = 0;
+    let minDist = Infinity;
+    for (let i = 0; i < gapXPositions.length; i++) {
+      const dist = Math.abs(cursorX - gapXPositions[i]);
+      if (dist < minDist) { minDist = dist; nearest = i; }
+    }
+    setSectionInsertGap(nearest);
+  };
+
+  const handleSectionDragEnd = () => {
+    if (activeSectionName !== null && sectionInsertGap !== null) {
+      const activeNames = sectionLayout.map((s) => s.name);
+      const newOrder = reorderSectionOrder(sectionOrder, activeSectionName, sectionInsertGap, activeNames);
+      const recalced = recalcAllStarts(tracks, newOrder);
+      setSectionOrder(newOrder);
+      setTracks(recalced);
+      // Patch all clips whose start time changed.
+      tracks.forEach((track) => {
+        const recalcedTrack = recalced.find((t) => t.id === track.id)!;
+        track.clips.forEach((old) => {
+          const updated = recalcedTrack.clips.find((c) => c.id === old.id);
+          if (updated && updated.start !== old.start) {
+            fetch(`/api/timeline-clips/${old.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ start: updated.start }),
+            }).catch((err) => console.error('Failed to patch clip start after section reorder:', err));
           }
-          console.log(`Adding to track ${t.name}, current clips count: ${t.clips.length}, start: ${start}`);
-          return {
-            ...t,
-            clips: [...t.clips, { ...clip, id: nanoid(), start }]
-          };
-        }
-        return t;
+        });
       });
-      console.log("New tracks state:", newTracks);
-      return newTracks;
+    }
+    setActiveSectionName(null);
+    setSectionInsertGap(null);
+  };
+
+  // Pixel offset (within the sections area) where the insertion line should appear during section drag.
+  const sectionInsertX = React.useMemo(() => {
+    if (activeSectionName === null || sectionInsertGap === null) return null;
+    if (sectionInsertGap === 0) return 0;
+    const prev = sectionLayout[sectionInsertGap - 1];
+    return prev ? (prev.start + prev.duration) * zoom : null;
+  }, [activeSectionName, sectionInsertGap, sectionLayout, zoom]);
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const clip = event.active.data.current?.clip as Clip;
+    const type = event.active.data.current?.type as string;
+    const dragTrackId = event.active.data.current?.trackId as string | undefined;
+    if (clip && type) {
+      let enrichedClip = { ...clip };
+      if (type === 'bucket-clip' && !clip.sectionName) {
+        // Fallback for mock clips that don't carry sectionName: derive from MOCK_SONG idea name.
+        // Real API clips always have sectionName set via toClip(), so this branch won't run for them.
+        outer: for (const inst of MOCK_SONG.instruments) {
+          for (const idea of inst.ideas) {
+            if (idea.versions.some((v) => v.id === clip.id)) {
+              enrichedClip.sectionName = idea.name.replace(inst.name + ' ', '');
+              break outer;
+            }
+          }
+        }
+      }
+      setActiveDragData({ clip: enrichedClip, type, trackId: dragTrackId });
+    }
+    setInsertionPoint(null);
+  };
+
+  // Inserts a clip into a specific section of a track. index is the position within that
+  // section's clip array; omit to append at end. newOrder lets callers pre-compute the
+  // section order when they've already updated it (e.g. gap drops).
+  const insertClipInSection = (
+    trackId: string,
+    sectionName: string,
+    clip: Clip,
+    index?: number,
+    newOrder?: string[]
+  ) => {
+    const newId = nanoid();
+    // Compute the order to use: supplied, or current with the section added if missing.
+    const effectiveOrder: string[] = newOrder ?? (
+      sectionOrder.includes(sectionName)
+        ? sectionOrder
+        : [...sectionOrder, sectionName]
+    );
+    if (!newOrder) setSectionOrder(effectiveOrder);
+
+    setTracks((prev) => {
+      const targetTrack = prev.find((t) => t.id === trackId);
+      if (!targetTrack) return prev;
+
+      const sectionClips = targetTrack.clips.filter((c) => c.sectionName === sectionName);
+      const otherClips = targetTrack.clips.filter((c) => c.sectionName !== sectionName);
+      const insertAt = index ?? sectionClips.length;
+      const newSectionClips = [
+        ...sectionClips.slice(0, insertAt),
+        { ...clip, id: newId, sectionName },
+        ...sectionClips.slice(insertAt),
+      ];
+
+      const draft = prev.map((t) =>
+        t.id === trackId ? { ...t, clips: [...otherClips, ...newSectionClips] } : t
+      );
+      const recalced = recalcAllStarts(draft, effectiveOrder);
+      const finalTrack = recalced.find((t) => t.id === trackId)!;
+      const finalClip = finalTrack.clips.find((c) => c.id === newId);
+
+      fetch(`/api/tracks/${trackId}/clips`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: newId, trackId, name: clip.name, type: clip.type, color: clip.color,
+          start: finalClip?.start ?? 0, duration: clip.duration,
+          src: clip.src ?? null, sectionName,
+        }),
+      }).catch((err) => console.error('Failed to persist timeline clip:', err));
+
+      targetTrack.clips.forEach((old) => {
+        const updated = finalTrack.clips.find((c) => c.id === old.id);
+        if (updated && updated.start !== old.start) {
+          fetch(`/api/timeline-clips/${old.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ start: updated.start }),
+          }).catch((err) => console.error('Failed to update clip start:', err));
+        }
+      });
+
+      return recalced;
     });
+  };
+
+  const handleDragMove = (event: DragMoveEvent) => {
+    const { over } = event;
+    setInsertionPoint(null);
+    if (!over) { setIsOverGap(false); return; }
+    setIsOverGap(String(over.id).startsWith('gap||'));
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    setActiveDragData(null);
+    // Capture before clearing — activeDragData holds the enriched clip (with sectionName derived at drag-start)
+    const dragData = activeDragData;
 
-    if (!over) return;
+    setActiveDragData(null);
+    setIsOverGap(false);
+
+    if (!over) { setInsertionPoint(null); return; }
 
     const activeType = active.data.current?.type;
     const clip = active.data.current?.clip as Clip;
-    const trackId = over.id as string;
+    const overId = over.id as string;
 
-    if (!trackId || !clip) return;
+    // ── Gap drop: insert or move a section column ──────────────────────────────
+    if (overId.startsWith('gap||')) {
+      setInsertionPoint(null);
+      const gapIndex = parseInt(overId.slice(5), 10);
+      const clipSectionName = dragData?.clip?.sectionName ?? dragData?.sectionName;
+      if (!clipSectionName) return;
+
+      // Active section names at the time of drop (no temp injection — isOverGap was true).
+      const activeNames = sectionLayout.map((s) => s.name);
+      const newOrder = reorderSectionOrder(sectionOrder, clipSectionName, gapIndex, activeNames);
+      setSectionOrder(newOrder);
+
+      if (activeType === 'bucket-clip') {
+        // Match by trackId (real API clips) or fall back to MOCK_SONG name lookup (mock clips).
+        const draggedTrackId = dragData?.trackId;
+        const targetTrack = draggedTrackId
+          ? tracks.find((t) => t.id === draggedTrackId)
+          : tracks.find((t) => {
+              const sourceInstrument = MOCK_SONG.instruments.find((inst) =>
+                inst.ideas.some((idea) => idea.versions.some((v) => v.id === clip.id))
+              );
+              return !sourceInstrument || sourceInstrument.name === t.name;
+            });
+        if (!targetTrack) return;
+
+        // Insert the clip into the (new or existing) section; pass newOrder so recalc uses it.
+        insertClipInSection(targetTrack.id, clipSectionName, { ...clip, sectionName: clipSectionName }, undefined, newOrder);
+      } else {
+        // Timeline clip: just reorder — recalcAllStarts with newOrder repositions everything.
+        setTracks((prev) => recalcAllStarts(prev, newOrder));
+      }
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Track-level drop (overId is the trackId) ──────────────────────────────
+    const trackId = overId;
+    const targetTrack = tracks.find((t) => t.id === trackId);
+    if (!targetTrack || !clip) { setInsertionPoint(null); return; }
 
     if (activeType === 'bucket-clip') {
-      // Find the instrument this clip belongs to
-      const sourceInstrument = MOCK_SONG.instruments.find(inst => 
-        inst.ideas.some(idea => idea.versions.some(v => v.id === clip.id))
-      );
-      
-      const targetTrack = tracks.find(t => t.id === trackId);
-      
-      // Restrict dropping to the matching instrument track
-      if (sourceInstrument && targetTrack && sourceInstrument.name !== targetTrack.name) {
-        console.warn(`Cannot drop ${clip.name} onto ${targetTrack.name} track. Must match instrument.`);
+      const draggedTrackId = dragData?.trackId;
+      const wrongTrack = draggedTrackId
+        ? draggedTrackId !== targetTrack.id
+        : (() => {
+            const sourceInstrument = MOCK_SONG.instruments.find((inst) =>
+              inst.ideas.some((idea) => idea.versions.some((v) => v.id === clip.id))
+            );
+            return !!(sourceInstrument && sourceInstrument.name !== targetTrack.name);
+          })();
+      if (wrongTrack) {
+        setInsertionPoint(null);
         return;
       }
+      const clipSectionName = dragData?.clip?.sectionName ?? dragData?.sectionName;
+      if (!clipSectionName) { setInsertionPoint(null); return; }
 
-      const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
-      
-      // Calculate new start time based on drop position relative to track
-      let newStart = 0;
-      
-      if (timelineRef.current) {
-        const activatorEvent = event.activatorEvent as any;
-        let startClientX = activatorEvent?.clientX;
-        
-        // Handle touch events
-        if (startClientX === undefined && activatorEvent?.touches?.length > 0) {
-          startClientX = activatorEvent.touches[0].clientX;
-        }
+      // Merge sectionName onto the clip — real API clips carry it on dragData but not on the clip object.
+      const clipToInsert = { ...clip, sectionName: clipSectionName };
 
-        if (startClientX !== undefined) {
-          const dropClientX = startClientX + event.delta.x;
-          const containerLeft = timelineRef.current.getBoundingClientRect().left;
-          const scrollLeft = timelineRef.current.scrollLeft;
-          const dropX = dropClientX - containerLeft + scrollLeft - 256; // 256 is the track header width
-          
-          if (dropX > 0) {
-            newStart = dropX / zoom;
-          }
-        }
-      }
+      // Use insertionPoint index if the cursor was in this section; otherwise append to end.
+      const idx =
+        insertionPoint?.trackId === trackId && insertionPoint?.sectionName === clipSectionName
+          ? insertionPoint.index
+          : undefined;
+      insertClipInSection(trackId, clipSectionName, clipToInsert, idx);
+      setInsertionPoint(null);
 
-      addClipToTrack(trackId, { ...clip, sectionName: clipIdeaName }, newStart);
     } else if (activeType === 'clip') {
-      const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
-      const targetTrack = tracks.find(t => t.id === trackId);
-      
-      // Restrict moving between different instrument tracks
-      if (sourceTrack && targetTrack && sourceTrack.id !== targetTrack.id) {
-         console.warn(`Cannot move clip from ${sourceTrack.name} to ${targetTrack.name}.`);
-         return;
-      }
-      const clipIdeaName = clip.name.replace(tracks.find(t => t.id === trackId)?.name + ' ', '').split(' V')[0];
-      
-      // Calculate new start time based on drop position relative to track
-      let newStart = clip.start;
-      
-      if (event.delta.x !== 0) {
-        // We moved it horizontally, adjust the start time
-        newStart = Math.max(0, clip.start + (event.delta.x / zoom));
-      }
-      
-      setTracks(prev => {
-        // First remove the clip from wherever it was
-        const withoutClip = prev.map(t => ({
-          ...t,
-          clips: t.clips.filter(c => c.id !== clip.id)
-        }));
-        
-        // Then add it to the new track at the new position
-        return withoutClip.map(t => {
-          if (t.id === trackId) {
-            return {
-              ...t,
-              clips: [...t.clips, { ...clip, start: newStart, sectionName: clipIdeaName }]
-            };
+      const sourceTrack = tracks.find((t) => t.clips.some((c) => c.id === clip.id));
+      if (sourceTrack && sourceTrack.id !== trackId) { setInsertionPoint(null); return; }
+
+      const clipSection = clip.sectionName;
+      if (!clipSection) { setInsertionPoint(null); return; }
+
+      const capturedPoint =
+        insertionPoint?.trackId === trackId && insertionPoint?.sectionName === clipSection
+          ? insertionPoint
+          : null;
+
+      setTracks((prev) => {
+        const track = prev.find((t) => t.id === trackId);
+        if (!track) return prev;
+
+        const sectionClips = track.clips.filter((c) => c.sectionName === clipSection);
+        const otherClips = track.clips.filter((c) => c.sectionName !== clipSection);
+        const withoutClip = sectionClips.filter((c) => c.id !== clip.id);
+        const oldIndex = sectionClips.findIndex((c) => c.id === clip.id);
+
+        let newIndex: number;
+        if (capturedPoint) {
+          newIndex = capturedPoint.index;
+          if (oldIndex !== -1 && oldIndex < newIndex) newIndex = Math.max(0, newIndex - 1);
+        } else {
+          newIndex = withoutClip.length; // no insertion indicator — snap to end
+        }
+
+        const spliced = [
+          ...withoutClip.slice(0, newIndex),
+          clip,
+          ...withoutClip.slice(newIndex),
+        ];
+
+        const draft = prev.map((t) =>
+          t.id === trackId ? { ...t, clips: [...otherClips, ...spliced] } : t
+        );
+        const recalced = recalcAllStarts(draft, sectionOrder);
+        const finalTrack = recalced.find((t) => t.id === trackId)!;
+
+        track.clips.forEach((old) => {
+          const updated = finalTrack.clips.find((c) => c.id === old.id);
+          if (updated && updated.start !== old.start) {
+            fetch(`/api/timeline-clips/${old.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ start: updated.start }),
+            }).catch((err) => console.error('Failed to update clip start:', err));
           }
-          return t;
         });
+
+        return recalced;
       });
+
+      setInsertionPoint(null);
     }
   };
 
@@ -561,190 +868,287 @@ export function Timeline() {
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
 
-  const endOfTimeline = React.useMemo(() => {
-    let max = 0;
-    tracks.forEach(t => {
-      t.clips.forEach(c => {
-        max = Math.max(max, c.start + c.duration);
-      });
-    });
-    return max;
-  }, [tracks]);
-
   const [location] = useLocation();
   const hasAutoScrolled = React.useRef<string | null>(null);
 
   useEffect(() => {
-    // Parse URL params for context to auto-scroll timeline
     const searchParams = new URLSearchParams(window.location.search);
-    const instrument = searchParams.get('instrument');
     const section = searchParams.get('section');
     const currentSearch = window.location.search;
-    
-    if (section && timelineSections.length > 0 && hasAutoScrolled.current !== currentSearch) {
-      const targetSection = timelineSections.find(s => s.name.toLowerCase() === section.toLowerCase());
+
+    if (section && sectionLayout.length > 0 && hasAutoScrolled.current !== currentSearch) {
+      const targetSection = sectionLayout.find(
+        (s) => s.name.toLowerCase() === section.toLowerCase()
+      );
       if (targetSection && timelineRef.current) {
-        // Scroll timeline to center the section
-        const scrollX = (targetSection.start * zoom) - (timelineRef.current.clientWidth / 2) + ((targetSection.duration * zoom) / 2);
+        const scrollX =
+          targetSection.start * zoom -
+          timelineRef.current.clientWidth / 2 +
+          (targetSection.duration * zoom) / 2;
         timelineRef.current.scrollTo({ left: Math.max(0, scrollX), behavior: 'smooth' });
-        
-        // Also move playhead to start of section
-        setPlayheadPosition(Math.max(256, targetSection.start * zoom + 256));
-        
-        // Force the checkAudioMuteState to update after setting playhead, so we don't accidentally silence everything
         const newPos = Math.max(256, targetSection.start * zoom + 256);
+        setPlayheadPosition(newPos);
         checkAudioMuteState(newPos);
         const time = Math.max(0, (newPos - 256) / zoom);
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
-        
         hasAutoScrolled.current = currentSearch;
       }
     }
-  }, [location, timelineSections, zoom, setPlayheadPosition, checkAudioMuteState]);
+  }, [location, sectionLayout, zoom, setPlayheadPosition, checkAudioMuteState]);
 
-  // Calculate available height: window height minus header (56px) and transport (~80px)
-  const [timelineHeight, setTimelineHeight] = useState(typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400); // Default exactly 50% of available space
+  const [timelineHeight, setTimelineHeight] = useState(
+    typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400
+  );
   const resizeRef = React.useRef<HTMLDivElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
+
+  const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Dismiss context menu on click-outside or Escape.
+  useEffect(() => {
+    if (!contextMenuPos) return;
+    const dismiss = () => setContextMenuPos(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setContextMenuPos(null); };
+    document.addEventListener('mousedown', dismiss);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', dismiss);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenuPos]);
+
+  const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    // Suppress on clips and draggable section header labels (all carry cursor-grab).
+    if (target.closest('.cursor-grab')) return;
+    // Suppress in the 256px sticky track-header zone.
+    const containerRect = timelineRef.current?.getBoundingClientRect();
+    if (containerRect && e.clientX - containerRect.left < 256) return;
+    e.preventDefault();
+    setContextMenuPos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleClearTimeline = () => {
+    const allClips = tracks.flatMap((t) => t.clips);
+    setTracks((prev) => prev.map((t) => ({ ...t, clips: [] })));
+    setSectionOrder([]);
+    allClips.forEach((clip) => {
+      fetch(`/api/timeline-clips/${clip.id}`, { method: 'DELETE' }).catch(console.error);
+    });
+    setShowClearConfirm(false);
+  };
 
   const handleResizePointerDown = (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    
     if (!containerRef.current) return;
-    
     const startY = e.clientY;
     const startHeight = timelineHeight;
     const containerHeight = containerRef.current.clientHeight;
-    
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      // Calculate new height (moving UP increases timeline height since it's at the bottom)
       const deltaY = startY - moveEvent.clientY;
-      
-      // Min timeline height: ~144px (ruler 24px + section headers 24px + 1 track 96px)
-      // Max timeline height: container height minus MediaBucket header (exactly 56px now)
       const newHeight = Math.max(144, Math.min(startHeight + deltaY, containerHeight - 56));
       setTimelineHeight(newHeight);
     };
-    
     const handlePointerUp = () => {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-    
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
   };
 
   return (
-    <DndContext 
-      sensors={sensors} 
-      onDragStart={handleDragStart} 
+    <DndContext
+      sensors={sensors}
+      collisionDetection={trackFirstCollision}
+      onDragStart={handleDragStart}
+      onDragMove={handleDragMove}
       onDragEnd={handleDragEnd}
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
           key={refreshKey}
           onAddToTimeline={(clip) => {
-            const track = tracks.find(t => clip.name.toLowerCase().includes(t.name.toLowerCase()));
-            const clipIdeaName = clip.name.replace(track?.name + ' ', '').split(' V')[0];
-            
-            if (track) {
-              addClipToTrack(track.id, { ...clip, sectionName: clipIdeaName });
-            } else {
-              addClipToTrack(tracks[0].id, { ...clip, sectionName: clipIdeaName });
-            }
+            const targetTrack =
+              tracks.find((t) => clip.name.toLowerCase().includes(t.name.toLowerCase())) || tracks[0];
+            if (!targetTrack) return;
+            const clipIdeaName =
+              clip.name.replace(targetTrack.name + ' ', '').split(' V')[0] || '';
+            const sectionName = clipIdeaName;
+            insertClipInSection(targetTrack.id, sectionName, { ...clip, sectionName });
           }}
           onInstrumentAdded={() => setRefreshKey((v) => v + 1)}
         />
 
-        <div 
+        <div
           className="flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none shrink-0"
           style={{ height: `${timelineHeight}px` }}
         >
-          {/* Resize Handle */}
-          <div 
+          <div
             ref={resizeRef}
             className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-50"
             onPointerDown={handleResizePointerDown}
           />
-          <div 
-            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] mt-1.5" 
+          <div
+            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] mt-1.5"
             ref={timelineRef}
           >
-            <div 
-              className="pb-32" 
-              style={{ 
-                width: `${Math.max(endOfTimeline + 15, 0) * zoom}px`,
-                minWidth: '100%'
+            <div
+              className="pb-32 relative"
+              style={{
+                width: `${Math.max(endOfTimeline + 15, 0) * zoom + 256}px`,
+                minWidth: '100%',
               }}
+              onContextMenu={handleTimelineContextMenu}
             >
               <Ruler onSeek={handleRulerSeek} zoom={zoom} />
-              
-              {/* Dynamic Section Headers based on clips */}
-              {timelineSections.length > 0 && (
-                <div className="flex w-full h-6 border-b border-border/50 bg-transparent relative pointer-events-none">
-                  <div className="w-64 shrink-0 bg-transparent px-3 flex items-center sticky left-0 z-20">
-                    {/* Empty header space for track column alignment */}
-                  </div>
-                  <div className="flex-1 relative">
-                    {timelineSections.map(sec => (
-                      <div 
-                        key={sec.id}
-                        className="absolute top-0 bottom-0 border-l border-primary/30 flex items-start pt-1 px-2 z-10"
-                        style={{ left: sec.start * zoom, width: sec.duration * zoom }}
-                      >
-                        <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm">
-                          {sec.name}
-                        </span>
-                      </div>
+
+              {/* Gap zones — rendered during drag at every section boundary; span full track area height */}
+              {activeDragData && [
+                <GapZone key="gap-0" id="gap||0" left={256} trackAreaHeight={64 * tracks.length + 64} />,
+                ...sectionLayout.map((sec, i) => (
+                  <GapZone
+                    key={`gap-${i + 1}`}
+                    id={`gap||${i + 1}`}
+                    left={256 + (sec.start + sec.duration) * zoom}
+                    trackAreaHeight={64 * tracks.length + 64}
+                  />
+                )),
+              ]}
+
+              {/* Section column headers — own DndContext for section reordering */}
+              <DndContext
+                sensors={sensors}
+                onDragStart={handleSectionDragStart}
+                onDragMove={handleSectionDragMove}
+                onDragEnd={handleSectionDragEnd}
+                onDragCancel={handleSectionDragEnd}
+              >
+                <div className="flex w-full h-6 border-b border-border/50 bg-transparent">
+                  <div className="w-64 shrink-0 bg-card border-r border-border sticky left-0 z-20" />
+                  <div className="flex relative">
+                    {sectionLayout.map((sec) => (
+                      <DraggableSectionHeader
+                        key={sec.name}
+                        name={sec.name}
+                        width={sec.duration * zoom}
+                      />
                     ))}
+                    {/* Insertion line — appears at the nearest gap while dragging a section header */}
+                    {sectionInsertX !== null && (
+                      <div
+                        className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_8px_rgba(212,175,55,0.9)] pointer-events-none z-10"
+                        style={{ left: sectionInsertX }}
+                      />
+                    )}
                   </div>
                 </div>
-              )}
-              
-              {tracks.map(track => {
-                let isInvalidTarget = false;
-                if (activeDragData) {
-                  const { clip, type } = activeDragData;
-                  
-                  if (type === 'bucket-clip') {
-                    // Check if it belongs to a different instrument
-                    const sourceInstrument = MOCK_SONG.instruments.find(inst => 
-                      inst.ideas.some(idea => idea.versions.some(v => v.id === clip.id))
+
+                {/* Lightweight column ghost shown while dragging a section header */}
+                <DragOverlay modifiers={[restrictToHorizontalAxis]} dropAnimation={null}>
+                  {activeSectionName && (() => {
+                    const sec = sectionLayout.find((s) => s.name === activeSectionName);
+                    if (!sec) return null;
+                    const colWidth = sec.duration * zoom;
+                    return (
+                      <div
+                        className="pointer-events-none opacity-90 rounded-sm overflow-hidden border border-primary/40 shadow-[0_0_20px_rgba(212,175,55,0.25)]"
+                        style={{ width: colWidth }}
+                      >
+                        {/* Header label */}
+                        <div className="h-6 bg-[#09090b]/95 flex items-center px-2 border-b border-primary/30">
+                          <span className="text-[9px] font-bold text-primary uppercase tracking-widest">
+                            {activeSectionName}
+                          </span>
+                        </div>
+                        {/* One solid bar per track — shows which tracks have clips in this section */}
+                        {tracks.map((track) => {
+                          const hasClips = track.clips.some((c) => c.sectionName === activeSectionName);
+                          return (
+                            <div
+                              key={track.id}
+                              className="h-16 border-b border-border/20 bg-[#09090b]/80 flex items-center px-1.5"
+                            >
+                              {hasClips && (
+                                <div
+                                  className="h-8 rounded flex-1 opacity-60"
+                                  style={{ backgroundColor: track.color }}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     );
-                    if (sourceInstrument && sourceInstrument.name !== track.name) {
-                      isInvalidTarget = true;
-                    }
-                    console.log(`Bucket-clip drag over ${track.name}: sourceInst=${sourceInstrument?.name}, isInvalidTarget=${isInvalidTarget}`);
-                  } else if (type === 'clip') {
-                    // Check if it came from a different track
-                    const sourceTrack = tracks.find(t => t.clips.some(c => c.id === clip.id));
-                    if (sourceTrack && sourceTrack.id !== track.id) {
-                      isInvalidTarget = true;
+                  })()}
+                </DragOverlay>
+              </DndContext>
+
+              {tracks.map((track) => {
+                const invalidSectionsForTrack = new Set<string>();
+                let isInvalidDrop = false;
+
+                if (activeDragData) {
+                  const { clip, type, trackId: draggedTrackId } = activeDragData;
+                  const sourceTrack =
+                    type === 'clip'
+                      ? tracks.find((t) => t.clips.some((c) => c.id === clip.id))
+                      : null;
+
+                  // Track-level invalidity — disables the droppable entirely.
+                  if (type === 'bucket-clip') {
+                    if (draggedTrackId) {
+                      // Real API clip: match by trackId directly.
+                      if (draggedTrackId !== track.id) isInvalidDrop = true;
+                    } else {
+                      // Mock clip fallback: look up instrument by clip ID in MOCK_SONG.
+                      const sourceInstrument = MOCK_SONG.instruments.find((inst) =>
+                        inst.ideas.some((idea) => idea.versions.some((v) => v.id === clip.id))
+                      );
+                      if (sourceInstrument && sourceInstrument.name !== track.name) isInvalidDrop = true;
                     }
                   }
+                  if (type === 'clip' && sourceTrack && sourceTrack.id !== track.id) isInvalidDrop = true;
+
+                  // Per-section visual grayout — clip must land in its own section column.
+                  if (clip.sectionName) {
+                    sectionLayout.forEach(({ name: sectionName }) => {
+                      if (clip.sectionName !== sectionName) invalidSectionsForTrack.add(sectionName);
+                    });
+                  }
                 }
-                
+
                 return (
-                  <TimelineTrack 
-                    key={track.id} 
-                    track={track} 
-                    isInvalidTarget={isInvalidTarget}
+                  <TimelineTrack
+                    key={track.id}
+                    track={track}
+                    sections={sectionLayout}
+                    invalidSections={invalidSectionsForTrack}
+                    isInvalidDrop={isInvalidDrop}
+                    isDragging={activeDragData !== null}
                     zoom={zoom}
+                    insertionPoint={
+                      insertionPoint?.trackId === track.id
+                        ? { sectionName: insertionPoint.sectionName, index: insertionPoint.index, x: insertionPoint.x }
+                        : undefined
+                    }
                   />
                 );
               })}
-              
+
               <div className="h-16 flex items-center justify-center border-b border-white/5 border-dashed text-muted-foreground hover:bg-white/5 cursor-pointer transition-colors group">
-                <span className="text-[10px] font-bold uppercase tracking-[0.2em] group-hover:text-primary transition-colors opacity-40 group-hover:opacity-100">+ Add New Track</span>
+                <span className="text-[10px] font-bold uppercase tracking-[0.2em] group-hover:text-primary transition-colors opacity-40 group-hover:opacity-100">
+                  + Add New Track
+                </span>
               </div>
             </div>
           </div>
 
           {/* Global Playhead */}
-          <div 
+          <div
             className="absolute top-0 bottom-0 w-[16px] z-50 flex justify-center cursor-ew-resize group"
             style={{ left: `${playheadPositionState}px`, transform: 'translateX(-50%)' }}
             onPointerDown={handlePlayheadPointerDown}
@@ -756,11 +1160,11 @@ export function Timeline() {
             <div className="absolute top-[14px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary pointer-events-none" />
           </div>
 
-          <DawScrollbar 
+          <DawScrollbar
             timelineRef={timelineRef}
             zoom={zoom}
             setZoom={setZoom}
-            projectDuration={Math.max(30, endOfTimeline + 5)} 
+            projectDuration={Math.max(30, endOfTimeline + 5)}
           />
         </div>
       </div>
@@ -768,8 +1172,8 @@ export function Timeline() {
       <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
         {activeDragData ? (
           <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
-            <div 
-              className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e]"
+            <div
+              className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e] pointer-events-none"
               style={{ width: Math.max(160, activeDragData.clip.duration * zoom) }}
             >
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
@@ -780,6 +1184,45 @@ export function Timeline() {
           </div>
         ) : null}
       </DragOverlay>
+
+      {/* Timeline background right-click context menu */}
+      {contextMenuPos && (
+        <div
+          className="fixed z-[9999] bg-popover border border-border rounded-md shadow-xl py-1 min-w-[160px]"
+          style={{ left: contextMenuPos.x, top: contextMenuPos.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full px-3 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-400/10 transition-colors"
+            onClick={() => {
+              setContextMenuPos(null);
+              setShowClearConfirm(true);
+            }}
+          >
+            Clear Timeline
+          </button>
+        </div>
+      )}
+
+      <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Clear Timeline</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove all clips from the timeline? This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleClearTimeline}
+            >
+              Clear Timeline
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </DndContext>
   );
 }

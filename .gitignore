@@ -4,3 +4,9 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+.env
+patchbay.db
+patchbay.db-shm
+patchbay.db-wal
+uploads/
+.local/
