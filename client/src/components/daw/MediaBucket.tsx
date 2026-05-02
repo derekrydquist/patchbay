@@ -548,7 +548,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                           <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
                             <SelectValue placeholder="Select Destination" />
                           </SelectTrigger>
-                          <SelectContent className="bg-popover border-border">
+                          <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
                             {tracks.map(track => (
                               <React.Fragment key={track.id}>
                                 <div className="px-2 py-1 text-[9px] uppercase font-bold text-primary opacity-50">

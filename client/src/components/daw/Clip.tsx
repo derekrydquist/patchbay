@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
@@ -445,6 +445,32 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
   const [location] = useLocation();
 
   const [isHighlighted, setIsHighlighted] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const handleMouseEnter = () => {
+    if (!clip.src) return;
+    const audio = new Audio(clip.src);
+    audio.volume = 0.7;
+    audioRef.current = audio;
+    audio.play().catch(() => {});
+  };
+
+  const handleMouseLeave = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
@@ -487,6 +513,8 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
         style={style}
         {...listeners}
         {...attributes}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
         className={cn(
           "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-all duration-500 group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
           isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]",

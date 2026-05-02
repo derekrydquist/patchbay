@@ -283,6 +283,18 @@ The same problem applies to `sectionOrder`. Handlers inside `useEffect(fn, [])` 
 
 Every insert fires a `POST /api/tracks/:trackId/clips` for the new clip, then `PATCH /api/timeline-clips/:id` for every existing clip whose `start` changed. Every remove fires `DELETE` then patches shifted clips. All are fire-and-forget (`.catch(console.error)`).
 
+### Timeline polling and live track sync
+
+The timeline `useQuery` has `refetchInterval: 3000` and an explicit `queryFn` that fetches `/api/songs/${SONG_ID}/timeline`. This means the timeline is always at most 3 seconds out of date when instruments are added or removed from outside the timeline view.
+
+There are two `useEffect`s that sync `apiTracks` into the local `tracks` state:
+
+1. **Initial load** (guarded by `tracksInitialized.current`): runs once on first non-null `apiTracks`, converts and sets the full tracks array, sets `sectionOrder`. After this, `tracksInitialized.current = true` and this branch never runs again.
+
+2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, appends any new tracks from `apiTracks`. New tracks are added with empty `clips` — their local mute/solo/volume state starts at defaults. The early-return guard `withRemovals.length === prev.length && newTracks.length === 0` prevents spurious re-renders on polls with no changes.
+
+**Do not merge the two effects.** The initial-load guard exists to prevent the API response from clobbering clip state that the user has added to the timeline mid-session (before the refetch fires). The live-sync effect intentionally only handles structural changes (track additions/removals), not clip content.
+
 ---
 
 ## Environment Variables
@@ -377,8 +389,8 @@ When implementing auth or any permission checks, always consult this table.
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport and Production Tracker still use mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
-| Right-click context menu (timeline) | ✅ Done | Right-click on timeline background opens menu with "Clear Timeline" action; AlertDialog confirmation required; extensible — see Planned Features section |
-| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously |
+| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (AlertDialog confirmation); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
+| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → Remove Instrument; right-click section → Remove Section |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
 | Production Tracker (Kanban) | ✅ UI done | Mock tasks only |
@@ -418,17 +430,18 @@ PATCH  /api/timeline-clips/:id           — update a placed clip (e.g. new star
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips
-POST   /api/tracks/:trackId/ideas        — create an idea (section slot) under a track
+POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server
+                                           generates id, sets type "audio", color, sortOrder 999;
+                                           also creates one idea per DEFAULT_SECTION automatically
+DELETE /api/tracks/:trackId              — delete a track and all its ideas/clips (cascade)
+DELETE /api/songs/:songId/sections/:name — delete all ideas with that sectionName across all tracks;
+                                           name must be URL-encoded
+POST   /api/tracks/:trackId/ideas        — create an idea (section slot) under a track;
+                                           server generates id and defaults sortOrder to 0
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
-```
-
-### Planned endpoints (not yet built)
-
-```
-POST   /api/songs/:id/tracks   — add a new instrument track
 ```
 
 ---
@@ -543,7 +556,12 @@ Do not change this to alphabetical or insertion-point ordering without discussio
 
 ### Timeline background right-click context menu
 
-Currently has one action — **"Clear Timeline."** The menu is intentionally minimal and extensible. Future actions may include "Export timeline," "Snap all clips," or other global timeline operations. When adding new actions, extend the existing menu in `Timeline.tsx` (the `contextMenuPos` state + the fixed-position `<div>` rendered near the bottom of the return) rather than creating a new context menu system.
+Currently has two surfaces:
+
+- **Background right-click** — "Clear Timeline" action. Extend via the `contextMenuPos` state + the fixed-position `<div>` near the bottom of `Timeline.tsx`'s return.
+- **Track header right-click** — "Remove Instrument" action in `Track.tsx`, wrapped in an `AlertDialog` for confirmation. The `onDeleteTrack` callback prop flows from `Timeline.tsx` → `TimelineTrack` → confirmation → API call + local state removal + bucket query invalidation.
+
+Both menus use the shadcn `ContextMenu` component (`@/components/ui/context-menu`). When adding new track-level actions, extend the `ContextMenuContent` in `Track.tsx`. When adding new global timeline actions, extend the menu in `Timeline.tsx`.
 
 ---
 
