@@ -15,6 +15,9 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog';
 import {
+  ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem,
+} from '@/components/ui/context-menu';
+import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
@@ -355,6 +358,30 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     },
   });
 
+  // ── Delete track mutation ────────────────────────────────────────────────────
+
+  const deleteTrackMutation = useMutation({
+    mutationFn: (trackId: string) =>
+      fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+      setSelectedTrack(null);
+      setSelectedIdea(null);
+    },
+  });
+
+  // ── Delete section mutation ──────────────────────────────────────────────────
+
+  const deleteSectionMutation = useMutation({
+    mutationFn: (sectionName: string) =>
+      fetch(`/api/songs/${DEFAULT_SONG_ID}/sections/${encodeURIComponent(sectionName)}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      setSelectedIdea(null);
+    },
+  });
+
   // ── File input helpers ───────────────────────────────────────────────────────
 
   const handleFileDrop = (e: React.DragEvent) => {
@@ -654,26 +681,37 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                 .map(track => {
                   const hasFiles = track.ideas.some(i => i.clips.length > 0);
                   return (
-                    <button
-                      key={track.id}
-                      onClick={() => { setSelectedTrack(track); setSelectedIdea(null); }}
-                      className={cn(
-                        "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
-                        selectedTrack?.id === track.id
-                          ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
-                          : "text-muted-foreground hover:bg-white/5 hover:text-white"
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <Folder
-                          size={14}
-                          className={selectedTrack?.id === track.id ? "text-primary" : "text-muted-foreground"}
-                          fill={hasFiles ? "currentColor" : "none"}
-                        />
-                        <span className="font-bold tracking-tight">{track.name}</span>
-                      </div>
-                      <ChevronRight size={12} className="opacity-40" />
-                    </button>
+                    <ContextMenu key={track.id}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          onClick={() => { setSelectedTrack(track); setSelectedIdea(null); }}
+                          className={cn(
+                            "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
+                            selectedTrack?.id === track.id
+                              ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
+                              : "text-muted-foreground hover:bg-white/5 hover:text-white"
+                          )}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Folder
+                              size={14}
+                              className={selectedTrack?.id === track.id ? "text-primary" : "text-muted-foreground"}
+                              fill={hasFiles ? "currentColor" : "none"}
+                            />
+                            <span className="font-bold tracking-tight">{track.name}</span>
+                          </div>
+                          <ChevronRight size={12} className="opacity-40" />
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="bg-popover border-border">
+                        <ContextMenuItem
+                          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+                          onClick={() => deleteTrackMutation.mutate(track.id)}
+                        >
+                          Remove Instrument
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
                   );
                 })}
             </div>
@@ -745,35 +783,46 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
               {selectedTrack ? filteredIdeas.map(idea => {
                 const hasFiles = idea.clips.length > 0;
                 return (
-                  <button
-                    key={idea.id}
-                    onClick={() => setSelectedIdea(idea)}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
-                    }}
-                    onDragLeave={(e) => {
-                      e.preventDefault();
-                      e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
-                    }}
-                    onDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
-                    className={cn(
-                      "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
-                      selectedIdea?.id === idea.id
-                        ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
-                        : "text-muted-foreground hover:bg-white/5 hover:text-white"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Folder
-                        size={14}
-                        className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"}
-                        fill={hasFiles ? "currentColor" : "none"}
-                      />
-                      <span className="font-bold tracking-tight">{idea.sectionName}</span>
-                    </div>
-                    <ChevronRight size={12} className="opacity-40" />
-                  </button>
+                  <ContextMenu key={idea.id}>
+                    <ContextMenuTrigger asChild>
+                      <button
+                        onClick={() => setSelectedIdea(idea)}
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
+                        }}
+                        onDragLeave={(e) => {
+                          e.preventDefault();
+                          e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
+                        }}
+                        onDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
+                        className={cn(
+                          "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
+                          selectedIdea?.id === idea.id
+                            ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
+                            : "text-muted-foreground hover:bg-white/5 hover:text-white"
+                        )}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Folder
+                            size={14}
+                            className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"}
+                            fill={hasFiles ? "currentColor" : "none"}
+                          />
+                          <span className="font-bold tracking-tight">{idea.sectionName}</span>
+                        </div>
+                        <ChevronRight size={12} className="opacity-40" />
+                      </button>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="bg-popover border-border">
+                      <ContextMenuItem
+                        className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+                        onClick={() => deleteSectionMutation.mutate(idea.sectionName)}
+                      >
+                        Remove Section
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 );
               }) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">

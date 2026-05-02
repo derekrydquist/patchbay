@@ -105,6 +105,16 @@ export async function registerRoutes(
     res.status(201).json(track);
   });
 
+  app.delete("/api/tracks/:trackId", async (req, res) => {
+    await storage.deleteTrack(req.params.trackId);
+    res.status(204).send();
+  });
+
+  app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {
+    await storage.deleteSection(req.params.songId, decodeURIComponent(req.params.sectionName));
+    res.status(204).send();
+  });
+
   // ─── Timeline ───────────────────────────────────────────────────────────────
 
   app.get("/api/songs/:id/timeline", async (req, res) => {

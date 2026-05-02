@@ -1,10 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import { cn } from '@/lib/utils';
 import { Track, Clip } from '@/lib/daw-data';
 import { TimelineClip } from './Clip';
 import { Mic, Headphones, Activity } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
+import {
+  ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem,
+} from '@/components/ui/context-menu';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
+} from '@/components/ui/alert-dialog';
 
 export interface SectionInfo {
   name: string;
@@ -55,6 +62,7 @@ interface TrackProps {
   isDragging: boolean;
   zoom: number;
   insertionPoint?: { sectionName: string; index: number; x: number };
+  onDeleteTrack?: (trackId: string) => void;
 }
 
 export function TimelineTrack({
@@ -65,7 +73,10 @@ export function TimelineTrack({
   isDragging,
   zoom,
   insertionPoint,
+  onDeleteTrack,
 }: TrackProps) {
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
   const { setNodeRef } = useDroppable({
     id: track.id,
     data: { trackId: track.id, type: 'track' },
@@ -108,6 +119,8 @@ export function TimelineTrack({
       )}
 
       {/* Track Header */}
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
       <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 sticky left-0 z-20">
         <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
 
@@ -168,6 +181,16 @@ export function TimelineTrack({
           </div>
         </div>
       </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={() => setShowDeleteConfirm(true)}
+        >
+          Remove Instrument
+        </ContextMenuItem>
+      </ContextMenuContent>
+      </ContextMenu>
 
       {/* Section cells — full row is the droppable target */}
       <div
@@ -192,6 +215,26 @@ export function TimelineTrack({
           );
         })}
       </div>
+
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Instrument</AlertDialogTitle>
+            <AlertDialogDescription>
+              Removing this instrument will delete it from the project and permanently delete any files uploaded to it. Would you like to proceed?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => { onDeleteTrack?.(track.id); setShowDeleteConfirm(false); }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   AlertDialog,
   AlertDialogContent,
@@ -231,6 +231,8 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 }
 
 export function Timeline() {
+  const queryClient = useQueryClient();
+
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${SONG_ID}/timeline`],
     queryFn: async () => {
@@ -271,11 +273,14 @@ export function Timeline() {
     }
   }, [apiTracks]);
 
-  // Merge tracks added after initial load (e.g. new instruments) without clobbering local state.
+  // Merge track additions and removals after initial load without clobbering local clip/mute state.
   useEffect(() => {
     if (!apiTracks || !tracksInitialized.current) return;
     setTracks(prev => {
+      const apiIds = new Set(apiTracks.map(t => t.id));
       const existingIds = new Set(prev.map(t => t.id));
+
+      const withRemovals = prev.filter(t => apiIds.has(t.id));
       const newTracks = apiTracks
         .filter(t => !existingIds.has(t.id))
         .map(t => ({
@@ -289,8 +294,9 @@ export function Timeline() {
           color: t.color ?? 'hsl(var(--chart-1))',
           clips: [],
         }));
-      if (newTracks.length === 0) return prev;
-      return [...prev, ...newTracks];
+
+      if (withRemovals.length === prev.length && newTracks.length === 0) return prev;
+      return [...withRemovals, ...newTracks];
     });
   }, [apiTracks]);
 
@@ -893,6 +899,12 @@ export function Timeline() {
     }
   };
 
+  const handleDeleteTrack = (trackId: string) => {
+    fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }).catch(console.error);
+    setTracks(prev => prev.filter(t => t.id !== trackId));
+    queryClient.invalidateQueries({ queryKey: ['bucket', SONG_ID] });
+  };
+
   const handleRulerSeek = (pos: number) => {
     const newPos = Math.max(256, pos + 256);
     setPlayheadPosition(newPos);
@@ -1168,6 +1180,7 @@ export function Timeline() {
                         ? { sectionName: insertionPoint.sectionName, index: insertionPoint.index, x: insertionPoint.x }
                         : undefined
                     }
+                    onDeleteTrack={handleDeleteTrack}
                   />
                 );
               })}

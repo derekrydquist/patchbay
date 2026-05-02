@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { eq, asc, inArray, count } from "drizzle-orm";
+import { eq, asc, inArray, count, and } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -87,6 +87,8 @@ export interface IStorage {
 
   // Tracks
   createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
+  deleteTrack(trackId: string): Promise<void>;
+  deleteSection(songId: string, sectionName: string): Promise<void>;
 
   // Ideas
   createIdea(data: InsertIdea): Promise<Idea>;
@@ -290,6 +292,22 @@ export class SQLiteStorage implements IStorage {
       });
     }
     return track;
+  }
+
+  async deleteTrack(trackId: string): Promise<void> {
+    db.delete(instrumentTracks).where(eq(instrumentTracks.id, trackId)).run();
+  }
+
+  async deleteSection(songId: string, sectionName: string): Promise<void> {
+    const songTracks = db.select().from(instrumentTracks)
+      .where(eq(instrumentTracks.songId, songId)).all();
+    if (!songTracks.length) return;
+    const trackIds = songTracks.map(t => t.id);
+    db.delete(ideas)
+      .where(and(
+        inArray(ideas.trackId, trackIds),
+        eq(ideas.sectionName, sectionName)
+      )).run();
   }
 
   // ── Ideas ──────────────────────────────────────────────────────────────────
