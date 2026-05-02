@@ -339,7 +339,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       }
       return res.json() as Promise<ApiTrack>;
     },
-    onSuccess: async (newTrack) => {
+    onSuccess: (newTrack) => {
       queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
@@ -349,9 +349,6 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
         if (track) { setSelectedTrack(track); setSelectedIdea(null); }
       });
       onInstrumentAdded?.();
-      // Wait for the server to finish creating ideas sequentially before refetching timeline
-      await new Promise(resolve => setTimeout(resolve, 300));
-      await queryClient.refetchQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
     },
     onError: (err: Error) => {
       setAddInstrumentError(err.message);

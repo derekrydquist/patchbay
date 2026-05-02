@@ -233,7 +233,17 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 export function Timeline() {
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${SONG_ID}/timeline`],
+    queryFn: async () => {
+      const res = await fetch(`/api/songs/${SONG_ID}/timeline`);
+      if (!res.ok) throw new Error('Failed to fetch timeline');
+      return res.json();
+    },
+    refetchInterval: 3000,
   });
+
+  useEffect(() => {
+    console.log('[timeline] tracks:', apiTracks?.map(t => t.name));
+  }, [apiTracks]);
 
   const [tracks, setTracks] = useState<Track[]>([]);
   const tracksInitialized = useRef(false);
@@ -259,6 +269,29 @@ export function Timeline() {
       setSectionOrder(initialSectionOrder);
       tracksInitialized.current = true;
     }
+  }, [apiTracks]);
+
+  // Merge tracks added after initial load (e.g. new instruments) without clobbering local state.
+  useEffect(() => {
+    if (!apiTracks || !tracksInitialized.current) return;
+    setTracks(prev => {
+      const existingIds = new Set(prev.map(t => t.id));
+      const newTracks = apiTracks
+        .filter(t => !existingIds.has(t.id))
+        .map(t => ({
+          id: t.id,
+          name: t.name,
+          type: t.type as Track['type'],
+          volume: 80,
+          pan: 0,
+          muted: false,
+          solo: false,
+          color: t.color ?? 'hsl(var(--chart-1))',
+          clips: [],
+        }));
+      if (newTracks.length === 0) return prev;
+      return [...prev, ...newTracks];
+    });
   }, [apiTracks]);
 
   // Keep sectionOrder pruned: remove any section that has no clips across all tracks.
