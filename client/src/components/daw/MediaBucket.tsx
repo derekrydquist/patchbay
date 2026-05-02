@@ -152,6 +152,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
+  const [selectedHiddenIdeaId, setSelectedHiddenIdeaId] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [location] = useLocation();
 
@@ -160,6 +161,15 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const { data: tracks = [], isLoading, isError } = useQuery<ApiTrack[]>({
     queryKey: ['bucket', DEFAULT_SONG_ID],
     queryFn: fetchBucket,
+  });
+
+  const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
+    queryKey: ['hidden-ideas', selectedTrack?.id],
+    queryFn: async () => {
+      const res = await fetch(`/api/tracks/${selectedTrack!.id}/hidden-ideas`);
+      return res.json();
+    },
+    enabled: isAddSectionOpen && !!selectedTrack?.id,
   });
 
   // ── Keep selected items in sync when data refreshes ─────────────────────────
@@ -374,11 +384,33 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   // ── Delete section mutation ──────────────────────────────────────────────────
 
   const deleteSectionMutation = useMutation({
-    mutationFn: (sectionName: string) =>
-      fetch(`/api/songs/${DEFAULT_SONG_ID}/sections/${encodeURIComponent(sectionName)}`, { method: 'DELETE' }),
+    mutationFn: async (ideaId: string) => {
+      const res = await fetch(`/api/ideas/${ideaId}`, { method: 'PATCH' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed' }));
+        throw new Error(err.message);
+      }
+      return res.json();
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
       setSelectedIdea(null);
+    },
+    onError: (err: Error) => {
+      console.error('[removeSection] error:', err.message);
+    },
+  });
+
+  const restoreSectionMutation = useMutation({
+    mutationFn: (ideaId: string) =>
+      fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
+      setSelectedHiddenIdeaId('');
+      setIsAddSectionOpen(false);
     },
   });
 
@@ -759,6 +791,34 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                       <AlertCircle size={12} /> {addSectionError}
                     </div>
                   )}
+                  {hiddenIdeas.length > 0 && (
+                    <div className="space-y-2 pt-2 border-t border-white/10">
+                      <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed section</label>
+                      <div className="flex gap-2">
+                        <Select value={selectedHiddenIdeaId} onValueChange={setSelectedHiddenIdeaId}>
+                          <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9 flex-1">
+                            <SelectValue placeholder="Select section…" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-popover border-border max-h-48 overflow-y-auto">
+                            {hiddenIdeas.map(idea => (
+                              <SelectItem key={idea.id} value={idea.id} className="text-xs">
+                                {idea.sectionName}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="uppercase tracking-widest text-[10px] font-bold shrink-0"
+                          onClick={() => selectedHiddenIdeaId && restoreSectionMutation.mutate(selectedHiddenIdeaId)}
+                          disabled={!selectedHiddenIdeaId || restoreSectionMutation.isPending}
+                        >
+                          {restoreSectionMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Restore'}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                   <div className="flex justify-end gap-2 pt-2">
                     <Button variant="ghost" size="sm" onClick={() => setIsAddSectionOpen(false)}>
                       Cancel
@@ -817,7 +877,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                     <ContextMenuContent className="bg-popover border-border">
                       <ContextMenuItem
                         className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-                        onClick={() => deleteSectionMutation.mutate(idea.sectionName)}
+                        onClick={() => deleteSectionMutation.mutate(idea.id)}
                       >
                         Remove Section
                       </ContextMenuItem>

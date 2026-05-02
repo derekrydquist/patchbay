@@ -111,6 +111,7 @@ export async function registerRoutes(
   });
 
   app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {
+    console.log('[deleteSection]', req.params.songId, req.params.sectionName);
     await storage.deleteSection(req.params.songId, decodeURIComponent(req.params.sectionName));
     res.status(204).send();
   });
@@ -173,6 +174,21 @@ export async function registerRoutes(
   });
 
   // ─── Clips (bucket versions) ─────────────────────────────────────────────────
+
+  app.patch("/api/ideas/:ideaId", async (req, res) => {
+    await storage.hideIdea(req.params.ideaId);
+    res.status(200).json({ ok: true });
+  });
+
+  app.post("/api/ideas/:ideaId/restore", async (req, res) => {
+    await storage.restoreIdea(req.params.ideaId);
+    res.status(200).json({ ok: true });
+  });
+
+  app.get("/api/tracks/:trackId/hidden-ideas", async (req, res) => {
+    const hidden = await storage.getHiddenIdeas(req.params.trackId);
+    res.json(hidden);
+  });
 
   /** POST /api/ideas/:ideaId/clips — attach a clip record to an idea */
   app.post("/api/ideas/:ideaId/clips", async (req, res) => {

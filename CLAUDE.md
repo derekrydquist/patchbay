@@ -398,6 +398,7 @@ When implementing auth or any permission checks, always consult this table.
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
+| Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
 | Audio playback from real files | 🔄 Partial | Clips have real `src` URLs; `<audio>` loads them; full transport sync needs testing |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions | ❌ Not built | Spec item for future |
@@ -534,14 +535,13 @@ For frontend-only changes (components, styles, pages), a server restart is not n
 
 These are features that have been deliberately designed for future extension. When building them, follow the guidance here rather than starting from scratch.
 
-### Audio hover preview (Media Bucket)
+### Audio hover preview (Media Bucket) — ✅ Built
 
-Hovering over a clip row in the Media Bucket versions panel should play a short preview of the audio. This feature is parked until real audio files are available. When building:
-- Add `onMouseEnter` / `onMouseLeave` to each version row in `MediaBucket.tsx`
-- Use an `<audio>` element to play from the clip's `src` URL
-- Hovering a second clip should stop the first
-- No waveform or progress indicator needed for the initial implementation
-- Requires real `src` URLs — do not build against mock data
+Implemented in `BucketClip` (`Clip.tsx`). On `onMouseEnter`, creates `new Audio(clip.src)`, sets `volume = 0.7`, and calls `.play()` (wrapped in try/catch for blocked autoplay). On `onMouseLeave`, pauses and nulls the ref. A cleanup `useEffect` pauses on unmount. No-ops if `clip.src` is falsy.
+
+**Not in `MediaBucket.tsx`** — the handler lives entirely in `BucketClip`. Do not move it to MediaBucket or duplicate it on the version row wrapper there.
+
+If adding a progress indicator or waveform in the future, extend `BucketClip` — the `audioRef` is already available.
 
 ### Media Bucket — "Add Section"
 

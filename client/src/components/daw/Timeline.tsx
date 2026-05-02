@@ -273,7 +273,8 @@ export function Timeline() {
     }
   }, [apiTracks]);
 
-  // Merge track additions and removals after initial load without clobbering local clip/mute state.
+  // Merge track additions, removals, and clip changes after initial load.
+  // Preserves local mute/solo/volume state for existing tracks.
   useEffect(() => {
     if (!apiTracks || !tracksInitialized.current) return;
     setTracks(prev => {
@@ -281,6 +282,23 @@ export function Timeline() {
       const existingIds = new Set(prev.map(t => t.id));
 
       const withRemovals = prev.filter(t => apiIds.has(t.id));
+
+      const withUpdatedClips = withRemovals.map(track => {
+        const apiTrack = apiTracks.find(t => t.id === track.id);
+        if (!apiTrack) return track;
+        const freshClips = [...apiTrack.timelineClips].sort((a, b) => a.start - b.start).map(c => ({
+          id: c.id,
+          name: c.name,
+          type: c.type as Clip['type'],
+          color: c.color,
+          start: c.start,
+          duration: c.duration,
+          src: c.src ?? undefined,
+          sectionName: c.sectionName ?? undefined,
+        }));
+        return { ...track, clips: freshClips };
+      });
+
       const newTracks = apiTracks
         .filter(t => !existingIds.has(t.id))
         .map(t => ({
@@ -295,8 +313,7 @@ export function Timeline() {
           clips: [],
         }));
 
-      if (withRemovals.length === prev.length && newTracks.length === 0) return prev;
-      return [...withRemovals, ...newTracks];
+      return [...withUpdatedClips, ...newTracks];
     });
   }, [apiTracks]);
 

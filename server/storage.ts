@@ -8,7 +8,7 @@ import {
   type Idea, type InsertIdea,
   type Clip, type InsertClip,
   type TimelineClip, type InsertTimelineClip,
-  users, songs, instrumentTracks, ideas, clips, timelineClips,
+  users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -92,6 +92,9 @@ export interface IStorage {
 
   // Ideas
   createIdea(data: InsertIdea): Promise<Idea>;
+  hideIdea(ideaId: string): Promise<void>;
+  restoreIdea(ideaId: string): Promise<void>;
+  getHiddenIdeas(trackId: string): Promise<Idea[]>;
 
   // Clips (bucket versions)
   createClip(data: InsertClip): Promise<Clip>;
@@ -187,13 +190,20 @@ export class SQLiteStorage implements IStorage {
     for (const track of DEFAULT_TRACKS) {
       db.insert(instrumentTracks).values(track).onConflictDoNothing().run();
       DEFAULT_SECTIONS.forEach((section, i) => {
-        db.insert(ideas).values({
-          id: defaultIdeaId(track.id, i),
-          trackId: track.id,
-          name: `${track.name} ${section}`,
-          sectionName: section,
-          sortOrder: i,
-        }).onConflictDoNothing().run();
+        const deleted = db.select().from(deletedSections)
+          .where(and(
+            eq(deletedSections.songId, DEFAULT_SONG_ID),
+            eq(deletedSections.sectionName, section)
+          )).get();
+        if (!deleted) {
+          db.insert(ideas).values({
+            id: defaultIdeaId(track.id, i),
+            trackId: track.id,
+            name: `${track.name} ${section}`,
+            sectionName: section,
+            sortOrder: i,
+          }).onConflictDoNothing().run();
+        }
       });
     }
   }
@@ -253,7 +263,10 @@ export class SQLiteStorage implements IStorage {
     const allIdeas = db
       .select()
       .from(ideas)
-      .where(inArray(ideas.trackId, tracks.map((t) => t.id)))
+      .where(and(
+        inArray(ideas.trackId, tracks.map((t) => t.id)),
+        eq(ideas.active, true)
+      ))
       .orderBy(asc(ideas.sortOrder))
       .all();
 
@@ -308,9 +321,35 @@ export class SQLiteStorage implements IStorage {
         inArray(ideas.trackId, trackIds),
         eq(ideas.sectionName, sectionName)
       )).run();
+    db.insert(deletedSections)
+      .values({ songId, sectionName })
+      .onConflictDoNothing().run();
   }
 
   // ── Ideas ──────────────────────────────────────────────────────────────────
+
+  async hideIdea(ideaId: string): Promise<void> {
+    const idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
+    if (!idea) return;
+    db.delete(timelineClips)
+      .where(and(
+        eq(timelineClips.trackId, idea.trackId),
+        eq(timelineClips.sectionName, idea.sectionName)
+      )).run();
+    db.update(ideas).set({ active: false }).where(eq(ideas.id, ideaId)).run();
+  }
+
+  async restoreIdea(ideaId: string): Promise<void> {
+    db.update(ideas).set({ active: true }).where(eq(ideas.id, ideaId)).run();
+  }
+
+  async getHiddenIdeas(trackId: string): Promise<Idea[]> {
+    return db.select().from(ideas)
+      .where(and(
+        eq(ideas.trackId, trackId),
+        eq(ideas.active, false)
+      )).all();
+  }
 
   async createIdea(data: InsertIdea): Promise<Idea> {
     const idea: Idea = { sortOrder: 0, ...data, id: data.id ?? randomUUID() };

@@ -58,6 +58,7 @@ export const ideas = sqliteTable("ideas", {
   name: text("name").notNull(),
   sectionName: text("section_name").notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
 });
 
 export const insertIdeaSchema = createInsertSchema(ideas);
@@ -168,6 +169,13 @@ export const timelineClips = sqliteTable("timeline_clips", {
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);
 export type InsertTimelineClip = z.infer<typeof insertTimelineClipSchema>;
 export type TimelineClip = typeof timelineClips.$inferSelect;
+
+// ─── Deleted Sections ─────────────────────────────────────────────────────────
+
+export const deletedSections = sqliteTable("deleted_sections", {
+  songId: text("song_id").notNull(),
+  sectionName: text("section_name").notNull(),
+});
 
 // ─── Task Comments ────────────────────────────────────────────────────────────
 
