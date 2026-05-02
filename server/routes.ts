@@ -106,8 +106,18 @@ export async function registerRoutes(
   });
 
   app.delete("/api/tracks/:trackId", async (req, res) => {
-    await storage.deleteTrack(req.params.trackId);
-    res.status(204).send();
+    await storage.hideTrack(req.params.trackId);
+    res.status(200).json({ ok: true });
+  });
+
+  app.post("/api/tracks/:trackId/restore", async (req, res) => {
+    await storage.restoreTrack(req.params.trackId);
+    res.status(200).json({ ok: true });
+  });
+
+  app.get("/api/songs/:songId/hidden-tracks", async (req, res) => {
+    const hidden = await storage.getHiddenTracks(req.params.songId);
+    res.json(hidden);
   });
 
   app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {

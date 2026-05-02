@@ -88,6 +88,9 @@ export interface IStorage {
   // Tracks
   createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
   deleteTrack(trackId: string): Promise<void>;
+  hideTrack(trackId: string): Promise<void>;
+  restoreTrack(trackId: string): Promise<void>;
+  getHiddenTracks(songId: string): Promise<InstrumentTrack[]>;
   deleteSection(songId: string, sectionName: string): Promise<void>;
 
   // Ideas
@@ -188,7 +191,12 @@ export class SQLiteStorage implements IStorage {
   async bootstrapDefaultSong(): Promise<void> {
     db.insert(songs).values(DEFAULT_SONG).onConflictDoNothing().run();
     for (const track of DEFAULT_TRACKS) {
-      db.insert(instrumentTracks).values(track).onConflictDoNothing().run();
+      const existing = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, track.id)).get();
+      if (!existing) {
+        db.insert(instrumentTracks).values(track).run();
+      } else if (!existing.active) {
+        continue;
+      }
       DEFAULT_SECTIONS.forEach((section, i) => {
         const deleted = db.select().from(deletedSections)
           .where(and(
@@ -214,7 +222,7 @@ export class SQLiteStorage implements IStorage {
     const tracks = db
       .select()
       .from(instrumentTracks)
-      .where(eq(instrumentTracks.songId, songId))
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
       .orderBy(asc(instrumentTracks.sortOrder))
       .all();
 
@@ -254,7 +262,7 @@ export class SQLiteStorage implements IStorage {
     const tracks = db
       .select()
       .from(instrumentTracks)
-      .where(eq(instrumentTracks.songId, songId))
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
       .orderBy(asc(instrumentTracks.sortOrder))
       .all();
 
@@ -309,6 +317,23 @@ export class SQLiteStorage implements IStorage {
 
   async deleteTrack(trackId: string): Promise<void> {
     db.delete(instrumentTracks).where(eq(instrumentTracks.id, trackId)).run();
+  }
+
+  async hideTrack(trackId: string): Promise<void> {
+    db.delete(timelineClips).where(eq(timelineClips.trackId, trackId)).run();
+    db.update(instrumentTracks).set({ active: false }).where(eq(instrumentTracks.id, trackId)).run();
+  }
+
+  async restoreTrack(trackId: string): Promise<void> {
+    db.update(instrumentTracks).set({ active: true }).where(eq(instrumentTracks.id, trackId)).run();
+  }
+
+  async getHiddenTracks(songId: string): Promise<InstrumentTrack[]> {
+    return db.select().from(instrumentTracks)
+      .where(and(
+        eq(instrumentTracks.songId, songId),
+        eq(instrumentTracks.active, false)
+      )).all();
   }
 
   async deleteSection(songId: string, sectionName: string): Promise<void> {

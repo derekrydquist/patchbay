@@ -153,6 +153,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
   const [selectedHiddenIdeaId, setSelectedHiddenIdeaId] = useState('');
+  const [selectedHiddenTrackId, setSelectedHiddenTrackId] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [location] = useLocation();
 
@@ -170,6 +171,15 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       return res.json();
     },
     enabled: isAddSectionOpen && !!selectedTrack?.id,
+  });
+
+  const { data: hiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ['hidden-tracks', DEFAULT_SONG_ID],
+    queryFn: async () => {
+      const res = await fetch(`/api/songs/${DEFAULT_SONG_ID}/hidden-tracks`);
+      return res.json();
+    },
+    enabled: isAddInstrumentOpen,
   });
 
   // ── Keep selected items in sync when data refreshes ─────────────────────────
@@ -371,13 +381,33 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   // ── Delete track mutation ────────────────────────────────────────────────────
 
   const deleteTrackMutation = useMutation({
-    mutationFn: (trackId: string) =>
-      fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }),
+    mutationFn: async (trackId: string) => {
+      const res = await fetch(`/api/tracks/${trackId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed' }));
+        throw new Error(err.message);
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
       setSelectedTrack(null);
       setSelectedIdea(null);
+    },
+    onError: (err: Error) => {
+      console.error('[removeInstrument] error:', err.message);
+    },
+  });
+
+  const restoreTrackMutation = useMutation({
+    mutationFn: (trackId: string) =>
+      fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+      setSelectedHiddenTrackId('');
+      setIsAddInstrumentOpen(false);
     },
   });
 
@@ -664,6 +694,34 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                   {addInstrumentError && (
                     <div className="flex items-center gap-2 text-[10px] text-red-400">
                       <AlertCircle size={12} /> {addInstrumentError}
+                    </div>
+                  )}
+                  {hiddenTracks.length > 0 && (
+                    <div className="space-y-2 pt-2 border-t border-white/10">
+                      <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed instrument</label>
+                      <div className="flex gap-2">
+                        <Select value={selectedHiddenTrackId} onValueChange={setSelectedHiddenTrackId}>
+                          <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9 flex-1">
+                            <SelectValue placeholder="Select instrument…" />
+                          </SelectTrigger>
+                          <SelectContent className="bg-popover border-border max-h-48 overflow-y-auto">
+                            {hiddenTracks.map(track => (
+                              <SelectItem key={track.id} value={track.id} className="text-xs">
+                                {track.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="uppercase tracking-widest text-[10px] font-bold shrink-0"
+                          onClick={() => selectedHiddenTrackId && restoreTrackMutation.mutate(selectedHiddenTrackId)}
+                          disabled={!selectedHiddenTrackId || restoreTrackMutation.isPending}
+                        >
+                          {restoreTrackMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Restore'}
+                        </Button>
+                      </div>
                     </div>
                   )}
                   <div className="flex justify-end gap-2 pt-2">

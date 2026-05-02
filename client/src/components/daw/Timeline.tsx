@@ -1202,11 +1202,6 @@ export function Timeline() {
                 );
               })}
 
-              <div className="h-16 flex items-center justify-center border-b border-white/5 border-dashed text-muted-foreground hover:bg-white/5 cursor-pointer transition-colors group">
-                <span className="text-[10px] font-bold uppercase tracking-[0.2em] group-hover:text-primary transition-colors opacity-40 group-hover:opacity-100">
-                  + Add New Track
-                </span>
-              </div>
             </div>
           </div>
 

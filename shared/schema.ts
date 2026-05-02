@@ -44,6 +44,7 @@ export const instrumentTracks = sqliteTable("instrument_tracks", {
   type: text("type", { enum: ["instrument", "audio", "vocal"] }).notNull(),
   color: text("color"),
   sortOrder: integer("sort_order").notNull().default(0),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
 });
 
 export const insertInstrumentTrackSchema = createInsertSchema(instrumentTracks);
