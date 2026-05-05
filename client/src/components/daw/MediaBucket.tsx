@@ -197,12 +197,39 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     }
   }, [tracks]);
 
+  // ── Persist selection to localStorage ───────────────────────────────────────
+
+  useEffect(() => {
+    if (selectedTrack) {
+      localStorage.setItem('patchbay-selected-track', selectedTrack.id);
+    }
+    if (selectedIdea) {
+      localStorage.setItem('patchbay-selected-idea', selectedIdea.id);
+    }
+  }, [selectedTrack?.id, selectedIdea?.id]);
+
   // ── URL param context (instrument / section / file) ──────────────────────────
 
   useEffect(() => {
     if (!tracks.length) return;
     if (sessionRestored.current) return;
     sessionRestored.current = true;
+
+    const savedTrackId = localStorage.getItem('patchbay-selected-track');
+    const savedIdeaId = localStorage.getItem('patchbay-selected-idea');
+
+    if (savedTrackId) {
+      const track = tracks.find(t => t.id === savedTrackId);
+      if (track) {
+        setSelectedTrack(track);
+        if (savedIdeaId) {
+          const idea = track.ideas.find(i => i.id === savedIdeaId);
+          if (idea) setSelectedIdea(idea);
+        }
+        return;
+      }
+    }
+
     const params = new URLSearchParams(window.location.search);
     const urlInstrument = params.get('instrument');
     const urlSection = params.get('section');
