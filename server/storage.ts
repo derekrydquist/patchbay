@@ -110,6 +110,7 @@ export interface IStorage {
   // Production Tasks
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
   getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
+  getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined>;
   upsertTask(data: InsertProductionTask): Promise<ProductionTask>;
   updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined>;
   getTaskComments(taskId: string): Promise<TaskComment[]>;
@@ -444,6 +445,20 @@ export class SQLiteStorage implements IStorage {
 
   async getTasksForSong(songId: string): Promise<ProductionTask[]> {
     return db.select().from(productionTasks).where(eq(productionTasks.songId, songId)).all();
+  }
+
+  async getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined> {
+    const track = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.name, instrument)))
+      .get();
+    if (!track) return undefined;
+    const idea = db.select().from(ideas)
+      .where(and(eq(ideas.trackId, track.id), eq(ideas.sectionName, sectionName)))
+      .get();
+    if (!idea) return undefined;
+    return db.select().from(clips)
+      .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
+      .get();
   }
 
   async getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined> {

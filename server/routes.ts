@@ -388,6 +388,31 @@ export async function registerRoutes(
       }
     }
 
+    if (taskUpdates.status && taskUpdates.status !== "complete" && previous?.status === "complete") {
+      try {
+        console.log("[unmark] checking for final clip — instrument:", task.instrument, "sectionName:", task.sectionName, "songId:", task.songId);
+        const finalClip = await storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId);
+        console.log("[unmark] finalClip result:", finalClip);
+        if (finalClip) {
+          await storage.updateClip(finalClip.id, { isFinal: false });
+          const statusNames: Record<string, string> = {
+            "todo": "To Do",
+            "in-progress": "In Progress",
+            "will-not-play": "Will Not Play",
+          };
+          await storage.addTaskComment({
+            id: randomUUID(),
+            taskId: req.params.id,
+            author: commentAuthor || "Unknown",
+            text: `Clip unmarked as final: "${finalClip.name}". Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`,
+            timestamp: Date.now(),
+          });
+        }
+      } catch (err) {
+        console.error("[task patch] failed to unmark final clip:", err);
+      }
+    }
+
     res.json(task);
   });
 

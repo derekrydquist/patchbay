@@ -34,7 +34,8 @@ const STATUS_CONFIG: Record<TaskStatus, StatusCfg> = {
   'will-not-play': { label: 'WILL NOT PLAY', icon: Minus,        iconClass: 'text-white/20', cellBg: 'bg-white/[0.02]' },
 };
 
-type BucketIdea = { id: string; sectionName: string };
+type BucketClip = { id: string; name: string; isFinal: boolean };
+type BucketIdea = { id: string; sectionName: string; clips: BucketClip[] };
 type BucketTrack = { id: string; name: string; ideas: BucketIdea[] };
 
 function avatarColor(name: string): string {
@@ -95,6 +96,8 @@ function CellModal({
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['production-tasks', SONG_ID] });
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
     },
   });
 
@@ -352,6 +355,23 @@ export function ProductionTracker() {
     queryFn: () => fetch(`/api/songs/${SONG_ID}/bucket`).then(r => r.json()),
   });
 
+  const { data: finalClipsBucket = [] } = useQuery<BucketTrack[]>({
+    queryKey: ['final-clips', SONG_ID],
+    queryFn: () => fetch(`/api/songs/${SONG_ID}/bucket`).then(r => r.json()),
+  });
+
+  // Map of `${instrument}__${sectionName}` → final clip name
+  const finalClipsMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const track of finalClipsBucket) {
+      for (const idea of track.ideas) {
+        const finalClip = idea.clips?.find(c => c.isFinal);
+        if (finalClip) map[`${track.name}__${idea.sectionName}`] = finalClip.name;
+      }
+    }
+    return map;
+  }, [finalClipsBucket]);
+
   // Deduplicated sections in first-appearance order across all tracks
   const sections = useMemo(() => {
     const seen = new Set<string>();
@@ -443,7 +463,7 @@ export function ProductionTracker() {
                           </div>
                           {status === 'complete' && (
                             <div className="text-[10px] text-primary truncate font-bold font-mono">
-                              {task?.title}
+                              {finalClipsMap[`${track.name}__${section}`] ?? task?.title}
                             </div>
                           )}
                         </div>

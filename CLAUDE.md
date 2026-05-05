@@ -395,7 +395,7 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
@@ -560,7 +560,9 @@ Implemented in `BucketClip` (`Clip.tsx`). On `onMouseEnter`, creates `new Audio(
 
 **Not in `MediaBucket.tsx`** — all audio logic lives entirely in `BucketClip`. Do not move it to MediaBucket or duplicate it on the version row wrapper there.
 
-**`isFinal` persistence** — "Mark as Final" in the `BucketClip` context menu calls `PATCH /api/clips/:clipId` with `{ isFinal }`. Local state is optimistically updated and reverted on API failure. A `useEffect` syncs `isFinal` from the prop whenever the bucket query refetches: `useEffect(() => { setIsFinal(clip.isFinal ?? false); }, [clip.isFinal])`. This prevents stale local state after the bucket cache is invalidated.
+**`isFinal` persistence** — "Mark as Final" in the `BucketClip` context menu calls `PATCH /api/clips/:clipId` with `{ isFinal, author: 'Unknown' }`. Local state is optimistically updated and reverted on API failure. A `useEffect` syncs `isFinal` from the prop whenever the bucket query refetches: `useEffect(() => { setIsFinal(clip.isFinal ?? false); }, [clip.isFinal])`. This prevents stale local state after the bucket cache is invalidated.
+
+On success, `BucketClip` invalidates three query keys: `['bucket', 'patchbay-default']`, `['production-tasks', 'patchbay-default']`, and `['final-clips', 'patchbay-default']`.
 
 If adding a progress indicator or waveform in the future, extend `BucketClip` — the `audioRef` is already available.
 
@@ -578,6 +580,46 @@ Do not change this to alphabetical or insertion-point ordering without discussio
 ### Media Bucket — session persistence
 
 `MediaBucket.tsx` persists the last selected instrument and section idea to `localStorage` under keys `patchbay-selected-track` and `patchbay-selected-idea`. On mount, a one-time restore effect (guarded by a `sessionRestored` ref) reads these keys and restores the selection before falling back to URL param logic. The guard ensures the restore only runs once — it does not re-run on subsequent bucket refetches, preventing the selection from snapping back on poll.
+
+### isFinal ↔ task status bidirectional sync
+
+Marking a clip as final and changing a task's status are kept in sync automatically. All sync logic lives in `server/routes.ts` — no frontend coordination needed beyond cache invalidation.
+
+**isFinal: true → task auto-completes**
+
+In `PATCH /api/clips/:clipId`, when `isFinal === true` is received and the linked task is not already "complete":
+1. Walk the chain: clip → idea (via `clip.ideaId`) → track (via `idea.trackId`) → call `storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName)`
+2. Call `storage.updateTask(task.id, { status: "complete" })`
+3. Call `storage.addTaskComment()` with text: `Clip marked as final: "{clip.name}"`
+
+**isFinal: false → task reverts to in-progress**
+
+Same lookup chain. Only fires if the task is currently "complete". Sets task to `"in-progress"` and adds a comment: `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
+
+**Task changed away from "complete" → clip unmarked**
+
+In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete"` and the previous status was `"complete"`:
+1. Call `storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId)` — three sequential DB lookups: track by songId+name → idea by trackId+sectionName → clip where isFinal=true
+2. If found, call `storage.updateClip(clip.id, { isFinal: false })`
+3. Call `storage.addTaskComment()` with text: `Clip unmarked as final: "{clip.name}". Status changed to {new status label}.`
+
+**Author field**
+
+Both PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `task.assignee || 'Unknown'` for task patches and `'Unknown'` for clip patches — ready to swap for a real username once auth is built.
+
+**Status change comment logging (manual)**
+
+In `PATCH /api/production-tasks/:id`, whenever `req.body.status` differs from the pre-update status, a system comment is appended:
+- `"todo"` → `"Status changed to To Do"`
+- `"in-progress"` → `"Status changed to In Progress"`
+- `"complete"` → `"Status changed to Complete"`
+- `"will-not-play"` → `"Status changed to Will Not Play"`
+
+**`['final-clips', 'patchbay-default']` query key**
+
+`ProductionTracker` subscribes to this key via a `useQuery` that fetches `/api/songs/${SONG_ID}/bucket` and derives a `finalClipsMap: Record<"${instrument}__${sectionName}", clipName>`. Complete cells in the grid show the actual final clip name from this map (falling back to `task.title`). The key is invalidated by both `BucketClip.handleToggleFinal` and `CellModal.patchTask.onSettled`, causing the grid to update instantly.
+
+`patchTask.onSettled` in `CellModal` invalidates: `['production-tasks', SONG_ID]`, `['task-comments', task.id]`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`.
 
 ### Timeline background right-click context menu
 
