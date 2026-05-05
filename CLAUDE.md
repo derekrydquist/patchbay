@@ -395,7 +395,8 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast |
+| Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
@@ -429,7 +430,10 @@ PATCH  /api/songs/:id                    — partial update of song metadata
 GET    /api/songs/:id/timeline           — get instrument tracks with their placed timeline clips
                                            auto-bootstraps the default song + tracks if missing
 POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body: InsertTimelineClip
-PATCH  /api/timeline-clips/:id           — update a placed clip (e.g. new start position)
+PATCH  /api/timeline-clips/:id           — update a placed clip (start position, etc.); also accepts
+                                           { isFinal: bool, author? } to mark/unmark the clip as
+                                           final — syncs the bucket clip via syncFinalClipFromTimeline
+                                           and updates the linked production task status
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
@@ -583,18 +587,39 @@ Do not change this to alphabetical or insertion-point ordering without discussio
 
 ### isFinal ↔ task status bidirectional sync
 
-Marking a clip as final and changing a task's status are kept in sync automatically. All sync logic lives in `server/routes.ts` — no frontend coordination needed beyond cache invalidation.
+Marking a clip as final and changing a task's status are kept in sync automatically. There are **three entry points**, all handled in `server/routes.ts`.
 
-**isFinal: true → task auto-completes**
+**Entry point 1 — bucket clip marked final (`PATCH /api/clips/:clipId`)**
 
-In `PATCH /api/clips/:clipId`, when `isFinal === true` is received and the linked task is not already "complete":
-1. Walk the chain: clip → idea (via `clip.ideaId`) → track (via `idea.trackId`) → call `storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName)`
-2. Call `storage.updateTask(task.id, { status: "complete" })`
-3. Call `storage.addTaskComment()` with text: `Clip marked as final: "{clip.name}"`
+When `isFinal === true` and the linked task is not already "complete":
+1. Walk the chain: clip → idea (via `clip.ideaId`) → track (via `idea.trackId`) → `storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName)`
+2. `storage.updateTask(task.id, { status: "complete" })`
+3. `storage.addTaskComment()` with text: `Clip marked as final: "{clip.name}"`
 
-**isFinal: false → task reverts to in-progress**
+When `isFinal === false` and the task is currently "complete": sets task to `"in-progress"` and logs `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
 
-Same lookup chain. Only fires if the task is currently "complete". Sets task to `"in-progress"` and adds a comment: `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
+**Entry point 2 — timeline clip marked final (`PATCH /api/timeline-clips/:id`)**
+
+`TimelineClip.handleMarkFinal` in `Clip.tsx` sends `PATCH /api/timeline-clips/:id` with `{ isFinal, author: 'Unknown' }`.
+
+The route strips `isFinal` and `author` from the body before passing the remainder to `storage.updateTimelineClip`. If `clipUpdates` is empty (as it is for a pure isFinal call), the route fetches the clip directly instead of calling `.set({})` on an empty object (which would throw a Drizzle error).
+
+When `isFinal === true || false`, the route:
+1. Calls `storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal)` to persist to the bucket
+2. Looks up the track via `clip.trackId`, then calls `storage.getTaskByInstrumentSection` to find the task
+3. Applies the same complete/revert logic and comment as entry point 1
+
+**`syncFinalClipFromTimeline(trackId, sectionName, clipName, isFinal)`** (in `storage.ts`):
+- Looks up the idea via `trackId + sectionName`
+- Fetches all clips for that idea
+- If `isFinal: true`: clears `isFinal` on all sibling clips first, then sets `isFinal = true` on the clip whose name matches `clipName` (falls back to the most recently created clip if no exact match)
+- If `isFinal: false`: clears `isFinal` on any currently-final clip for that idea
+
+On success, `TimelineClip.handleMarkFinal` invalidates: `['production-tasks', 'patchbay-default']`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`.
+
+**Entry point 3 — task manually set to "complete" (`PATCH /api/production-tasks/:id`)**
+
+See "Complete status guard" section below.
 
 **Task changed away from "complete" → clip unmarked**
 
@@ -605,7 +630,7 @@ In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete
 
 **Author field**
 
-Both PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `'Unknown'` for all task and clip patches — a uniform placeholder until auth is built. Do not use `task.assignee` as the author; the assignee is who the task is assigned to, not who is making the change.
+All three PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `'Unknown'` for all patches — a uniform placeholder until auth is built. Do not use `task.assignee` as the author.
 
 **Change comment logging (manual)**
 
@@ -616,6 +641,28 @@ Both PATCH routes accept an optional `author` field in `req.body`. It is destruc
 - **Due date** — if `'dueDate' in req.body` and value differs from previous: `"Due date set to {date}"` or `"Due date removed"`
 
 All three use `'in taskUpdates'` checks (not truthiness) to distinguish "field was sent as empty" from "field was not sent at all".
+
+### Complete status guard
+
+`PATCH /api/production-tasks/:id` enforces a rule when `status === "complete"`: at least one of these conditions must be true or the request is rejected with 400.
+
+**Condition A** — a clip exists in the timeline for this instrument+section (query `timelineClips` joined to `instrumentTracks` by trackId, filtered by `instrumentTracks.name = task.instrument`, `instrumentTracks.songId = task.songId`, `timelineClips.sectionName = task.sectionName`). Storage method: `getTimelineClipForTask(instrument, sectionName, songId)`.
+
+**Condition B** — a bucket clip with `isFinal = true` exists for this instrument+section. Storage method: `getFinalClipForTask(instrument, sectionName, songId)`.
+
+If **neither** passes → `400 { message: "Cannot mark as complete — no clip in the timeline or marked as final for this instrument and section." }`
+
+If **A passes but B does not** (clip on timeline, nothing yet marked final in bucket) → the route auto-promotes a bucket clip to final:
+1. Looks up the track → idea → first clip for that idea
+2. Calls `storage.updateClip(bucketClip.id, { isFinal: true })`
+3. Logs `Clip marked as final: "{bucketClip.name}"` as a session note
+4. Then proceeds with `updateTask()` as normal
+
+If **B passes** (final clip already exists) → proceeds directly with `updateTask()`.
+
+The guard runs **before** `updateTask()` is called, so a rejected request makes no DB changes.
+
+**Frontend** — `CellModal.patchTask.mutationFn` throws on non-OK responses. `onError` calls `useToast()` with `variant: 'destructive'` and the server's message. The optimistic update is rolled back via `context.prev`. `<Toaster />` is mounted in `App.tsx` at the app root.
 
 **`['final-clips', 'patchbay-default']` query key**
 
@@ -647,6 +694,15 @@ git commit -m "Brief description of what was built"
 If something breaks badly, `git stash` or `git checkout .` can revert all uncommitted changes instantly.
 
 `.gitignore` includes: `node_modules/`, `dist/`, `.env`, `patchbay.db`, `patchbay.db-shm`, `patchbay.db-wal`, `uploads/`, `.local/`.
+
+---
+
+## Temporary Debug Logs (Remove When Done)
+
+The following `console.log` calls were added for debugging and should be removed once the isFinal sync is confirmed working:
+
+- `server/routes.ts` — `PATCH /api/timeline-clips/:id`: `[timeline clip patch] req.body`, `[timeline clip patch] isFinal sync triggered`, `[sync] calling syncFinalClipFromTimeline`, `[timeline clip patch] task found`
+- `server/storage.ts` — `syncFinalClipFromTimeline`: `[sync] idea found`, `[sync] clips found for idea`, `[sync] name-matched clip`
 
 ---
 

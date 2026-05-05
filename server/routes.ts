@@ -5,7 +5,7 @@ import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and } from "drizzle-orm";
+import { eq, and, ne, count } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import {
@@ -21,6 +21,7 @@ import {
   timelineClips,
   instrumentTracks,
   productionTasks,
+  taskComments,
 } from "@shared/schema";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -410,6 +411,23 @@ export async function registerRoutes(
   app.get("/api/songs/:songId/production-tasks", async (req, res) => {
     const tasks = await storage.getTasksForSong(req.params.songId);
     res.json(tasks);
+  });
+
+  app.get("/api/songs/:songId/task-comment-counts", async (req, res) => {
+    const rows = db
+      .select({ taskId: taskComments.taskId, count: count() })
+      .from(taskComments)
+      .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
+      .where(and(
+        eq(productionTasks.songId, req.params.songId),
+        ne(taskComments.author, 'System'),
+        ne(taskComments.author, 'Unknown')
+      ))
+      .groupBy(taskComments.taskId)
+      .all();
+    const result: Record<string, number> = {};
+    for (const row of rows) result[row.taskId] = row.count;
+    res.json(result);
   });
 
   app.patch("/api/production-tasks/:id", async (req, res) => {

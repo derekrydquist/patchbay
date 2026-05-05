@@ -123,6 +123,7 @@ function CellModal({
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+      queryClient.invalidateQueries({ queryKey: ['task-comment-counts', SONG_ID] });
       setNewComment('');
     },
   });
@@ -378,6 +379,11 @@ export function ProductionTracker() {
     queryFn: () => fetch(`/api/songs/${SONG_ID}/bucket`).then(r => r.json()),
   });
 
+  const { data: commentCounts = {} } = useQuery<Record<string, number>>({
+    queryKey: ['task-comment-counts', SONG_ID],
+    queryFn: () => fetch(`/api/songs/${SONG_ID}/task-comment-counts`).then(r => r.json()),
+  });
+
   // Map of `${instrument}__${sectionName}` → final clip name
   const finalClipsMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -460,46 +466,59 @@ export function ProductionTracker() {
                       key={track.id}
                       onClick={() => task && setActiveTaskId(task.id)}
                       className={cn(
-                        'relative border-t border-l border-white/5 min-h-[78px] p-3 text-left transition-all cursor-pointer',
+                        'relative border-t border-l border-white/5 min-h-[78px] p-3 text-left transition-all cursor-pointer flex flex-col',
                         'hover:bg-white/5 hover:shadow-[inset_0_0_0_1px_#D4AF37] focus:outline-none focus:ring-2 focus:ring-primary/40',
                         cfg.cellBg
                       )}
                     >
-                      <div className="flex items-start gap-2">
-                        <div className="space-y-2 min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <Icon size={13} className={cfg.iconClass} />
-                            <span className={cn(
-                              'text-[9px] uppercase tracking-[0.2em] font-bold truncate',
-                              status === 'complete'      && 'text-primary',
-                              status === 'in-progress'   && 'text-blue-300',
-                              status === 'will-not-play' && 'text-white/20 line-through',
-                              status === 'todo'          && 'text-white/45'
-                            )}>
-                              {cfg.label}
-                            </span>
-                          </div>
-                          {status === 'complete' && (
-                            <div className="text-[10px] text-primary truncate font-bold font-mono">
-                              {finalClipsMap[`${track.name}__${section}`] ?? task?.title}
-                            </div>
-                          )}
+                      {/* TOP ZONE */}
+                      <div className="flex-1 space-y-2 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Icon size={13} className={cfg.iconClass} />
+                          <span className={cn(
+                            'text-[9px] uppercase tracking-[0.2em] font-bold truncate',
+                            status === 'complete'      && 'text-primary',
+                            status === 'in-progress'   && 'text-blue-300',
+                            status === 'will-not-play' && 'text-white/20 line-through',
+                            status === 'todo'          && 'text-white/45'
+                          )}>
+                            {cfg.label}
+                          </span>
                         </div>
-                        {(task?.assignee || task?.dueDate) && (
-                          <div className="flex flex-col items-end gap-1 shrink-0">
-                            {task.assignee && (
-                              <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white', avatarColor(task.assignee))}>
+                        {status === 'complete' && (
+                          <div className="text-[10px] text-primary truncate font-bold font-mono">
+                            {finalClipsMap[`${track.name}__${section}`] ?? task?.title}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* BOTTOM ZONE */}
+                      {task && (
+                        (commentCounts[task.id] ?? 0) > 0 || task.assignee || task.dueDate
+                      ) && (
+                        <div className="flex items-center justify-between w-full mt-auto pt-1">
+                          <div className="flex items-center gap-1.5">
+                            {task?.assignee && (
+                              <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(task.assignee))}>
                                 {task.assignee.charAt(0)}
                               </div>
                             )}
-                            {task.dueDate && (
+                            {task?.dueDate && (
                               <div className="text-[9px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded">
                                 {new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                               </div>
                             )}
                           </div>
-                        )}
-                      </div>
+                          <div className="flex items-center gap-0.5 text-white/50">
+                            {(commentCounts[task.id] ?? 0) > 0 && (
+                              <>
+                                <MessageSquare size={10} />
+                                <span className="text-[9px] font-mono">{commentCounts[task.id]}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </button>
                   );
                 })}
