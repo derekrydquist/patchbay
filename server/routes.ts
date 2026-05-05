@@ -5,7 +5,7 @@ import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import {
@@ -17,6 +17,8 @@ import {
   insertProductionTaskSchema,
   insertTaskCommentSchema,
   ideas,
+  clips,
+  timelineClips,
   instrumentTracks,
   productionTasks,
 } from "@shared/schema";
@@ -161,8 +163,54 @@ export async function registerRoutes(
   });
 
   app.patch("/api/timeline-clips/:id", async (req, res) => {
-    const clip = await storage.updateTimelineClip(req.params.id, req.body);
+    console.log("[timeline clip patch] req.body:", JSON.stringify(req.body));
+    const { isFinal, author: commentAuthor, ...clipUpdates } = req.body;
+    const clip = Object.keys(clipUpdates).length > 0
+      ? await storage.updateTimelineClip(req.params.id, clipUpdates)
+      : db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     if (!clip) return res.status(404).json({ message: "Clip not found" });
+
+    if (isFinal === true || isFinal === false) {
+      console.log("[timeline clip patch] isFinal sync triggered — trackId:", clip.trackId);
+      try {
+        // Sync isFinal to the corresponding bucket clip so it persists across reloads
+        if (clip.sectionName) {
+          console.log("[sync] calling syncFinalClipFromTimeline — trackId:", clip.trackId, "sectionName:", clip.sectionName, "clipName:", clip.name, "isFinal:", isFinal);
+          await storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal);
+        }
+
+        const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clip.trackId)).get();
+        if (track && clip.sectionName) {
+          const task = await storage.getTaskByInstrumentSection(track.songId, track.name, clip.sectionName);
+          console.log("[timeline clip patch] task found:", task);
+          if (task) {
+            const author = commentAuthor || "Unknown";
+            if (isFinal === true && task.status !== "complete") {
+              await storage.updateTask(task.id, { status: "complete" });
+              await storage.addTaskComment({
+                id: randomUUID(),
+                taskId: task.id,
+                author,
+                text: `Clip marked as final: "${clip.name}"`,
+                timestamp: Date.now(),
+              });
+            } else if (isFinal === false && task.status === "complete") {
+              await storage.updateTask(task.id, { status: "in-progress" });
+              await storage.addTaskComment({
+                id: randomUUID(),
+                taskId: task.id,
+                author,
+                text: `Clip unmarked as final: "${clip.name}". Status reverted to In Progress.`,
+                timestamp: Date.now(),
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[timeline-clip isFinal] failed to sync task status:", err);
+      }
+    }
+
     res.json(clip);
   });
 
@@ -365,10 +413,52 @@ export async function registerRoutes(
   });
 
   app.patch("/api/production-tasks/:id", async (req, res) => {
-    console.log("[task patch] req.body:", JSON.stringify(req.body));
     const { author: commentAuthor, ...taskUpdates } = req.body;
 
     const previous = db.select().from(productionTasks).where(eq(productionTasks.id, req.params.id)).get();
+
+    if (taskUpdates.status === "complete") {
+      if (!previous) return res.status(404).json({ message: "Task not found" });
+
+      const [timelineClipForTask, finalClipForTask] = await Promise.all([
+        storage.getTimelineClipForTask(previous.instrument, previous.sectionName, previous.songId),
+        storage.getFinalClipForTask(previous.instrument, previous.sectionName, previous.songId),
+      ]);
+
+      if (!timelineClipForTask && !finalClipForTask) {
+        return res.status(400).json({
+          message: "Cannot mark as complete — no clip in the timeline or marked as final for this instrument and section.",
+        });
+      }
+
+      if (timelineClipForTask && !finalClipForTask) {
+        try {
+          const track = db.select().from(instrumentTracks)
+            .where(and(eq(instrumentTracks.songId, previous.songId), eq(instrumentTracks.name, previous.instrument)))
+            .get();
+          if (track) {
+            const idea = db.select().from(ideas)
+              .where(and(eq(ideas.trackId, track.id), eq(ideas.sectionName, previous.sectionName)))
+              .get();
+            if (idea) {
+              const bucketClip = db.select().from(clips).where(eq(clips.ideaId, idea.id)).get();
+              if (bucketClip) {
+                await storage.updateClip(bucketClip.id, { isFinal: true });
+                await storage.addTaskComment({
+                  id: randomUUID(),
+                  taskId: req.params.id,
+                  author: commentAuthor || "Unknown",
+                  text: `Clip marked as final: "${bucketClip.name}"`,
+                  timestamp: Date.now(),
+                });
+              }
+            }
+          }
+        } catch (err) {
+          console.error("[task patch] failed to auto-mark clip as final:", err);
+        }
+      }
+    }
 
     const task = await storage.updateTask(req.params.id, taskUpdates);
     if (!task) return res.status(404).json({ message: "Task not found" });
@@ -412,9 +502,7 @@ export async function registerRoutes(
 
     if (taskUpdates.status && taskUpdates.status !== "complete" && previous?.status === "complete") {
       try {
-        console.log("[unmark] checking for final clip — instrument:", task.instrument, "sectionName:", task.sectionName, "songId:", task.songId);
         const finalClip = await storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId);
-        console.log("[unmark] finalClip result:", finalClip);
         if (finalClip) {
           await storage.updateClip(finalClip.id, { isFinal: false });
           const statusNames: Record<string, string> = {

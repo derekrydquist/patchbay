@@ -2,6 +2,7 @@ import { Switch, Route } from "wouter";
 import Dashboard from "./pages/Dashboard";
 import Workspace from "./pages/Workspace";
 import NotFound from "./pages/not-found";
+import { Toaster } from "@/components/ui/toaster";
 
 function Router() {
   return (
@@ -14,5 +15,10 @@ function Router() {
 }
 
 export default function App() {
-  return <Router />;
+  return (
+    <>
+      <Router />
+      <Toaster />
+    </>
+  );
 }

@@ -213,6 +213,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
   const [newComment, setNewComment] = useState("");
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [comments, setComments] = useState(clip.comments || []);
+  const queryClient = useQueryClient();
   
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
@@ -251,8 +252,25 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
     setComments(newComments);
   };
 
-  const handleMarkFinal = () => {
-    setIsFinal(!isFinal);
+  const handleMarkFinal = async () => {
+    const newIsFinal = !isFinal;
+    setIsFinal(newIsFinal); // optimistic
+    try {
+      const res = await fetch(`/api/timeline-clips/${clip.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isFinal: newIsFinal, author: 'Unknown' }),
+      });
+      if (!res.ok) {
+        setIsFinal(!newIsFinal); // revert
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+    } catch {
+      setIsFinal(!newIsFinal); // revert
+    }
   };
 
   const findVersions = () => {

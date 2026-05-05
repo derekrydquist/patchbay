@@ -106,11 +106,13 @@ export interface IStorage {
   createClip(data: InsertClip): Promise<Clip>;
   countClipsForIdea(ideaId: string): Promise<number>;
   updateClip(clipId: string, updates: Partial<InsertClip>): Promise<Clip | undefined>;
+  syncFinalClipFromTimeline(trackId: string, sectionName: string, clipName: string, isFinal: boolean): Promise<void>;
 
   // Production Tasks
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
   getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
   getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined>;
+  getTimelineClipForTask(instrument: string, sectionName: string, songId: string): Promise<TimelineClip | undefined>;
   upsertTask(data: InsertProductionTask): Promise<ProductionTask>;
   updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined>;
   getTaskComments(taskId: string): Promise<TaskComment[]>;
@@ -441,6 +443,32 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(clips).where(eq(clips.id, clipId)).get();
   }
 
+  async syncFinalClipFromTimeline(trackId: string, sectionName: string, clipName: string, isFinal: boolean): Promise<void> {
+    const idea = db.select().from(ideas)
+      .where(and(eq(ideas.trackId, trackId), eq(ideas.sectionName, sectionName)))
+      .get();
+    console.log("[sync] idea found:", idea);
+    if (!idea) return;
+
+    const ideaClips = db.select().from(clips).where(eq(clips.ideaId, idea.id)).all();
+    console.log("[sync] clips found for idea:", ideaClips);
+    if (!ideaClips.length) return;
+
+    if (isFinal) {
+      // Clear isFinal on all clips for this idea first
+      db.update(clips).set({ isFinal: false }).where(eq(clips.ideaId, idea.id)).run();
+      // Find exact name match, fall back to most recently created
+      const matchedClip = ideaClips.find(c => c.name === clipName)
+        ?? ideaClips.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      console.log("[sync] name-matched clip:", matchedClip);
+      db.update(clips).set({ isFinal: true }).where(eq(clips.id, matchedClip.id)).run();
+    } else {
+      db.update(clips).set({ isFinal: false })
+        .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
+        .run();
+    }
+  }
+
   // ── Production Tasks ───────────────────────────────────────────────────────
 
   async getTasksForSong(songId: string): Promise<ProductionTask[]> {
@@ -458,6 +486,16 @@ export class SQLiteStorage implements IStorage {
     if (!idea) return undefined;
     return db.select().from(clips)
       .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
+      .get();
+  }
+
+  async getTimelineClipForTask(instrument: string, sectionName: string, songId: string): Promise<TimelineClip | undefined> {
+    const track = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.name, instrument)))
+      .get();
+    if (!track) return undefined;
+    return db.select().from(timelineClips)
+      .where(and(eq(timelineClips.trackId, track.id), eq(timelineClips.sectionName, sectionName)))
       .get();
   }
 

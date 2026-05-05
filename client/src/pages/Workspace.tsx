@@ -16,7 +16,10 @@ import { cn } from '@/lib/utils';
 
 export default function Workspace() {
   const [location, setLocation] = useLocation();
-  const [activeTab, setActiveTab] = useState('timeline');
+  const [activeTab, setActiveTab] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('tab') === 'production' ? 'tasks' : 'timeline';
+  });
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [workingContext, setWorkingContext] = useState<{ instrument: string | null, section: string | null }>({ instrument: null, section: null });
@@ -26,11 +29,18 @@ export default function Workspace() {
     const searchParams = new URLSearchParams(window.location.search);
     const instrument = searchParams.get('instrument');
     const section = searchParams.get('section');
-    
+
     if (instrument || section) {
       setWorkingContext({ instrument, section });
     }
   }, [location]);
+
+  const handleTabChange = (value: string) => {
+    setActiveTab(value);
+    const params = new URLSearchParams(window.location.search);
+    params.set('tab', value === 'tasks' ? 'production' : 'arrangement');
+    setLocation(`/workspace?${params.toString()}`);
+  };
 
   const [members, setMembers] = useState([
     { id: 1, name: 'John Doe (You)', email: 'john@example.com', role: 'Owner', instrument: 'All Tracks', initials: 'JD', color: 'bg-primary/20 text-primary' },
@@ -55,7 +65,7 @@ export default function Workspace() {
             </h1>
           </div>
           
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full">
+          <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full">
             <TabsList className="bg-transparent border-none p-0 h-14 gap-1">
               <TabsTrigger 
                 value="timeline" 

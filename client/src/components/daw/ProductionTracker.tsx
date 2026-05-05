@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useToast } from '@/hooks/use-toast';
 import {
   CheckCircle2, Circle, Clock, Minus, Music2, Plus, MessageSquare, Pencil, Trash2,
 } from 'lucide-react';
@@ -65,6 +66,7 @@ function CellModal({
   task: ProductionTask;
 }) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const [newComment, setNewComment] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
@@ -76,12 +78,18 @@ function CellModal({
   });
 
   const patchTask = useMutation({
-    mutationFn: (updates: Partial<ProductionTask>) =>
-      fetch(`/api/production-tasks/${task.id}`, {
+    mutationFn: async (updates: Partial<ProductionTask>) => {
+      const r = await fetch(`/api/production-tasks/${task.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...updates, author: 'Unknown' }),
-      }).then(r => r.json()),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to update task');
+      }
+      return r.json();
+    },
     onMutate: async (updates) => {
       await queryClient.cancelQueries({ queryKey: ['production-tasks', SONG_ID] });
       const prev = queryClient.getQueryData<ProductionTask[]>(['production-tasks', SONG_ID]);
@@ -90,8 +98,13 @@ function CellModal({
       );
       return { prev };
     },
-    onError: (_err, _vars, context) => {
+    onError: (err, _vars, context) => {
       if (context?.prev) queryClient.setQueryData(['production-tasks', SONG_ID], context.prev);
+      toast({
+        title: 'Cannot update task',
+        description: err instanceof Error ? err.message : 'An error occurred.',
+        variant: 'destructive',
+      });
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['production-tasks', SONG_ID] });
@@ -345,6 +358,11 @@ function CellModal({
 export function ProductionTracker() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 
+  const { data: song } = useQuery<{ name: string }>({
+    queryKey: ['song', SONG_ID],
+    queryFn: () => fetch(`/api/songs/${SONG_ID}`).then(r => r.json()),
+  });
+
   const { data: tasks = [] } = useQuery<ProductionTask[]>({
     queryKey: ['production-tasks', SONG_ID],
     queryFn: () => fetch(`/api/songs/${SONG_ID}/production-tasks`).then(r => r.json()),
@@ -411,14 +429,14 @@ export function ProductionTracker() {
 
       {/* ── Grid ── */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="min-w-[1100px] rounded-2xl border border-white/5 bg-white/[0.02] shadow-2xl shadow-black/40 overflow-hidden">
+        <div className="min-w-[1100px] border border-white/5 bg-white/[0.02] shadow-2xl shadow-black/40 overflow-hidden">
           <div
             className="grid"
             style={{ gridTemplateColumns: `220px repeat(${bucket.length}, minmax(150px, 1fr))` }}
           >
             {/* Column headers */}
             <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center">
-              <span className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">Song Sections</span>
+              <span className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">{song?.name ?? 'Song Sections'}</span>
             </div>
             {bucket.map((track) => (
               <div key={track.id} className="border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
@@ -442,8 +460,8 @@ export function ProductionTracker() {
                       key={track.id}
                       onClick={() => task && setActiveTaskId(task.id)}
                       className={cn(
-                        'relative border-t border-l border-white/5 min-h-[78px] p-3 text-left transition-all',
-                        'hover:bg-white/[0.04] focus:outline-none focus:ring-2 focus:ring-primary/40',
+                        'relative border-t border-l border-white/5 min-h-[78px] p-3 text-left transition-all cursor-pointer',
+                        'hover:bg-white/5 hover:shadow-[inset_0_0_0_1px_#D4AF37] focus:outline-none focus:ring-2 focus:ring-primary/40',
                         cfg.cellBg
                       )}
                     >
