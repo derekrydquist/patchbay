@@ -605,15 +605,17 @@ In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete
 
 **Author field**
 
-Both PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `task.assignee || 'Unknown'` for task patches and `'Unknown'` for clip patches — ready to swap for a real username once auth is built.
+Both PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `'Unknown'` for all task and clip patches — a uniform placeholder until auth is built. Do not use `task.assignee` as the author; the assignee is who the task is assigned to, not who is making the change.
 
-**Status change comment logging (manual)**
+**Change comment logging (manual)**
 
-In `PATCH /api/production-tasks/:id`, whenever `req.body.status` differs from the pre-update status, a system comment is appended:
-- `"todo"` → `"Status changed to To Do"`
-- `"in-progress"` → `"Status changed to In Progress"`
-- `"complete"` → `"Status changed to Complete"`
-- `"will-not-play"` → `"Status changed to Will Not Play"`
+`PATCH /api/production-tasks/:id` always fetches the pre-update task (unconditional PK lookup) so it can diff every field. After `updateTask()` succeeds, three independent fire-and-forget comment blocks run:
+
+- **Status** — if `req.body.status` differs from previous: `"Status changed to To Do"` / `"Status changed to In Progress"` / `"Status changed to Complete"` / `"Status changed to Will Not Play"`
+- **Assignee** — if `'assignee' in req.body` and value differs from previous: `"Assignee set to {name}"` or `"Assignee removed"`
+- **Due date** — if `'dueDate' in req.body` and value differs from previous: `"Due date set to {date}"` or `"Due date removed"`
+
+All three use `'in taskUpdates'` checks (not truthiness) to distinguish "field was sent as empty" from "field was not sent at all".
 
 **`['final-clips', 'patchbay-default']` query key**
 

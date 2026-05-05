@@ -368,12 +368,12 @@ export async function registerRoutes(
     console.log("[task patch] req.body:", JSON.stringify(req.body));
     const { author: commentAuthor, ...taskUpdates } = req.body;
 
-    const previous = taskUpdates.status
-      ? db.select().from(productionTasks).where(eq(productionTasks.id, req.params.id)).get()
-      : null;
+    const previous = db.select().from(productionTasks).where(eq(productionTasks.id, req.params.id)).get();
 
     const task = await storage.updateTask(req.params.id, taskUpdates);
     if (!task) return res.status(404).json({ message: "Task not found" });
+
+    const author = commentAuthor || "Unknown";
 
     if (previous && taskUpdates.status && taskUpdates.status !== previous.status) {
       const label = STATUS_LABELS[taskUpdates.status as string];
@@ -381,11 +381,33 @@ export async function registerRoutes(
         storage.addTaskComment({
           id: randomUUID(),
           taskId: req.params.id,
-          author: commentAuthor || "Unknown",
+          author,
           text: label,
           timestamp: Date.now(),
         }).catch(console.error);
       }
+    }
+
+    if (previous && 'assignee' in taskUpdates && taskUpdates.assignee !== previous.assignee) {
+      const text = !taskUpdates.assignee ? "Assignee removed" : `Assignee set to ${taskUpdates.assignee}`;
+      storage.addTaskComment({
+        id: randomUUID(),
+        taskId: req.params.id,
+        author,
+        text,
+        timestamp: Date.now(),
+      }).catch(console.error);
+    }
+
+    if (previous && 'dueDate' in taskUpdates && taskUpdates.dueDate !== previous.dueDate) {
+      const text = !taskUpdates.dueDate ? "Due date removed" : `Due date set to ${taskUpdates.dueDate}`;
+      storage.addTaskComment({
+        id: randomUUID(),
+        taskId: req.params.id,
+        author,
+        text,
+        timestamp: Date.now(),
+      }).catch(console.error);
     }
 
     if (taskUpdates.status && taskUpdates.status !== "complete" && previous?.status === "complete") {
@@ -403,7 +425,7 @@ export async function registerRoutes(
           await storage.addTaskComment({
             id: randomUUID(),
             taskId: req.params.id,
-            author: commentAuthor || "Unknown",
+            author,
             text: `Clip unmarked as final: "${finalClip.name}". Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`,
             timestamp: Date.now(),
           });
