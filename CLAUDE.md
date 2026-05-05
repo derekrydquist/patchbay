@@ -170,7 +170,7 @@ in route handlers.
 
 `server/storage.ts` exports `DEFAULT_SONG_ID = "patchbay-default"`. The first call to `GET /api/songs/:id/timeline` auto-creates this song and its five default instrument tracks if they don't exist yet (using `INSERT OR IGNORE`). The default track IDs are stable strings: `track-drums`, `track-bass`, `track-guitar-1`, `track-guitar-2`, `track-vocals`.
 
-`storage.ts` also exports `DEFAULT_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"]`. The bootstrap inserts 35 idea rows (5 tracks × 7 sections) using stable IDs like `idea-track-drums-0`. Ideas use `onConflictDoNothing()` — hidden ideas (active = false) already exist in the DB so they won't be re-inserted. Default tracks check for existence first: if a track exists with `active = false`, the bootstrap skips it entirely (does not re-show it). Both mechanisms ensure hide/restore persists across server restarts.
+`storage.ts` also exports `DEFAULT_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"]`. The bootstrap inserts 35 idea rows (5 tracks × 7 sections) using stable IDs like `idea-track-drums-0`, and 35 production task rows using stable IDs like `task-track-drums-0`. Both ideas and tasks use `onConflictDoNothing()` — existing rows (including hidden ones) are preserved. Default tracks check for existence first: if a track exists with `active = false`, the bootstrap skips it entirely (does not re-show it). All mechanisms ensure hide/restore persists across server restarts.
 
 ### Track IDs must be stable
 
@@ -363,8 +363,9 @@ A single uploaded audio file. Has:
 - `comments` — timestamped comments left by band members
 
 ### ProductionTask
-A task in the production tracker. Has status (`todo`, `in-progress`, `review`, `done`),
-priority, assignee, due date, and optional subtasks and comments.
+A task in the production tracker. Has status (`todo`, `in-progress`, `complete`, `will-not-play`),
+priority, assignee, due date, `instrument`, `sectionName`, and optional comments. One task is
+bootstrapped per instrument × section combination using deterministic IDs `task-{trackId}-{sectionIndex}`.
 
 ---
 
@@ -387,14 +388,14 @@ When implementing auth or any permission checks, always consult this table.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard page | ✅ UI done | Layout and components complete; data is still hardcoded mock data |
-| Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport and Production Tracker still use mock data |
+| Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
 | Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (AlertDialog confirmation); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
-| Production Tracker (Kanban) | ✅ UI done | Mock tasks only |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
@@ -445,9 +446,17 @@ PATCH  /api/ideas/:ideaId               — hide an idea (active=false); also de
 POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
 GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
+PATCH  /api/clips/:clipId               — partial update of a bucket clip (e.g. isFinal)
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
+
+GET    /api/songs/:songId/production-tasks        — list all tasks for a song
+PATCH  /api/production-tasks/:id                  — partial update of a task (status, assignee, dueDate, etc.)
+GET    /api/production-tasks/:id/comments         — list comments on a task
+POST   /api/production-tasks/:id/comments         — add a comment; body: { author, text }
+PATCH  /api/task-comments/:id                     — edit a comment's text; body: { text }
+DELETE /api/task-comments/:id                     — delete a comment → 204
 ```
 
 ---
@@ -544,7 +553,14 @@ These are features that have been deliberately designed for future extension. Wh
 
 Implemented in `BucketClip` (`Clip.tsx`). On `onMouseEnter`, creates `new Audio(clip.src)`, sets `volume = 0.7`, and calls `.play()` (wrapped in try/catch for blocked autoplay). On `onMouseLeave`, pauses and nulls the ref. A cleanup `useEffect` pauses on unmount. No-ops if `clip.src` is falsy.
 
-**Not in `MediaBucket.tsx`** — the handler lives entirely in `BucketClip`. Do not move it to MediaBucket or duplicate it on the version row wrapper there.
+**Three-layer defense against unwanted playback:**
+1. `isRightClicking` ref — set in `onContextMenu`, checked in `handleMouseEnter`; prevents audio starting when the user right-clicks
+2. `contextMenuOpen` state — checked in `handleMouseEnter`; also used in `ContextMenu onOpenChange` to stop any currently-playing audio the moment the context menu opens
+3. `onContextMenu` → sets `isRightClicking = true`; `onMouseLeave` resets it after 100ms to avoid race with the context menu opening
+
+**Not in `MediaBucket.tsx`** — all audio logic lives entirely in `BucketClip`. Do not move it to MediaBucket or duplicate it on the version row wrapper there.
+
+**`isFinal` persistence** — "Mark as Final" in the `BucketClip` context menu calls `PATCH /api/clips/:clipId` with `{ isFinal }`. Local state is optimistically updated and reverted on API failure. A `useEffect` syncs `isFinal` from the prop whenever the bucket query refetches: `useEffect(() => { setIsFinal(clip.isFinal ?? false); }, [clip.isFinal])`. This prevents stale local state after the bucket cache is invalidated.
 
 If adding a progress indicator or waveform in the future, extend `BucketClip` — the `audioRef` is already available.
 
@@ -558,6 +574,10 @@ Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that
 - MediaBucket renders ideas in the order the API returns them — no client-side re-sort
 
 Do not change this to alphabetical or insertion-point ordering without discussion. Append-to-bottom is the intentional UX.
+
+### Media Bucket — session persistence
+
+`MediaBucket.tsx` persists the last selected instrument and section idea to `localStorage` under keys `patchbay-selected-track` and `patchbay-selected-idea`. On mount, a one-time restore effect (guarded by a `sessionRestored` ref) reads these keys and restores the selection before falling back to URL param logic. The guard ensures the restore only runs once — it does not re-run on subsequent bucket refetches, preventing the selection from snapping back on poll.
 
 ### Timeline background right-click context menu
 

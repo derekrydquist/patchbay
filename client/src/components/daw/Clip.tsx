@@ -512,7 +512,7 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
       const res = await fetch(`/api/clips/${clip.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isFinal: newIsFinal }),
+        body: JSON.stringify({ isFinal: newIsFinal, author: 'Unknown' }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed' }));
@@ -522,6 +522,8 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
       }
       console.log('[markFinal] success, clip id:', clip.id, 'isFinal:', newIsFinal);
       queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
     } catch (err) {
       console.error('[markFinal] network error:', err);
       setIsFinal(!newIsFinal); // revert on failure

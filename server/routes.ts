@@ -5,6 +5,8 @@ import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
+import { eq } from "drizzle-orm";
+import { db } from "./db";
 import { storage } from "./storage";
 import {
   insertSongSchema,
@@ -14,7 +16,17 @@ import {
   insertClipSchema,
   insertProductionTaskSchema,
   insertTaskCommentSchema,
+  ideas,
+  instrumentTracks,
+  productionTasks,
 } from "@shared/schema";
+
+const STATUS_LABELS: Record<string, string> = {
+  "todo": "Status changed to To Do",
+  "in-progress": "Status changed to In Progress",
+  "complete": "Status changed to Complete",
+  "will-not-play": "Status changed to Will Not Play",
+};
 
 const updateSongBody = insertSongSchema.partial();
 
@@ -203,8 +215,46 @@ export async function registerRoutes(
   });
 
   app.patch("/api/clips/:clipId", async (req, res) => {
-    const clip = await storage.updateClip(req.params.clipId, req.body);
+    const { author: commentAuthor, ...clipUpdates } = req.body;
+    const clip = await storage.updateClip(req.params.clipId, clipUpdates);
     if (!clip) return res.status(404).json({ message: "Clip not found" });
+
+    if (clipUpdates.isFinal === true || clipUpdates.isFinal === false) {
+      try {
+        const idea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();
+        if (idea) {
+          const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
+          if (track) {
+            const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
+            if (task) {
+              const author = commentAuthor || "Unknown";
+              if (clipUpdates.isFinal === true && task.status !== "complete") {
+                await storage.updateTask(task.id, { status: "complete" });
+                await storage.addTaskComment({
+                  id: randomUUID(),
+                  taskId: task.id,
+                  author,
+                  text: `Clip marked as final: "${clip.name}"`,
+                  timestamp: Date.now(),
+                });
+              } else if (clipUpdates.isFinal === false && task.status === "complete") {
+                await storage.updateTask(task.id, { status: "in-progress" });
+                await storage.addTaskComment({
+                  id: randomUUID(),
+                  taskId: task.id,
+                  author,
+                  text: `Clip unmarked as final: "${clip.name}". Status reverted to In Progress.`,
+                  timestamp: Date.now(),
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[isFinal] failed to sync task status:", err);
+      }
+    }
+
     res.json(clip);
   });
 
@@ -315,8 +365,29 @@ export async function registerRoutes(
   });
 
   app.patch("/api/production-tasks/:id", async (req, res) => {
-    const task = await storage.updateTask(req.params.id, req.body);
+    console.log("[task patch] req.body:", JSON.stringify(req.body));
+    const { author: commentAuthor, ...taskUpdates } = req.body;
+
+    const previous = taskUpdates.status
+      ? db.select().from(productionTasks).where(eq(productionTasks.id, req.params.id)).get()
+      : null;
+
+    const task = await storage.updateTask(req.params.id, taskUpdates);
     if (!task) return res.status(404).json({ message: "Task not found" });
+
+    if (previous && taskUpdates.status && taskUpdates.status !== previous.status) {
+      const label = STATUS_LABELS[taskUpdates.status as string];
+      if (label) {
+        storage.addTaskComment({
+          id: randomUUID(),
+          taskId: req.params.id,
+          author: commentAuthor || "Unknown",
+          text: label,
+          timestamp: Date.now(),
+        }).catch(console.error);
+      }
+    }
+
     res.json(task);
   });
 

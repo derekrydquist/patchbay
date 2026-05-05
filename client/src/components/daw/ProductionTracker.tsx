@@ -79,7 +79,7 @@ function CellModal({
       fetch(`/api/production-tasks/${task.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
+        body: JSON.stringify({ ...updates, author: task.assignee || 'Unknown' }),
       }).then(r => r.json()),
     onMutate: async (updates) => {
       await queryClient.cancelQueries({ queryKey: ['production-tasks', SONG_ID] });
@@ -94,6 +94,7 @@ function CellModal({
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['production-tasks', SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
     },
   });
 

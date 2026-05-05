@@ -109,6 +109,7 @@ export interface IStorage {
 
   // Production Tasks
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
+  getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
   upsertTask(data: InsertProductionTask): Promise<ProductionTask>;
   updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined>;
   getTaskComments(taskId: string): Promise<TaskComment[]>;
@@ -443,6 +444,16 @@ export class SQLiteStorage implements IStorage {
 
   async getTasksForSong(songId: string): Promise<ProductionTask[]> {
     return db.select().from(productionTasks).where(eq(productionTasks.songId, songId)).all();
+  }
+
+  async getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined> {
+    return db.select().from(productionTasks).where(
+      and(
+        eq(productionTasks.songId, songId),
+        eq(productionTasks.instrument, instrument),
+        eq(productionTasks.sectionName, sectionName),
+      )
+    ).get();
   }
 
   async upsertTask(data: InsertProductionTask): Promise<ProductionTask> {
