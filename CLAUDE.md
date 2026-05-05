@@ -154,8 +154,9 @@ in route handlers.
 |---|---|
 | `users` | Auth — username/password accounts |
 | `songs` | Top-level song container (name, bpm, sections JSON) |
-| `instrument_tracks` | One row per instrument per song (Drums, Bass, etc.) |
-| `ideas` | A section slot per instrument (e.g. "Drums — Verse 1") |
+| `instrument_tracks` | One row per instrument per song (Drums, Bass, etc.); has `active` boolean — false = hidden |
+| `ideas` | A section slot per instrument (e.g. "Drums — Verse 1"); has `active` boolean — false = hidden |
+| `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
 | `clips` | Versions uploaded to a bucket idea (linked to `ideas`) |
 | `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`) |
 | `clip_comments` | Timestamped comments on bucket clips |
@@ -169,7 +170,7 @@ in route handlers.
 
 `server/storage.ts` exports `DEFAULT_SONG_ID = "patchbay-default"`. The first call to `GET /api/songs/:id/timeline` auto-creates this song and its five default instrument tracks if they don't exist yet (using `INSERT OR IGNORE`). The default track IDs are stable strings: `track-drums`, `track-bass`, `track-guitar-1`, `track-guitar-2`, `track-vocals`.
 
-`storage.ts` also exports `DEFAULT_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"]`. The bootstrap inserts 35 idea rows (5 tracks × 7 sections) using stable IDs like `idea-track-drums-0`. All inserts use `onConflictDoNothing()` so the bootstrap is safe to call on every request — it's idempotent.
+`storage.ts` also exports `DEFAULT_SECTIONS = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"]`. The bootstrap inserts 35 idea rows (5 tracks × 7 sections) using stable IDs like `idea-track-drums-0`. Ideas use `onConflictDoNothing()` — hidden ideas (active = false) already exist in the DB so they won't be re-inserted. Default tracks check for existence first: if a track exists with `active = false`, the bootstrap skips it entirely (does not re-show it). Both mechanisms ensure hide/restore persists across server restarts.
 
 ### Track IDs must be stable
 
@@ -291,9 +292,9 @@ There are two `useEffect`s that sync `apiTracks` into the local `tracks` state:
 
 1. **Initial load** (guarded by `tracksInitialized.current`): runs once on first non-null `apiTracks`, converts and sets the full tracks array, sets `sectionOrder`. After this, `tracksInitialized.current = true` and this branch never runs again.
 
-2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, appends any new tracks from `apiTracks`. New tracks are added with empty `clips` — their local mute/solo/volume state starts at defaults. The early-return guard `withRemovals.length === prev.length && newTracks.length === 0` prevents spurious re-renders on polls with no changes.
+2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, syncs clips for existing tracks from the API response, and appends any new tracks. Preserves local `muted`/`solo`/`volume` state. New tracks start with empty clips. Clip sync is needed so that when a section is hidden (which deletes its timeline clips on the server), the timeline removes those clips within 3 seconds without a manual refresh.
 
-**Do not merge the two effects.** The initial-load guard exists to prevent the API response from clobbering clip state that the user has added to the timeline mid-session (before the refetch fires). The live-sync effect intentionally only handles structural changes (track additions/removals), not clip content.
+**Do not merge the two effects.** The initial-load guard exists to prevent the API response from clobbering clip state that the user has added to the timeline mid-session (before the refetch fires).
 
 ---
 
@@ -390,7 +391,7 @@ When implementing auth or any permission checks, always consult this table.
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
 | Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (AlertDialog confirmation); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
-| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → Remove Instrument; right-click section → Remove Section |
+| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
 | Production Tracker (Kanban) | ✅ UI done | Mock tasks only |
@@ -430,15 +431,19 @@ POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body:
 PATCH  /api/timeline-clips/:id           — update a placed clip (e.g. new start position)
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 
-GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips
+GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
 POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server
                                            generates id, sets type "audio", color, sortOrder 999;
                                            also creates one idea per DEFAULT_SECTION automatically
-DELETE /api/tracks/:trackId              — delete a track and all its ideas/clips (cascade)
-DELETE /api/songs/:songId/sections/:name — delete all ideas with that sectionName across all tracks;
-                                           name must be URL-encoded
+DELETE /api/tracks/:trackId              — hide a track (active=false); also deletes its timeline clips
+POST   /api/tracks/:trackId/restore      — restore a hidden track (active=true)
+GET    /api/songs/:songId/hidden-tracks  — list hidden tracks for a song
 POST   /api/tracks/:trackId/ideas        — create an idea (section slot) under a track;
                                            server generates id and defaults sortOrder to 0
+PATCH  /api/ideas/:ideaId               — hide an idea (active=false); also deletes timeline clips
+                                           for that track+section
+POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
+GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,

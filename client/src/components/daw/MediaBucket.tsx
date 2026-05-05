@@ -155,6 +155,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [selectedHiddenIdeaId, setSelectedHiddenIdeaId] = useState('');
   const [selectedHiddenTrackId, setSelectedHiddenTrackId] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sessionRestored = useRef(false);
   const [location] = useLocation();
 
   // ── Fetch bucket from API ────────────────────────────────────────────────────
@@ -200,6 +201,8 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
   useEffect(() => {
     if (!tracks.length) return;
+    if (sessionRestored.current) return;
+    sessionRestored.current = true;
     const params = new URLSearchParams(window.location.search);
     const urlInstrument = params.get('instrument');
     const urlSection = params.get('section');

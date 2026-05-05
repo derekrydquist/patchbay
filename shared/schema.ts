@@ -127,11 +127,12 @@ export const productionTasks = sqliteTable("production_tasks", {
   songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   instrument: text("instrument").notNull(),
-  status: text("status", { enum: ["todo", "in-progress", "review", "done"] }).notNull().default("todo"),
+  status: text("status", { enum: ["todo", "in-progress", "complete", "will-not-play"] }).notNull().default("todo"),
   priority: text("priority", { enum: ["low", "medium", "high"] }).notNull().default("medium"),
   assignee: text("assignee").notNull(),
   dueDate: text("due_date"),
   description: text("description"),
+  sectionName: text("section_name").notNull().default(""),
   relatedClipId: text("related_clip_id").references(() => clips.id, { onDelete: "set null" }),
 });
 

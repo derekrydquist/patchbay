@@ -12,6 +12,8 @@ import {
   insertTimelineClipSchema,
   insertIdeaSchema,
   insertClipSchema,
+  insertProductionTaskSchema,
+  insertTaskCommentSchema,
 } from "@shared/schema";
 
 const updateSongBody = insertSongSchema.partial();
@@ -200,6 +202,12 @@ export async function registerRoutes(
     res.json(hidden);
   });
 
+  app.patch("/api/clips/:clipId", async (req, res) => {
+    const clip = await storage.updateClip(req.params.clipId, req.body);
+    if (!clip) return res.status(404).json({ message: "Clip not found" });
+    res.json(clip);
+  });
+
   /** POST /api/ideas/:ideaId/clips — attach a clip record to an idea */
   app.post("/api/ideas/:ideaId/clips", async (req, res) => {
     const parsed = insertClipSchema.safeParse({
@@ -298,6 +306,47 @@ export async function registerRoutes(
   // Express static middleware for /uploads/ is registered in server/index.ts.
   // Add this line there if it isn't already:
   //   app.use("/uploads", express.static(path.resolve("uploads")));
+
+  // ─── Production Tasks ─────────────────────────────────────────────────────────
+
+  app.get("/api/songs/:songId/production-tasks", async (req, res) => {
+    const tasks = await storage.getTasksForSong(req.params.songId);
+    res.json(tasks);
+  });
+
+  app.patch("/api/production-tasks/:id", async (req, res) => {
+    const task = await storage.updateTask(req.params.id, req.body);
+    if (!task) return res.status(404).json({ message: "Task not found" });
+    res.json(task);
+  });
+
+  app.get("/api/production-tasks/:id/comments", async (req, res) => {
+    const comments = await storage.getTaskComments(req.params.id);
+    res.json(comments);
+  });
+
+  app.post("/api/production-tasks/:id/comments", async (req, res) => {
+    const { author, text } = req.body as { author: string; text: string };
+    const comment = await storage.addTaskComment({
+      id: randomUUID(),
+      taskId: req.params.id,
+      author,
+      text,
+      timestamp: Date.now(),
+    });
+    res.status(201).json(comment);
+  });
+
+  app.patch("/api/task-comments/:id", async (req, res) => {
+    const comment = await storage.updateTaskComment(req.params.id, req.body.text);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+    res.json(comment);
+  });
+
+  app.delete("/api/task-comments/:id", async (req, res) => {
+    await storage.deleteTaskComment(req.params.id);
+    res.status(204).send();
+  });
 
   return httpServer;
 }

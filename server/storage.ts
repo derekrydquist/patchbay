@@ -8,7 +8,10 @@ import {
   type Idea, type InsertIdea,
   type Clip, type InsertClip,
   type TimelineClip, type InsertTimelineClip,
+  type ProductionTask, type InsertProductionTask,
+  type TaskComment, type InsertTaskComment,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
+  productionTasks, taskComments,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -102,6 +105,16 @@ export interface IStorage {
   // Clips (bucket versions)
   createClip(data: InsertClip): Promise<Clip>;
   countClipsForIdea(ideaId: string): Promise<number>;
+  updateClip(clipId: string, updates: Partial<InsertClip>): Promise<Clip | undefined>;
+
+  // Production Tasks
+  getTasksForSong(songId: string): Promise<ProductionTask[]>;
+  upsertTask(data: InsertProductionTask): Promise<ProductionTask>;
+  updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined>;
+  getTaskComments(taskId: string): Promise<TaskComment[]>;
+  addTaskComment(data: InsertTaskComment): Promise<TaskComment>;
+  updateTaskComment(id: string, text: string): Promise<TaskComment | undefined>;
+  deleteTaskComment(id: string): Promise<void>;
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -210,6 +223,16 @@ export class SQLiteStorage implements IStorage {
             name: `${track.name} ${section}`,
             sectionName: section,
             sortOrder: i,
+          }).onConflictDoNothing().run();
+          db.insert(productionTasks).values({
+            id: `task-${track.id}-${i}`,
+            songId: DEFAULT_SONG_ID,
+            title: `${track.name} – ${section}`,
+            instrument: track.name,
+            sectionName: section,
+            status: "todo",
+            priority: "medium",
+            assignee: "",
           }).onConflictDoNothing().run();
         }
       });
@@ -377,7 +400,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   async createIdea(data: InsertIdea): Promise<Idea> {
-    const idea: Idea = { sortOrder: 0, ...data, id: data.id ?? randomUUID() };
+    const idea: Idea = { sortOrder: 0, active: true, ...data, id: data.id ?? randomUUID() };
     db.insert(ideas).values(idea).run();
     return db.select().from(ideas).where(eq(ideas.id, idea.id)).get()!;
   }
@@ -407,6 +430,56 @@ export class SQLiteStorage implements IStorage {
       .where(eq(clips.ideaId, ideaId))
       .get();
     return result?.value ?? 0;
+  }
+
+  async updateClip(clipId: string, updates: Partial<InsertClip>): Promise<Clip | undefined> {
+    const existing = db.select().from(clips).where(eq(clips.id, clipId)).get();
+    if (!existing) return undefined;
+    db.update(clips).set(updates).where(eq(clips.id, clipId)).run();
+    return db.select().from(clips).where(eq(clips.id, clipId)).get();
+  }
+
+  // ── Production Tasks ───────────────────────────────────────────────────────
+
+  async getTasksForSong(songId: string): Promise<ProductionTask[]> {
+    return db.select().from(productionTasks).where(eq(productionTasks.songId, songId)).all();
+  }
+
+  async upsertTask(data: InsertProductionTask): Promise<ProductionTask> {
+    db.insert(productionTasks).values(data).onConflictDoUpdate({
+      target: productionTasks.id,
+      set: data,
+    }).run();
+    return db.select().from(productionTasks).where(eq(productionTasks.id, data.id)).get()!;
+  }
+
+  async updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined> {
+    const existing = db.select().from(productionTasks).where(eq(productionTasks.id, id)).get();
+    if (!existing) return undefined;
+    db.update(productionTasks).set(updates).where(eq(productionTasks.id, id)).run();
+    return db.select().from(productionTasks).where(eq(productionTasks.id, id)).get();
+  }
+
+  async getTaskComments(taskId: string): Promise<TaskComment[]> {
+    return db.select().from(taskComments).where(eq(taskComments.taskId, taskId)).orderBy(asc(taskComments.createdAt)).all();
+  }
+
+  async addTaskComment(data: InsertTaskComment): Promise<TaskComment> {
+    const now = new Date().toISOString();
+    const comment: TaskComment = { ...data, id: data.id ?? randomUUID(), createdAt: now };
+    db.insert(taskComments).values(comment).run();
+    return db.select().from(taskComments).where(eq(taskComments.id, comment.id)).get()!;
+  }
+
+  async updateTaskComment(id: string, text: string): Promise<TaskComment | undefined> {
+    const existing = db.select().from(taskComments).where(eq(taskComments.id, id)).get();
+    if (!existing) return undefined;
+    db.update(taskComments).set({ text }).where(eq(taskComments.id, id)).run();
+    return db.select().from(taskComments).where(eq(taskComments.id, id)).get();
+  }
+
+  async deleteTaskComment(id: string): Promise<void> {
+    db.delete(taskComments).where(eq(taskComments.id, id)).run();
   }
 }
 

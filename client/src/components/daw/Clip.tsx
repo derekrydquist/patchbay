@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
@@ -440,15 +441,22 @@ import { useLocation } from 'wouter';
 
 export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
-  const [isFinal, setIsFinal] = useState(clip.isFinal);
+  const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
   const [location] = useLocation();
 
   const [isHighlighted, setIsHighlighted] = useState(false);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const isRightClicking = useRef(false);
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    setIsFinal(clip.isFinal ?? false);
+  }, [clip.isFinal]);
 
   const handleMouseEnter = () => {
-    if (!clip.src) return;
+    if (!clip.src || isRightClicking.current || contextMenuOpen) return;
     const audio = new Audio(clip.src);
     audio.volume = 0.7;
     audioRef.current = audio;
@@ -461,6 +469,7 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
       audioRef.current.currentTime = 0;
       audioRef.current = null;
     }
+    setTimeout(() => { isRightClicking.current = false; }, 100);
   };
 
   useEffect(() => {
@@ -496,9 +505,27 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
     transform: CSS.Translate.toString(transform),
   };
 
-  const handleToggleFinal = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setIsFinal(!isFinal);
+  const handleToggleFinal = async () => {
+    const newIsFinal = !isFinal;
+    setIsFinal(newIsFinal); // optimistic update
+    try {
+      const res = await fetch(`/api/clips/${clip.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isFinal: newIsFinal }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed' }));
+        console.error('[markFinal] error:', err.message);
+        setIsFinal(!newIsFinal); // revert on failure
+        return;
+      }
+      console.log('[markFinal] success, clip id:', clip.id, 'isFinal:', newIsFinal);
+      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+    } catch (err) {
+      console.error('[markFinal] network error:', err);
+      setIsFinal(!newIsFinal); // revert on failure
+    }
   };
 
   const handleAddClick = (e: React.MouseEvent) => {
@@ -515,6 +542,7 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
         {...attributes}
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
+        onContextMenu={() => { isRightClicking.current = true; }}
         className={cn(
           "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-all duration-500 group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
           isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]",
@@ -539,7 +567,14 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
           </div>
         </div>
 
-        <ContextMenu>
+        <ContextMenu onOpenChange={(open) => {
+            setContextMenuOpen(open);
+            if (open && audioRef.current) {
+              audioRef.current.pause();
+              audioRef.current.currentTime = 0;
+              audioRef.current = null;
+            }
+          }}>
           <ContextMenuTrigger 
             className="absolute inset-0 z-0" 
             onMouseDown={(e) => {
@@ -551,7 +586,7 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
             <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <Info size={14} className="text-primary" /> More Info
             </ContextMenuItem>
-            <ContextMenuItem onClick={handleToggleFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <ContextMenuItem onClick={(e) => { e.stopPropagation(); handleToggleFinal(); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
               {isFinal ? "Unmark Final" : "Mark as Final"}
             </ContextMenuItem>
