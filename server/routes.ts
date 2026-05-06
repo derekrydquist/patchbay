@@ -159,31 +159,50 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
-    const clip = await storage.addTimelineClip(req.params.trackId, parsed.data);
+    let clip = await storage.addTimelineClip(req.params.trackId, parsed.data);
+
+    // If there's already a final bucket clip for this track+section, mark the new timeline clip final too
+    if (clip.sectionName) {
+      const idea = db.select().from(ideas)
+        .where(and(eq(ideas.trackId, req.params.trackId), eq(ideas.sectionName, clip.sectionName)))
+        .get();
+      if (idea) {
+        const finalBucketClip = db.select().from(clips)
+          .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
+          .get();
+        if (finalBucketClip && finalBucketClip.name === clip.name) {
+          clip = (await storage.updateTimelineClip(clip.id, { isFinal: true })) ?? clip;
+        }
+      }
+    }
+
     res.status(201).json(clip);
   });
 
   app.patch("/api/timeline-clips/:id", async (req, res) => {
-    console.log("[timeline clip patch] req.body:", JSON.stringify(req.body));
-    const { isFinal, author: commentAuthor, ...clipUpdates } = req.body;
+    const { author: commentAuthor, ...clipUpdates } = req.body;
     const clip = Object.keys(clipUpdates).length > 0
       ? await storage.updateTimelineClip(req.params.id, clipUpdates)
       : db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
+    const isFinal = clipUpdates.isFinal;
     if (isFinal === true || isFinal === false) {
-      console.log("[timeline clip patch] isFinal sync triggered — trackId:", clip.trackId);
       try {
         // Sync isFinal to the corresponding bucket clip so it persists across reloads
         if (clip.sectionName) {
-          console.log("[sync] calling syncFinalClipFromTimeline — trackId:", clip.trackId, "sectionName:", clip.sectionName, "clipName:", clip.name, "isFinal:", isFinal);
           await storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal);
+
+          if (isFinal === true) {
+            db.update(timelineClips).set({ isFinal: false })
+              .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.sectionName, clip.sectionName), ne(timelineClips.id, clip.id)))
+              .run();
+          }
         }
 
         const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clip.trackId)).get();
         if (track && clip.sectionName) {
           const task = await storage.getTaskByInstrumentSection(track.songId, track.name, clip.sectionName);
-          console.log("[timeline clip patch] task found:", task);
           if (task) {
             const author = commentAuthor || "Unknown";
             if (isFinal === true && task.status !== "complete") {
@@ -272,6 +291,12 @@ export async function registerRoutes(
       try {
         const idea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();
         if (idea) {
+          if (clipUpdates.isFinal === true) {
+            db.update(clips).set({ isFinal: false })
+              .where(and(eq(clips.ideaId, idea.id), ne(clips.id, clip.id)))
+              .run();
+          }
+
           const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
           if (track) {
             const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
@@ -296,6 +321,35 @@ export async function registerRoutes(
                   timestamp: Date.now(),
                 });
               }
+            }
+          }
+
+          // Sync isFinal to the corresponding timeline clip
+          if (clipUpdates.isFinal === true) {
+            // Fetch all timeline clips for this section, clear them all, then set only the name-matching one
+            const sectionTimelineClips = db.select().from(timelineClips)
+              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.sectionName, idea.sectionName)))
+              .all();
+            console.log("[clear timeline siblings] trackId:", idea.trackId, "sectionName:", idea.sectionName);
+            console.log("[clear timeline siblings] clips being cleared:", sectionTimelineClips);
+            db.update(timelineClips).set({ isFinal: false })
+              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.sectionName, idea.sectionName)))
+              .run();
+            const matchingTimelineClip = sectionTimelineClips.find(tc => tc.name === clip.name);
+            if (matchingTimelineClip) {
+              await storage.updateTimelineClip(matchingTimelineClip.id, { isFinal: true });
+            }
+          } else {
+            // Only clear the timeline clip matching this clip's name — don't touch siblings
+            const matchingTimelineClip = db.select().from(timelineClips)
+              .where(and(
+                eq(timelineClips.trackId, idea.trackId),
+                eq(timelineClips.sectionName, idea.sectionName),
+                eq(timelineClips.name, clip.name)
+              ))
+              .get();
+            if (matchingTimelineClip) {
+              await storage.updateTimelineClip(matchingTimelineClip.id, { isFinal: false });
             }
           }
         }

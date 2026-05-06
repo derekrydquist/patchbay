@@ -447,11 +447,9 @@ export class SQLiteStorage implements IStorage {
     const idea = db.select().from(ideas)
       .where(and(eq(ideas.trackId, trackId), eq(ideas.sectionName, sectionName)))
       .get();
-    console.log("[sync] idea found:", idea);
     if (!idea) return;
 
     const ideaClips = db.select().from(clips).where(eq(clips.ideaId, idea.id)).all();
-    console.log("[sync] clips found for idea:", ideaClips);
     if (!ideaClips.length) return;
 
     if (isFinal) {
@@ -460,12 +458,14 @@ export class SQLiteStorage implements IStorage {
       // Find exact name match, fall back to most recently created
       const matchedClip = ideaClips.find(c => c.name === clipName)
         ?? ideaClips.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-      console.log("[sync] name-matched clip:", matchedClip);
       db.update(clips).set({ isFinal: true }).where(eq(clips.id, matchedClip.id)).run();
     } else {
-      db.update(clips).set({ isFinal: false })
-        .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
-        .run();
+      // Only clear the bucket clip matching clipName — don't clear clips with different names.
+      // Prevents wiping a legitimately-final clip when a stale timeline clip is unmarked.
+      const clipToUnmark = ideaClips.find(c => c.name === clipName && c.isFinal);
+      if (clipToUnmark) {
+        db.update(clips).set({ isFinal: false }).where(eq(clips.id, clipToUnmark.id)).run();
+      }
     }
   }
 

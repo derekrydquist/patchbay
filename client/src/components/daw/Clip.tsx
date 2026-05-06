@@ -20,6 +20,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -213,7 +223,12 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
   const [newComment, setNewComment] = useState("");
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [comments, setComments] = useState(clip.comments || []);
+  const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    setIsFinal(clip.isFinal ?? false);
+  }, [clip.isFinal]);
   
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
@@ -403,12 +418,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
 
           <Separator className="my-1 bg-border/50" />
           
-          <ContextMenuItem 
+          <ContextMenuItem
             onClick={(e) => {
               e.stopPropagation();
-              window.dispatchEvent(new CustomEvent('remove-clip', { 
-                detail: { clipId: clip.id } 
-              }));
+              if (isFinal) {
+                setShowRemoveConfirm(true);
+              } else {
+                window.dispatchEvent(new CustomEvent('remove-clip', { detail: { clipId: clip.id } }));
+              }
             }}
             className="text-red-400 gap-2 text-xs uppercase tracking-wider font-semibold focus:text-red-300 focus:bg-red-400/10"
           >
@@ -431,8 +448,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
             <DialogTitle className="text-sm uppercase tracking-widest font-heading">Add Note to {clip.name}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
-            <Input 
-              placeholder="Leave a comment..." 
+            <Input
+              placeholder="Leave a comment..."
               value={newComment}
               onChange={(e) => setNewComment(e.target.value)}
               className="bg-black/40 border-border"
@@ -445,6 +462,29 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Final Clip?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This clip has been marked as final. Are you sure you want to remove it from the timeline?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('remove-clip', { detail: { clipId: clip.id } }));
+                setShowRemoveConfirm(false);
+              }}
+            >
+              Remove Clip
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
@@ -453,14 +493,16 @@ interface BucketClipProps {
   clip: Clip;
   trackId?: string;
   onAddToTimeline?: (clip: Clip) => void;
+  siblingClips?: Clip[];
 }
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) {
+export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
+  const [showChangeFinalConfirm, setShowChangeFinalConfirm] = useState(false);
   const [location] = useLocation();
 
   const [isHighlighted, setIsHighlighted] = useState(false);
@@ -523,8 +565,7 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
     transform: CSS.Translate.toString(transform),
   };
 
-  const handleToggleFinal = async () => {
-    const newIsFinal = !isFinal;
+  const executeMark = async (newIsFinal: boolean) => {
     setIsFinal(newIsFinal); // optimistic update
     try {
       const res = await fetch(`/api/clips/${clip.id}`, {
@@ -538,14 +579,26 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
         setIsFinal(!newIsFinal); // revert on failure
         return;
       }
-      console.log('[markFinal] success, clip id:', clip.id, 'isFinal:', newIsFinal);
       queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', 'patchbay-default'] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/songs/patchbay-default/timeline'] });
     } catch (err) {
       console.error('[markFinal] network error:', err);
       setIsFinal(!newIsFinal); // revert on failure
     }
+  };
+
+  const handleToggleFinal = () => {
+    const newIsFinal = !isFinal;
+    if (newIsFinal) {
+      const anotherIsFinal = siblingClips.some(c => c.id !== clip.id && c.isFinal);
+      if (anotherIsFinal) {
+        setShowChangeFinalConfirm(true);
+        return;
+      }
+    }
+    executeMark(newIsFinal);
   };
 
   const handleAddClick = (e: React.MouseEvent) => {
@@ -629,12 +682,31 @@ export function BucketClip({ clip, trackId, onAddToTimeline }: BucketClipProps) 
         </ContextMenu>
       </div>
       
-      <ClipInfoWindow 
-        clip={{...clip, isFinal, comments}} 
-        open={showInfo} 
-        onOpenChange={setShowInfo} 
+      <ClipInfoWindow
+        clip={{...clip, isFinal, comments}}
+        open={showInfo}
+        onOpenChange={setShowInfo}
         onCommentsChange={handleUpdateComments}
       />
+
+      <AlertDialog open={showChangeFinalConfirm} onOpenChange={setShowChangeFinalConfirm}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Change Final Version?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Another version is already marked as final for this section. Do you want to make this version the final instead?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => { executeMark(true); setShowChangeFinalConfirm(false); }}
+            >
+              Make Final
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

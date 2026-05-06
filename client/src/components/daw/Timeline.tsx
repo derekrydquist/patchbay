@@ -55,6 +55,7 @@ type ApiTrack = {
     duration: number;
     src: string | null;
     sectionName: string | null;
+    isFinal: boolean;
   }[];
 };
 
@@ -154,6 +155,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
       duration: c.duration,
       src: c.src ?? undefined,
       sectionName: c.sectionName ?? undefined,
+      isFinal: c.isFinal ?? false,
     })),
   }));
   const initialSectionOrder = getActiveSections(rawTracks, MOCK_SONG.sections);
@@ -295,6 +297,7 @@ export function Timeline() {
           duration: c.duration,
           src: c.src ?? undefined,
           sectionName: c.sectionName ?? undefined,
+          isFinal: c.isFinal ?? false,
         }));
         return { ...track, clips: freshClips };
       });

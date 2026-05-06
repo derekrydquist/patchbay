@@ -157,8 +157,8 @@ in route handlers.
 | `instrument_tracks` | One row per instrument per song (Drums, Bass, etc.); has `active` boolean — false = hidden |
 | `ideas` | A section slot per instrument (e.g. "Drums — Verse 1"); has `active` boolean — false = hidden |
 | `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
-| `clips` | Versions uploaded to a bucket idea (linked to `ideas`) |
-| `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`) |
+| `clips` | Versions uploaded to a bucket idea (linked to `ideas`); `isFinal` marks the chosen version |
+| `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`); `isFinal` mirrors the corresponding bucket clip's final state |
 | `clip_comments` | Timestamped comments on bucket clips |
 | `production_tasks` | Kanban tasks linked to a song |
 | `task_subtasks` | Checklist items on a task |
@@ -395,7 +395,7 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts` |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
@@ -429,11 +429,14 @@ PATCH  /api/songs/:id                    — partial update of song metadata
 
 GET    /api/songs/:id/timeline           — get instrument tracks with their placed timeline clips
                                            auto-bootstraps the default song + tracks if missing
-POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body: InsertTimelineClip
+POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body: InsertTimelineClip;
+                                           auto-sets isFinal: true if a final bucket clip already
+                                           exists for this track+section
 PATCH  /api/timeline-clips/:id           — update a placed clip (start position, etc.); also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
-                                           final — syncs the bucket clip via syncFinalClipFromTimeline
-                                           and updates the linked production task status
+                                           final — syncs the bucket clip via syncFinalClipFromTimeline,
+                                           clears isFinal on sibling timeline clips, and updates the
+                                           linked production task status
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
@@ -450,10 +453,16 @@ PATCH  /api/ideas/:ideaId               — hide an idea (active=false); also de
 POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
 GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
-PATCH  /api/clips/:clipId               — partial update of a bucket clip (e.g. isFinal)
+PATCH  /api/clips/:clipId               — partial update of a bucket clip; when isFinal: true,
+                                           clears isFinal on all sibling clips (same ideaId) and
+                                           all sibling timeline clips (same trackId+sectionName)
+                                           before setting the new one
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
+
+GET    /api/songs/:songId/task-comment-counts      — map of { taskId → count } for human comments
+                                                     (excludes author = "System" or "Unknown")
 
 GET    /api/songs/:songId/production-tasks        — list all tasks for a song
 PATCH  /api/production-tasks/:id                  — partial update of a task (status, assignee, dueDate, etc.)
@@ -568,6 +577,12 @@ Implemented in `BucketClip` (`Clip.tsx`). On `onMouseEnter`, creates `new Audio(
 
 On success, `BucketClip` invalidates three query keys: `['bucket', 'patchbay-default']`, `['production-tasks', 'patchbay-default']`, and `['final-clips', 'patchbay-default']`.
 
+**Sibling-final confirmation dialog** — before marking a clip final, `BucketClip` checks `siblingClips.some(c => c.id !== clip.id && c.isFinal)`. If a sibling is already final, it shows a shadcn `AlertDialog` ("Change Final Version?") before proceeding. `siblingClips` is passed as a prop from `MediaBucket` via `siblingClips={selectedIdea.clips.map(toClip)}`. The actual API call is extracted into `executeMark(newIsFinal)` so both the direct path and the dialog confirm path call the same logic.
+
+**Timeline clip removal guard** — `TimelineClip` shows a shadcn `AlertDialog` ("Remove Final Clip?") when a user selects "Remove Clip" from the context menu and `isFinal === true`. The clip is only deleted after the user confirms. This is managed via a `showRemoveConfirm` state in `TimelineClip`.
+
+**Auto-isFinal on timeline clip placement** — `POST /api/tracks/:trackId/clips` checks whether a final bucket clip exists for the same `trackId + sectionName`. If one exists, the newly placed timeline clip is immediately set to `isFinal: true`. This keeps the timeline checkmark in sync when clips are placed after a version has already been marked final in the bucket.
+
 If adding a progress indicator or waveform in the future, extend `BucketClip` — the `audioRef` is already available.
 
 ### Media Bucket — "Add Section"
@@ -591,10 +606,10 @@ Marking a clip as final and changing a task's status are kept in sync automatica
 
 **Entry point 1 — bucket clip marked final (`PATCH /api/clips/:clipId`)**
 
-When `isFinal === true` and the linked task is not already "complete":
-1. Walk the chain: clip → idea (via `clip.ideaId`) → track (via `idea.trackId`) → `storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName)`
-2. `storage.updateTask(task.id, { status: "complete" })`
-3. `storage.addTaskComment()` with text: `Clip marked as final: "{clip.name}"`
+When `isFinal === true`:
+- Clears `isFinal` on all sibling clips in the same idea (`ideaId`, different `id`)
+- Clears `isFinal` on all `timelineClips` with the same `trackId + sectionName`, then re-sets `isFinal: true` on the matching timeline clip
+- If the linked task is not already "complete": walks clip → idea → track → `storage.getTaskByInstrumentSection`, calls `storage.updateTask(task.id, { status: "complete" })`, and logs `Clip marked as final: "{clip.name}"`
 
 When `isFinal === false` and the task is currently "complete": sets task to `"in-progress"` and logs `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
 
@@ -602,12 +617,13 @@ When `isFinal === false` and the task is currently "complete": sets task to `"in
 
 `TimelineClip.handleMarkFinal` in `Clip.tsx` sends `PATCH /api/timeline-clips/:id` with `{ isFinal, author: 'Unknown' }`.
 
-The route strips `isFinal` and `author` from the body before passing the remainder to `storage.updateTimelineClip`. If `clipUpdates` is empty (as it is for a pure isFinal call), the route fetches the clip directly instead of calling `.set({})` on an empty object (which would throw a Drizzle error).
+The route strips only `author` from the body before passing the remainder to `storage.updateTimelineClip`. If `clipUpdates` is empty after stripping, the route fetches the clip directly instead of calling `.set({})` on an empty object (which would throw a Drizzle error).
 
 When `isFinal === true || false`, the route:
 1. Calls `storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal)` to persist to the bucket
-2. Looks up the track via `clip.trackId`, then calls `storage.getTaskByInstrumentSection` to find the task
-3. Applies the same complete/revert logic and comment as entry point 1
+2. If `isFinal === true`, clears `isFinal` on all other `timelineClips` with the same `trackId + sectionName`
+3. Looks up the track via `clip.trackId`, then calls `storage.getTaskByInstrumentSection` to find the task
+4. Applies the same complete/revert logic and comment as entry point 1
 
 **`syncFinalClipFromTimeline(trackId, sectionName, clipName, isFinal)`** (in `storage.ts`):
 - Looks up the idea via `trackId + sectionName`
@@ -694,15 +710,6 @@ git commit -m "Brief description of what was built"
 If something breaks badly, `git stash` or `git checkout .` can revert all uncommitted changes instantly.
 
 `.gitignore` includes: `node_modules/`, `dist/`, `.env`, `patchbay.db`, `patchbay.db-shm`, `patchbay.db-wal`, `uploads/`, `.local/`.
-
----
-
-## Temporary Debug Logs (Remove When Done)
-
-The following `console.log` calls were added for debugging and should be removed once the isFinal sync is confirmed working:
-
-- `server/routes.ts` — `PATCH /api/timeline-clips/:id`: `[timeline clip patch] req.body`, `[timeline clip patch] isFinal sync triggered`, `[sync] calling syncFinalClipFromTimeline`, `[timeline clip patch] task found`
-- `server/storage.ts` — `syncFinalClipFromTimeline`: `[sync] idea found`, `[sync] clips found for idea`, `[sync] name-matched clip`
 
 ---
 

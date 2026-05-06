@@ -442,11 +442,11 @@ export function ProductionTracker() {
           >
             {/* Column headers */}
             <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center">
-              <span className="text-[10px] uppercase tracking-[0.3em] text-primary/70 font-bold">{song?.name ?? 'Song Sections'}</span>
+              <span className="text-[10px] uppercase tracking-widest text-primary/70 font-bold">{song?.name ?? 'Song Sections'}</span>
             </div>
             {bucket.map((track) => (
               <div key={track.id} className="border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
-                <div className="text-[10px] uppercase tracking-[0.3em] text-white/70 font-bold truncate">{track.name}</div>
+                <div className="text-[11px] font-heading font-bold uppercase tracking-wider text-white/70 truncate">{track.name}</div>
               </div>
             ))}
 
@@ -454,7 +454,7 @@ export function ProductionTracker() {
             {sections.map((section) => (
               <React.Fragment key={section}>
                 <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
-                  <div className="text-[10px] uppercase tracking-[0.25em] text-white/80 font-bold">{section}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-white/80 font-bold">{section}</div>
                 </div>
                 {bucket.map((track) => {
                   const task = findTask(track.name, section);

@@ -1011,6 +1011,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                         clip={toClip(clip)}
                         trackId={selectedTrack?.id}
                         onAddToTimeline={onAddToTimeline}
+                        siblingClips={selectedIdea.clips.map(toClip)}
                       />
                     ))
                   : (
