@@ -959,6 +959,7 @@ export function Timeline() {
     fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }).catch(console.error);
     setTracks(prev => prev.filter(t => t.id !== trackId));
     queryClient.invalidateQueries({ queryKey: ['bucket', SONG_ID] });
+    queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] });
   };
 
   const handleRulerSeek = (pos: number) => {

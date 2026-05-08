@@ -182,6 +182,8 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       return res.json();
     },
     enabled: isAddInstrumentOpen,
+    refetchOnMount: true,
+    refetchOnWindowFocus: false,
   });
 
   // ── Keep selected items in sync when data refreshes ─────────────────────────
@@ -439,6 +441,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', DEFAULT_SONG_ID] });
       setSelectedTrack(null);
       setSelectedIdea(null);
     },
