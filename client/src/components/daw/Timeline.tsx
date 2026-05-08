@@ -353,7 +353,7 @@ export function Timeline() {
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
-  const audioContextUnlockedRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -381,10 +381,24 @@ export function Timeline() {
   }, [tracks]);
 
   useEffect(() => {
+    const handleTogglePlay = (e: any) => {
+      if (e.detail.isPlaying) {
+        if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+          audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        audioCtxRef.current.resume();
+      }
+    };
+    window.addEventListener('toggle-play', handleTogglePlay);
+    return () => window.removeEventListener('toggle-play', handleTogglePlay);
+  }, []);
+
+  useEffect(() => {
     if (!isPlaying) {
       Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
       pendingPlayRef.current.clear();
-      audioContextUnlockedRef.current = false;
+      audioCtxRef.current?.close();
+      audioCtxRef.current = null;
     }
   }, [isPlaying]);
 
@@ -499,30 +513,14 @@ export function Timeline() {
 
                 if (inRange && isPlaying) {
                   if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
-                    if (!audioContextUnlockedRef.current) {
-                      audioContextUnlockedRef.current = true;
-                      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                      ctx.resume().then(() => {
-                        ctx.close();
-                        audio.currentTime = Math.max(0, playheadTime - clipStart);
-                        pendingPlayRef.current.add(clip.id);
-                        audio.play()
-                          .then(() => pendingPlayRef.current.delete(clip.id))
-                          .catch((e) => {
-                            pendingPlayRef.current.delete(clip.id);
-                            console.warn('play failed:', e);
-                          });
+                    audio.currentTime = Math.max(0, playheadTime - clipStart);
+                    pendingPlayRef.current.add(clip.id);
+                    audio.play()
+                      .then(() => pendingPlayRef.current.delete(clip.id))
+                      .catch((e) => {
+                        pendingPlayRef.current.delete(clip.id);
+                        console.warn('play failed:', e);
                       });
-                    } else {
-                      audio.currentTime = Math.max(0, playheadTime - clipStart);
-                      pendingPlayRef.current.add(clip.id);
-                      audio.play()
-                        .then(() => pendingPlayRef.current.delete(clip.id))
-                        .catch((e) => {
-                          pendingPlayRef.current.delete(clip.id);
-                          console.warn('play failed:', e);
-                        });
-                    }
                   }
                   // Update volume/mute/rate every frame
                   audio.volume = (track.volume / 100);
