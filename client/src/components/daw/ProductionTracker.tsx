@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -44,6 +44,11 @@ function avatarColor(name: string): string {
   return idx >= 0 ? AVATAR_COLORS[idx] : 'bg-white/20';
 }
 
+function parseLocalDate(dateStr: string): Date {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
 function formatTimestamp(ts: number): string {
   const diffMin = Math.floor((Date.now() - ts) / 60000);
   if (diffMin < 1) return 'Just now';
@@ -71,6 +76,51 @@ function CellModal({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [savedField, setSavedField] = useState<string | null>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const noteInputRef = useRef<HTMLInputElement>(null);
+
+  const mentionMatches = mentionQuery !== null
+    ? ASSIGNEES.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
+    : [];
+
+  const insertMention = (name: string) => {
+    const input = noteInputRef.current;
+    if (!input) return;
+    const cursor = input.selectionStart ?? newComment.length;
+    const atIdx = newComment.slice(0, cursor).lastIndexOf('@');
+    const inserted = `${newComment.slice(0, atIdx)}@${name} ${newComment.slice(cursor)}`;
+    setNewComment(inserted);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      input.focus();
+      const pos = atIdx + name.length + 2;
+      input.setSelectionRange(pos, pos);
+    });
+  };
+
+  const handleNoteChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setNewComment(val);
+    const cursor = e.target.selectionStart ?? val.length;
+    const atMatch = val.slice(0, cursor).match(/@(\w*)$/);
+    if (atMatch) {
+      setMentionQuery(atMatch[1]);
+      setMentionIndex(0);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const handleNoteKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (mentionQuery !== null && mentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % mentionMatches.length); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setMentionIndex(i => (i - 1 + mentionMatches.length) % mentionMatches.length); return; }
+      if (e.key === 'Enter')     { e.preventDefault(); insertMention(mentionMatches[mentionIndex]); return; }
+      if (e.key === 'Escape')    { setMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter') submitComment();
+  };
 
   const { data: comments = [] } = useQuery<TaskComment[]>({
     queryKey: ['task-comments', task.id],
@@ -299,13 +349,35 @@ function CellModal({
               </div>
               <div className="space-y-4">
                 <div className="flex gap-2">
-                  <Input
-                    placeholder="Add a collaboration note..."
-                    value={newComment}
-                    onChange={(e) => setNewComment(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && submitComment()}
-                    className="bg-black/40 border-white/10 text-xs h-9"
-                  />
+                  <div className="relative flex-1">
+                    <Input
+                      ref={noteInputRef}
+                      placeholder="Add a collaboration note..."
+                      value={newComment}
+                      onChange={handleNoteChange}
+                      onKeyDown={handleNoteKeyDown}
+                      className="bg-black/40 border-white/10 text-xs h-9 w-full"
+                    />
+                    {mentionQuery !== null && mentionMatches.length > 0 && (
+                      <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-md shadow-xl overflow-hidden">
+                        {mentionMatches.map((name, i) => (
+                          <button
+                            key={name}
+                            onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
+                            className={cn(
+                              'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
+                              i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
+                            )}
+                          >
+                            <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(name))}>
+                              {name.charAt(0)}
+                            </div>
+                            @{name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <Button size="sm" onClick={submitComment} className="h-9 px-3">
                     <Plus size={14} />
                   </Button>
@@ -544,9 +616,12 @@ export function ProductionTracker() {
                                 {task.assignee.charAt(0)}
                               </div>
                             )}
-                            {task?.dueDate && (
-                              <div className="text-[9px] font-mono text-muted-foreground bg-white/5 px-1.5 py-0.5 rounded">
-                                {new Date(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                            {task?.dueDate && status !== 'complete' && status !== 'will-not-play' && (
+                              <div className={cn(
+                                'text-[9px] font-mono bg-white/5 px-1.5 py-0.5 rounded',
+                                parseLocalDate(task.dueDate) < new Date() ? 'text-red-400' : 'text-muted-foreground'
+                              )}>
+                                {parseLocalDate(task.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                               </div>
                             )}
                           </div>
