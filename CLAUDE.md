@@ -641,6 +641,16 @@ Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that
 
 Do not change this to alphabetical or insertion-point ordering without discussion. Append-to-bottom is the intentional UX.
 
+### Media Bucket — hidden-tracks query invalidation
+
+The `hiddenTracks` useQuery (key: `['hidden-tracks', DEFAULT_SONG_ID]`) has `enabled: isAddInstrumentOpen` so it only runs when the Add Instrument dialog is open. It also has `refetchOnMount: true` and `refetchOnWindowFocus: false` — this ensures it always fetches fresh data when the dialog opens, even if the cache was previously populated.
+
+**Two places must invalidate this key** whenever an instrument is soft-deleted (hidden):
+1. `deleteTrackMutation.onSuccess` in `MediaBucket.tsx` — triggered when the user removes an instrument from the bucket panel's right-click menu
+2. `handleDeleteTrack` in `Timeline.tsx` — triggered when the user removes an instrument from the timeline track header right-click menu
+
+Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] })`. If either is missing, the restore dropdown in the Add Instrument dialog will show stale data until a manual page refresh.
+
 ### Media Bucket — session persistence
 
 `MediaBucket.tsx` persists the last selected instrument and section idea to `localStorage` under keys `patchbay-selected-track` and `patchbay-selected-idea`. On mount, a one-time restore effect (guarded by a `sessionRestored` ref) reads these keys and restores the selection before falling back to URL param logic. The guard ensures the restore only runs once — it does not re-run on subsequent bucket refetches, preventing the selection from snapping back on poll.

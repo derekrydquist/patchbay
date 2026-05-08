@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import {
-  CheckCircle2, Circle, Clock, Minus, Music2, Plus, MessageSquare, Pencil, Trash2,
+  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -32,7 +32,7 @@ const STATUS_CONFIG: Record<TaskStatus, StatusCfg> = {
   'todo':          { label: 'TO DO',         icon: Circle,       iconClass: 'text-white/30', cellBg: '' },
   'in-progress':   { label: 'IN PROGRESS',   icon: Clock,        iconClass: 'text-blue-300', cellBg: 'bg-blue-400/10' },
   'complete':      { label: 'COMPLETE',       icon: CheckCircle2, iconClass: 'text-primary',  cellBg: 'bg-primary/10' },
-  'will-not-play': { label: 'WILL NOT PLAY', icon: Minus,        iconClass: 'text-white/20', cellBg: 'bg-white/[0.02]' },
+  'will-not-play': { label: 'WILL NOT PLAY', icon: Ban,          iconClass: 'text-red-400/70', cellBg: 'bg-red-950/30 shadow-[inset_0_0_0_1px_rgba(220,38,38,0.3)]' },
 };
 
 type BucketClip = { id: string; name: string; isFinal: boolean };
@@ -70,6 +70,7 @@ function CellModal({
   const [newComment, setNewComment] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const [savedField, setSavedField] = useState<string | null>(null);
 
   const { data: comments = [] } = useQuery<TaskComment[]>({
     queryKey: ['task-comments', task.id],
@@ -97,6 +98,13 @@ function CellModal({
         old?.map(t => t.id === task.id ? { ...t, ...updates } : t)
       );
       return { prev };
+    },
+    onSuccess: (_data, variables) => {
+      const field = 'status' in variables ? 'status' : 'assignee' in variables ? 'assignee' : 'dueDate' in variables ? 'dueDate' : null;
+      if (field) {
+        setSavedField(field);
+        setTimeout(() => setSavedField(null), 1500);
+      }
     },
     onError: (err, _vars, context) => {
       if (context?.prev) queryClient.setQueryData(['production-tasks', SONG_ID], context.prev);
@@ -173,7 +181,14 @@ function CellModal({
 
             {/* ── STATUS ── */}
             <div className="space-y-2">
-              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Status</label>
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center">
+                Status
+                {savedField === 'status' && (
+                  <span className="text-green-400 text-xs flex items-center gap-1 ml-2">
+                    <Check size={10} /> Saved
+                  </span>
+                )}
+              </label>
               <div className="space-y-1.5">
                 {(Object.entries(STATUS_CONFIG) as [TaskStatus, StatusCfg][]).map(([s, cfg]) => {
                   const Icon = cfg.icon;
@@ -184,7 +199,9 @@ function CellModal({
                       onClick={() => patchTask.mutate({ status: s })}
                       className={cn(
                         'w-full flex items-center justify-between rounded-lg border px-4 py-3 text-left transition-all',
-                        isSelected
+                        isSelected && s === 'will-not-play'
+                          ? 'border-red-800/50 bg-red-950/40'
+                          : isSelected
                           ? 'border-primary/60 bg-primary/10'
                           : 'border-white/5 bg-white/[0.03] hover:border-white/10 hover:bg-white/[0.05]'
                       )}
@@ -193,12 +210,12 @@ function CellModal({
                         <Icon size={14} className={cfg.iconClass} />
                         <span className={cn(
                           'text-xs uppercase tracking-[0.2em] font-bold',
-                          s === 'will-not-play' ? 'line-through text-white/30' : 'text-white/80'
+                          s === 'will-not-play' ? 'text-red-400/70' : 'text-white/80'
                         )}>
                           {cfg.label}
                         </span>
                       </div>
-                      {isSelected && <CheckCircle2 size={14} className="text-primary" />}
+                      {isSelected && <CheckCircle2 size={14} className={s === 'will-not-play' ? 'text-red-400/70' : 'text-primary'} />}
                     </button>
                   );
                 })}
@@ -207,7 +224,14 @@ function CellModal({
 
             {/* ── ASSIGNEE ── */}
             <div className="space-y-2 pt-4 border-t border-white/5">
-              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Assignee</label>
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center">
+                Assignee
+                {savedField === 'assignee' && (
+                  <span className="text-green-400 text-xs flex items-center gap-1 ml-2">
+                    <Check size={10} /> Saved
+                  </span>
+                )}
+              </label>
               <div className="px-1">
                 <Select
                   value={task.assignee || 'unassigned'}
@@ -248,7 +272,14 @@ function CellModal({
 
             {/* ── DUE DATE ── */}
             <div className="space-y-2 pt-4 border-t border-white/5">
-              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">Due Date</label>
+              <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1 flex items-center">
+                Due Date
+                {savedField === 'dueDate' && (
+                  <span className="text-green-400 text-xs flex items-center gap-1 ml-2">
+                    <Check size={10} /> Saved
+                  </span>
+                )}
+              </label>
               <div className="px-1">
                 <Input
                   type="date"
@@ -348,6 +379,16 @@ function CellModal({
             </div>
 
           </div>
+        </div>
+
+        {/* ── Footer ── */}
+        <div className="p-4 border-t border-white/5 shrink-0 flex justify-end">
+          <Button
+            className="bg-primary text-primary-foreground hover:bg-primary/90 uppercase text-xs font-bold tracking-wider"
+            onClick={() => onOpenChange(false)}
+          >
+            Done
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -479,7 +520,7 @@ export function ProductionTracker() {
                             'text-[9px] uppercase tracking-[0.2em] font-bold truncate',
                             status === 'complete'      && 'text-primary',
                             status === 'in-progress'   && 'text-blue-300',
-                            status === 'will-not-play' && 'text-white/20 line-through',
+                            status === 'will-not-play' && 'text-red-400/70',
                             status === 'todo'          && 'text-white/45'
                           )}>
                             {cfg.label}
