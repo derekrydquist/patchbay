@@ -5,7 +5,7 @@ import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count } from "drizzle-orm";
+import { eq, and, ne, count, asc } from "drizzle-orm";
 import { db } from "./db";
 import { storage } from "./storage";
 import {
@@ -237,6 +237,31 @@ export async function registerRoutes(
   app.delete("/api/timeline-clips/:id", async (req, res) => {
     await storage.deleteTimelineClip(req.params.id);
     res.status(204).send();
+  });
+
+  app.get("/api/timeline-clips/:id/replacements", async (req, res) => {
+    const clip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+    if (!clip || !clip.sectionName) return res.json([]);
+
+    const idea = db.select().from(ideas)
+      .where(and(eq(ideas.trackId, clip.trackId), eq(ideas.sectionName, clip.sectionName)))
+      .get();
+    if (!idea) return res.json([]);
+
+    const replacements = db.select({
+      id: clips.id,
+      name: clips.name,
+      duration: clips.duration,
+      src: clips.src,
+      isFinal: clips.isFinal,
+      createdAt: clips.createdAt,
+    })
+      .from(clips)
+      .where(and(eq(clips.ideaId, idea.id), ne(clips.name, clip.name)))
+      .orderBy(asc(clips.createdAt))
+      .all();
+
+    res.json(replacements);
   });
 
   app.get("/api/songs/:songId/timeline-has-finals", async (req, res) => {

@@ -25,13 +25,13 @@ This project was originally scaffolded by Replit and used as a design prototype.
 previously called "Song-Weaver-Suite" and "Studio Lux" in some parts of the code. All
 references should be renamed to **PatchBay** going forward.
 
-The frontend UI is largely designed and functional with mock/hardcoded data. The backend is
-a near-empty shell. The primary work ahead is:
+The frontend UI is largely designed and functional. The backend is fully built out — real API
+routes, database persistence, file uploads, and audio playback all work end-to-end. The primary
+remaining work is:
 
-1. Building out the real backend (API routes, database schema, file uploads)
-2. Connecting the frontend to real data (replacing all mock data)
-3. Implementing auth (user accounts, roles)
-4. Making file uploading and audio playback work end-to-end
+1. Implementing auth (user accounts, roles, permissions) — Passport.js is installed but not wired up
+2. Real-time collaboration — WebSockets (`ws`) are installed but not used yet
+3. Deployment infrastructure (file storage, hosting)
 
 ---
 
@@ -174,7 +174,7 @@ in route handlers.
 
 ### Track IDs must be stable
 
-`INITIAL_TRACKS` in `daw-data.ts` uses the same stable string IDs (`track-drums`, etc.) — **not** `nanoid()`. This is required because `Transport.tsx` keys its `audioRefs` map by track ID, and `Timeline.tsx` dispatches `audio-mute-state` events using the DB track IDs. If these diverge, audio muting silently breaks. Do not change `INITIAL_TRACKS` to use generated IDs.
+`INITIAL_TRACKS` in `daw-data.ts` uses the same stable string IDs (`track-drums`, etc.) — **not** `nanoid()`. This is required because the timeline's live sync matches local `Track` objects to `ApiTrack` objects by `id`, and `timelineClips.trackId` is a DB foreign key that must match. If IDs diverge, the live sync silently mismatches tracks and DB relationships break. Do not change `INITIAL_TRACKS` to use generated IDs.
 
 ---
 
@@ -391,10 +391,10 @@ When implementing auth or any permission checks, always consult this table.
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
-| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (AlertDialog confirmation); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
+| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
-| Transport (play/pause/BPM) | ✅ UI done | Uses custom audio events |
+| Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
 | Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts` |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Export Dialog | ✅ UI done | Non-functional |
@@ -402,7 +402,7 @@ When implementing auth or any permission checks, always consult this table.
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
-| Audio playback from real files | 🔄 Partial | Clips have real `src` URLs; `<audio>` loads them; full transport sync needs testing |
+| Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions | ❌ Not built | Spec item for future |
 | Video → audio stripping | ❌ Not built | Spec item for future |
@@ -438,6 +438,11 @@ PATCH  /api/timeline-clips/:id           — update a placed clip (start positio
                                            clears isFinal on sibling timeline clips, and updates the
                                            linked production task status
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
+GET    /api/songs/:songId/timeline-has-finals     — returns { hasFinals: boolean }; true if any
+                                                    timeline clip with isFinal=true exists for this song
+DELETE /api/songs/:songId/timeline-clips/non-final — deletes all non-final timeline clips for the song,
+                                                      then recomputes and persists correct start values
+                                                      for the remaining final clips → 204
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
 POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server
@@ -514,6 +519,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 - **Do not reintroduce free clip positioning** — clips on the timeline have no independent position. `clip.start` is always derived by `recalcAllStarts`, never set from a cursor pixel offset or stored as an arbitrary value. This is intentional.
 - **Do not add overlap capability to the timeline** — PatchBay is plug-and-play, not a freeform DAW. Clips on the same track cannot overlap under any circumstances. The only valid drop targets are append-to-end or insert-between within a section column.
 - **Do not remove Replit-specific vite plugins without updating `vite.config.ts`** — they are conditionally loaded only when `REPL_ID` is set, so they do no harm locally.
+- **Do not set `isFinal` on clips or `timeline_clips` outside the established three-entry-point sync** — `PATCH /api/clips/:clipId`, `PATCH /api/timeline-clips/:id`, and `PATCH /api/production-tasks/:id` all cascade `isFinal` changes across bucket clips, timeline clips, and production task status in a coordinated chain. A one-off `isFinal` write (direct DB update, ad-hoc route, or storage method call) will silently desync the three tables and create inconsistent "Complete" task states. Always go through one of the three established entry points.
 
 ---
 
@@ -561,6 +567,35 @@ For frontend-only changes (components, styles, pages), a server restart is not n
 ## Planned Features & Extensibility Notes
 
 These are features that have been deliberately designed for future extension. When building them, follow the guidance here rather than starting from scratch.
+
+### Audio playback system — ✅ Built
+
+Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.tsx` is a pure controls component — it only dispatches CustomEvents and displays state. No audio logic lives in Transport.
+
+**Key refs in `Timeline.tsx`:**
+- `customAudioRefs` — `{ [clipId: string]: HTMLAudioElement }`. One `Audio` object pre-created per clip as clips appear in `tracks`. Set `audio.preload = 'auto'` so the browser buffers ahead of play. Created in a `useEffect` on `tracks`; only adds new entries, never overwrites existing ones.
+- `pendingPlayRef` — `Set<string>` of clip IDs whose `.play()` Promise is still resolving. Guards against calling `.play()` again before the previous call settles, which would throw `AbortError`.
+- `audioCtxRef` — persistent `AudioContext | null`. Used solely to unlock Safari's audio pipeline; not used to route audio. Closed when playback stops.
+
+**Animation loop:**
+The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
+1. Advances the playhead by `delta * zoom` pixels (zoom is pixels/second).
+2. Computes `playheadTime` in seconds from the pixel position.
+3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + clip.duration)`, calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume`, `muted`, and `playbackRate` every frame.
+4. If the clip is out of range and not paused, calls `audio.pause()`.
+
+**Safari AudioContext unlock:**
+Safari requires `AudioContext.resume()` to be called synchronously within a user gesture window. The rAF loop fires asynchronously — outside that window — so raw `audio.play()` from the loop has a ~0.5s delay.
+
+Fix: `Timeline.tsx` listens to the `toggle-play` CustomEvent synchronously. `Transport.tsx` dispatches this event synchronously from the play button click handler and the spacebar handler. When `isPlaying: true` arrives in that synchronous listener, `Timeline.tsx` immediately calls `audioCtxRef.current.resume()` — still within the gesture window. The `audio.play()` calls that happen frames later then run without delay.
+
+When `isPlaying` becomes `false`: all audios are paused, `pendingPlayRef` is cleared, `audioCtxRef.current?.close()` is called, and `audioCtxRef` is set to `null`.
+
+**Do not:**
+- Move audio playback logic into `Transport.tsx` — it belongs in `Timeline.tsx` where clip positions are known.
+- Call `audio.play()` outside the rAF loop without checking `pendingPlayRef` — overlapping play/pause calls throw `AbortError`.
+- Create a new `AudioContext` per clip or per play call — one persistent `audioCtxRef` per play session is correct.
+- Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
 
 ### Audio hover preview (Media Bucket) — ✅ Built
 
@@ -694,6 +729,20 @@ Currently has two surfaces:
 - **Track header right-click** — "Remove Instrument" action in `Track.tsx`, wrapped in an `AlertDialog` for confirmation. The `onDeleteTrack` callback prop flows from `Timeline.tsx` → `TimelineTrack` → confirmation → API call + local state removal + bucket query invalidation.
 
 Both menus use the shadcn `ContextMenu` component (`@/components/ui/context-menu`). When adding new track-level actions, extend the `ContextMenuContent` in `Track.tsx`. When adding new global timeline actions, extend the menu in `Timeline.tsx`.
+
+**Smart "Clear Timeline" — server-driven branching dialog:**
+
+Clicking "Clear Timeline" in the background context menu triggers a `GET /api/songs/:songId/timeline-has-finals` call before showing any dialog. The result drives which dialog appears:
+
+- **No finals on the timeline** (`hasFinals: false`) → simple dialog: Cancel / Clear Timeline (destructive). Same as the old behavior — clears local state and fires individual `DELETE /api/timeline-clips/:id` for each clip.
+- **Finals exist** (`hasFinals: true`) → enhanced dialog: Cancel / Leave Final Clips / Clear All.
+  - **Clear All** — same as the simple path; deletes everything.
+  - **Leave Final Clips** — fires `DELETE /api/songs/:songId/timeline-clips/non-final` (fire-and-forget), closes the dialog immediately, then calls `queryClient.invalidateQueries` for the timeline key. No manual local state update — the live sync picks up the server result when the query refetches.
+
+**`deleteNonFinalTimelineClips` server-side recalc:**
+After deleting non-final clips, the server recomputes correct `start` values for the remaining final clips using the same algorithm as the client's `recalcAllStarts`: infers section order from the clips' pre-deletion `start` values (smallest per section), computes section widths (max total final-clip duration per section across all tracks, floored at 4s), then walks each track+section and writes updated `start` values to the DB. This ensures the client's live sync picks up geometrically correct positions without needing a client-side recalc.
+
+`clearDialogState` in `Timeline.tsx` is a string union `'none' | 'checking' | 'simple' | 'enhanced'` (replaced the old `showClearConfirm: boolean`). The `'checking'` state covers the async server round-trip before the dialog appears.
 
 ---
 

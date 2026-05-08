@@ -3,7 +3,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
-import { Clip, Comment, MOCK_SONG } from '@/lib/daw-data';
+import { Clip, Comment } from '@/lib/daw-data';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle } from 'lucide-react';
 import {
   ContextMenu,
@@ -217,6 +217,15 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
   );
 }
 
+type ReplacementClip = {
+  id: string;
+  name: string;
+  duration: number;
+  src: string | null;
+  isFinal: boolean;
+  createdAt: string;
+};
+
 export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
@@ -224,6 +233,10 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [comments, setComments] = useState(clip.comments || []);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
+  const [replacements, setReplacements] = useState<ReplacementClip[] | null>(null);
+  const [replacementsLoading, setReplacementsLoading] = useState(false);
+  const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
+  const [pendingReplacement, setPendingReplacement] = useState<ReplacementClip | null>(null);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -288,23 +301,42 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
     }
   };
 
-  const findVersions = () => {
-    // A timeline clip gets a new ID, so we can't match by ID against the original idea versions.
-    // Instead, we find the idea by base name or if the idea contains a version with this clip's name.
-    const baseName = clip.name.split(' V')[0];
-    
-    for (const inst of MOCK_SONG.instruments) {
-      for (const idea of inst.ideas) {
-        if (idea.name === baseName || idea.versions.some(v => v.name === clip.name)) {
-          // Return all other versions of this idea (filtering out the one with the same name)
-          return idea.versions.filter(v => v.name !== clip.name);
-        }
-      }
+  const fetchReplacements = async () => {
+    setReplacementsLoading(true);
+    try {
+      const res = await fetch(`/api/timeline-clips/${clip.id}/replacements`);
+      if (res.ok) setReplacements(await res.json());
+    } catch {
+      // leave replacements null — "No other versions found" will show
+    } finally {
+      setReplacementsLoading(false);
     }
-    return [];
   };
 
-  const otherVersions = findVersions();
+  const performReplace = async (replacement: ReplacementClip) => {
+    try {
+      const res = await fetch(`/api/timeline-clips/${clip.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: replacement.name,
+          src: replacement.src ?? null,
+          duration: replacement.duration,
+          type: 'audio',
+          color: clip.color,
+          isFinal: false,
+        }),
+      });
+      if (res.ok) {
+        window.dispatchEvent(new CustomEvent('clip-replaced', { detail: { clipId: clip.id } }));
+        queryClient.invalidateQueries({ queryKey: ['/api/songs/patchbay-default/timeline'] });
+        queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+        queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
+      }
+    } catch (err) {
+      console.error('Failed to replace clip:', err);
+    }
+  };
 
   return (
     <>
@@ -373,27 +405,31 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
 
           <Separator className="my-1 bg-border/50" />
           
-          <ContextMenuSub>
+          <ContextMenuSub onOpenChange={(open) => { if (open) fetchReplacements(); }}>
             <ContextMenuSubTrigger className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <RefreshCw size={14} className="text-primary" /> Replace
             </ContextMenuSubTrigger>
             <ContextMenuSubContent className="bg-popover border-border min-w-[200px]">
-              {otherVersions.length > 0 ? (
-                otherVersions.map(v => (
-                  <ContextMenuItem 
-                    key={v.id} 
-                    className="text-xs flex flex-col items-start gap-1 py-2"
+              {replacementsLoading ? (
+                <div className="p-4 text-[10px] text-muted-foreground italic text-center uppercase tracking-widest">Loading…</div>
+              ) : replacements && replacements.length > 0 ? (
+                replacements.map((r) => (
+                  <ContextMenuItem
+                    key={r.id}
+                    className="text-xs flex flex-col items-start gap-0.5 py-2"
                     onClick={() => {
-                      window.dispatchEvent(new CustomEvent('replace-clip', { 
-                        detail: { 
-                          oldClipId: clip.id, 
-                          newClip: v 
-                        } 
-                      }));
+                      if (isFinal) {
+                        setPendingReplacement(r);
+                        setShowReplaceConfirm(true);
+                      } else {
+                        performReplace(r);
+                      }
                     }}
                   >
-                    <span className="font-bold">{v.name}</span>
-                    <span className="text-[10px] text-muted-foreground uppercase">{v.metadata?.uploadedBy} • {v.metadata?.uploadedDate}</span>
+                    <span className="font-bold">{r.name}</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {r.duration}s{r.isFinal ? ' · Final' : ''}
+                    </span>
                   </ContextMenuItem>
                 ))
               ) : (
@@ -481,6 +517,29 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
               }}
             >
               Remove Clip
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showReplaceConfirm} onOpenChange={(open) => { if (!open) { setShowReplaceConfirm(false); setPendingReplacement(null); } }}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Replace Final Clip?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This clip is marked as final. Replacing it will set it as non-final. Are you sure?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (pendingReplacement) performReplace(pendingReplacement);
+                setShowReplaceConfirm(false);
+                setPendingReplacement(null);
+              }}
+            >
+              Replace
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

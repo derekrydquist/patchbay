@@ -381,6 +381,18 @@ export function Timeline() {
   }, [tracks]);
 
   useEffect(() => {
+    const handleClipReplaced = (e: any) => {
+      const audio = customAudioRefs.current[e.detail.clipId];
+      if (audio) {
+        audio.pause();
+        delete customAudioRefs.current[e.detail.clipId];
+      }
+    };
+    window.addEventListener('clip-replaced', handleClipReplaced);
+    return () => window.removeEventListener('clip-replaced', handleClipReplaced);
+  }, []);
+
+  useEffect(() => {
     const handleTogglePlay = (e: any) => {
       if (e.detail.isPlaying) {
         if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
