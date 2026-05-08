@@ -391,7 +391,7 @@ When implementing auth or any permission checks, always consult this table.
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
-| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation, cascades to all clips and ideas) |
+| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation); right-click timeline clip → Replace submenu (fetches real bucket versions from `/api/timeline-clips/:id/replacements` on open; confirmation dialog if clip is final; PATCHes name/src/duration/type/color + isFinal:false on select) |
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
@@ -438,6 +438,12 @@ PATCH  /api/timeline-clips/:id           — update a placed clip (start positio
                                            clears isFinal on sibling timeline clips, and updates the
                                            linked production task status
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
+GET    /api/timeline-clips/:id/replacements — returns bucket clips that can replace this timeline clip:
+                                              looks up the clip's trackId+sectionName → idea → all
+                                              clips for that idea, excluding the one whose name matches
+                                              the current clip. Fields: id, name, duration, src,
+                                              isFinal, createdAt. Ordered by createdAt asc. Returns []
+                                              if clip not found or has no sectionName.
 GET    /api/songs/:songId/timeline-has-finals     — returns { hasFinals: boolean }; true if any
                                                     timeline clip with isFinal=true exists for this song
 DELETE /api/songs/:songId/timeline-clips/non-final — deletes all non-final timeline clips for the song,
@@ -591,11 +597,15 @@ Fix: `Timeline.tsx` listens to the `toggle-play` CustomEvent synchronously. `Tra
 
 When `isPlaying` becomes `false`: all audios are paused, `pendingPlayRef` is cleared, `audioCtxRef.current?.close()` is called, and `audioCtxRef` is set to `null`.
 
+**Stale audio on clip replace — `clip-replaced` CustomEvent:**
+When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the Replace submenu in `Clip.tsx`), the old `HTMLAudioElement` in `customAudioRefs` still holds the old `src` and will keep playing. Fix: `Clip.tsx` dispatches `clip-replaced` with `{ clipId }` after a successful PATCH. `Timeline.tsx` listens for this event (in a `useEffect(fn, [])`, so `customAudioRefs.current` is never stale) and pauses + removes the old element. The pre-create `useEffect` then creates a fresh `Audio` for the new `src` when `tracks` updates after the query refetch.
+
 **Do not:**
 - Move audio playback logic into `Transport.tsx` — it belongs in `Timeline.tsx` where clip positions are known.
 - Call `audio.play()` outside the rAF loop without checking `pendingPlayRef` — overlapping play/pause calls throw `AbortError`.
 - Create a new `AudioContext` per clip or per play call — one persistent `audioCtxRef` per play session is correct.
 - Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
+- Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
 
 ### Audio hover preview (Media Bucket) — ✅ Built
 

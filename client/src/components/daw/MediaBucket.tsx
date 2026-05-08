@@ -156,6 +156,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const [selectedHiddenTrackId, setSelectedHiddenTrackId] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionRestored = useRef(false);
+  const tracksRef = useRef<ApiTrack[]>([]);
   const [location] = useLocation();
 
   // ── Fetch bucket from API ────────────────────────────────────────────────────
@@ -187,6 +188,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
   useEffect(() => {
     if (!tracks.length) return;
+    tracksRef.current = tracks;
     if (selectedTrack) {
       const fresh = tracks.find(t => t.id === selectedTrack.id);
       setSelectedTrack(fresh ?? null);
@@ -196,6 +198,22 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       }
     }
   }, [tracks]);
+
+  // ── "Find in File Browser" from timeline clip right-click ─────────────────
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { trackId, sectionName } = (e as CustomEvent).detail as { trackId?: string; sectionName?: string };
+      if (!trackId || !sectionName) return;
+      const track = tracksRef.current.find(t => t.id === trackId);
+      if (!track) return;
+      const idea = track.ideas.find(i => i.sectionName === sectionName) ?? null;
+      setSelectedTrack(track);
+      setSelectedIdea(idea);
+    };
+    window.addEventListener('find-in-bucket', handler);
+    return () => window.removeEventListener('find-in-bucket', handler);
+  }, []);
 
   // ── Persist selection to localStorage ───────────────────────────────────────
 

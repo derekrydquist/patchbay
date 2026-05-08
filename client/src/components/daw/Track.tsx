@@ -26,6 +26,7 @@ interface SectionCellProps {
   zoom: number;
   isInvalid: boolean;
   insertionX?: number;
+  trackId: string;
 }
 
 function SectionCell({
@@ -35,6 +36,7 @@ function SectionCell({
   zoom,
   isInvalid,
   insertionX,
+  trackId,
 }: SectionCellProps) {
   return (
     <div
@@ -42,7 +44,7 @@ function SectionCell({
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
       {clips.map((clip) => (
-        <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} />
+        <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} />
       ))}
       {insertionX !== undefined && (
         <div
@@ -208,6 +210,7 @@ export function TimelineTrack({
               clips={sectionClips}
               zoom={zoom}
               isInvalid={invalidSections.has(section.name)}
+              trackId={track.id}
               insertionX={
                 insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
               }

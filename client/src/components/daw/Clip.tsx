@@ -4,7 +4,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -41,6 +41,7 @@ interface ClipProps {
   isOverlay?: boolean;
   zoom?: number;
   sectionStart?: number;
+  trackId?: string;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -226,7 +227,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
   const [newComment, setNewComment] = useState("");
@@ -399,8 +400,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0 }: C
           </ContextMenuItem>
           
           <ContextMenuItem onClick={handleMarkFinal} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} /> 
+            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-muted-foreground"} />
             {isFinal ? "Unmark Final" : "Mark as Final"}
+          </ContextMenuItem>
+
+          <ContextMenuItem
+            onClick={() => {
+              window.dispatchEvent(new CustomEvent('find-in-bucket', {
+                detail: { trackId, sectionName: clip.sectionName, clipName: clip.name },
+              }));
+            }}
+            className="gap-2 text-xs uppercase tracking-wider font-semibold"
+          >
+            <FolderSearch size={14} className="text-primary" /> Show in File Browser
           </ContextMenuItem>
 
           <Separator className="my-1 bg-border/50" />
