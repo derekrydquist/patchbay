@@ -625,6 +625,13 @@ export async function registerRoutes(
         const finalClip = await storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId);
         if (finalClip) {
           await storage.updateClip(finalClip.id, { isFinal: false });
+
+          // Also unmark the timeline clip
+          const timelineClipToUnmark = await storage.getTimelineClipForTask(task.instrument, task.sectionName, task.songId);
+          if (timelineClipToUnmark) {
+            await storage.updateTimelineClip(timelineClipToUnmark.id, { isFinal: false });
+          }
+
           const statusNames: Record<string, string> = {
             "todo": "To Do",
             "in-progress": "In Progress",

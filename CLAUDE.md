@@ -726,8 +726,10 @@ If **neither** passes → `400 { message: "Cannot mark as complete — no clip i
 If **A passes but B does not** (clip on timeline, nothing yet marked final in bucket) → the route auto-promotes a bucket clip to final:
 1. Looks up the track → idea → first clip for that idea
 2. Calls `storage.updateClip(bucketClip.id, { isFinal: true })`
-3. Logs `Clip marked as final: "{bucketClip.name}"` as a session note
-4. Then proceeds with `updateTask()` as normal
+3. Calls `storage.updateTimelineClip(timelineClipForTask.id, { isFinal: true })` to sync the timeline clip
+4. Clears `isFinal` on all other timeline clips with the same `trackId + sectionName`
+5. Logs `Clip marked as final: "{bucketClip.name}"` as a session note
+6. Then proceeds with `updateTask()` as normal
 
 If **B passes** (final clip already exists) → proceeds directly with `updateTask()`.
 
@@ -739,7 +741,7 @@ The guard runs **before** `updateTask()` is called, so a rejected request makes 
 
 `ProductionTracker` subscribes to this key via a `useQuery` that fetches `/api/songs/${SONG_ID}/bucket` and derives a `finalClipsMap: Record<"${instrument}__${sectionName}", clipName>`. Complete cells in the grid show the actual final clip name from this map (falling back to `task.title`). The key is invalidated by both `BucketClip.handleToggleFinal` and `CellModal.patchTask.onSettled`, causing the grid to update instantly.
 
-`patchTask.onSettled` in `CellModal` invalidates: `['production-tasks', SONG_ID]`, `['task-comments', task.id]`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`.
+`patchTask.onSettled` in `CellModal` invalidates: `['production-tasks', SONG_ID]`, `['task-comments', task.id]`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`, and `['/api/songs/patchbay-default/timeline']` (so the timeline checkmark updates within the next poll cycle).
 
 ### Timeline background right-click context menu
 
