@@ -107,6 +107,8 @@ export interface IStorage {
   countClipsForIdea(ideaId: string): Promise<number>;
   updateClip(clipId: string, updates: Partial<InsertClip>): Promise<Clip | undefined>;
   syncFinalClipFromTimeline(trackId: string, sectionName: string, clipName: string, isFinal: boolean): Promise<void>;
+  timelineHasFinals(songId: string): Promise<boolean>;
+  deleteNonFinalTimelineClips(songId: string): Promise<void>;
 
   // Production Tasks
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
@@ -465,6 +467,84 @@ export class SQLiteStorage implements IStorage {
       const clipToUnmark = ideaClips.find(c => c.name === clipName && c.isFinal);
       if (clipToUnmark) {
         db.update(clips).set({ isFinal: false }).where(eq(clips.id, clipToUnmark.id)).run();
+      }
+    }
+  }
+
+  async timelineHasFinals(songId: string): Promise<boolean> {
+    const songTracks = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+      .all();
+    if (!songTracks.length) return false;
+    const trackIds = songTracks.map(t => t.id);
+    const finalClip = db.select().from(timelineClips)
+      .where(and(inArray(timelineClips.trackId, trackIds), eq(timelineClips.isFinal, true)))
+      .get();
+    return !!finalClip;
+  }
+
+  async deleteNonFinalTimelineClips(songId: string): Promise<void> {
+    const songTracks = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+      .all();
+    if (!songTracks.length) return;
+    const trackIds = songTracks.map(t => t.id);
+
+    const allClips = db.select().from(timelineClips)
+      .where(inArray(timelineClips.trackId, trackIds))
+      .all();
+
+    db.delete(timelineClips)
+      .where(and(inArray(timelineClips.trackId, trackIds), eq(timelineClips.isFinal, false)))
+      .run();
+
+    const finals = allClips.filter(c => c.isFinal);
+    if (!finals.length) return;
+
+    // Infer section order from existing start values (smallest clip start per section).
+    const sectionMinStart: Record<string, number> = {};
+    for (const clip of finals) {
+      if (!clip.sectionName) continue;
+      if (!(clip.sectionName in sectionMinStart) || clip.start < sectionMinStart[clip.sectionName]) {
+        sectionMinStart[clip.sectionName] = clip.start;
+      }
+    }
+    const sections = Object.keys(sectionMinStart).sort((a, b) => sectionMinStart[a] - sectionMinStart[b]);
+
+    // Section width = max total final-clip duration across all tracks for that section.
+    const MIN_SECTION_WIDTH = 4;
+    const sectionWidths: Record<string, number> = {};
+    for (const section of sections) {
+      sectionWidths[section] = MIN_SECTION_WIDTH;
+      for (const trackId of trackIds) {
+        const total = finals
+          .filter(c => c.trackId === trackId && c.sectionName === section)
+          .reduce((sum, c) => sum + c.duration, 0);
+        if (total > sectionWidths[section]) sectionWidths[section] = total;
+      }
+    }
+
+    // Compute absolute section starts.
+    const sectionStarts: Record<string, number> = {};
+    let cursor = 0;
+    for (const section of sections) {
+      sectionStarts[section] = cursor;
+      cursor += sectionWidths[section];
+    }
+
+    // Recompute each final clip's start and write to DB.
+    for (const trackId of trackIds) {
+      for (const section of sections) {
+        const trackSectionClips = finals
+          .filter(c => c.trackId === trackId && c.sectionName === section)
+          .sort((a, b) => a.start - b.start);
+        let pos = sectionStarts[section];
+        for (const clip of trackSectionClips) {
+          if (clip.start !== pos) {
+            db.update(timelineClips).set({ start: pos }).where(eq(timelineClips.id, clip.id)).run();
+          }
+          pos += clip.duration;
+        }
       }
     }
   }

@@ -239,6 +239,16 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  app.get("/api/songs/:songId/timeline-has-finals", async (req, res) => {
+    const hasFinals = await storage.timelineHasFinals(req.params.songId);
+    res.json({ hasFinals });
+  });
+
+  app.delete("/api/songs/:songId/timeline-clips/non-final", async (req, res) => {
+    await storage.deleteNonFinalTimelineClips(req.params.songId);
+    res.status(204).send();
+  });
+
   // ─── Bucket ─────────────────────────────────────────────────────────────────
 
   /** GET /api/songs/:id/bucket — full bucket tree: tracks → ideas → clips */

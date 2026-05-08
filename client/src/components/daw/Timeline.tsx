@@ -993,7 +993,7 @@ export function Timeline() {
   const containerRef = React.useRef<HTMLDivElement>(null);
 
   const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [clearDialogState, setClearDialogState] = useState<'none' | 'checking' | 'simple' | 'enhanced'>('none');
 
   // Dismiss context menu on click-outside or Escape.
   useEffect(() => {
@@ -1019,14 +1019,21 @@ export function Timeline() {
     setContextMenuPos({ x: e.clientX, y: e.clientY });
   };
 
-  const handleClearTimeline = () => {
+  const handleClearAll = () => {
     const allClips = tracks.flatMap((t) => t.clips);
     setTracks((prev) => prev.map((t) => ({ ...t, clips: [] })));
     setSectionOrder([]);
     allClips.forEach((clip) => {
       fetch(`/api/timeline-clips/${clip.id}`, { method: 'DELETE' }).catch(console.error);
     });
-    setShowClearConfirm(false);
+    setClearDialogState('none');
+  };
+
+  const handleLeaveFinalClips = () => {
+    fetch(`/api/songs/${SONG_ID}/timeline-clips/non-final`, { method: 'DELETE' })
+      .then(() => queryClient.invalidateQueries({ queryKey: [`/api/songs/${SONG_ID}/timeline`] }))
+      .catch(console.error);
+    setClearDialogState('none');
   };
 
   const handleResizePointerDown = (e: React.PointerEvent) => {
@@ -1281,7 +1288,13 @@ export function Timeline() {
             className="w-full px-3 py-1.5 text-left text-xs font-semibold uppercase tracking-wider text-red-400 hover:bg-red-400/10 transition-colors"
             onClick={() => {
               setContextMenuPos(null);
-              setShowClearConfirm(true);
+              setClearDialogState('checking');
+              fetch(`/api/songs/${SONG_ID}/timeline-has-finals`)
+                .then((r) => r.json())
+                .then(({ hasFinals }: { hasFinals: boolean }) =>
+                  setClearDialogState(hasFinals ? 'enhanced' : 'simple')
+                )
+                .catch(() => setClearDialogState('simple'));
             }}
           >
             Clear Timeline
@@ -1289,7 +1302,11 @@ export function Timeline() {
         </div>
       )}
 
-      <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>
+      {/* Simple clear dialog — no finals on the timeline */}
+      <AlertDialog
+        open={clearDialogState === 'simple'}
+        onOpenChange={(open) => { if (!open) setClearDialogState('none'); }}
+      >
         <AlertDialogContent className="bg-[#0c0c0e] border-border">
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Clear Timeline</AlertDialogTitle>
@@ -1301,9 +1318,39 @@ export function Timeline() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={handleClearTimeline}
+              onClick={handleClearAll}
             >
               Clear Timeline
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Enhanced clear dialog — finals exist on the timeline */}
+      <AlertDialog
+        open={clearDialogState === 'enhanced'}
+        onOpenChange={(open) => { if (!open) setClearDialogState('none'); }}
+      >
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Clear Timeline</AlertDialogTitle>
+            <AlertDialogDescription>
+              Some clips on the timeline are marked as final. You can keep only the final clips or clear everything.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-card text-foreground border border-border hover:bg-muted"
+              onClick={handleLeaveFinalClips}
+            >
+              Leave Final Clips
+            </AlertDialogAction>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleClearAll}
+            >
+              Clear All
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
