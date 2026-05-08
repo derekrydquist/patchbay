@@ -169,6 +169,7 @@ function CellModal({
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
       queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/patchbay-default/timeline`] });
     },
   });
 

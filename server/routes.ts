@@ -551,6 +551,19 @@ export async function registerRoutes(
               const bucketClip = db.select().from(clips).where(eq(clips.ideaId, idea.id)).get();
               if (bucketClip) {
                 await storage.updateClip(bucketClip.id, { isFinal: true });
+
+                await storage.updateTimelineClip(timelineClipForTask.id, { isFinal: true });
+
+                // Clear isFinal on any other timeline clips in the same section
+                db.update(timelineClips)
+                  .set({ isFinal: false })
+                  .where(and(
+                    eq(timelineClips.trackId, timelineClipForTask.trackId),
+                    eq(timelineClips.sectionName, timelineClipForTask.sectionName),
+                    ne(timelineClips.id, timelineClipForTask.id)
+                  ))
+                  .run();
+
                 await storage.addTaskComment({
                   id: randomUUID(),
                   taskId: req.params.id,
