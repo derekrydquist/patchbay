@@ -352,6 +352,8 @@ export function Timeline() {
   const lastTimeRef = React.useRef<number | null>(null);
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
+  const pendingPlayRef = React.useRef<Set<string>>(new Set());
+  const audioContextUnlockedRef = useRef(false);
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -377,6 +379,14 @@ export function Timeline() {
       });
     });
   }, [tracks]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
+      pendingPlayRef.current.clear();
+      audioContextUnlockedRef.current = false;
+    }
+  }, [isPlaying]);
 
   useEffect(() => {
     const handleBpmUpdated = (e: any) => setBpm(e.detail.bpm);
@@ -478,38 +488,54 @@ export function Timeline() {
               }
             }
 
-            const trackMuteStates: Record<string, boolean> = {};
-            let isOverCustomAudioClip = false;
             for (const track of tracks) {
-              const isTrackMuted = track.muted || (tracks.some((t) => t.solo) && !track.solo);
-              let isOverClip = false;
               for (const clip of track.clips) {
-                const audio = clip.src ? customAudioRefs.current[clip.id] : null;
-                if (playheadTime >= clip.start && playheadTime <= clip.start + clip.duration) {
-                  isOverClip = true;
-                  if (audio) {
-                    isOverCustomAudioClip = true;
-                    audio.playbackRate = bpm / 120;
-                    audio.volume = track.volume / 100;
-                    audio.muted = isTrackMuted;
-                    try {
-                      if (audio.readyState >= 1) {
-                        if (audio.paused || Math.abs(audio.currentTime - (playheadTime - clip.start)) > 0.2) {
-                          audio.currentTime = Math.max(0, playheadTime - clip.start);
-                          if (isPlaying) audio.play().catch((e) => console.warn('Custom audio play failed:', e));
-                        }
-                      }
-                    } catch (err) {
-                      console.warn('Could not set audio currentTime:', err);
+                const audio = customAudioRefs.current[clip.id];
+                if (!audio || !clip.src) continue;
+
+                const clipStart = clip.start;
+                const clipEnd = clip.start + clip.duration;
+                const inRange = playheadTime >= clipStart && playheadTime < clipEnd;
+
+                if (inRange && isPlaying) {
+                  if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
+                    if (!audioContextUnlockedRef.current) {
+                      audioContextUnlockedRef.current = true;
+                      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+                      ctx.resume().then(() => {
+                        ctx.close();
+                        audio.currentTime = Math.max(0, playheadTime - clipStart);
+                        pendingPlayRef.current.add(clip.id);
+                        audio.play()
+                          .then(() => pendingPlayRef.current.delete(clip.id))
+                          .catch((e) => {
+                            pendingPlayRef.current.delete(clip.id);
+                            console.warn('play failed:', e);
+                          });
+                      });
+                    } else {
+                      audio.currentTime = Math.max(0, playheadTime - clipStart);
+                      pendingPlayRef.current.add(clip.id);
+                      audio.play()
+                        .then(() => pendingPlayRef.current.delete(clip.id))
+                        .catch((e) => {
+                          pendingPlayRef.current.delete(clip.id);
+                          console.warn('play failed:', e);
+                        });
                     }
                   }
+                  // Update volume/mute/rate every frame
+                  audio.volume = (track.volume / 100);
+                  audio.muted = track.muted;
+                  audio.playbackRate = bpm / 120;
                 } else {
-                  if (audio && !audio.paused) audio.pause();
+                  if (!audio.paused) {
+                    audio.pause();
+                    pendingPlayRef.current.delete(clip.id);
+                  }
                 }
               }
-              trackMuteStates[track.id] = isTrackMuted || isOverCustomAudioClip ? true : !isOverClip;
             }
-            window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
             window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadTime } }));
             return newPos;
           });
