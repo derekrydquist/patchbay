@@ -403,8 +403,9 @@ When implementing auth or any permission checks, always consult this table.
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
+| Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD (GET/POST/PATCH/DELETE) against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; "Add Note" shortcut in both `BucketClip` and `TimelineClip` right-click menus opens the panel and focuses the input via `focusNotes` prop; @ mention autocomplete on the notes input matches the ProductionTracker pattern |
 | Email notifications | ❌ Not built | Spec item for future |
-| @mentions | ❌ Not built | Spec item for future |
+| @mentions (system-wide) | ❌ Not built | @ mention autocomplete exists in clip notes and production tracker comments, but there are no push notifications or @mention feeds yet |
 | Video → audio stripping | ❌ Not built | Spec item for future |
 | AI trim detection on upload | ❌ Not built | Spec item for future |
 
@@ -468,6 +469,10 @@ PATCH  /api/clips/:clipId               — partial update of a bucket clip; whe
                                            clears isFinal on all sibling clips (same ideaId) and
                                            all sibling timeline clips (same trackId+sectionName)
                                            before setting the new one
+GET    /api/clips/:clipId/comments       — list comments on a bucket clip (ordered by timestamp asc)
+POST   /api/clips/:clipId/comments       — add a comment; body: { author, text }; timestamp set to Date.now()
+PATCH  /api/clip-comments/:id            — edit a comment's text; body: { text }
+DELETE /api/clip-comments/:id            — delete a comment → 204
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
@@ -742,6 +747,34 @@ The guard runs **before** `updateTask()` is called, so a rejected request makes 
 `ProductionTracker` subscribes to this key via a `useQuery` that fetches `/api/songs/${SONG_ID}/bucket` and derives a `finalClipsMap: Record<"${instrument}__${sectionName}", clipName>`. Complete cells in the grid show the actual final clip name from this map (falling back to `task.title`). The key is invalidated by both `BucketClip.handleToggleFinal` and `CellModal.patchTask.onSettled`, causing the grid to update instantly.
 
 `patchTask.onSettled` in `CellModal` invalidates: `['production-tasks', SONG_ID]`, `['task-comments', task.id]`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`, and `['/api/songs/patchbay-default/timeline']` (so the timeline checkmark updates within the next poll cycle).
+
+### Clip session notes (More Info panel) — ✅ Built
+
+`ClipInfoWindow` in `Clip.tsx` is the shared "More Info" dialog for both `BucketClip` and `TimelineClip`. It shows clip metadata stats and a full comment thread backed by the `clip_comments` table.
+
+**`bucketClipId` prop and `effectiveId`:**
+`clip_comments` rows reference `clips.id` (bucket clip IDs), never `timeline_clips.id`. When `TimelineClip` opens the panel, it must resolve the bucket clip ID from the TanStack Query cache:
+```ts
+const bucketData = queryClient.getQueryData<any[]>(['bucket', 'patchbay-default']);
+const track = bucketData?.find((t: any) => t.id === trackId);
+const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
+const bucketClipId = idea?.clips?.find((c: any) => c.name === clip.name)?.id;
+```
+This is synchronous — no extra API call — because the bucket query is always warm. `ClipInfoWindow` then uses `effectiveId = bucketClipId ?? clip.id` for all comment API calls. `BucketClip` always passes `bucketClipId={clip.id}` directly.
+
+**`focusNotes` prop:**
+Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `true` when "Add Note" is selected from the context menu and reset to `false` when the dialog closes. `ClipInfoWindow` receives this as a prop and triggers `setTimeout(() => noteInputRef.current?.focus(), 150)` inside `useEffect([open, focusNotes])`.
+
+**Comment CRUD:**
+- `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`
+- `POST /api/clips/:clipId/comments` — `{ author: 'Unknown', text }` — invalidates the query key on success
+- `PATCH /api/clip-comments/:id` — inline edit; Input shown in place of the comment text on click of pencil icon
+- `DELETE /api/clip-comments/:id` — immediate, no confirmation
+
+**@ mention autocomplete:**
+Matches the ProductionTracker pattern exactly. `BAND_MEMBERS` is a module-level constant in `Clip.tsx`. `handleNoteChange` detects `/@(\w*)$/` behind the cursor and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. The dropdown renders as an absolutely-positioned div below the Input, with colored avatar initials using `avatarColor(name)` (returns a hex string — use `style={{ backgroundColor }}`, not a CSS class). `onMouseDown + e.preventDefault()` on each dropdown item prevents the Input from blurring before the click registers.
+
+**`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper may return a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
 
 ### Timeline background right-click context menu
 

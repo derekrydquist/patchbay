@@ -354,6 +354,7 @@ export function Timeline() {
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -418,6 +419,17 @@ export function Timeline() {
     const handleBpmUpdated = (e: any) => setBpm(e.detail.bpm);
     window.addEventListener('update-bpm', handleBpmUpdated);
     return () => window.removeEventListener('update-bpm', handleBpmUpdated);
+  }, []);
+
+  useEffect(() => {
+    const handleMasterVolume = (e: any) => {
+      masterVolumeRef.current = e.detail.volume / 100;
+      Object.values(customAudioRefs.current).forEach((audio) => {
+        if (!audio.paused) audio.volume = masterVolumeRef.current;
+      });
+    };
+    window.addEventListener('update-master-volume', handleMasterVolume);
+    return () => window.removeEventListener('update-master-volume', handleMasterVolume);
   }, []);
 
   useEffect(() => {
@@ -535,7 +547,7 @@ export function Timeline() {
                       });
                   }
                   // Update volume/mute/rate every frame
-                  audio.volume = (track.volume / 100);
+                  audio.volume = (track.volume / 100) * masterVolumeRef.current;
                   audio.muted = track.muted;
                   audio.playbackRate = bpm / 120;
                 } else {
