@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -35,6 +35,25 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { ClipComment } from '@shared/schema';
+
+function formatRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function avatarColor(name: string): string {
+  const colors = ['#D4AF37', '#7C3AED', '#2563EB', '#16A34A', '#DC2626', '#EA580C'];
+  return colors[name.charCodeAt(0) % colors.length];
+}
+
+const BAND_MEMBERS = ["Alex", "Jamie", "Sam", "Jordan", "Taylor", "Riley"];
 
 interface ClipProps {
   clip: Clip;
@@ -58,23 +77,112 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
   );
 }
 
-export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void }) {
+export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, focusNotes, bucketClipId }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, bucketClipId?: string }) {
+  const queryClient = useQueryClient();
+  const effectiveId = bucketClipId ?? clip.id;
   const [newComment, setNewComment] = useState("");
-  const [comments, setComments] = useState(clip.comments || []);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const noteInputRef = useRef<HTMLInputElement | null>(null);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
 
-  const handleAddComment = () => {
+  const mentionMatches = mentionQuery !== null
+    ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
+    : [];
+
+  const insertMention = (name: string) => {
+    const input = noteInputRef.current;
+    if (!input) return;
+    const cursor = input.selectionStart ?? newComment.length;
+    const atIdx = newComment.slice(0, cursor).lastIndexOf('@');
+    const inserted = `${newComment.slice(0, atIdx)}@${name} ${newComment.slice(cursor)}`;
+    setNewComment(inserted);
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      input.focus();
+      const pos = atIdx + name.length + 2;
+      input.setSelectionRange(pos, pos);
+    });
+  };
+
+  const handleNoteChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setNewComment(val);
+    const cursor = e.target.selectionStart ?? val.length;
+    const atMatch = val.slice(0, cursor).match(/@(\w*)$/);
+    if (atMatch) {
+      setMentionQuery(atMatch[1]);
+      setMentionIndex(0);
+    } else {
+      setMentionQuery(null);
+    }
+  };
+
+  const handleNoteKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (mentionQuery !== null && mentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % mentionMatches.length); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setMentionIndex(i => (i - 1 + mentionMatches.length) % mentionMatches.length); return; }
+      if (e.key === 'Enter')     { e.preventDefault(); insertMention(mentionMatches[mentionIndex]); return; }
+      if (e.key === 'Escape')    { setMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter') handleAddComment();
+  };
+
+  const { data: clipCommentsList = [] } = useQuery<ClipComment[]>({
+    queryKey: ["clip-comments", effectiveId],
+    queryFn: async () => {
+      const res = await fetch(`/api/clips/${effectiveId}/comments`);
+      if (!res.ok) throw new Error("Failed to fetch");
+      return res.json();
+    },
+    enabled: open,
+  });
+
+  useEffect(() => {
+    if (open && focusNotes) {
+      const timer = setTimeout(() => noteInputRef.current?.focus(), 150);
+      return () => clearTimeout(timer);
+    }
+  }, [open, focusNotes]);
+
+  const handleAddComment = async () => {
     if (!newComment.trim()) return;
-    const comment: Comment = {
-      id: Math.random().toString(36).substr(2, 9),
-      author: "Current User",
-      text: newComment,
-      timestamp: Date.now(),
-      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-    const updatedComments = [comment, ...comments];
-    setComments(updatedComments);
-    onCommentsChange?.(updatedComments);
-    setNewComment("");
+    try {
+      await fetch(`/api/clips/${effectiveId}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: 'Unknown', text: newComment.trim() }),
+      });
+      setNewComment("");
+      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+    } catch (err) {
+      console.error('[clip comment] add failed:', err);
+    }
+  };
+
+  const handleSaveEdit = async (id: string) => {
+    if (!editText.trim()) return;
+    try {
+      await fetch(`/api/clip-comments/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: editText.trim() }),
+      });
+      setEditingId(null);
+      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+    } catch (err) {
+      console.error('[clip comment] edit failed:', err);
+    }
+  };
+
+  const handleDeleteComment = async (id: string) => {
+    try {
+      await fetch(`/api/clip-comments/${id}`, { method: 'DELETE' });
+      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+    } catch (err) {
+      console.error('[clip comment] delete failed:', err);
+    }
   };
 
   return (
@@ -169,33 +277,95 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange }: {
                   <div className="h-px flex-1 bg-primary/20" /> Session Notes
                 </h4>
               </div>
-              
+
               <div className="space-y-4">
                 <div className="flex gap-2">
-                  <Input 
-                    placeholder="Add a collaboration note..." 
-                    value={newComment}
-                    onChange={(e) => setNewComment(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddComment()}
-                    className="bg-black/40 border-white/10 text-xs h-9"
-                  />
+                  <div className="relative flex-1">
+                    <Input
+                      ref={noteInputRef}
+                      placeholder="Add a collaboration note..."
+                      value={newComment}
+                      onChange={handleNoteChange}
+                      onKeyDown={handleNoteKeyDown}
+                      className="bg-black/40 border-white/10 text-xs h-9 w-full"
+                    />
+                    {mentionQuery !== null && mentionMatches.length > 0 && (
+                      <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-md shadow-xl overflow-hidden">
+                        {mentionMatches.map((name, i) => (
+                          <button
+                            key={name}
+                            onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
+                            className={cn(
+                              'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
+                              i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
+                            )}
+                          >
+                            <div
+                              className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-black shrink-0"
+                              style={{ backgroundColor: avatarColor(name) }}
+                            >
+                              {name.charAt(0)}
+                            </div>
+                            @{name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <Button size="sm" onClick={handleAddComment} className="h-9 px-3">
                     <Plus size={14} />
                   </Button>
                 </div>
 
                 <div className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
-                  {comments.length > 0 ? (
+                  {clipCommentsList.length > 0 ? (
                     <div className="space-y-1">
-                      {comments.map(c => (
-                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
-                          <div className="flex justify-between items-center mb-1">
-                            <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
-                              <User size={10} /> {c.author}
-                            </span>
-                            <span className="text-[9px] text-muted-foreground font-mono opacity-50">{c.createdAt}</span>
+                      {clipCommentsList.map(c => (
+                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded group/comment">
+                          <div className="flex justify-between items-start mb-1">
+                            <div className="flex items-center gap-2">
+                              <div
+                                className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-black shrink-0"
+                                style={{ backgroundColor: avatarColor(c.author) }}
+                              >
+                                {c.author.charAt(0).toUpperCase()}
+                              </div>
+                              <span className="text-[11px] font-bold text-primary">{c.author}</span>
+                              <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(c.timestamp)}</span>
+                            </div>
+                            <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                              <button
+                                onClick={() => { setEditingId(c.id); setEditText(c.text); }}
+                                className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
+                              >
+                                <Pencil size={10} />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteComment(c.id)}
+                                className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors"
+                              >
+                                <Trash2 size={10} />
+                              </button>
+                            </div>
                           </div>
-                          <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
+                          {editingId === c.id ? (
+                            <div className="flex gap-2 mt-2">
+                              <Input
+                                value={editText}
+                                onChange={(e) => setEditText(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleSaveEdit(c.id);
+                                  if (e.key === 'Escape') setEditingId(null);
+                                }}
+                                className="bg-black/40 border-white/10 text-xs h-7 flex-1"
+                                autoFocus
+                              />
+                              <Button size="sm" onClick={() => handleSaveEdit(c.id)} className="h-7 px-2 text-[10px]">Save</Button>
+                              <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-7 px-2 text-[10px]">Cancel</Button>
+                            </div>
+                          ) : (
+                            <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -229,10 +399,8 @@ type ReplacementClip = {
 
 export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
-  const [showCommentInput, setShowCommentInput] = useState(false);
-  const [newComment, setNewComment] = useState("");
+  const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
-  const [comments, setComments] = useState(clip.comments || []);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   const [replacements, setReplacements] = useState<ReplacementClip[] | null>(null);
   const [replacementsLoading, setReplacementsLoading] = useState(false);
@@ -246,7 +414,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
-    data: { clip: { ...clip, isFinal, comments }, type: 'clip' },
+    data: { clip: { ...clip, isFinal }, type: 'clip' },
   });
 
   const style = {
@@ -261,24 +429,6 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     position: 'absolute',
     zIndex: 1,
     ...style,
-  };
-
-  const handleAddComment = () => {
-    if (!newComment.trim()) return;
-    const comment: Comment = {
-      id: Math.random().toString(36).substr(2, 9),
-      author: "Current User",
-      text: newComment,
-      timestamp: Date.now(),
-      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-    setComments([comment, ...comments]);
-    setShowCommentInput(false);
-    setNewComment("");
-  };
-
-  const handleUpdateComments = (newComments: Comment[]) => {
-    setComments(newComments);
   };
 
   const handleMarkFinal = async () => {
@@ -395,7 +545,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Info size={14} className="text-primary" /> More Info
           </ContextMenuItem>
-          <ContextMenuItem onClick={() => setShowCommentInput(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+          <ContextMenuItem onClick={() => { setShowInfo(true); setFocusNotes(true); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <MessageSquare size={14} className="text-primary" /> Add Note
           </ContextMenuItem>
           
@@ -483,33 +633,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         </ContextMenuContent>
       </ContextMenu>
 
-      <ClipInfoWindow 
-        clip={{...clip, isFinal, comments}} 
-        open={showInfo} 
-        onOpenChange={setShowInfo} 
-        onCommentsChange={handleUpdateComments}
+      <ClipInfoWindow
+        clip={{...clip, isFinal}}
+        open={showInfo}
+        onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
+        focusNotes={focusNotes}
+        bucketClipId={(() => {
+          const bucketData = queryClient.getQueryData<any[]>(['bucket', 'patchbay-default']);
+          if (!bucketData || !trackId) return undefined;
+          const track = bucketData.find((t: any) => t.id === trackId);
+          const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
+          return idea?.clips?.find((c: any) => c.name === clip.name)?.id as string | undefined;
+        })()}
       />
-
-      <Dialog open={showCommentInput} onOpenChange={setShowCommentInput}>
-        <DialogContent className="max-w-sm bg-card border-primary/20">
-          <DialogHeader>
-            <DialogTitle className="text-sm uppercase tracking-widest font-heading">Add Note to {clip.name}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <Input
-              placeholder="Leave a comment..."
-              value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
-              className="bg-black/40 border-border"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" size="sm" onClick={() => setShowCommentInput(false)}>Cancel</Button>
-              <Button size="sm" onClick={handleAddComment}>Save Note</Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
         <AlertDialogContent className="bg-[#0c0c0e] border-border">
@@ -571,6 +707,7 @@ import { useLocation } from 'wouter';
 
 export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
+  const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
   const [showChangeFinalConfirm, setShowChangeFinalConfirm] = useState(false);
@@ -730,6 +867,9 @@ export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }
             <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <Info size={14} className="text-primary" /> More Info
             </ContextMenuItem>
+            <ContextMenuItem onClick={() => { setShowInfo(true); setFocusNotes(true); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <MessageSquare size={14} className="text-primary" /> Add Note
+            </ContextMenuItem>
             <ContextMenuItem onClick={(e) => { e.stopPropagation(); handleToggleFinal(); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
               {isFinal ? "Unmark Final" : "Mark as Final"}
@@ -756,8 +896,10 @@ export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }
       <ClipInfoWindow
         clip={{...clip, isFinal, comments}}
         open={showInfo}
-        onOpenChange={setShowInfo}
+        onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
         onCommentsChange={handleUpdateComments}
+        bucketClipId={clip.id}
+        focusNotes={focusNotes}
       />
 
       <AlertDialog open={showChangeFinalConfirm} onOpenChange={setShowChangeFinalConfirm}>

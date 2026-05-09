@@ -10,8 +10,9 @@ import {
   type TimelineClip, type InsertTimelineClip,
   type ProductionTask, type InsertProductionTask,
   type TaskComment, type InsertTaskComment,
+  type ClipComment, type InsertClipComment,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
-  productionTasks, taskComments,
+  productionTasks, taskComments, clipComments,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -121,6 +122,12 @@ export interface IStorage {
   addTaskComment(data: InsertTaskComment): Promise<TaskComment>;
   updateTaskComment(id: string, text: string): Promise<TaskComment | undefined>;
   deleteTaskComment(id: string): Promise<void>;
+
+  // Clip Comments
+  getClipComments(clipId: string): Promise<ClipComment[]>;
+  addClipComment(data: InsertClipComment): Promise<ClipComment>;
+  updateClipComment(id: string, text: string): Promise<ClipComment | undefined>;
+  deleteClipComment(id: string): Promise<void>;
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -624,6 +631,30 @@ export class SQLiteStorage implements IStorage {
 
   async deleteTaskComment(id: string): Promise<void> {
     db.delete(taskComments).where(eq(taskComments.id, id)).run();
+  }
+
+  // ── Clip Comments ──────────────────────────────────────────────────────────
+
+  async getClipComments(clipId: string): Promise<ClipComment[]> {
+    return db.select().from(clipComments).where(eq(clipComments.clipId, clipId)).orderBy(asc(clipComments.timestamp)).all();
+  }
+
+  async addClipComment(data: InsertClipComment): Promise<ClipComment> {
+    const now = new Date().toISOString();
+    const comment: ClipComment = { ...data, id: data.id ?? randomUUID(), createdAt: now };
+    db.insert(clipComments).values(comment).run();
+    return db.select().from(clipComments).where(eq(clipComments.id, comment.id)).get()!;
+  }
+
+  async updateClipComment(id: string, text: string): Promise<ClipComment | undefined> {
+    const existing = db.select().from(clipComments).where(eq(clipComments.id, id)).get();
+    if (!existing) return undefined;
+    db.update(clipComments).set({ text }).where(eq(clipComments.id, id)).run();
+    return db.select().from(clipComments).where(eq(clipComments.id, id)).get();
+  }
+
+  async deleteClipComment(id: string): Promise<void> {
+    db.delete(clipComments).where(eq(clipComments.id, id)).run();
   }
 }
 

@@ -409,6 +409,36 @@ export async function registerRoutes(
     res.status(201).json(clip);
   });
 
+  // ─── Clip Comments ────────────────────────────────────────────────────────────
+
+  app.get("/api/clips/:clipId/comments", async (req, res) => {
+    const comments = await storage.getClipComments(req.params.clipId);
+    res.json(comments);
+  });
+
+  app.post("/api/clips/:clipId/comments", async (req, res) => {
+    const { author, text } = req.body as { author: string; text: string };
+    const comment = await storage.addClipComment({
+      id: randomUUID(),
+      clipId: req.params.clipId,
+      author,
+      text,
+      timestamp: Date.now(),
+    });
+    res.status(201).json(comment);
+  });
+
+  app.patch("/api/clip-comments/:id", async (req, res) => {
+    const comment = await storage.updateClipComment(req.params.id, req.body.text);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+    res.json(comment);
+  });
+
+  app.delete("/api/clip-comments/:id", async (req, res) => {
+    await storage.deleteClipComment(req.params.id);
+    res.status(204).send();
+  });
+
   // ─── File upload ─────────────────────────────────────────────────────────────
 
   /**
