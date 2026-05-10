@@ -78,6 +78,18 @@ function activityUrl(event: ActivityEvent): string {
   if (event.type === 'status-change' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
+  if (event.type === 'task-comment' && event.source === 'task' && event.taskId) {
+    return `${base}?tab=production&taskId=${event.taskId}`;
+  }
+  if (event.type === 'clip-comment' && event.source === 'clip' && event.instrument && event.sectionName) {
+    const params = new URLSearchParams({
+      instrument: event.instrument,
+      section: event.sectionName,
+      ...(event.clipId ? { clipId: event.clipId } : {}),
+      openComments: 'true',
+    });
+    return `${base}?${params}`;
+  }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
   }
@@ -105,6 +117,8 @@ interface ActivityEvent {
   instrument?: string;
   sectionName?: string;
   taskId?: string;
+  source?: 'clip' | 'task';
+  clipId?: string;
 }
 
 function sortByDueDate(tasks: Task[]): Task[] {
@@ -458,7 +472,20 @@ export default function Dashboard() {
               {visibleActivity.map((event, i) => (
                 <div
                   key={i}
-                  onClick={() => setLocation(activityUrl(event))}
+                  onClick={() => {
+                    const url = activityUrl(event);
+                    console.log('[Activity click]', {
+                      type: event.type,
+                      source: event.source,
+                      clipId: event.clipId,
+                      taskId: event.taskId,
+                      songId: event.songId,
+                      instrument: event.instrument,
+                      sectionName: event.sectionName,
+                      url,
+                    });
+                    setLocation(url);
+                  }}
                   className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.03] hover:border-l-2 hover:border-primary/40 transition-all cursor-pointer group gap-4"
                 >
                   <div className="min-w-0">

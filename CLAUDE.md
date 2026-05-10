@@ -60,10 +60,11 @@ patchbay/
 ├── client/                     # All frontend code
 │   ├── index.html
 │   └── src/
-│       ├── App.tsx             # Router — two main routes: / and /workspace
+│       ├── App.tsx             # Router — three main routes: / (Dashboard), /songs/:songId (SongHome), /songs/:songId/workspace (Workspace)
 │       ├── main.tsx            # React entry point
 │       ├── pages/
-│       │   ├── Dashboard.tsx   # Landing page after login — recent projects, tasks, files
+│       │   ├── Dashboard.tsx   # Landing page — all songs, cross-song task list, activity feed
+│       │   ├── SongHome.tsx    # Per-song homepage — resume last session, tasks, file browser, activity feed
 │       │   ├── Workspace.tsx   # Main DAW view — timeline, buckets, production tracker
 │       │   ├── home.tsx        # (Unused / legacy — can be removed)
 │       │   └── not-found.tsx   # 404 page
@@ -387,7 +388,8 @@ When implementing auth or any permission checks, always consult this table.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Dashboard page | ✅ UI done | Layout and components complete; data is still hardcoded mock data |
+| Dashboard page | ✅ Done | Fully wired to real API; song cards styled as gradient banners (gold chevron, BPM badge); cross-song task list filtered to current user sorted by due date; activity feed polling every 10s |
+| SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; "Resume Last Session" banner (reads `localStorage`); task list filtered to current user with 5-task cap + expand; file browser (MediaBucket); activity feed with deep-link navigation to workspace |
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
@@ -395,11 +397,12 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links) |
+| Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates 4 event types from existing tables — file uploads, clips marked final, clip comments, task comments/status changes; polls every 10s via `refetchInterval`; status changes attributed as "Jordan changed status to X — Instrument · Section"; file uploads as "Jordan added X to Instrument — Section"; clip comments show "You commented on Instrument · Section"; task comments show "You commented on Instrument · Section task"; rows are deep-link clickable — status-change and task-comment events navigate to `?tab=production&taskId=`, clip-comment events navigate to `?instrument=X&section=Y&clipId=Z&openComments=true`, all other events navigate to `?instrument=X&section=Y`. See Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Export Dialog | ✅ UI done | Non-functional |
 | User auth / login | ❌ Not built | Passport.js is installed |
-| Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload — all built |
+| Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload, cross-song tasks, activity feed — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
@@ -427,6 +430,15 @@ GET    /api/songs                        — list all songs (ordered by createdA
 GET    /api/songs/:id                    — get a song with nested tracks → ideas → clips
 POST   /api/songs                        — create a song; body: { name, bpm?, sections }
 PATCH  /api/songs/:id                    — partial update of song metadata
+DELETE /api/songs/:id                    — delete a song and all associated data
+
+GET    /api/tasks                        — list all production tasks across all songs; includes
+                                           songId and songName fields for cross-song context;
+                                           used by Dashboard task widget
+GET    /api/activity                     — aggregated activity feed across all songs; returns
+                                           ActivityEvent[] sorted by timestamp desc — see
+                                           Activity Feed architecture section
+GET    /api/songs/:songId/activity       — same as /api/activity but filtered to one song
 
 GET    /api/songs/:id/timeline           — get instrument tracks with their placed timeline clips
                                            auto-bootstraps the default song + tracks if missing
@@ -524,7 +536,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 
 - **Do not edit files in `client/src/components/ui/`** — these are auto-generated shadcn components. If a UI component needs customization, wrap it rather than editing it directly.
 - **Do not use `any` TypeScript types** — use the interfaces defined in `daw-data.ts` or `shared/schema.ts`.
-- **Do not hardcode data in components** — mock data lives in `daw-data.ts`. Real data will come from API calls via TanStack Query.
+- **Do not hardcode data in components** — mock data lives in `daw-data.ts`. Real data comes from API calls via TanStack Query. The `CURRENT_USER = 'Jordan'` constant in Dashboard, SongHome, and `storage.ts` is a deliberate temporary placeholder until auth is built — it is marked with `// TODO: replace with real auth user` and should not be replicated to new components.
 - **Do not break the existing UI** — the visual design is intentional and represents significant work. Backend changes should not require redesigning pages.
 - **Do not add a PostgreSQL dependency** — we are using SQLite. Do not add `pg`, `postgres`, or `neon` packages.
 - **Do not reintroduce free clip positioning** — clips on the timeline have no independent position. `clip.start` is always derived by `recalcAllStarts`, never set from a cursor pixel offset or stored as an arbitrary value. This is intentional.
@@ -661,6 +673,10 @@ Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] 
 
 `MediaBucket.tsx` persists the last selected instrument and section idea to `localStorage` under keys `patchbay-selected-track` and `patchbay-selected-idea`. On mount, a one-time restore effect (guarded by a `sessionRestored` ref) reads these keys and restores the selection before falling back to URL param logic. The guard ensures the restore only runs once — it does not re-run on subsequent bucket refetches, preventing the selection from snapping back on poll.
 
+**URL param priority** — On fresh mount, `MediaBucket` checks for `?instrument=` and `?section=` query params before falling back to localStorage. If both are present, they override the stored session. This is how activity feed deep-links work: navigating to `/songs/:songId/workspace?instrument=Guitar+2&section=Verse+1` causes MediaBucket to open directly to that instrument and section.
+
+**Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
+
 ### isFinal ↔ task status bidirectional sync
 
 Marking a clip as final and changing a task's status are kept in sync automatically. There are **three entry points**, all handled in `server/routes.ts`.
@@ -777,6 +793,99 @@ Matches the ProductionTracker pattern exactly. `BAND_MEMBERS` is a module-level 
 
 **`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper may return a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
 
+### Activity feed — ✅ Built
+
+The activity feed aggregates recent events across the app into a unified timeline. It lives in `server/storage.ts` as `getActivity(songId?: string)` and is exposed via two routes.
+
+**`ActivityEvent` interface (in `storage.ts`):**
+```ts
+interface ActivityEvent {
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change';
+  description: string;
+  timestamp: number;
+  songId: string;
+  songName: string;
+  instrument?: string;
+  sectionName?: string;
+  taskId?: string;
+  // present on clip-comment and task-comment events for differentiated routing
+  source?: 'clip' | 'task';
+  clipId?: string;
+}
+```
+
+**Four event types and their sources:**
+
+1. **`file-added`** — one event per `clips` row (joined through `ideas → instrument_tracks → songs`). Description: `"Jordan added {clipName} to {trackName} — {sectionName}"`. Timestamp: `clip.createdAt`.
+2. **`marked-final`** — same `clips` query; only rows where `isFinal = true` emit this extra event. Description: `"{trackName} — {sectionName} marked as final: {clipName}"`.
+3. **`clip-comment`** — from `clip_comments` (joined through `clips → ideas → instrument_tracks → songs`). `author = 'Unknown'` renders as `"You"`. Description: `"You commented on {trackName} · {sectionName}"`. Includes `source: 'clip'` and `clipId`.
+4. **`task-comment` / `status-change`** — from `task_comments` (joined through `production_tasks → songs`). If `comment.author === 'System'` OR text starts with `"Status changed to "`, it's a `status-change` event attributed to the current user: `"Jordan changed status to {label} — {instrument} · {sectionName}"`. Otherwise it's a `task-comment` with `author = 'Unknown'` rendered as `"You"`. Description: `"You commented on {instrument} · {sectionName} task"`. Includes `source: 'task'` and `taskId`.
+
+**Implementation note — system vs user comments:** Status-change comments in `task_comments` are written with `author: 'System'` by the server. Old records written with `author: 'Unknown'` are detected via `text.startsWith('Status changed to ')` as a backward-compat fallback. Never use the request body's author for system-generated comments.
+
+**JS-level merge, no SQL UNION:** Each event type is fetched with a separate Drizzle query and merged into a single `events[]` array in JavaScript, then sorted by `timestamp` descending. No SQL UNION needed.
+
+**Frontend queries:**
+```ts
+// Dashboard — cross-song
+useQuery({ queryKey: ['activity'], queryFn: () => fetch('/api/activity').then(r => r.json()), refetchInterval: 10000 })
+
+// SongHome — per-song
+useQuery({ queryKey: ['activity', songId], queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()), refetchInterval: 10000 })
+```
+
+**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. This call should be added to the `onSuccess` of any mutation that creates activity-feed-visible data (uploads, status changes, comments). Check `routes.ts` when adding new mutations.
+
+**Hardcoded current user:** `CURRENT_USER = 'Jordan'` appears in three places with `// TODO: replace with real auth user`:
+1. `server/storage.ts` — used to attribute file-added and status-change descriptions
+2. `client/src/pages/Dashboard.tsx` — used to filter the task list
+3. `client/src/pages/SongHome.tsx` — used to filter the task list
+
+When auth is built, replace all three with the real authenticated user.
+
+**Deep-link navigation from activity rows:**
+
+```ts
+function activityUrl(songId: string, event: ActivityEvent): string {
+  const base = `/songs/${songId}/workspace`;
+  if (event.type === 'status-change' && event.taskId)
+    return `${base}?tab=production&taskId=${event.taskId}`;
+  if (event.type === 'task-comment' && event.source === 'task' && event.taskId)
+    return `${base}?tab=production&taskId=${event.taskId}`;
+  if (event.type === 'clip-comment' && event.source === 'clip' && event.instrument && event.sectionName) {
+    const params = new URLSearchParams({
+      instrument: event.instrument,
+      section: event.sectionName,
+      ...(event.clipId ? { clipId: event.clipId } : {}),
+      openComments: 'true',
+    });
+    return `${base}?${params}`;
+  }
+  if (event.instrument && event.sectionName)
+    return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
+  return `/songs/${songId}`;
+}
+```
+
+- **`status-change`** and **`task-comment`** events open the workspace Production tab with the task modal auto-opened (ProductionTracker reads `?taskId=` from the URL on mount).
+- **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, and pass `clipId` and `openComments=true` as params for future use (MediaBucket lands on the correct idea; the openComments handling is not yet wired up).
+- All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
+
+**ProductionTracker auto-open modal from URL:**
+```ts
+const taskIdFromUrl = new URLSearchParams(window.location.search).get('taskId');
+const { data: tasks = [] } = useQuery<ProductionTask[]>({ ... }); // must be declared BEFORE the useEffect
+
+// IMPORTANT: useEffect must come AFTER the tasks declaration to avoid temporal dead zone
+useEffect(() => {
+  if (taskIdFromUrl && tasks.length > 0 && !activeTaskId) {
+    setActiveTaskId(taskIdFromUrl);
+  }
+}, [taskIdFromUrl, tasks.length]);
+```
+
+The `useEffect` must come after the `tasks` query declaration in the component body — placing it before causes a `"Cannot access uninitialized variable"` runtime error due to JavaScript's temporal dead zone for `const`.
+
 ### Timeline background right-click context menu
 
 Currently has two surfaces:
@@ -815,11 +924,13 @@ window.dispatchEvent(new CustomEvent('find-in-bucket', {
 }));
 ```
 
+The event payload accepts either `trackId` (stable ID string) or `instrumentName` (display name string) for track lookup — whichever is available. Use `trackId` when possible; `instrumentName` is the fallback for callers that don't have the track ID.
+
 **`MediaBucket.tsx` listener:**
 A `useEffect(fn, [])` registers the handler. To avoid stale closures (the handler is registered once but `tracks` changes on every poll), `MediaBucket` keeps a `tracksRef = useRef<ApiTrack[]>([])` and syncs it inside the existing `useEffect` on `tracks`. The handler:
 1. Reads `tracksRef.current` (always current)
-2. Finds the matching track by `trackId`
-3. Finds the matching idea by `sectionName`
+2. Finds the matching track — first by `trackId`, then by case-insensitive `instrumentName` match
+3. Finds the matching idea by case-insensitive `sectionName`
 4. Calls `setSelectedTrack(track)` + `setSelectedIdea(idea)` — the three-column UI updates immediately
 
 ---

@@ -705,11 +705,12 @@ interface BucketClipProps {
   songId?: string;
   onAddToTimeline?: (clip: Clip) => void;
   siblingClips?: Clip[];
+  autoOpenInfo?: boolean;
 }
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, siblingClips = [] }: BucketClipProps) {
+export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, siblingClips = [], autoOpenInfo }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
@@ -726,6 +727,13 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);
   }, [clip.isFinal]);
+
+  useEffect(() => {
+    if (autoOpenInfo) {
+      setShowInfo(true);
+      setFocusNotes(true);
+    }
+  }, [autoOpenInfo]);
 
   const handleMouseEnter = () => {
     if (!clip.src || isRightClicking.current || contextMenuOpen) return;

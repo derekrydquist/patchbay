@@ -141,6 +141,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
 
   const [selectedTrack, setSelectedTrack] = useState<ApiTrack | null>(null);
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
+  const [autoOpenClipId, setAutoOpenClipId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<{ name: string; size: string; file: File }[]>([]);
   const [uploadDestination, setUploadDestination] = useState<string>(''); // ideaId
@@ -252,6 +253,11 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     const urlInstrument = params.get('instrument');
     const urlSection = params.get('section');
     const urlFile = params.get('file');
+    const urlClipId = params.get('clipId');
+    const urlOpenComments = params.get('openComments');
+    if (urlClipId && urlOpenComments === 'true') {
+      setAutoOpenClipId(urlClipId);
+    }
 
     // URL params win — used when navigating from task clicks or external links
     if (urlInstrument || urlFile) {
@@ -1050,6 +1056,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}
                         siblingClips={selectedIdea.clips.map(toClip)}
+                        autoOpenInfo={clip.id === autoOpenClipId}
                       />
                     ))
                   : (

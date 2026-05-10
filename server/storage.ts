@@ -82,6 +82,9 @@ export interface ActivityEvent {
   instrument?: string;
   sectionName?: string;
   taskId?: string;
+  // comment source routing — present on clip-comment and task-comment events
+  source?: 'clip' | 'task';
+  clipId?: string;
 }
 
 export interface IStorage {
@@ -682,9 +685,9 @@ export class SQLiteStorage implements IStorage {
     // Clip comments
     const clipCommentRows = db
       .select({
+        clipId: clipComments.clipId,
         author: clipComments.author,
         timestamp: clipComments.timestamp,
-        clipName: clips.name,
         sectionName: clips.sectionName,
         trackName: instrumentTracks.name,
         songId: songs.id,
@@ -699,16 +702,18 @@ export class SQLiteStorage implements IStorage {
       .all();
 
     for (const row of clipCommentRows) {
-      // TODO: replace with real auth user — show 'Unknown' as 'Someone' until auth is built
-      const displayAuthor = row.author === 'Unknown' ? 'Someone' : row.author;
+      // TODO: replace with real auth user — show 'Unknown' as 'You' until auth is built
+      const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
       events.push({
         type: 'clip-comment',
-        description: `${displayAuthor} commented on ${row.clipName}`,
+        description: `${displayAuthor} commented on ${row.trackName} · ${row.sectionName ?? ''}`,
         timestamp: row.timestamp,
         songId: row.songId,
         songName: row.songName,
         instrument: row.trackName,
         sectionName: row.sectionName ?? undefined,
+        source: 'clip',
+        clipId: row.clipId,
       });
     }
 
@@ -748,17 +753,18 @@ export class SQLiteStorage implements IStorage {
           sectionName: row.sectionName,
         });
       } else {
-        // TODO: replace with real auth user — show 'Unknown' as 'Someone' until auth is built
-        const displayAuthor = row.author === 'Unknown' ? 'Someone' : row.author;
+        // TODO: replace with real auth user — show 'Unknown' as 'You' until auth is built
+        const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
         events.push({
           type: 'task-comment',
-          description: `${displayAuthor} commented on ${row.instrument} · ${row.sectionName}`,
+          description: `${displayAuthor} commented on ${row.instrument} · ${row.sectionName} task`,
           timestamp: row.timestamp,
           songId: row.songId,
           songName: row.songName,
           taskId: row.taskId,
           instrument: row.instrument,
           sectionName: row.sectionName,
+          source: 'task',
         });
       }
     }
