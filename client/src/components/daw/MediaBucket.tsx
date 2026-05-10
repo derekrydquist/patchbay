@@ -167,6 +167,11 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     queryFn: () => fetchBucket(songId),
   });
 
+  const { data: songData } = useQuery<{ name: string }>({
+    queryKey: ['song', songId],
+    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
+  });
+
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
     queryKey: ['hidden-ideas', selectedTrack?.id],
     queryFn: async () => {
@@ -229,10 +234,10 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
 
   useEffect(() => {
     if (selectedTrack) {
-      localStorage.setItem('patchbay-selected-track', selectedTrack.id);
+      localStorage.setItem(`patchbay-selected-track-${songId}`, selectedTrack.id);
     }
     if (selectedIdea) {
-      localStorage.setItem('patchbay-selected-idea', selectedIdea.id);
+      localStorage.setItem(`patchbay-selected-idea-${songId}`, selectedIdea.id);
     }
     if (selectedTrack && selectedIdea) {
       localStorage.setItem(`patchbay-last-session-${songId}`, JSON.stringify({
@@ -282,9 +287,9 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       return;
     }
 
-    // Fall back to localStorage session persistence
-    const savedTrackId = localStorage.getItem('patchbay-selected-track');
-    const savedIdeaId = localStorage.getItem('patchbay-selected-idea');
+    // Fall back to localStorage session persistence (scoped per song)
+    const savedTrackId = localStorage.getItem(`patchbay-selected-track-${songId}`);
+    const savedIdeaId = localStorage.getItem(`patchbay-selected-idea-${songId}`);
 
     if (savedTrackId) {
       const track = tracks.find(t => t.id === savedTrackId);
@@ -592,7 +597,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
         <div className="flex items-center gap-3">
           <Library size={18} className="text-primary" />
           <h2 className="text-sm font-heading font-bold uppercase tracking-widest text-white">
-            Project: Midnight Horizon
+            Project: {songData?.name ?? '…'}
           </h2>
         </div>
         <div className="flex items-center gap-3">

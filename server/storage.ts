@@ -669,17 +669,8 @@ export class SQLiteStorage implements IStorage {
         instrument: row.trackName,
         sectionName: row.sectionName ?? undefined,
       });
-      if (row.isFinal) {
-        events.push({
-          type: 'marked-final',
-          description: `${row.clipName} marked as final`,
-          timestamp: ts,
-          songId: row.songId,
-          songName: row.songName,
-          instrument: row.trackName,
-          sectionName: row.sectionName ?? undefined,
-        });
-      }
+      // marked-final events are generated from task_comments (with accurate timestamps),
+      // not from clips.isFinal here — which would only have the upload timestamp.
     }
 
     // Clip comments
@@ -736,11 +727,11 @@ export class SQLiteStorage implements IStorage {
       .all();
 
     for (const row of taskCommentRows) {
-      // Detect status-change events by author=System (new) or text pattern (legacy records stored with author=Unknown)
-      const isStatusChange = row.author === 'System' || row.text.startsWith('Status changed to ');
-      if (isStatusChange) {
-        // TODO: replace with real auth user
-        const CURRENT_USER = 'Jordan';
+      // TODO: replace with real auth user
+      const CURRENT_USER = 'Jordan';
+
+      if (row.text.startsWith('Status changed to ')) {
+        // Legacy fallback: old records written with author=Unknown instead of System
         const statusLabel = row.text.replace(/^Status changed to /, '');
         events.push({
           type: 'status-change',
@@ -752,8 +743,25 @@ export class SQLiteStorage implements IStorage {
           instrument: row.instrument,
           sectionName: row.sectionName,
         });
+      } else if (row.text.startsWith('Clip marked as final:')) {
+        // Extract clip name from text: 'Clip marked as final: "Guitar 2 Verse 1 V2"'
+        const clipName = row.text.slice('Clip marked as final: '.length).replace(/^"|"$/g, '');
+        events.push({
+          type: 'marked-final',
+          description: `${CURRENT_USER} marked ${clipName} as final`,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+        });
+      } else if (row.author === 'System') {
+        // Other system comments (assignee changes, due date changes, clip unmarked) —
+        // not surfaced in the activity feed
+        continue;
       } else {
-        // TODO: replace with real auth user — show 'Unknown' as 'You' until auth is built
+        // Human task comment — 'Unknown' means current user before auth is built
         const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
         events.push({
           type: 'task-comment',

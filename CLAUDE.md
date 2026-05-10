@@ -673,7 +673,7 @@ Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] 
 
 `MediaBucket.tsx` persists the last selected instrument and section idea to `localStorage` under keys `patchbay-selected-track` and `patchbay-selected-idea`. On mount, a one-time restore effect (guarded by a `sessionRestored` ref) reads these keys and restores the selection before falling back to URL param logic. The guard ensures the restore only runs once — it does not re-run on subsequent bucket refetches, preventing the selection from snapping back on poll.
 
-**URL param priority** — On fresh mount, `MediaBucket` checks for `?instrument=` and `?section=` query params before falling back to localStorage. If both are present, they override the stored session. This is how activity feed deep-links work: navigating to `/songs/:songId/workspace?instrument=Guitar+2&section=Verse+1` causes MediaBucket to open directly to that instrument and section.
+**URL param priority** — On fresh mount, `MediaBucket` checks for `?instrument=`, `?section=`, `?clipId=`, and `?openComments=` query params before falling back to localStorage. `instrument` + `section` navigate the three-column browser to the right idea. `clipId` + `openComments=true` (both must be present) set `autoOpenClipId` state, which causes the matching `BucketClip` to auto-open its More Info modal with the comment input focused. All four params are read in the same one-shot session restore `useEffect` so they resolve atomically on the first bucket data load.
 
 **Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
 
@@ -868,8 +868,14 @@ function activityUrl(songId: string, event: ActivityEvent): string {
 ```
 
 - **`status-change`** and **`task-comment`** events open the workspace Production tab with the task modal auto-opened (ProductionTracker reads `?taskId=` from the URL on mount).
-- **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, and pass `clipId` and `openComments=true` as params for future use (MediaBucket lands on the correct idea; the openComments handling is not yet wired up).
+- **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, then automatically open the More Info / inspection modal for the specific clip with the notes input focused. See `autoOpenInfo` prop below.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
+
+**`autoOpenInfo` — clip inspection modal auto-open:**
+
+`MediaBucket` reads `clipId` and `openComments` from the URL params inside the session restore `useEffect` (the same one-shot effect that resolves `instrument` and `section`). If both are present, it sets `autoOpenClipId` state and passes `autoOpenInfo={clip.id === autoOpenClipId}` to the matching `BucketClip`.
+
+`BucketClip` (`Clip.tsx`) has an `autoOpenInfo?: boolean` prop. A `useEffect([autoOpenInfo])` calls `setShowInfo(true)` and `setFocusNotes(true)` when it becomes true — replicating the same trigger path as the right-click "Add Note" shortcut. The `ClipInfoWindow` then opens with the comment input focused.
 
 **ProductionTracker auto-open modal from URL:**
 ```ts
