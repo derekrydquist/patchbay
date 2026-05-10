@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import { eq, asc, inArray, count, and } from "drizzle-orm";
+import { eq, asc, desc, inArray, count, and } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -25,6 +25,14 @@ export const DEFAULT_SECTIONS = [
   "Chorus 2",
   "Bridge",
   "Outro",
+];
+
+export const DEFAULT_INSTRUMENTS = [
+  "Drums",
+  "Bass",
+  "Guitar 1",
+  "Guitar 2",
+  "Vocals",
 ];
 
 function defaultIdeaId(trackId: string, sectionIndex: number): string {
@@ -65,6 +73,17 @@ export type BucketTrack = InstrumentTrack & {
 
 // ─── Interface ────────────────────────────────────────────────────────────────
 
+export interface ActivityEvent {
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change';
+  description: string;
+  timestamp: number; // ms since epoch
+  songId: string;
+  songName: string;
+  instrument?: string;
+  sectionName?: string;
+  taskId?: string;
+}
+
 export interface IStorage {
   // Users
   getUser(id: string): Promise<User | undefined>;
@@ -76,6 +95,8 @@ export interface IStorage {
   getSongById(id: string): Promise<SongWithTracks | undefined>;
   createSong(data: InsertSong): Promise<Song>;
   updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined>;
+  deleteSong(id: string): Promise<void>;
+  seedSong(songId: string, instruments: string[], sections: string[]): Promise<void>;
 
   // Bootstrap
   bootstrapDefaultSong(): Promise<void>;
@@ -111,7 +132,11 @@ export interface IStorage {
   timelineHasFinals(songId: string): Promise<boolean>;
   deleteNonFinalTimelineClips(songId: string): Promise<void>;
 
+  // Activity
+  getActivity(songId?: string): Promise<ActivityEvent[]>;
+
   // Production Tasks
+  getAllTasks(): Promise<(ProductionTask & { songName: string })[]>;
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
   getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
   getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined>;
@@ -153,7 +178,7 @@ export class SQLiteStorage implements IStorage {
   // ── Songs ──────────────────────────────────────────────────────────────────
 
   async getSongs(): Promise<Song[]> {
-    return db.select().from(songs).orderBy(asc(songs.createdAt)).all();
+    return db.select().from(songs).orderBy(desc(songs.updatedAt)).all();
   }
 
   async getSongById(id: string): Promise<SongWithTracks | undefined> {
@@ -210,6 +235,53 @@ export class SQLiteStorage implements IStorage {
     if (!existing) return undefined;
     db.update(songs).set({ ...updates, updatedAt: new Date().toISOString() }).where(eq(songs.id, id)).run();
     return db.select().from(songs).where(eq(songs.id, id)).get();
+  }
+
+  async deleteSong(id: string): Promise<void> {
+    db.delete(songs).where(eq(songs.id, id)).run();
+  }
+
+  async seedSong(songId: string, instruments: string[], sections: string[]): Promise<void> {
+    const TRACK_COLORS = [
+      "hsl(var(--chart-1))",
+      "hsl(var(--chart-2))",
+      "hsl(var(--chart-3))",
+      "hsl(var(--chart-5))",
+      "hsl(var(--chart-4))",
+    ];
+    for (let ti = 0; ti < instruments.length; ti++) {
+      const trackId = randomUUID();
+      const trackName = instruments[ti];
+      db.insert(instrumentTracks).values({
+        id: trackId,
+        songId,
+        name: trackName,
+        type: "audio",
+        color: TRACK_COLORS[ti % TRACK_COLORS.length],
+        sortOrder: ti,
+        active: true,
+      }).run();
+      for (let si = 0; si < sections.length; si++) {
+        db.insert(ideas).values({
+          id: randomUUID(),
+          trackId,
+          name: `${trackName} ${sections[si]}`,
+          sectionName: sections[si],
+          sortOrder: si,
+          active: true,
+        }).run();
+        db.insert(productionTasks).values({
+          id: randomUUID(),
+          songId,
+          title: `${trackName} – ${sections[si]}`,
+          instrument: trackName,
+          sectionName: sections[si],
+          status: "todo",
+          priority: "medium",
+          assignee: "",
+        }).run();
+      }
+    }
   }
 
   // ── Bootstrap ──────────────────────────────────────────────────────────────
@@ -557,6 +629,151 @@ export class SQLiteStorage implements IStorage {
   }
 
   // ── Production Tasks ───────────────────────────────────────────────────────
+
+  async getActivity(songId?: string): Promise<ActivityEvent[]> {
+    const events: ActivityEvent[] = [];
+    const songFilter = songId ? eq(songs.id, songId) : undefined;
+
+    // Clips: file-added and marked-final
+    const clipRows = db
+      .select({
+        clipId: clips.id,
+        clipName: clips.name,
+        isFinal: clips.isFinal,
+        createdAt: clips.createdAt,
+        sectionName: clips.sectionName,
+        trackName: instrumentTracks.name,
+        songId: songs.id,
+        songName: songs.name,
+      })
+      .from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(songFilter)
+      .all();
+
+    for (const row of clipRows) {
+      const ts = new Date(row.createdAt).getTime();
+      // TODO: replace with real auth user
+      const CURRENT_USER = 'Jordan';
+      events.push({
+        type: 'file-added',
+        description: `${CURRENT_USER} added ${row.clipName} to ${row.trackName}${row.sectionName ? ` — ${row.sectionName}` : ''}`,
+        timestamp: ts,
+        songId: row.songId,
+        songName: row.songName,
+        instrument: row.trackName,
+        sectionName: row.sectionName ?? undefined,
+      });
+      if (row.isFinal) {
+        events.push({
+          type: 'marked-final',
+          description: `${row.clipName} marked as final`,
+          timestamp: ts,
+          songId: row.songId,
+          songName: row.songName,
+          instrument: row.trackName,
+          sectionName: row.sectionName ?? undefined,
+        });
+      }
+    }
+
+    // Clip comments
+    const clipCommentRows = db
+      .select({
+        author: clipComments.author,
+        timestamp: clipComments.timestamp,
+        clipName: clips.name,
+        sectionName: clips.sectionName,
+        trackName: instrumentTracks.name,
+        songId: songs.id,
+        songName: songs.name,
+      })
+      .from(clipComments)
+      .innerJoin(clips, eq(clipComments.clipId, clips.id))
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(songFilter)
+      .all();
+
+    for (const row of clipCommentRows) {
+      // TODO: replace with real auth user — show 'Unknown' as 'Someone' until auth is built
+      const displayAuthor = row.author === 'Unknown' ? 'Someone' : row.author;
+      events.push({
+        type: 'clip-comment',
+        description: `${displayAuthor} commented on ${row.clipName}`,
+        timestamp: row.timestamp,
+        songId: row.songId,
+        songName: row.songName,
+        instrument: row.trackName,
+        sectionName: row.sectionName ?? undefined,
+      });
+    }
+
+    // Task comments (human comments + system status-change events)
+    const taskCommentRows = db
+      .select({
+        author: taskComments.author,
+        text: taskComments.text,
+        timestamp: taskComments.timestamp,
+        taskId: productionTasks.id,
+        instrument: productionTasks.instrument,
+        sectionName: productionTasks.sectionName,
+        songId: songs.id,
+        songName: songs.name,
+      })
+      .from(taskComments)
+      .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
+      .innerJoin(songs, eq(productionTasks.songId, songs.id))
+      .where(songFilter)
+      .all();
+
+    for (const row of taskCommentRows) {
+      // Detect status-change events by author=System (new) or text pattern (legacy records stored with author=Unknown)
+      const isStatusChange = row.author === 'System' || row.text.startsWith('Status changed to ');
+      if (isStatusChange) {
+        // TODO: replace with real auth user
+        const CURRENT_USER = 'Jordan';
+        const statusLabel = row.text.replace(/^Status changed to /, '');
+        events.push({
+          type: 'status-change',
+          description: `${CURRENT_USER} changed status to ${statusLabel} — ${row.instrument} · ${row.sectionName}`,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+        });
+      } else {
+        // TODO: replace with real auth user — show 'Unknown' as 'Someone' until auth is built
+        const displayAuthor = row.author === 'Unknown' ? 'Someone' : row.author;
+        events.push({
+          type: 'task-comment',
+          description: `${displayAuthor} commented on ${row.instrument} · ${row.sectionName}`,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+        });
+      }
+    }
+
+    return events.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  async getAllTasks(): Promise<(ProductionTask & { songName: string })[]> {
+    const rows = db
+      .select({ task: productionTasks, songName: songs.name })
+      .from(productionTasks)
+      .innerJoin(songs, eq(productionTasks.songId, songs.id))
+      .all();
+    return rows.map(r => ({ ...r.task, songName: r.songName }));
+  }
 
   async getTasksForSong(songId: string): Promise<ProductionTask[]> {
     return db.select().from(productionTasks).where(eq(productionTasks.songId, songId)).all();

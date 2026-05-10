@@ -36,7 +36,6 @@ import { Ruler } from './Ruler';
 import { DawScrollbar } from './DawScrollbar';
 import { MediaBucket } from './MediaBucket';
 
-const SONG_ID = 'patchbay-default';
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 
 type ApiTrack = {
@@ -232,13 +231,13 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
   );
 }
 
-export function Timeline() {
+export function Timeline({ songId }: { songId: string }) {
   const queryClient = useQueryClient();
 
   const { data: apiTracks } = useQuery<ApiTrack[]>({
-    queryKey: [`/api/songs/${SONG_ID}/timeline`],
+    queryKey: [`/api/songs/${songId}/timeline`],
     queryFn: async () => {
-      const res = await fetch(`/api/songs/${SONG_ID}/timeline`);
+      const res = await fetch(`/api/songs/${songId}/timeline`);
       if (!res.ok) throw new Error('Failed to fetch timeline');
       return res.json();
     },
@@ -970,8 +969,8 @@ export function Timeline() {
   const handleDeleteTrack = (trackId: string) => {
     fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }).catch(console.error);
     setTracks(prev => prev.filter(t => t.id !== trackId));
-    queryClient.invalidateQueries({ queryKey: ['bucket', SONG_ID] });
-    queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] });
+    queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+    queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
   };
 
   const handleRulerSeek = (pos: number) => {
@@ -1055,8 +1054,8 @@ export function Timeline() {
   };
 
   const handleLeaveFinalClips = () => {
-    fetch(`/api/songs/${SONG_ID}/timeline-clips/non-final`, { method: 'DELETE' })
-      .then(() => queryClient.invalidateQueries({ queryKey: [`/api/songs/${SONG_ID}/timeline`] }))
+    fetch(`/api/songs/${songId}/timeline-clips/non-final`, { method: 'DELETE' })
+      .then(() => queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] }))
       .catch(console.error);
     setClearDialogState('none');
   };
@@ -1092,6 +1091,7 @@ export function Timeline() {
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
           key={refreshKey}
+          songId={songId}
           onAddToTimeline={(clip) => {
             const targetTrack =
               tracks.find((t) => clip.name.toLowerCase().includes(t.name.toLowerCase())) || tracks[0];
@@ -1257,6 +1257,7 @@ export function Timeline() {
                         : undefined
                     }
                     onDeleteTrack={handleDeleteTrack}
+                    songId={songId}
                   />
                 );
               })}
@@ -1314,7 +1315,7 @@ export function Timeline() {
             onClick={() => {
               setContextMenuPos(null);
               setClearDialogState('checking');
-              fetch(`/api/songs/${SONG_ID}/timeline-has-finals`)
+              fetch(`/api/songs/${songId}/timeline-has-finals`)
                 .then((r) => r.json())
                 .then(({ hasFinals }: { hasFinals: boolean }) =>
                   setClearDialogState(hasFinals ? 'enhanced' : 'simple')

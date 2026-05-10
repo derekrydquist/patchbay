@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -11,7 +11,6 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
 import type { ProductionTask, TaskComment } from '@shared/schema';
 
-const SONG_ID = 'patchbay-default';
 
 const ASSIGNEES = ['Alex', 'Jamie', 'Sam', 'Jordan', 'Taylor', 'Riley'];
 
@@ -65,10 +64,12 @@ function CellModal({
   open,
   onOpenChange,
   task,
+  songId,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   task: ProductionTask;
+  songId: string;
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -142,9 +143,9 @@ function CellModal({
       return r.json();
     },
     onMutate: async (updates) => {
-      await queryClient.cancelQueries({ queryKey: ['production-tasks', SONG_ID] });
-      const prev = queryClient.getQueryData<ProductionTask[]>(['production-tasks', SONG_ID]);
-      queryClient.setQueryData<ProductionTask[]>(['production-tasks', SONG_ID], (old) =>
+      await queryClient.cancelQueries({ queryKey: ['production-tasks', songId] });
+      const prev = queryClient.getQueryData<ProductionTask[]>(['production-tasks', songId]);
+      queryClient.setQueryData<ProductionTask[]>(['production-tasks', songId], (old) =>
         old?.map(t => t.id === task.id ? { ...t, ...updates } : t)
       );
       return { prev };
@@ -157,7 +158,7 @@ function CellModal({
       }
     },
     onError: (err, _vars, context) => {
-      if (context?.prev) queryClient.setQueryData(['production-tasks', SONG_ID], context.prev);
+      if (context?.prev) queryClient.setQueryData(['production-tasks', songId], context.prev);
       toast({
         title: 'Cannot update task',
         description: err instanceof Error ? err.message : 'An error occurred.',
@@ -165,11 +166,12 @@ function CellModal({
       });
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['production-tasks', SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
-      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/patchbay-default/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     },
   });
 
@@ -182,7 +184,8 @@ function CellModal({
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
-      queryClient.invalidateQueries({ queryKey: ['task-comment-counts', SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setNewComment('');
     },
   });
@@ -470,32 +473,40 @@ function CellModal({
 
 // ── ProductionTracker ─────────────────────────────────────────────────────────
 
-export function ProductionTracker() {
+export function ProductionTracker({ songId }: { songId: string }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const taskIdFromUrl = new URLSearchParams(window.location.search).get('taskId');
 
   const { data: song } = useQuery<{ name: string }>({
-    queryKey: ['song', SONG_ID],
-    queryFn: () => fetch(`/api/songs/${SONG_ID}`).then(r => r.json()),
+    queryKey: ['song', songId],
+    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
   });
 
   const { data: tasks = [] } = useQuery<ProductionTask[]>({
-    queryKey: ['production-tasks', SONG_ID],
-    queryFn: () => fetch(`/api/songs/${SONG_ID}/production-tasks`).then(r => r.json()),
+    queryKey: ['production-tasks', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/production-tasks`).then(r => r.json()),
   });
 
+  // Auto-open task modal when taskId is in the URL
+  useEffect(() => {
+    if (taskIdFromUrl && tasks.length > 0 && !activeTaskId) {
+      setActiveTaskId(taskIdFromUrl);
+    }
+  }, [taskIdFromUrl, tasks.length]);
+
   const { data: bucket = [] } = useQuery<BucketTrack[]>({
-    queryKey: ['bucket', SONG_ID],
-    queryFn: () => fetch(`/api/songs/${SONG_ID}/bucket`).then(r => r.json()),
+    queryKey: ['bucket', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
 
   const { data: finalClipsBucket = [] } = useQuery<BucketTrack[]>({
-    queryKey: ['final-clips', SONG_ID],
-    queryFn: () => fetch(`/api/songs/${SONG_ID}/bucket`).then(r => r.json()),
+    queryKey: ['final-clips', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
 
   const { data: commentCounts = {} } = useQuery<Record<string, number>>({
-    queryKey: ['task-comment-counts', SONG_ID],
-    queryFn: () => fetch(`/api/songs/${SONG_ID}/task-comment-counts`).then(r => r.json()),
+    queryKey: ['task-comment-counts', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/task-comment-counts`).then(r => r.json()),
   });
 
   // Map of `${instrument}__${sectionName}` → final clip name
@@ -652,6 +663,7 @@ export function ProductionTracker() {
           open={true}
           onOpenChange={(v) => !v && setActiveTaskId(null)}
           task={activeTask}
+          songId={songId}
         />
       )}
     </div>

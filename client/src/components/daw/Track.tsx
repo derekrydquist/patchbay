@@ -27,6 +27,7 @@ interface SectionCellProps {
   isInvalid: boolean;
   insertionX?: number;
   trackId: string;
+  songId: string;
 }
 
 function SectionCell({
@@ -37,6 +38,7 @@ function SectionCell({
   isInvalid,
   insertionX,
   trackId,
+  songId,
 }: SectionCellProps) {
   return (
     <div
@@ -44,7 +46,7 @@ function SectionCell({
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
       {clips.map((clip) => (
-        <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} />
+        <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} />
       ))}
       {insertionX !== undefined && (
         <div
@@ -65,6 +67,7 @@ interface TrackProps {
   zoom: number;
   insertionPoint?: { sectionName: string; index: number; x: number };
   onDeleteTrack?: (trackId: string) => void;
+  songId: string;
 }
 
 export function TimelineTrack({
@@ -76,6 +79,7 @@ export function TimelineTrack({
   zoom,
   insertionPoint,
   onDeleteTrack,
+  songId,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -211,6 +215,7 @@ export function TimelineTrack({
               zoom={zoom}
               isInvalid={invalidSections.has(section.name)}
               trackId={track.id}
+              songId={songId}
               insertionX={
                 insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
               }

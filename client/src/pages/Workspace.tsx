@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useLocation } from 'wouter';
+import { useLocation, useParams } from 'wouter';
 import { MediaBucket } from '@/components/daw/MediaBucket';
 import { Timeline } from '@/components/daw/Timeline';
 import { Transport } from '@/components/daw/Transport';
@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 
 export default function Workspace() {
   const [location, setLocation] = useLocation();
+  const { songId = 'patchbay-default' } = useParams<{ songId: string }>();
   const [activeTab, setActiveTab] = useState(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get('tab') === 'production' ? 'tasks' : 'timeline';
@@ -39,7 +40,7 @@ export default function Workspace() {
     setActiveTab(value);
     const params = new URLSearchParams(window.location.search);
     params.set('tab', value === 'tasks' ? 'production' : 'arrangement');
-    setLocation(`/workspace?${params.toString()}`);
+    setLocation(`/songs/${songId}/workspace?${params.toString()}`);
   };
 
   const [members, setMembers] = useState([
@@ -55,7 +56,7 @@ export default function Workspace() {
         <div className="flex items-center gap-8">
           <div 
             className="flex items-center gap-2.5 cursor-pointer hover:opacity-80 transition-opacity"
-            onClick={() => setLocation('/')}
+            onClick={() => setLocation(`/songs/${songId}`)}
           >
             <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center shadow-lg shadow-primary/20">
               <Music2 size={18} className="text-black" />
@@ -325,14 +326,14 @@ export default function Workspace() {
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
             <div className="flex-1 flex flex-col overflow-hidden">
                {/* Timeline now contains MediaBucket to ensure both share the same DndContext */}
-               <Timeline />
+               <Timeline songId={songId} />
             </div>
             <div className="p-4 bg-black/40 border-t border-white/5">
               <Transport />
             </div>
           </TabsContent>
           <TabsContent value="tasks" className="m-0 h-full outline-none">
-            <ProductionTracker />
+            <ProductionTracker songId={songId} />
           </TabsContent>
         </Tabs>
       </main>

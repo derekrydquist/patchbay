@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid';
 import { type Clip } from '@/lib/daw-data';
 import { BucketClip } from './Clip';
 import {
-  ChevronRight, Folder, Music, User, Library, Search,
+  ChevronRight, Folder, Music, Library, Search,
   Upload, FileAudio, X, Plus, Loader2, AlertCircle,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -60,10 +60,9 @@ interface ApiTrack {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-const DEFAULT_SONG_ID = 'patchbay-default';
 
-async function fetchBucket(): Promise<ApiTrack[]> {
-  const res = await fetch(`/api/songs/${DEFAULT_SONG_ID}/bucket`);
+async function fetchBucket(id: string): Promise<ApiTrack[]> {
+  const res = await fetch(`/api/songs/${id}/bucket`);
   if (!res.ok) throw new Error('Failed to load bucket');
   return res.json();
 }
@@ -130,13 +129,14 @@ function toClip(apiClip: ApiClip): Clip {
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface MediaBucketProps {
+  songId: string;
   onAddToTimeline?: (clip: Clip) => void;
   onInstrumentAdded?: () => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketProps) {
+export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: MediaBucketProps) {
   const queryClient = useQueryClient();
 
   const [selectedTrack, setSelectedTrack] = useState<ApiTrack | null>(null);
@@ -162,8 +162,8 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   // ── Fetch bucket from API ────────────────────────────────────────────────────
 
   const { data: tracks = [], isLoading, isError } = useQuery<ApiTrack[]>({
-    queryKey: ['bucket', DEFAULT_SONG_ID],
-    queryFn: fetchBucket,
+    queryKey: ['bucket', songId],
+    queryFn: () => fetchBucket(songId),
   });
 
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
@@ -176,9 +176,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   });
 
   const { data: hiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
-    queryKey: ['hidden-tracks', DEFAULT_SONG_ID],
+    queryKey: ['hidden-tracks', songId],
     queryFn: async () => {
-      const res = await fetch(`/api/songs/${DEFAULT_SONG_ID}/hidden-tracks`);
+      const res = await fetch(`/api/songs/${songId}/hidden-tracks`);
       return res.json();
     },
     enabled: isAddInstrumentOpen,
@@ -205,11 +205,18 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const { trackId, sectionName } = (e as CustomEvent).detail as { trackId?: string; sectionName?: string };
-      if (!trackId || !sectionName) return;
-      const track = tracksRef.current.find(t => t.id === trackId);
+      const { trackId, instrumentName, sectionName } = (e as CustomEvent).detail as {
+        trackId?: string; instrumentName?: string; sectionName?: string;
+      };
+      const track = trackId
+        ? tracksRef.current.find(t => t.id === trackId)
+        : instrumentName
+          ? tracksRef.current.find(t => t.name.toLowerCase() === instrumentName.toLowerCase())
+          : null;
       if (!track) return;
-      const idea = track.ideas.find(i => i.sectionName === sectionName) ?? null;
+      const idea = sectionName
+        ? track.ideas.find(i => i.sectionName.toLowerCase() === sectionName.toLowerCase()) ?? null
+        : null;
       setSelectedTrack(track);
       setSelectedIdea(idea);
     };
@@ -226,15 +233,50 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     if (selectedIdea) {
       localStorage.setItem('patchbay-selected-idea', selectedIdea.id);
     }
-  }, [selectedTrack?.id, selectedIdea?.id]);
+    if (selectedTrack && selectedIdea) {
+      localStorage.setItem(`patchbay-last-session-${songId}`, JSON.stringify({
+        instrument: selectedTrack.name,
+        section: selectedIdea.sectionName,
+      }));
+    }
+  }, [selectedTrack?.id, selectedIdea?.id, songId]);
 
-  // ── URL param context (instrument / section / file) ──────────────────────────
+  // ── Session restore: URL params take priority, localStorage as fallback ────────
 
   useEffect(() => {
     if (!tracks.length) return;
     if (sessionRestored.current) return;
     sessionRestored.current = true;
 
+    const params = new URLSearchParams(window.location.search);
+    const urlInstrument = params.get('instrument');
+    const urlSection = params.get('section');
+    const urlFile = params.get('file');
+
+    // URL params win — used when navigating from task clicks or external links
+    if (urlInstrument || urlFile) {
+      let targetTrack: ApiTrack | null = null;
+
+      if (urlInstrument) {
+        targetTrack = tracks.find(t => t.name.toLowerCase() === urlInstrument.toLowerCase()) ?? null;
+      } else if (urlFile) {
+        targetTrack = tracks.find(t => t.ideas.some(i => i.clips.some(c => c.id === urlFile))) ?? null;
+      }
+
+      if (targetTrack) {
+        setSelectedTrack(targetTrack);
+        let targetIdea: ApiIdea | null = null;
+        if (urlSection) {
+          targetIdea = targetTrack.ideas.find(i => i.sectionName.toLowerCase().includes(urlSection.toLowerCase())) ?? null;
+        } else if (urlFile) {
+          targetIdea = targetTrack.ideas.find(i => i.clips.some(c => c.id === urlFile)) ?? null;
+        }
+        setSelectedIdea(targetIdea);
+      }
+      return;
+    }
+
+    // Fall back to localStorage session persistence
     const savedTrackId = localStorage.getItem('patchbay-selected-track');
     const savedIdeaId = localStorage.getItem('patchbay-selected-idea');
 
@@ -246,34 +288,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
           const idea = track.ideas.find(i => i.id === savedIdeaId);
           if (idea) setSelectedIdea(idea);
         }
-        return;
       }
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const urlInstrument = params.get('instrument');
-    const urlSection = params.get('section');
-    const urlFile = params.get('file');
-
-    if (!urlInstrument && !urlSection && !urlFile) return;
-
-    let targetTrack: ApiTrack | null = null;
-    let targetIdea: ApiIdea | null = null;
-
-    if (urlInstrument) {
-      targetTrack = tracks.find(t => t.name.toLowerCase() === urlInstrument.toLowerCase()) ?? null;
-    } else if (urlFile) {
-      targetTrack = tracks.find(t => t.ideas.some(i => i.clips.some(c => c.id === urlFile))) ?? null;
-    }
-
-    if (targetTrack) {
-      setSelectedTrack(targetTrack);
-      if (urlSection) {
-        targetIdea = targetTrack.ideas.find(i => i.sectionName.toLowerCase().includes(urlSection.toLowerCase())) ?? null;
-      } else if (urlFile) {
-        targetIdea = targetTrack.ideas.find(i => i.clips.some(c => c.id === urlFile)) ?? null;
-      }
-      setSelectedIdea(targetIdea);
     }
   }, [location, tracks]);
 
@@ -341,13 +356,14 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     },
     onSuccess: (result) => {
       if (!result) return;
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsUploadOpen(false);
       setUploadFiles([]);
       setUploadDestination('');
 
       // Auto-select the destination after refetch
-      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', DEFAULT_SONG_ID], queryFn: fetchBucket }).then(fresh => {
+      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
         const track = fresh.find(t => t.id === result.destTrackId);
         if (track) {
           setSelectedTrack(track);
@@ -387,7 +403,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
     },
@@ -401,7 +417,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
   const addInstrumentMutation = useMutation({
     mutationFn: async (name: string) => {
       setAddInstrumentError(null);
-      const res = await fetch(`/api/songs/${DEFAULT_SONG_ID}/tracks`, {
+      const res = await fetch(`/api/songs/${songId}/tracks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
@@ -413,11 +429,11 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       return res.json() as Promise<ApiTrack>;
     },
     onSuccess: (newTrack) => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
       // Auto-select the new instrument after refetch
-      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', DEFAULT_SONG_ID], queryFn: fetchBucket }).then(fresh => {
+      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
         const track = fresh.find(t => t.id === newTrack.id);
         if (track) { setSelectedTrack(track); setSelectedIdea(null); }
       });
@@ -439,9 +455,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
       setSelectedTrack(null);
       setSelectedIdea(null);
     },
@@ -454,9 +470,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     mutationFn: (trackId: string) =>
       fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', DEFAULT_SONG_ID] });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       setSelectedHiddenTrackId('');
       setIsAddInstrumentOpen(false);
     },
@@ -474,9 +490,9 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${DEFAULT_SONG_ID}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       setSelectedIdea(null);
     },
     onError: (err: Error) => {
@@ -488,7 +504,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
     mutationFn: (ideaId: string) =>
       fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', DEFAULT_SONG_ID] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
       setSelectedHiddenIdeaId('');
       setIsAddSectionOpen(false);
@@ -1031,6 +1047,7 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
                         key={clip.id}
                         clip={toClip(clip)}
                         trackId={selectedTrack?.id}
+                        songId={songId}
                         onAddToTimeline={onAddToTimeline}
                         siblingClips={selectedIdea.clips.map(toClip)}
                       />
@@ -1047,31 +1064,6 @@ export function MediaBucket({ onAddToTimeline, onInstrumentAdded }: MediaBucketP
               )}
             </div>
           </ScrollArea>
-        </div>
-
-        {/* ── Activity column ── */}
-        <div className="w-1/5 flex flex-col bg-black/30 p-4 border-l border-white/5">
-          <div className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold mb-4">Activity</div>
-          <div className="space-y-4">
-            <div className="flex gap-3">
-              <div className="w-6 h-6 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
-                <User size={12} className="text-primary" />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="text-[10px] font-bold text-white">Dave uploaded V2</span>
-                <span className="text-[9px] text-muted-foreground uppercase">2 hours ago</span>
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <div className="w-6 h-6 rounded-full bg-blue-500/20 flex items-center justify-center shrink-0">
-                <User size={12} className="text-blue-400" />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <span className="text-[10px] font-bold text-white">Sarah added a note</span>
-                <span className="text-[9px] text-muted-foreground uppercase">Yesterday</span>
-              </div>
-            </div>
-          </div>
         </div>
 
       </div>

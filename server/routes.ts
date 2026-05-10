@@ -7,7 +7,7 @@ import multer from "multer";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc } from "drizzle-orm";
 import { db } from "./db";
-import { storage } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS } from "./storage";
 import {
   insertSongSchema,
   insertInstrumentTrackSchema,
@@ -74,6 +74,21 @@ export async function registerRoutes(
 
   // ─── Songs ──────────────────────────────────────────────────────────────────
 
+  app.get("/api/tasks", async (_req, res) => {
+    const tasks = await storage.getAllTasks();
+    res.json(tasks);
+  });
+
+  app.get("/api/activity", async (_req, res) => {
+    const events = await storage.getActivity();
+    res.json(events);
+  });
+
+  app.get("/api/songs/:songId/activity", async (req, res) => {
+    const events = await storage.getActivity(req.params.songId);
+    res.json(events);
+  });
+
   app.get("/api/songs", async (_req, res) => {
     const result = await storage.getSongs();
     res.json(result);
@@ -86,12 +101,28 @@ export async function registerRoutes(
   });
 
   app.post("/api/songs", async (req, res) => {
-    const parsed = insertSongSchema.safeParse(req.body);
+    const bodyInstruments: unknown = req.body.instruments;
+    const instruments: string[] = Array.isArray(bodyInstruments)
+      ? (bodyInstruments as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      : DEFAULT_INSTRUMENTS;
+
+    const bodyForSchema = { ...req.body };
+    if (!Array.isArray(bodyForSchema.sections) || bodyForSchema.sections.length === 0) {
+      bodyForSchema.sections = DEFAULT_SECTIONS;
+    }
+
+    const parsed = insertSongSchema.safeParse(bodyForSchema);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const song = await storage.createSong(parsed.data);
+    await storage.seedSong(song.id, instruments, song.sections);
     res.status(201).json(song);
+  });
+
+  app.delete("/api/songs/:id", async (req, res) => {
+    await storage.deleteSong(req.params.id);
+    res.status(204).end();
   });
 
   app.patch("/api/songs/:id", async (req, res) => {
@@ -621,7 +652,7 @@ export async function registerRoutes(
         storage.addTaskComment({
           id: randomUUID(),
           taskId: req.params.id,
-          author,
+          author: 'System',
           text: label,
           timestamp: Date.now(),
         }).catch(console.error);

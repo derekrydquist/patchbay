@@ -61,6 +61,7 @@ interface ClipProps {
   zoom?: number;
   sectionStart?: number;
   trackId?: string;
+  songId?: string;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -156,6 +157,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
       });
       setNewComment("");
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch (err) {
       console.error('[clip comment] add failed:', err);
     }
@@ -397,7 +399,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default' }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
@@ -444,9 +446,10 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         setIsFinal(!newIsFinal); // revert
         return;
       }
-      queryClient.invalidateQueries({ queryKey: ['production-tasks', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch {
       setIsFinal(!newIsFinal); // revert
     }
@@ -480,9 +483,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       });
       if (res.ok) {
         window.dispatchEvent(new CustomEvent('clip-replaced', { detail: { clipId: clip.id } }));
-        queryClient.invalidateQueries({ queryKey: ['/api/songs/patchbay-default/timeline'] });
-        queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
-        queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
+        queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+        queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+        queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       }
     } catch (err) {
       console.error('Failed to replace clip:', err);
@@ -639,7 +642,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
         focusNotes={focusNotes}
         bucketClipId={(() => {
-          const bucketData = queryClient.getQueryData<any[]>(['bucket', 'patchbay-default']);
+          const bucketData = queryClient.getQueryData<any[]>(['bucket', songId]);
           if (!bucketData || !trackId) return undefined;
           const track = bucketData.find((t: any) => t.id === trackId);
           const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
@@ -699,13 +702,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 interface BucketClipProps {
   clip: Clip;
   trackId?: string;
+  songId?: string;
   onAddToTimeline?: (clip: Clip) => void;
   siblingClips?: Clip[];
 }
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }: BucketClipProps) {
+export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, siblingClips = [] }: BucketClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
@@ -787,10 +791,11 @@ export function BucketClip({ clip, trackId, onAddToTimeline, siblingClips = [] }
         setIsFinal(!newIsFinal); // revert on failure
         return;
       }
-      queryClient.invalidateQueries({ queryKey: ['bucket', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['production-tasks', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['final-clips', 'patchbay-default'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/songs/patchbay-default/timeline'] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch (err) {
       console.error('[markFinal] network error:', err);
       setIsFinal(!newIsFinal); // revert on failure
