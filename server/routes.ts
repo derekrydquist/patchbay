@@ -178,8 +178,11 @@ export async function registerRoutes(
 
   app.get("/api/songs/:id/timeline", async (req, res) => {
     await storage.bootstrapDefaultSong();
-    const tracks = await storage.getTimelineTracks(req.params.id);
-    res.json(tracks);
+    const [tracks, song] = await Promise.all([
+      storage.getTimelineTracks(req.params.id),
+      storage.getSongById(req.params.id),
+    ]);
+    res.json({ songName: song?.name ?? 'Untitled', tracks });
   });
 
   app.post("/api/tracks/:trackId/clips", async (req, res) => {

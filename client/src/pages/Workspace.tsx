@@ -329,7 +329,7 @@ export default function Workspace() {
                <Timeline songId={songId} />
             </div>
             <div className="p-4 bg-black/40 border-t border-white/5">
-              <Transport />
+              <Transport songId={songId} />
             </div>
           </TabsContent>
           <TabsContent value="tasks" className="m-0 h-full outline-none">

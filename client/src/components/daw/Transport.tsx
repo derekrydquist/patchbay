@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { MOCK_SONG } from '@/lib/daw-data';
 import { ExportDialog } from './ExportDialog';
 
-export function Transport() {
+export function Transport({ songId = 'patchbay-default' }: { songId?: string }) {
   const [bpm, setBpm] = React.useState(MOCK_SONG.bpm || 120);
   const [bpmInput, setBpmInput] = React.useState(String(bpm));
   const [isPlaying, setIsPlaying] = React.useState(false);
@@ -166,7 +166,7 @@ export function Transport() {
             max={100} step={1} className="w-full"
           />
         </div>
-        <ExportDialog>
+        <ExportDialog songId={songId}>
           <Button variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
             Export
           </Button>

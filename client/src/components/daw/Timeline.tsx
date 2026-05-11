@@ -239,7 +239,9 @@ export function Timeline({ songId }: { songId: string }) {
     queryFn: async () => {
       const res = await fetch(`/api/songs/${songId}/timeline`);
       if (!res.ok) throw new Error('Failed to fetch timeline');
-      return res.json();
+      const body = await res.json();
+      // Response shape is { songName, tracks } — extract the array.
+      return Array.isArray(body) ? body : body.tracks;
     },
     refetchInterval: 3000,
   });
