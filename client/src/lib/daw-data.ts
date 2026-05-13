@@ -38,6 +38,8 @@ export interface Clip {
   comments?: Comment[];
   isFinal?: boolean;
   sectionName?: string;
+  trimStart?: number;
+  trimEnd?: number | null;
 }
 
 export interface Idea {

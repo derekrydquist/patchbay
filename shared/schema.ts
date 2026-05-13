@@ -167,6 +167,8 @@ export const timelineClips = sqliteTable("timeline_clips", {
   src: text("src"),
   sectionName: text("section_name"),
   isFinal: integer("is_final", { mode: "boolean" }).notNull().default(false),
+  trimStart: real("trim_start").notNull().default(0),
+  trimEnd: real("trim_end"),
 });
 
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);

@@ -55,6 +55,8 @@ type ApiTrack = {
     src: string | null;
     sectionName: string | null;
     isFinal: boolean;
+    trimStart: number;
+    trimEnd: number | null;
   }[];
 };
 
@@ -73,18 +75,20 @@ function getActiveSections(tracks: Track[], sectionOrder: string[]): string[] {
 // Section width = max total clip duration in that section across all tracks, floored at MIN_SECTION_WIDTH.
 // This is the single source of truth for section geometry — used by both rendering and recalcAllStarts.
 function computeSectionLayout(tracks: Track[], sectionOrder: string[]): SectionInfo[] {
-  const sections = getActiveSections(tracks, sectionOrder);
+  const sections: SectionInfo[] = [];
   let cursor = 0;
-  return sections.map((name) => {
+  for (const name of getActiveSections(tracks, sectionOrder)) {
     let maxWidth = MIN_SECTION_WIDTH;
     for (const t of tracks) {
-      const total = t.clips.filter((c) => c.sectionName === name).reduce((s, c) => s + c.duration, 0);
-      maxWidth = Math.max(maxWidth, total);
+      const total = t.clips
+        .filter((c) => c.sectionName === name)
+        .reduce((s, c) => s + (c.trimEnd ?? c.duration) - (c.trimStart ?? 0), 0);
+      if (total > maxWidth) maxWidth = total;
     }
-    const entry: SectionInfo = { name, start: cursor, duration: maxWidth };
+    sections.push({ name, start: cursor, duration: maxWidth });
     cursor += maxWidth;
-    return entry;
-  });
+  }
+  return sections;
 }
 
 // Recalculates every clip's absolute start time. Derives section geometry from computeSectionLayout
@@ -100,7 +104,7 @@ function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
       let pos = sectionStarts[name];
       return sc.map((clip) => {
         const updated = { ...clip, start: pos };
-        pos += clip.duration;
+        pos += (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
         return updated;
       });
     });
@@ -145,17 +149,23 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
     muted: false,
     solo: false,
     color: t.color ?? 'hsl(var(--chart-1))',
-    clips: [...t.timelineClips].sort((a, b) => a.start - b.start).map((c) => ({
-      id: c.id,
-      name: c.name,
-      type: c.type as Clip['type'],
-      color: c.color,
-      start: c.start,
-      duration: c.duration,
-      src: c.src ?? undefined,
-      sectionName: c.sectionName ?? undefined,
-      isFinal: c.isFinal ?? false,
-    })),
+    clips: [...t.timelineClips].sort((a, b) => a.start - b.start).map((c) => {
+      const ts = c.trimStart ?? 0;
+      const te = c.trimEnd ?? null;
+      return {
+        id: c.id,
+        name: c.name,
+        type: c.type as Clip['type'],
+        color: c.color,
+        start: c.start,
+        duration: c.duration,
+        src: c.src ?? undefined,
+        sectionName: c.sectionName ?? undefined,
+        isFinal: c.isFinal ?? false,
+        trimStart: ts,
+        trimEnd: te,
+      };
+    }),
   }));
   const initialSectionOrder = getActiveSections(rawTracks, MOCK_SONG.sections);
   return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
@@ -289,17 +299,23 @@ export function Timeline({ songId }: { songId: string }) {
       const withUpdatedClips = withRemovals.map(track => {
         const apiTrack = apiTracks.find(t => t.id === track.id);
         if (!apiTrack) return track;
-        const freshClips = [...apiTrack.timelineClips].sort((a, b) => a.start - b.start).map(c => ({
-          id: c.id,
-          name: c.name,
-          type: c.type as Clip['type'],
-          color: c.color,
-          start: c.start,
-          duration: c.duration,
-          src: c.src ?? undefined,
-          sectionName: c.sectionName ?? undefined,
-          isFinal: c.isFinal ?? false,
-        }));
+        const freshClips = [...apiTrack.timelineClips].sort((a, b) => a.start - b.start).map(c => {
+          const ts = c.trimStart ?? 0;
+          const te = c.trimEnd ?? null;
+          return {
+            id: c.id,
+            name: c.name,
+            type: c.type as Clip['type'],
+            color: c.color,
+            start: c.start,
+            duration: c.duration,
+            src: c.src ?? undefined,
+            sectionName: c.sectionName ?? undefined,
+            isFinal: c.isFinal ?? false,
+            trimStart: ts,
+            trimEnd: te,
+          };
+        });
         return { ...track, clips: freshClips };
       });
 
@@ -317,7 +333,8 @@ export function Timeline({ songId }: { songId: string }) {
           clips: [],
         }));
 
-      return [...withUpdatedClips, ...newTracks];
+      const merged = [...withUpdatedClips, ...newTracks];
+      return recalcAllStarts(merged, sectionOrderRef.current);
     });
   }, [apiTracks]);
 
@@ -447,7 +464,7 @@ export function Timeline({ songId }: { songId: string }) {
         if (track.muted) { trackMuteStates[track.id] = true; continue; }
         let isOverClip = false;
         for (const clip of track.clips) {
-          if (playheadTime >= clip.start && playheadTime < clip.start + clip.duration) {
+          if (playheadTime >= clip.start && playheadTime < clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)) {
             isOverClip = true;
             break;
           }
@@ -533,12 +550,15 @@ export function Timeline({ songId }: { songId: string }) {
                 if (!audio || !clip.src) continue;
 
                 const clipStart = clip.start;
-                const clipEnd = clip.start + clip.duration;
+                const trimStart = clip.trimStart ?? 0;
+                const trimEnd = clip.trimEnd ?? clip.duration;
+                const effectiveDuration = trimEnd - trimStart;
+                const clipEnd = clipStart + effectiveDuration;
                 const inRange = playheadTime >= clipStart && playheadTime < clipEnd;
 
                 if (inRange && isPlaying) {
                   if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
-                    audio.currentTime = Math.max(0, playheadTime - clipStart);
+                    audio.currentTime = trimStart + Math.max(0, playheadTime - clipStart);
                     pendingPlayRef.current.add(clip.id);
                     audio.play()
                       .then(() => pendingPlayRef.current.delete(clip.id))
@@ -546,6 +566,11 @@ export function Timeline({ songId }: { songId: string }) {
                         pendingPlayRef.current.delete(clip.id);
                         console.warn('play failed:', e);
                       });
+                  }
+                  // Stop playback if audio has passed trimEnd
+                  if (!audio.paused && audio.currentTime >= trimEnd) {
+                    audio.pause();
+                    pendingPlayRef.current.delete(clip.id);
                   }
                   // Update volume/mute/rate every frame
                   audio.volume = (track.volume / 100) * masterVolumeRef.current;
@@ -784,7 +809,7 @@ export function Timeline({ songId }: { songId: string }) {
       const insertAt = index ?? sectionClips.length;
       const newSectionClips = [
         ...sectionClips.slice(0, insertAt),
-        { ...clip, id: newId, sectionName },
+        { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null },
         ...sectionClips.slice(insertAt),
       ];
 
@@ -802,6 +827,7 @@ export function Timeline({ songId }: { songId: string }) {
           id: newId, trackId, name: clip.name, type: clip.type, color: clip.color,
           start: finalClip?.start ?? 0, duration: clip.duration,
           src: clip.src ?? null, sectionName,
+          trimStart: 0, trimEnd: null,
         }),
       }).catch((err) => console.error('Failed to persist timeline clip:', err));
 
@@ -1294,7 +1320,7 @@ export function Timeline({ songId }: { songId: string }) {
           <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
             <div
               className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e] pointer-events-none"
-              style={{ width: Math.max(160, activeDragData.clip.duration * zoom) }}
+              style={{ width: Math.max(160, ((activeDragData.clip.trimEnd ?? activeDragData.clip.duration) - (activeDragData.clip.trimStart ?? 0)) * zoom) }}
             >
               <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
               <span className="text-xs font-bold text-white truncate tracking-tight">

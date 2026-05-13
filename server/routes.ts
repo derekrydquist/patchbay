@@ -273,6 +273,16 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  app.patch("/api/timeline-clips/:id/trim", async (req, res) => {
+    const { trimStart, trimEnd } = req.body;
+    if (typeof trimStart !== 'number' || (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number')) {
+      return res.status(400).json({ message: "trimStart must be a number; trimEnd must be a number or null" });
+    }
+    const clip = await storage.updateTimelineClip(req.params.id, { trimStart, trimEnd: trimEnd ?? null });
+    if (!clip) return res.status(404).json({ message: "Clip not found" });
+    res.json(clip);
+  });
+
   app.get("/api/timeline-clips/:id/replacements", async (req, res) => {
     const clip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     if (!clip || !clip.sectionName) return res.json([]);

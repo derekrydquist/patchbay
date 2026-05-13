@@ -4,7 +4,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2 } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -408,12 +408,111 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const [replacementsLoading, setReplacementsLoading] = useState(false);
   const [showReplaceConfirm, setShowReplaceConfirm] = useState(false);
   const [pendingReplacement, setPendingReplacement] = useState<ReplacementClip | null>(null);
+  const [trimStart, setTrimStart] = useState(clip.trimStart ?? 0);
+  const [trimEnd, setTrimEnd] = useState<number | null>(clip.trimEnd ?? null);
+  const trimStartRef = useRef(trimStart);
+  const trimEndRef = useRef(trimEnd);
+  const [isHovered, setIsHovered] = useState(false);
+  const [isTrimDragging, setIsTrimDragging] = useState(false);
   const queryClient = useQueryClient();
 
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);
   }, [clip.isFinal]);
-  
+
+  useEffect(() => {
+    setTrimStart(clip.trimStart ?? 0);
+    trimStartRef.current = clip.trimStart ?? 0;
+    setTrimEnd(clip.trimEnd ?? null);
+    trimEndRef.current = clip.trimEnd ?? null;
+  }, [clip.trimStart, clip.trimEnd]);
+
+  const patchTrim = async (newTrimStart: number, newTrimEnd: number | null) => {
+    try {
+      const res = await fetch(`/api/timeline-clips/${clip.id}/trim`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trimStart: newTrimStart, trimEnd: newTrimEnd }),
+      });
+      if (res.ok) {
+        queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      }
+    } catch (err) {
+      console.error('Failed to patch trim:', err);
+    }
+  };
+
+  const handleLeftTrimDrag = (e: React.PointerEvent) => {
+    if (isOverlay) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.nativeEvent.stopImmediatePropagation();
+    setIsTrimDragging(true);
+    const startX = e.clientX;
+    const startTrimStart = trimStartRef.current;
+
+    const onMove = (moveE: PointerEvent) => {
+      const delta = moveE.clientX - startX;
+      const deltaSecs = delta / zoom;
+      const maxTrimStart = (trimEndRef.current ?? clip.duration) - 0.5;
+      const newTrimStart = Math.max(0, Math.min(maxTrimStart, startTrimStart + deltaSecs));
+      trimStartRef.current = newTrimStart;
+      setTrimStart(newTrimStart);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setIsTrimDragging(false);
+      patchTrim(trimStartRef.current, trimEndRef.current);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const handleRightTrimDrag = (e: React.PointerEvent) => {
+    if (isOverlay) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.nativeEvent.stopImmediatePropagation();
+    setIsTrimDragging(true);
+    const startX = e.clientX;
+    const startTrimEnd = trimEndRef.current ?? clip.duration;
+
+    const onMove = (moveE: PointerEvent) => {
+      const delta = moveE.clientX - startX;
+      const deltaSecs = delta / zoom;
+      const minTrimEnd = trimStartRef.current + 0.5;
+      const newTrimEnd = Math.max(minTrimEnd, Math.min(clip.duration, startTrimEnd + deltaSecs));
+      trimEndRef.current = newTrimEnd;
+      setTrimEnd(newTrimEnd);
+    };
+
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setIsTrimDragging(false);
+      // Store null when trim is at the very end of the file (no right trim)
+      const finalTrimEnd = trimEndRef.current;
+      const storedTrimEnd = finalTrimEnd !== null && finalTrimEnd >= clip.duration - 0.01 ? null : finalTrimEnd;
+      trimEndRef.current = storedTrimEnd;
+      setTrimEnd(storedTrimEnd);
+      patchTrim(trimStartRef.current, storedTrimEnd);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const handleResetTrim = async () => {
+    setTrimStart(0);
+    setTrimEnd(null);
+    trimStartRef.current = 0;
+    trimEndRef.current = null;
+    await patchTrim(0, null);
+  };
+
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip' },
@@ -423,14 +522,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     transform: CSS.Translate.toString(transform),
   };
 
-  const width = clip.duration * zoom;
-  
-  const positionStyle: React.CSSProperties = isOverlay ? { width } : {
-    width,
+  const displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom;
+
+  const positionStyle: React.CSSProperties = isOverlay ? { width: displayWidth } : {
+    width: displayWidth,
     left: (clip.start - sectionStart) * zoom,
     position: 'absolute',
     zIndex: 1,
-    ...style,
+    ...(isTrimDragging ? {} : style),
   };
 
   const handleMarkFinal = async () => {
@@ -501,17 +600,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             style={positionStyle}
             {...listeners}
             {...attributes}
+            onMouseEnter={() => setIsHovered(true)}
+            onMouseLeave={() => setIsHovered(false)}
             className={cn(
               "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none",
               isOverlay && "shadow-2xl scale-105 opacity-90",
               isFinal && "ring-1 ring-primary/50"
             )}
           >
-            <div 
-              className="absolute inset-0 opacity-80" 
+            <div
+              className="absolute inset-0 opacity-80"
               style={{ backgroundColor: clip.color || 'hsl(var(--primary))' }}
             />
-            
+
             {isFinal && (
               <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-lg">
                 <CheckCircle2 size={10} className="text-black" />
@@ -520,9 +621,45 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 
             <div className="absolute inset-0 flex items-center justify-center opacity-30 pointer-events-none">
                <svg width="100%" height="100%" preserveAspectRatio="none">
-                  <path d={`M0,${50 + Math.random() * 10} Q${width/4},${20} ${width/2},${50} T${width},${50}`} fill="none" stroke="black" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
+                  <path d={`M0,${50 + Math.random() * 10} Q${displayWidth/4},${20} ${displayWidth/2},${50} T${displayWidth},${50}`} fill="none" stroke="black" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
                </svg>
             </div>
+
+            {/* Left trim handle — at the left edge of the (already-trimmed) clip */}
+            {!isOverlay && (
+              <div
+                onPointerDown={handleLeftTrimDrag}
+                className="absolute z-20 pointer-events-auto transition-opacity"
+                style={{
+                  top: 0,
+                  left: 0,
+                  width: 8,
+                  height: '100%',
+                  opacity: isHovered ? 1 : 0,
+                  cursor: 'ew-resize',
+                  background: 'rgba(212,175,55,0.9)',
+                  borderRadius: '2px',
+                }}
+              />
+            )}
+
+            {/* Right trim handle — at the right edge of the (already-trimmed) clip */}
+            {!isOverlay && (
+              <div
+                onPointerDown={handleRightTrimDrag}
+                className="absolute z-20 pointer-events-auto transition-opacity"
+                style={{
+                  top: 0,
+                  right: 0,
+                  width: 8,
+                  height: '100%',
+                  opacity: isHovered ? 1 : 0,
+                  cursor: 'ew-resize',
+                  background: 'rgba(212,175,55,0.9)',
+                  borderRadius: '2px',
+                }}
+              />
+            )}
 
             <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between pointer-events-none">
               <div className="flex items-center gap-1 truncate">
@@ -534,7 +671,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                   {clip.name}
                 </span>
               </div>
-              
+
               {clip.comments && clip.comments.length > 0 && (
                 <div className="flex items-center bg-black/20 rounded px-1 shrink-0">
                   <MessageSquare size={10} className="text-black" />
@@ -567,6 +704,12 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           >
             <FolderSearch size={14} className="text-primary" /> Show in File Browser
           </ContextMenuItem>
+
+          {(trimStart > 0 || trimEnd !== null) && (
+            <ContextMenuItem onClick={handleResetTrim} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Scissors size={14} className="text-primary" /> Reset Trim
+            </ContextMenuItem>
+          )}
 
           <Separator className="my-1 bg-border/50" />
           

@@ -13,6 +13,8 @@ type TimelineClip = {
   start: number;
   duration: number;
   src: string | null;
+  trimStart: number;
+  trimEnd: number | null;
 };
 
 type ApiTrack = {
@@ -21,7 +23,7 @@ type ApiTrack = {
   timelineClips: TimelineClip[];
 };
 
-type ExportClip = { src: string; start: number; duration: number; volume: number };
+type ExportClip = { src: string; start: number; duration: number; volume: number; trimStart: number; trimEnd: number | null };
 
 type Progress = { phase: string; done: number; total: number };
 
@@ -130,6 +132,9 @@ async function renderClips(
         const decoded = await ctx.decodeAudioData(ab);
         console.log(`[Export] clip[${idx}] decoded: ${decoded.duration.toFixed(2)}s | ${decoded.numberOfChannels}ch | ${decoded.sampleRate}Hz`);
         onDecoded();
+        const trimStartSecs = clip.trimStart ?? 0;
+        const trimEndSecs = clip.trimEnd ?? decoded.duration;
+        const trimDuration = Math.max(0, trimEndSecs - trimStartSecs);
         const source = ctx.createBufferSource();
         source.buffer = decoded;
         if (clip.volume !== 1) {
@@ -140,8 +145,8 @@ async function renderClips(
         } else {
           source.connect(ctx.destination);
         }
-        source.start(clip.start);
-        console.log(`[Export] clip[${idx}] scheduled at start=${clip.start}s`);
+        source.start(clip.start, trimStartSecs, trimDuration);
+        console.log(`[Export] clip[${idx}] scheduled at start=${clip.start}s offset=${trimStartSecs}s duration=${trimDuration}s`);
       } catch (err) {
         console.error(`[Export] clip[${idx}] FAILED (${clip.src}):`, err);
         onDecoded();
@@ -253,9 +258,16 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
       }
 
       const allClips: ExportClip[] = tracksWithClips.flatMap((t) =>
-        t.timelineClips.filter((c) => c.src).map((c) => ({ src: c.src!, start: c.start, duration: c.duration, volume: VOLUME })),
+        t.timelineClips.filter((c) => c.src).map((c) => ({
+          src: c.src!,
+          start: c.start,
+          duration: c.duration,
+          volume: VOLUME,
+          trimStart: c.trimStart ?? 0,
+          trimEnd: c.trimEnd ?? null,
+        })),
       );
-      const totalDuration = Math.max(...allClips.map((c) => c.start + c.duration));
+      const totalDuration = Math.max(...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart));
       console.log('[Export] allClips:', allClips, '| totalDuration:', totalDuration);
       const ext = format === 'mp3' ? 'mp3' : 'wav';
 
@@ -266,7 +278,14 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
         for (const track of tracksWithClips) {
           const stemClips: ExportClip[] = track.timelineClips
             .filter((c) => c.src)
-            .map((c) => ({ src: c.src!, start: c.start, duration: c.duration, volume: VOLUME }));
+            .map((c) => ({
+              src: c.src!,
+              start: c.start,
+              duration: c.duration,
+              volume: VOLUME,
+              trimStart: c.trimStart ?? 0,
+              trimEnd: c.trimEnd ?? null,
+            }));
 
           let clipsDone = 0;
           setProgress({ phase: `Rendering ${track.name} (0/${stemClips.length} clips)…`, done: stemsDone, total: tracksWithClips.length });
