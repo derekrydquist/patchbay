@@ -29,6 +29,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
+import { AppHeader } from '@/components/AppHeader';
 
 const DEFAULT_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 const DEFAULT_INSTRUMENTS = ['Drums', 'Bass', 'Guitar 1', 'Guitar 2', 'Vocals'];
@@ -295,23 +296,16 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30">
-      {/* Header */}
-      <header className="h-14 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-6">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center shadow-lg shadow-primary/20">
-            <Music2 size={18} className="text-black" />
-          </div>
-          <h1 className="text-lg font-heading font-black tracking-tighter uppercase text-white italic">
-            Patch<span className="text-primary not-italic">Bay</span>
-          </h1>
-        </div>
-        <Button
-          onClick={() => setIsNewProjectOpen(true)}
-          className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
-        >
-          <Plus size={14} /> New Project
-        </Button>
-      </header>
+      <AppHeader
+        actionSlot={
+          <Button
+            onClick={() => setIsNewProjectOpen(true)}
+            className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
+          >
+            <Plus size={14} /> New Project
+          </Button>
+        }
+      />
 
       <main className="max-w-5xl mx-auto px-6 py-12">
         <div className="mb-8">

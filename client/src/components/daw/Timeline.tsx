@@ -412,6 +412,23 @@ export function Timeline({ songId }: { songId: string }) {
   }, []);
 
   useEffect(() => {
+    const handleTrimPreview = (e: any) => {
+      const { clipId, trimStart, trimEnd } = e.detail;
+      setTracks((prev) => {
+        const updated = prev.map((track) => ({
+          ...track,
+          clips: track.clips.map((c) =>
+            c.id === clipId ? { ...c, trimStart, trimEnd } : c
+          ),
+        }));
+        return recalcAllStarts(updated, sectionOrderRef.current);
+      });
+    };
+    window.addEventListener('trim-preview', handleTrimPreview);
+    return () => window.removeEventListener('trim-preview', handleTrimPreview);
+  }, []);
+
+  useEffect(() => {
     const handleTogglePlay = (e: any) => {
       if (e.detail.isPlaying) {
         if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {

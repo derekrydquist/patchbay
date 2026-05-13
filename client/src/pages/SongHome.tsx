@@ -3,8 +3,10 @@ import { useParams, useLocation } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { DndContext } from '@dnd-kit/core';
 import {
-  ArrowLeft, ChevronRight, Music2, Circle, Clock, ArrowRight,
+  ArrowLeft, ChevronRight, Circle, Clock, ArrowRight,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { AppHeader } from '@/components/AppHeader';
 import { cn } from '@/lib/utils';
 import { MediaBucket } from '@/components/daw/MediaBucket';
 import type { ProductionTask } from '@shared/schema';
@@ -140,37 +142,31 @@ export default function SongHome() {
 
   return (
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30 flex flex-col">
-      {/* Header */}
-      <header className="h-14 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between px-6 shrink-0">
-        <div className="flex items-center gap-4">
+      <AppHeader
+        className="shrink-0"
+        preLogoSlot={
           <button
             onClick={() => setLocation('/')}
             className="w-8 h-8 rounded-lg flex items-center justify-center text-white/50 hover:text-white hover:bg-white/5 transition-colors"
           >
             <ArrowLeft size={16} />
           </button>
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary to-primary/60 flex items-center justify-center shadow-lg shadow-primary/20">
-              <Music2 size={18} className="text-black" />
-            </div>
-            <h1 className="text-lg font-heading font-black tracking-tighter uppercase text-white italic">
-              Patch<span className="text-primary not-italic">Bay</span>
-            </h1>
-          </div>
-          {song?.name && (
-            <>
-              <span className="text-white/20">/</span>
-              <span className="text-sm font-semibold text-white/70 truncate max-w-[200px]">{song.name}</span>
-            </>
-          )}
-        </div>
-        <button
-          onClick={() => goToWorkspace()}
-          className="h-8 px-4 rounded-md bg-primary text-black text-xs font-bold hover:bg-primary/90 transition-colors"
-        >
-          Open Workspace
-        </button>
-      </header>
+        }
+        postLogoSlot={song?.name && (
+          <>
+            <span className="text-white/20">/</span>
+            <span className="text-sm font-semibold text-white/70 truncate max-w-[200px]">{song.name}</span>
+          </>
+        )}
+        actionSlot={
+          <button
+            onClick={() => goToWorkspace()}
+            className="h-8 px-4 rounded-md bg-primary text-black text-xs font-bold hover:bg-primary/90 transition-colors"
+          >
+            Open Workspace
+          </button>
+        }
+      />
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-8 space-y-10">
 

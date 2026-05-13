@@ -458,6 +458,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       const newTrimStart = Math.max(0, Math.min(maxTrimStart, startTrimStart + deltaSecs));
       trimStartRef.current = newTrimStart;
       setTrimStart(newTrimStart);
+      window.dispatchEvent(new CustomEvent('trim-preview', {
+        detail: { clipId: clip.id, trimStart: newTrimStart, trimEnd: trimEndRef.current },
+      }));
     };
 
     const onUp = () => {
@@ -487,6 +490,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       const newTrimEnd = Math.max(minTrimEnd, Math.min(clip.duration, startTrimEnd + deltaSecs));
       trimEndRef.current = newTrimEnd;
       setTrimEnd(newTrimEnd);
+      window.dispatchEvent(new CustomEvent('trim-preview', {
+        detail: { clipId: clip.id, trimStart: trimStartRef.current, trimEnd: newTrimEnd },
+      }));
     };
 
     const onUp = () => {
