@@ -584,6 +584,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           type: 'audio',
           color: clip.color,
           isFinal: false,
+          trimStart: 0,
+          trimEnd: null,
         }),
       });
       if (res.ok) {
