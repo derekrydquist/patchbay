@@ -441,6 +441,7 @@ When implementing auth or any permission checks, always consult this table.
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
 | Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; "Reset Trim" context menu item |
 | Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD (GET/POST/PATCH/DELETE) against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; "Add Note" shortcut in both `BucketClip` and `TimelineClip` right-click menus opens the panel and focuses the input via `focusNotes` prop; @ mention autocomplete on the notes input matches the ProductionTracker pattern |
+| Timeline clip waveform | ✅ Done | `<canvas>` inside each `TimelineClip`; decoded once via `AudioContext.decodeAudioData`, cached in `decodedBufferRef`; redrawn on trim change and on zoom/resize via `ResizeObserver`; rendered at device pixel ratio for retina sharpness; trim-aware (only the active region is drawn); fails silently |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions (system-wide) | ❌ Not built | @ mention autocomplete exists in clip notes and production tracker comments, but there are no push notifications or @mention feeds yet |
 | Video → audio stripping | ❌ Not built | Spec item for future |
@@ -714,7 +715,7 @@ On success, `BucketClip` invalidates three query keys: `['bucket', 'patchbay-def
 
 **Auto-isFinal on timeline clip placement** — `POST /api/tracks/:trackId/clips` checks whether a final bucket clip exists for the same `trackId + sectionName`. If one exists, the newly placed timeline clip is immediately set to `isFinal: true`. This keeps the timeline checkmark in sync when clips are placed after a version has already been marked final in the bucket.
 
-If adding a progress indicator or waveform in the future, extend `BucketClip` — the `audioRef` is already available.
+If adding a progress indicator in the future, extend `BucketClip` — the `audioRef` is already available. Waveform visualization is implemented on `TimelineClip` only — see Timeline clip waveform section.
 
 ### Media Bucket — "Add Section"
 
@@ -862,6 +863,31 @@ Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `t
 Matches the ProductionTracker pattern exactly. `BAND_MEMBERS` is a module-level constant in `Clip.tsx`. `handleNoteChange` detects `/@(\w*)$/` behind the cursor and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. The dropdown renders as an absolutely-positioned div below the Input, with colored avatar initials using `avatarColor(name)` (returns a hex string — use `style={{ backgroundColor }}`, not a CSS class). `onMouseDown + e.preventDefault()` on each dropdown item prevents the Input from blurring before the click registers.
 
 **`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper may return a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
+
+### Timeline clip waveform — ✅ Built
+
+Each `TimelineClip` in `Clip.tsx` renders a `<canvas>` waveform over its clip background. The waveform is decoded once and cached; redrawing on trim change or zoom is cheap (no re-fetch).
+
+**Key refs in `TimelineClip`:**
+- `canvasRef` — `HTMLCanvasElement | null`. The canvas is `position: absolute; top: 0; left: 0; width: 100%; height: 100%` with `zIndex: 2` — above the clip color background, below the `z-10` label and `z-20` trim handles.
+- `decodedBufferRef` — `AudioBuffer | null`. Populated once after the first fetch+decode. All subsequent redraws (trim, zoom) read from this ref — no re-fetch or re-decode.
+- `drawRef` — `(() => void) | null`. Reassigned in the component body on every render, so it always closes over the current `trimStart`, `trimEnd`, and `clip.duration`. The `ResizeObserver` and trim `useEffect` both call `drawRef.current?.()` with no stale-closure risk.
+
+**Three effects:**
+1. **Decode effect** `[clip.src, isOverlay]` — fetches the audio file, decodes via `AudioContext.decodeAudioData()` (channel 0 only), stores the buffer in `decodedBufferRef`, then calls `drawRef.current?.()`. Skipped for overlay clips. Fails silently. Cancellation flag prevents stale writes after unmount.
+2. **Trim redraw effect** `[trimStart, trimEnd, clip.duration]` — calls `drawRef.current?.()`. Buffer is already cached; redraw is a pure canvas operation.
+3. **Resize effect** `[]` — attaches a `ResizeObserver` to the canvas and calls `drawRef.current?.()` on every size change (fires on zoom-in/out since the clip container width tracks `displayWidth`).
+
+**Draw function (`drawRef.current`):**
+- Reads `canvas.offsetWidth` / `canvas.offsetHeight` for current CSS pixel dimensions.
+- Applies device pixel ratio: `canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr)` — renders at physical pixel resolution, displays at CSS size.
+- Slices `buffer.getChannelData(0)` to the trimmed region: `[trimStart * sampleRate, (trimEnd ?? duration) * sampleRate)`.
+- Iterates one column per CSS pixel, finds min/max sample in each slice, draws a vertical `fillRect` centered at `midY`. Minimum bar height: 1px (for silence).
+- Color: `rgba(0, 0, 0, 0.4)` — semi-transparent dark over the clip color.
+
+**`isOverlay` guard:** The decode effect returns early for overlay (drag ghost) clips. No waveform fetch is initiated during drag.
+
+**Do not** add waveform rendering to `BucketClip` — bucket clips use hover audio preview instead (see Audio hover preview section).
 
 ### Activity feed — ✅ Built
 

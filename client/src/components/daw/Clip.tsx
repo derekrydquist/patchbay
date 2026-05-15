@@ -415,6 +415,99 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const [isHovered, setIsHovered] = useState(false);
   const [isTrimDragging, setIsTrimDragging] = useState(false);
   const queryClient = useQueryClient();
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const decodedBufferRef = useRef<AudioBuffer | null>(null);
+  const drawRef = useRef<(() => void) | null>(null);
+
+  // Always keep drawRef current so ResizeObserver and trim effects get fresh values
+  drawRef.current = () => {
+    const canvas = canvasRef.current;
+    const buffer = decodedBufferRef.current;
+    if (!canvas || !buffer) return;
+
+    const w = canvas.offsetWidth;
+    const h = canvas.offsetHeight;
+    if (!w || !h) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    const channelData = buffer.getChannelData(0);
+    const sampleRate = buffer.sampleRate;
+
+    const startSample = Math.floor(trimStart * sampleRate);
+    const endSample = Math.floor((trimEnd ?? clip.duration) * sampleRate);
+    const samples = channelData.slice(startSample, Math.min(endSample, channelData.length));
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+
+    const samplesPerPixel = samples.length / w;
+    const midY = h / 2;
+
+    for (let x = 0; x < w; x++) {
+      const startIdx = Math.floor(x * samplesPerPixel);
+      const endIdx = Math.floor((x + 1) * samplesPerPixel);
+      let min = 0;
+      let max = 0;
+      for (let i = startIdx; i < endIdx; i++) {
+        const s = samples[i];
+        if (s < min) min = s;
+        if (s > max) max = s;
+      }
+      const yTop = midY - max * midY;
+      const yBottom = midY - min * midY;
+      ctx.fillRect(x, yTop, 1, Math.max(1, yBottom - yTop));
+    }
+  };
+
+  // TODO: implement waveform caching (Option A) if performance becomes an issue
+  // Fetch and decode audio — only re-runs when src changes; buffer is cached in decodedBufferRef
+  useEffect(() => {
+    if (!clip.src || isOverlay) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const response = await fetch(clip.src!);
+        if (cancelled) return;
+        const arrayBuffer = await response.arrayBuffer();
+        if (cancelled) return;
+
+        const audioCtx = new AudioContext();
+        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        audioCtx.close();
+        if (cancelled) return;
+
+        decodedBufferRef.current = decoded;
+        drawRef.current?.();
+      } catch {
+        // fail silently — clip renders normally without waveform
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [clip.src, isOverlay]);
+
+  // Redraw when trim changes — buffer already decoded, no re-fetch needed
+  useEffect(() => {
+    drawRef.current?.();
+  }, [trimStart, trimEnd, clip.duration]);
+
+  // Redraw on zoom/resize — fires whenever the canvas CSS width changes
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(() => drawRef.current?.());
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);
@@ -627,11 +720,18 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               </div>
             )}
 
-            <div className="absolute inset-0 flex items-center justify-center opacity-30 pointer-events-none">
-               <svg width="100%" height="100%" preserveAspectRatio="none">
-                  <path d={`M0,${50 + Math.random() * 10} Q${displayWidth/4},${20} ${displayWidth/2},${50} T${displayWidth},${50}`} fill="none" stroke="black" strokeWidth="1" vectorEffect="non-scaling-stroke"/>
-               </svg>
-            </div>
+            <canvas
+              ref={canvasRef}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                height: '100%',
+                zIndex: 2,
+                pointerEvents: 'none',
+              }}
+            />
 
             {/* Left trim handle — at the left edge of the (already-trimmed) clip */}
             {!isOverlay && (
