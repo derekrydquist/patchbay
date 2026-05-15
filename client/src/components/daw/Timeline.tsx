@@ -18,6 +18,7 @@ import {
   DragEndEvent,
   DragMoveEvent,
   CollisionDetection,
+  MeasuringStrategy,
   useSensor,
   useSensors,
   useDroppable,
@@ -173,22 +174,24 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
 
 // Custom collision detection: gap zones require precise pointer intersection (they are narrow);
 // track rows match by vertical overlap only — any X position on the row resolves to that track.
-// This prevents overId from returning null when dropping on empty horizontal track space.
+// Gap zones read live getBoundingClientRect() directly so freshly-mounted zones are never skipped
+// due to a stale/missing entry in dnd-kit's droppableRects cache.
 const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppableRects, pointerCoordinates }) => {
   if (!pointerCoordinates) return [];
   const { x, y } = pointerCoordinates;
 
-  // Gap zones first — narrow strips that require the pointer to actually hit them.
+  // First pass — gap zones only, live bounds check.
   for (const container of droppableContainers) {
     if (!String(container.id).startsWith('gap||')) continue;
-    const rect = droppableRects.get(container.id);
+    // Prefer a live rect from the DOM element; fall back to the cached rect.
+    const rect = container.node.current?.getBoundingClientRect() ?? droppableRects.get(container.id);
     if (!rect) continue;
     if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
       return [{ id: container.id }];
     }
   }
 
-  // Track rows — match by vertical band only; horizontal position is irrelevant.
+  // Second pass — track rows, vertical band only (X is irrelevant).
   for (const container of droppableContainers) {
     if (String(container.id).startsWith('gap||')) continue;
     const rect = droppableRects.get(container.id);
@@ -223,16 +226,25 @@ function DraggableSectionHeader({ name, width }: { name: string; width: number }
   );
 }
 
-// Droppable zone rendered at a section column boundary during clip drag.
-// id format: gap||${gapIndex} where gapIndex = 0 means before section[0].
+// Droppable zone at a clip boundary within the active drag's section.
+// id format: gap||${clipIndex} where gap||0 = before clip 0, gap||N = after clip N-1.
 // left: pixel offset from the left edge of the content div (includes the 256px track header).
+// pointer-events is always 'auto' so the live getBoundingClientRect() check in collision
+// detection can reliably find these elements.
 function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trackAreaHeight: number }) {
+  const nodeRef = React.useRef<HTMLDivElement | null>(null);
   const { setNodeRef, isOver } = useDroppable({ id });
+
+  const refCallback = React.useCallback((node: HTMLDivElement | null) => {
+    nodeRef.current = node;
+    setNodeRef(node);
+  }, [setNodeRef]);
+
   return (
     <div
-      ref={setNodeRef}
-      className="absolute z-30 -translate-x-1/2 pointer-events-auto"
-      style={{ left, top: 0, width: 20, height: trackAreaHeight }}
+      ref={refCallback}
+      className="absolute z-30 -translate-x-1/2"
+      style={{ left, top: 0, width: 20, height: trackAreaHeight, pointerEvents: 'auto' }}
     >
       {isOver && (
         <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_12px_rgba(212,175,55,0.9)] pointer-events-none" />
@@ -255,10 +267,6 @@ export function Timeline({ songId }: { songId: string }) {
     },
     refetchInterval: 3000,
   });
-
-  useEffect(() => {
-    console.log('[timeline] tracks:', apiTracks?.map(t => t.name));
-  }, [apiTracks]);
 
   const [tracks, setTracks] = useState<Track[]>([]);
   const tracksInitialized = useRef(false);
@@ -386,6 +394,27 @@ export function Timeline({ songId }: { songId: string }) {
     const last = sectionLayout[sectionLayout.length - 1];
     return last.start + last.duration;
   }, [sectionLayout]);
+
+  // Clip-boundary gap zone positions for the active drag's track+section.
+  // gap||0 = before first clip, gap||N = after clip N-1.
+  const gapZones = React.useMemo(() => {
+    if (!activeDragData) return [];
+    const { trackId } = activeDragData;
+    const sectionName = activeDragData.clip?.sectionName;
+    if (!trackId || !sectionName) return [];
+    const track = tracks.find((t) => t.id === trackId);
+    const sectionInfo = sectionLayout.find((s) => s.name === sectionName);
+    if (!track || !sectionInfo) return [];
+    const sectionClips = track.clips.filter((c) => c.sectionName === sectionName);
+    const lefts: number[] = [];
+    let cursor = sectionInfo.start;
+    lefts.push(cursor);
+    for (const c of sectionClips) {
+      cursor += (c.trimEnd ?? c.duration) - (c.trimStart ?? 0);
+      lefts.push(cursor);
+    }
+    return lefts.map((posSec, i) => ({ id: `gap||${i}`, left: 256 + posSec * zoom }));
+  }, [activeDragData, tracks, sectionLayout, zoom]);
 
   useEffect(() => {
     tracks.forEach((track) => {
@@ -884,17 +913,13 @@ export function Timeline({ songId }: { songId: string }) {
     const clip = active.data.current?.clip as Clip;
     const overId = over.id as string;
 
-    // ── Gap drop: insert or move a section column ──────────────────────────────
+    // ── Gap drop: insert clip at exact gapIndex position within its section ──────
     if (overId.startsWith('gap||')) {
       setInsertionPoint(null);
       const gapIndex = parseInt(overId.slice(5), 10);
       const clipSectionName = dragData?.clip?.sectionName ?? dragData?.sectionName;
-      if (!clipSectionName) return;
 
-      // Active section names at the time of drop (no temp injection — isOverGap was true).
-      const activeNames = sectionLayout.map((s) => s.name);
-      const newOrder = reorderSectionOrder(sectionOrder, clipSectionName, gapIndex, activeNames);
-      setSectionOrder(newOrder);
+      if (!clipSectionName) return;
 
       if (activeType === 'bucket-clip') {
         // Match by trackId (real API clips) or fall back to MOCK_SONG name lookup (mock clips).
@@ -908,12 +933,50 @@ export function Timeline({ songId }: { songId: string }) {
               return !sourceInstrument || sourceInstrument.name === t.name;
             });
         if (!targetTrack) return;
-
-        // Insert the clip into the (new or existing) section; pass newOrder so recalc uses it.
-        insertClipInSection(targetTrack.id, clipSectionName, { ...clip, sectionName: clipSectionName }, undefined, newOrder);
+        insertClipInSection(targetTrack.id, clipSectionName, { ...clip, sectionName: clipSectionName }, gapIndex);
       } else {
-        // Timeline clip: just reorder — recalcAllStarts with newOrder repositions everything.
-        setTracks((prev) => recalcAllStarts(prev, newOrder));
+        // Timeline clip: reinsert at gapIndex within the section's clip array.
+        const sourceTrackId = dragData?.trackId;
+        if (!sourceTrackId) return;
+        const sourceTrack = tracks.find((t) => t.id === sourceTrackId);
+        if (!sourceTrack) return;
+
+        const sectionClips = sourceTrack.clips.filter((c) => c.sectionName === clipSectionName);
+        const otherClips = sourceTrack.clips.filter((c) => c.sectionName !== clipSectionName);
+        const withoutClip = sectionClips.filter((c) => c.id !== clip.id);
+        const clipFromState = sectionClips.find((c) => c.id === clip.id) ?? clip;
+
+        // gapIndex references positions in the original sectionClips array.
+        // Removing the dragged clip shifts all subsequent indices down by 1,
+        // so adjust when the clip's original position precedes the target gap.
+        const oldIndex = sectionClips.findIndex((c) => c.id === clip.id);
+        const adjustedGapIndex = oldIndex !== -1 && oldIndex < gapIndex ? gapIndex - 1 : gapIndex;
+        const insertIdx = Math.min(adjustedGapIndex, withoutClip.length);
+        const spliced = [
+          ...withoutClip.slice(0, insertIdx),
+          clipFromState,
+          ...withoutClip.slice(insertIdx),
+        ];
+
+        const draft = tracks.map((t) =>
+          t.id === sourceTrackId ? { ...t, clips: [...otherClips, ...spliced] } : t
+        );
+        const recalced = recalcAllStarts(draft, sectionOrder);
+
+        const recalcedTrack = recalced.find((t) => t.id === sourceTrackId)!;
+
+        setTracks(recalced);
+
+        sourceTrack.clips.forEach((old) => {
+          const updated = recalcedTrack.clips.find((c) => c.id === old.id);
+          if (updated && updated.start !== old.start) {
+            fetch(`/api/timeline-clips/${old.id}`, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ start: updated.start }),
+            }).catch((err) => console.error('Failed to patch clip start after gap drop:', err));
+          }
+        });
       }
       return;
     }
@@ -959,6 +1022,21 @@ export function Timeline({ songId }: { songId: string }) {
       const clipSection = clip.sectionName;
       if (!clipSection) { setInsertionPoint(null); return; }
 
+      // Bug 1: for leftward drops, confirm the cursor released within the timeline track area
+      // (right of the 256px instrument panel). Releases inside the panel are ignored.
+      if (event.delta.x < 0) {
+        const activatorEvent = event.activatorEvent;
+        const startX = 'clientX' in activatorEvent
+          ? (activatorEvent as MouseEvent).clientX
+          : (activatorEvent as TouchEvent).touches?.[0]?.clientX ?? 0;
+        const endX = startX + event.delta.x;
+        const trackAreaLeft = timelineRef.current?.getBoundingClientRect().left ?? 0;
+        if (endX < trackAreaLeft) {
+          setInsertionPoint(null);
+          return;
+        }
+      }
+
       const capturedPoint =
         insertionPoint?.trackId === trackId && insertionPoint?.sectionName === clipSection
           ? insertionPoint
@@ -977,13 +1055,21 @@ export function Timeline({ songId }: { songId: string }) {
         if (capturedPoint) {
           newIndex = capturedPoint.index;
           if (oldIndex !== -1 && oldIndex < newIndex) newIndex = Math.max(0, newIndex - 1);
+        } else if (event.delta.x < 0) {
+          // Dragged leftward — move to beginning of section.
+          newIndex = 0;
         } else {
-          newIndex = withoutClip.length; // no insertion indicator — snap to end
+          // Dragged rightward or no movement — snap to end of section.
+          newIndex = withoutClip.length;
         }
 
+        // Bug 2: use the clip from prev state (not the closure drag-data clip) so that
+        // trimStart/trimEnd are current — stale values would cause recalcAllStarts to
+        // compute wrong effective durations and misplace clips.
+        const clipFromPrev = sectionClips.find((c) => c.id === clip.id) ?? clip;
         const spliced = [
           ...withoutClip.slice(0, newIndex),
-          clip,
+          clipFromPrev,
           ...withoutClip.slice(newIndex),
         ];
 
@@ -1129,6 +1215,7 @@ export function Timeline({ songId }: { songId: string }) {
     <DndContext
       sensors={sensors}
       collisionDetection={trackFirstCollision}
+      measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
       onDragStart={handleDragStart}
       onDragMove={handleDragMove}
       onDragEnd={handleDragEnd}
@@ -1172,18 +1259,11 @@ export function Timeline({ songId }: { songId: string }) {
             >
               <Ruler onSeek={handleRulerSeek} zoom={zoom} />
 
-              {/* Gap zones — rendered during drag at every section boundary; span full track area height */}
-              {activeDragData && [
-                <GapZone key="gap-0" id="gap||0" left={256} trackAreaHeight={64 * tracks.length + 64} />,
-                ...sectionLayout.map((sec, i) => (
-                  <GapZone
-                    key={`gap-${i + 1}`}
-                    id={`gap||${i + 1}`}
-                    left={256 + (sec.start + sec.duration) * zoom}
-                    trackAreaHeight={64 * tracks.length + 64}
-                  />
-                )),
-              ]}
+              {/* Gap zones — rendered at clip boundaries within the active drag's section.
+                  One zone before the first clip and one after each clip (N clips → N+1 zones). */}
+              {gapZones.map(({ id, left }) => (
+                <GapZone key={id} id={id} left={left} trackAreaHeight={64 * tracks.length + 64} />
+              ))}
 
               {/* Section column headers — own DndContext for section reordering */}
               <DndContext
@@ -1193,7 +1273,7 @@ export function Timeline({ songId }: { songId: string }) {
                 onDragEnd={handleSectionDragEnd}
                 onDragCancel={handleSectionDragEnd}
               >
-                <div className="flex w-full h-6 border-b border-border/50 bg-transparent">
+                <div className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-8 z-10">
                   <div className="w-64 shrink-0 bg-card border-r border-border sticky left-0 z-20" />
                   <div className="flex relative">
                     {sectionLayout.map((sec) => (

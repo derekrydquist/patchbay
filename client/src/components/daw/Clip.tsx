@@ -521,7 +521,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
-    data: { clip: { ...clip, isFinal }, type: 'clip' },
+    data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
 
   const style = {
@@ -637,13 +637,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             {!isOverlay && (
               <div
                 onPointerDown={handleLeftTrimDrag}
-                className="absolute z-20 pointer-events-auto transition-opacity"
+                className="absolute z-20 transition-opacity"
                 style={{
                   top: 0,
                   left: 0,
                   width: 8,
                   height: '100%',
                   opacity: isHovered ? 1 : 0,
+                  pointerEvents: isHovered ? 'auto' : 'none',
                   cursor: 'ew-resize',
                   background: 'rgba(212,175,55,0.9)',
                   borderRadius: '2px',
@@ -655,13 +656,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             {!isOverlay && (
               <div
                 onPointerDown={handleRightTrimDrag}
-                className="absolute z-20 pointer-events-auto transition-opacity"
+                className="absolute z-20 transition-opacity"
                 style={{
                   top: 0,
                   right: 0,
                   width: 8,
                   height: '100%',
                   opacity: isHovered ? 1 : 0,
+                  pointerEvents: isHovered ? 'auto' : 'none',
                   cursor: 'ew-resize',
                   background: 'rgba(212,175,55,0.9)',
                   borderRadius: '2px',

@@ -159,7 +159,7 @@ in route handlers.
 | `ideas` | A section slot per instrument (e.g. "Drums — Verse 1"); has `active` boolean — false = hidden |
 | `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
 | `clips` | Versions uploaded to a bucket idea (linked to `ideas`); `isFinal` marks the chosen version |
-| `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`); `isFinal` mirrors the corresponding bucket clip's final state |
+| `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`); `isFinal` mirrors the corresponding bucket clip's final state; `trimStart` (real, default 0) and `trimEnd` (real, nullable) store non-destructive trim points in seconds |
 | `clip_comments` | Timestamped comments on bucket clips |
 | `production_tasks` | Kanban tasks linked to a song |
 | `task_subtasks` | Checklist items on a task |
@@ -202,8 +202,8 @@ Section column **order** is stored as an explicit `sectionOrder: string[]` state
 
 Three pure functions (module-level in `Timeline.tsx`) maintain section geometry. All three take `sectionOrder` as their second argument:
 - **`getActiveSections(tracks, sectionOrder)`** — returns ordered section names present in clips, using `sectionOrder` as the authoritative sequence. Sections not yet in `sectionOrder` are appended at the end.
-- **`computeSectionLayout(tracks, sectionOrder)`** — calls `getActiveSections`, then computes each section's absolute `start` (seconds) and `duration` (max total clip duration in that section across all tracks, floored at `MIN_SECTION_WIDTH = 4s`). Returns `SectionInfo[]`.
-- **`recalcAllStarts(tracks, sectionOrder)`** — calls `computeSectionLayout` internally and recalculates `clip.start` for every clip. This is the single source of truth for positions.
+- **`computeSectionLayout(tracks, sectionOrder)`** — calls `getActiveSections`, then computes each section's absolute `start` (seconds) and `duration` (sum of effective trimmed durations per track, max across tracks, floored at `MIN_SECTION_WIDTH = 4s`). Effective duration = `(c.trimEnd ?? c.duration) - (c.trimStart ?? 0)`. Returns `SectionInfo[]`.
+- **`recalcAllStarts(tracks, sectionOrder)`** — calls `computeSectionLayout` internally and recalculates `clip.start` for every clip using effective trimmed durations to advance position. This is the single source of truth for positions.
 
 The `sectionLayout` `useMemo` inside `Timeline` calls `computeSectionLayout(tracks, sectionOrder)` and is the authoritative list for rendering (section headers, `SectionCell` widths, invalid-section grayout):
 ```ts
@@ -234,7 +234,9 @@ There are two kinds of droppable zones:
 
 `recalcAllStarts(tracks, sectionOrder)` is the single source of truth for all clip start times. It:
 1. Calls `computeSectionLayout(tracks, sectionOrder)` to get each section's absolute start offset (widest track in that section determines section width)
-2. For each track, walks each section's clip array in order and sets `clip.start = sectionOffset + sum of preceding clip durations`
+2. For each track, walks each section's clip array in order and sets `clip.start = sectionOffset + sum of preceding effective trimmed durations`
+
+**Effective duration** — everywhere clip length is used for layout (section width, snap position, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. `clip.duration` is the full file length and is never modified.
 
 Call it after every insert, remove, or section reorder. It takes the full tracks array and the current `sectionOrder` and returns a new array with all starts updated. Because it is pure, it can be called inside `setTracks(prev => ...)` safely.
 
@@ -357,9 +359,11 @@ Versions (takes/recordings the user has uploaded).
 ### Clip (Version)
 A single uploaded audio file. Has:
 - `src` — URL to the audio file
-- `duration` — length in seconds
+- `duration` — full length of the audio file in seconds (never modified by trim)
 - `sectionName` — which section of the song it belongs to
 - `isFinal` — whether this version has been marked as complete
+- `trimStart` — seconds to skip from the beginning (0 = no left trim); only on `timeline_clips`
+- `trimEnd` — cutoff point in seconds (null = no right trim, plays to end); only on `timeline_clips`
 - `metadata` — BPM, key, time signature, format, uploaded-by, etc.
 - `comments` — timestamped comments left by band members
 
@@ -400,12 +404,13 @@ When implementing auth or any permission checks, always consult this table.
 | Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links) |
 | Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates 4 event types from existing tables — file uploads, clips marked final, clip comments, task comments/status changes; polls every 10s via `refetchInterval`; file uploads: "Jordan added X to Instrument — Section"; mark-final: "Jordan marked X as final" (sourced from task_comments with accurate timestamp); status changes: "Jordan changed status to X — Instrument · Section"; clip comments: "You commented on Instrument · Section"; task comments: "You commented on Instrument · Section task"; rows are deep-link clickable — status-change and task-comment events navigate to `?tab=production&taskId=`, clip-comment events navigate to `?instrument=X&section=Y&clipId=Z&openComments=true`, all other events navigate to `?instrument=X&section=Y`. See Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
-| Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace` |
+| Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); trim-aware — uses `source.start(when, trimStartSecs, trimDuration)` so only the trimmed region renders; WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace` |
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload, cross-song tasks, activity feed — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
+| Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; "Reset Trim" context menu item |
 | Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD (GET/POST/PATCH/DELETE) against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; "Add Note" shortcut in both `BucketClip` and `TimelineClip` right-click menus opens the panel and focuses the input via `focusNotes` prop; @ mention autocomplete on the notes input matches the ProductionTracker pattern |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions (system-wide) | ❌ Not built | @ mention autocomplete exists in clip notes and production tracker comments, but there are no push notifications or @mention feeds yet |
@@ -450,6 +455,10 @@ PATCH  /api/timeline-clips/:id           — update a placed clip (start positio
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
                                            clears isFinal on sibling timeline clips, and updates the
                                            linked production task status
+PATCH  /api/timeline-clips/:id/trim      — update trim points only; body: { trimStart: number,
+                                           trimEnd: number | null }; does not touch isFinal or start;
+                                           client calls queryClient.invalidateQueries on success to
+                                           push updated trimStart/trimEnd into the tracks state
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 GET    /api/timeline-clips/:id/replacements — returns bucket clips that can replace this timeline clip:
                                               looks up the clip's trackId+sectionName → idea → all
@@ -543,6 +552,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 - **Do not add overlap capability to the timeline** — PatchBay is plug-and-play, not a freeform DAW. Clips on the same track cannot overlap under any circumstances. The only valid drop targets are append-to-end or insert-between within a section column.
 - **Do not remove Replit-specific vite plugins without updating `vite.config.ts`** — they are conditionally loaded only when `REPL_ID` is set, so they do no harm locally.
 - **Do not set `isFinal` on clips or `timeline_clips` outside the established three-entry-point sync** — `PATCH /api/clips/:clipId`, `PATCH /api/timeline-clips/:id`, and `PATCH /api/production-tasks/:id` all cascade `isFinal` changes across bucket clips, timeline clips, and production task status in a coordinated chain. A one-off `isFinal` write (direct DB update, ad-hoc route, or storage method call) will silently desync the three tables and create inconsistent "Complete" task states. Always go through one of the three established entry points.
+- **Do not set `trimStart`/`trimEnd` anywhere except `PATCH /api/timeline-clips/:id/trim`** — trim values on `timeline_clips` must only be written via this dedicated route. Setting them inline in `PATCH /api/timeline-clips/:id` or through ad-hoc DB writes bypasses the query-invalidation path that keeps `Timeline.tsx`'s local state in sync (the live-sync effect re-runs `recalcAllStarts` only when trimmed durations arrive via the normal API poll). Also: `clip.duration` must never be modified by trim — it always stores the full file length.
 
 ---
 
@@ -605,7 +615,7 @@ Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.t
 The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
 1. Advances the playhead by `delta * zoom` pixels (zoom is pixels/second).
 2. Computes `playheadTime` in seconds from the pixel position.
-3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + clip.duration)`, calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume`, `muted`, and `playbackRate` every frame.
+3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + effectiveDuration)` (where `effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)`), calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume`, `muted`, and `playbackRate` every frame. When playback starts, `audio.currentTime` is set to `clip.trimStart ?? 0` so the audio begins at the trimmed in-point.
 4. If the clip is out of range and not paused, calls `audio.pause()`.
 
 **Safari AudioContext unlock:**
@@ -624,6 +634,35 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Create a new `AudioContext` per clip or per play call — one persistent `audioCtxRef` per play session is correct.
 - Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
 - Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
+
+### Non-destructive clip trim — ✅ Built
+
+Timeline clips have left and right trim handles that physically resize the clip container without modifying `clip.duration`. `clip.duration` always stores the full file length; trim state is held in `trimStart` (seconds to skip from the start, default 0) and `trimEnd` (cutoff point in seconds, `null` = play to end), both stored in the `timeline_clips` DB table.
+
+**UI — `TimelineClip` in `Clip.tsx`:**
+- Gold 8px-wide handles render at `left: 0` and `right: 0` on hover (`isHovered` state, driven by `onMouseEnter`/`onMouseLeave` on the clip container)
+- `displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom` — the clip container's `width` is set to this value; the `left` position stays fixed at `(clip.start - sectionStart) * zoom` so the clip never shifts horizontally during a left-handle drag
+- Drag is captured with `window.addEventListener('pointermove'/'pointerup')` (no `setPointerCapture`) to avoid conflicts with dnd-kit sensors. `e.nativeEvent.stopImmediatePropagation()` on `pointerdown` prevents dnd-kit from starting a drag
+- `isTrimDragging` ref gates the `positionStyle` so dnd-kit's `style` prop (transform) is suppressed during trim drag
+- Local `trimStart`/`trimEnd` state is updated on every `pointermove` frame; `patchTrim` fires on `pointerup`
+- On every `pointermove` frame, `Clip.tsx` also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd }`. `Timeline.tsx` listens in a zero-dep `useEffect` and calls `setTracks(prev => recalcAllStarts(...))` with `sectionOrderRef.current` — so neighboring clips reflow in real time during drag without waiting for the server PATCH
+- A `useEffect` syncs `trimStart`/`trimEnd` from the prop whenever the API refetches (so a live-sync poll doesn't clobber active drag state — the effect only runs when the clip is not being dragged)
+- "Reset Trim" appears in the right-click context menu when `trimStart > 0 || trimEnd !== null`
+
+**API — `PATCH /api/timeline-clips/:id/trim`:**
+Accepts `{ trimStart: number, trimEnd: number | null }`. Validates both fields. Calls `storage.updateTimelineClip`. Does not touch `isFinal` or `start`. On success, `patchTrim` in `TimelineClip` calls `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` to push the new trim values into the tracks state so the rAF loop and live-sync effect see them immediately.
+
+**Layout — effective duration everywhere:**
+`computeSectionLayout`, `recalcAllStarts`, the mute-state range check, and the `DragOverlay` width all use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` instead of raw `clip.duration`. This ensures section columns expand/contract to match the audible content, not the raw file length.
+
+**Live-sync fix:**
+After a trim PATCH, the server's `start` values for sibling clips may be stale (they were computed before the trim change). The live-sync `useEffect` in `Timeline.tsx` calls `recalcAllStarts(merged, sectionOrderRef.current)` at the end of its `setTracks` callback to recompute all positions from the fresh trim values.
+
+**New and replaced clips always start untrimmed:**
+`insertClipInSection` explicitly sets `trimStart: 0, trimEnd: null` on every new clip it creates and in the `POST /api/tracks/:trackId/clips` body. Spreading from the bucket clip drag data is not sufficient because bucket clips don't carry these fields. `performReplace` in `TimelineClip` also explicitly sends `trimStart: 0, trimEnd: null` in its `PATCH /api/timeline-clips/:id` body — the general PATCH route is a partial update and would otherwise preserve the original clip's trim values on the replacement.
+
+**Export:**
+`ExportDialog.tsx` passes trim to the `OfflineAudioContext` via `source.start(when, trimStartSecs, trimDuration)` where `trimDuration = (clip.trimEnd ?? decoded.duration) - trimStartSecs`. The total export duration also uses effective trimmed durations so silence is not rendered past the trim out-point.
 
 ### Audio hover preview (Media Bucket) — ✅ Built
 
