@@ -214,21 +214,33 @@ The `sectionLayout` `useMemo` inside `Timeline` calls `computeSectionLayout(trac
 
 ### Droppable zones
 
-There are two kinds of droppable zones:
+There are two kinds of droppable zones in the clip-drag `DndContext`:
 
 **1. Track rows** — bare track ID (e.g. `"track-drums"`). One per track. The droppable element is the sections container div inside `TimelineTrack` — it spans the full row from after the 256px header to the right edge. `disabled: isInvalidDrop` when the dragged clip belongs to a different instrument.
 
-**2. Gap zones** — `gap||${gapIndex}` (one per boundary between adjacent section columns, plus before the first and after the last). `gapIndex = 0` means before section[0]; `gapIndex = n` means after section[n-1]. Dropping here inserts or moves an entire section column. Gap zones are rendered as absolute-positioned `GapZone` components (defined in `Timeline.tsx`) only while a drag is active. They are 20px wide, centered on the boundary, and span the full track area height.
+**2. Gap zones** — `gap||${gapIndex}` — **clip-boundary** zones within the active drag's section. `gapIndex = 0` is before the first clip; `gapIndex = N` is after clip N−1 (i.e. between clips N−1 and N). Dropping here **reorders clips within the section** — it is not a section column operation. These are rendered as `GapZone` components (defined in `Timeline.tsx`) via a `gapZones` `useMemo` that runs whenever `activeDragData` changes. They are always rendered (not gated on `isDragging`) so their DOM nodes exist for the live rect check. Each zone is 20px wide, centered on the boundary, spanning the full track-area height.
+
+**`GapZone` implementation:** Uses a `refCallback` that writes to both `setNodeRef` (dnd-kit) and a local `nodeRef.current` (for live rect), so the collision function can call `container.node.current?.getBoundingClientRect()` to bypass the stale `droppableRects` cache. `isOver` alone drives the gold insertion line — no state threaded from the parent.
+
+**`gapZones` useMemo:** Reads `activeDragData.trackId` and `activeDragData.clip.sectionName` to find the track and section, then walks the section's clips in order using effective durations to compute each boundary's absolute pixel position (`256 + posSec * zoom`). Returns `[]` when no drag is active.
+
+**Section column reordering** is handled entirely by a **separate inner `DndContext`** that wraps only the section header row. It does not use gap zone IDs — it uses `handleSectionDragMove` (nearest-gap heuristic) and `handleSectionDragEnd` → `reorderSectionOrder`. Clip drag and section-column drag are completely independent drag contexts with no shared drop targets.
+
+**`reorderSectionOrder(sectionOrder, sectionName, gapIndex, activeNames)`** — pure function used only by the section-header DndContext. `activeNames` is `sectionLayout.map(s => s.name)`. It removes the section from its current position, adjusts `gapIndex` for the resulting index shift, and splices the section back in. Returns the new ordered array.
 
 **There are no per-section-cell droppables.** The old `${trackId}||${sectionName}` format was replaced. `SectionCell` is a pure visual component with no dnd-kit involvement.
 
-**Collision detection** — `DndContext` uses the custom `trackFirstCollision` function (defined module-level in `Timeline.tsx`). It checks gap zones first using strict pointer intersection (narrow strips that require precision). Track rows are matched by vertical band only — any X position on the row resolves to that track, regardless of whether the cursor is over rendered section cells or empty space. This prevents `overId: null` when dropping in empty horizontal track space.
+**Collision detection** — the outer `DndContext` uses the custom `trackFirstCollision` function (defined module-level in `Timeline.tsx`). The outer `DndContext` also sets `measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}` to force dnd-kit to remeasure droppables on every render — necessary because gap zones mount and reposition mid-drag.
 
-`handleDragMove` checks `overId.startsWith('gap||')` first. When over a gap, it sets `isOverGap = true` and clears `insertionPoint`. Otherwise it sets `isOverGap = false` and always clears `insertionPoint` (no cursor-position computation during drag).
+Gap zones are checked **first** using a live `container.node.current?.getBoundingClientRect()` call (falls back to cached rect if the ref is null). This bypasses the stale `droppableRects` cache for freshly-mounted or repositioned zones. Track rows are checked **second** by vertical band only — any X position on the row matches, preventing `overId: null` in empty horizontal track space.
 
-`handleDragEnd` checks `overId.startsWith('gap||')` first. On a gap drop it calls `reorderSectionOrder` to compute the new column order, updates `sectionOrder`, and — for bucket clips — also inserts the clip into the matching track via `insertClipInSection(..., newOrder)`. On a track-row drop, `overId` is the trackId directly.
+`handleDragMove` checks `overId.startsWith('gap||')` first. When over a gap, it sets `isOverGap = true` and clears `insertionPoint`. Otherwise it sets `isOverGap = false` and clears `insertionPoint`.
 
-**`reorderSectionOrder(sectionOrder, sectionName, gapIndex, activeNames)`** — pure function. `activeNames` is `sectionLayout.map(s => s.name)` (real layout, not speculative). It removes the section from its current position (if present), adjusts `gapIndex` for the resulting index shift, and splices the section back in at the correct position. Returns the new ordered array.
+**`handleDragEnd` gap drop — clip reorder:**
+- **Bucket clip**: calls `insertClipInSection(targetTrack.id, clipSectionName, clip, gapIndex)`. No index adjustment needed — inserting a new clip, not removing an existing one.
+- **Timeline clip**: removes the clip from `sectionClips`, computes `adjustedGapIndex = oldIndex < gapIndex ? gapIndex - 1 : gapIndex` (removal shifts subsequent indices down by 1), splices the clip back at `Math.min(adjustedGapIndex, withoutClip.length)`, calls `recalcAllStarts`, and PATCHes all clips whose `start` changed to the server. Uses `clipFromState` (the clip from current `tracks` state, not the stale drag-data closure) to get current `trimStart`/`trimEnd`.
+
+On a track-row drop, `overId` is the trackId directly — see clip reorder section below.
 
 ### Position calculation — `recalcAllStarts`
 
@@ -269,11 +281,28 @@ There is one active insertion indicator during drag:
 - **`Clip.tsx` must have zero drag-aware styling.** No `isDragging &&` conditional classes on `TimelineClip` or `BucketClip`. The `DragOverlay` renders the floating ghost separately; the original clip element in the track must not change appearance during drag.
 - **The timeline itself does not change during drag.** No ghost section columns are injected speculatively. `sectionLayout` is used directly for all rendering; the old `effectiveSectionLayout` speculative-injection memo has been removed.
 
-### Bucket clip drag data — `trackId`
+### Clip reorder via track-row drop
 
-`BucketClip` embeds `trackId` in its dnd-kit drag data: `{ clip: {...}, type: 'bucket-clip', trackId }`. `Timeline.handleDragStart` reads this as `dragTrackId` and stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render) uses `draggedTrackId !== track.id` when `draggedTrackId` is present. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
+Dropping a timeline clip onto its own track row (not a gap zone) reorders it within its section using `delta.x` as a proxy for intent:
 
-`clipSectionName` in `handleDragEnd` is read as `dragData?.clip?.sectionName ?? dragData?.sectionName` — the double path is needed because real API clips store `sectionName` at the top level of `dragData` while mock clips carry it on `dragData.clip`.
+- `delta.x < 0` (dragged leftward) → move clip to **index 0** (beginning of section)
+- `delta.x >= 0` (dragged rightward or no horizontal movement) → move clip to **end of section** (`withoutClip.length`)
+
+**Left-boundary guard:** Before processing a leftward drop, the handler checks whether the pointer released inside the 256px instrument panel. It reads `activatorEvent.clientX + delta.x` and compares to `timelineRef.current.getBoundingClientRect().left`. If the cursor is left of the track area, the drop is cancelled. This prevents accidental reorders when the user drags a clip toward the panel and releases.
+
+**Trim-safe splicing (`clipFromPrev`):** Inside `setTracks(prev => ...)`, the clip must be read from `prev` state rather than from the stale drag-data closure. The closure captures `clip` at drag-start, which may have stale `trimStart`/`trimEnd` if the clip was trimmed after the drag began. `clipFromPrev = sectionClips.find(c => c.id === clip.id) ?? clip` ensures `recalcAllStarts` sees current trim values and computes correct effective durations.
+
+**Index adjustment for capturedPoint (unused path):** If `insertionPoint` ever resumes (currently always null during drag), `oldIndex < newIndex → newIndex -= 1` corrects for the removal shift — same logic as the gap zone `adjustedGapIndex`.
+
+After splicing, `recalcAllStarts(draft, sectionOrder)` is called inside `setTracks`, and all clips whose `start` changed are PATCHed to the server.
+
+### Drag data — `trackId` requirements
+
+**`BucketClip`** embeds `trackId` in its dnd-kit drag data: `{ clip: {...}, type: 'bucket-clip', trackId }`. `Timeline.handleDragStart` stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render, `gapZones` useMemo) uses this `trackId`. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
+
+**`TimelineClip`** must also embed `trackId` in its drag data: `{ clip: {...}, type: 'clip', trackId }`. Without it, gap drops and track-row reorders fail silently because `dragData?.trackId` is undefined and the handlers bail early. `trackId` is threaded as a prop: `Timeline` → `TimelineTrack` (passes `trackId={track.id}`) → `SectionCell` (prop `trackId: string`) → `TimelineClip` (prop `trackId?: string`).
+
+`clipSectionName` in `handleDragEnd` is read as `dragData?.clip?.sectionName ?? dragData?.sectionName` — the double path handles real API clips (sectionName at top level of dragData) vs. mock clips (on dragData.clip).
 
 ### Stale closure rule
 
@@ -395,8 +424,8 @@ When implementing auth or any permission checks, always consult this table.
 | Dashboard page | ✅ Done | Fully wired to real API; song cards styled as gradient banners (gold chevron, BPM badge); cross-song task list filtered to current user sorted by due date; activity feed polling every 10s |
 | SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; "Resume Last Session" banner (reads `localStorage`); task list filtered to current user with 5-task cap + expand; file browser (MediaBucket); activity feed with deep-link navigation to workspace |
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
-| Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; clips append to end of section on drop; gap zones reorder section columns; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20 — track row opacity never changes; valid track shows full-row gold border highlight; no speculative section injection during drag |
-| Section header drag-to-reorder | ✅ Done | Separate DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop |
+| Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; gap zones at clip boundaries enable clip reordering within a section; track-row drop snaps leftward drags to index 0, rightward to end; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20; valid track shows full-row gold border; MeasuringStrategy.Always + live getBoundingClientRect() in collision function for reliable gap zone hits; no speculative section injection during drag |
+| Section header drag-to-reorder | ✅ Done | Separate inner DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop; section headers are sticky (top-8 z-10 bg-[#09090b]) — pin below the ruler on vertical scroll while remaining draggable |
 | Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation); right-click timeline clip → Replace submenu (fetches real bucket versions from `/api/timeline-clips/:id/replacements` on open; confirmation dialog if clip is final; PATCHes name/src/duration/type/color + isFinal:false on select); "Show in File Browser" (dispatches `find-in-bucket` CustomEvent; MediaBucket navigates to matching instrument + section) |
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
