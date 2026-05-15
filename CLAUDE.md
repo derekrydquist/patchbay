@@ -483,8 +483,9 @@ POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body:
 PATCH  /api/timeline-clips/:id           — update a placed clip (start position, etc.); also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
-                                           clears isFinal on sibling timeline clips, and updates the
-                                           linked production task status
+                                           marks ALL same-name timeline clips on the track final (or
+                                           clears them), clears sibling names in the same section,
+                                           and updates the linked production task status
 PATCH  /api/timeline-clips/:id/trim      — update trim points only; body: { trimStart: number,
                                            trimEnd: number | null }; does not touch isFinal or start;
                                            client calls queryClient.invalidateQueries on success to
@@ -517,9 +518,11 @@ POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
 GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
 PATCH  /api/clips/:clipId               — partial update of a bucket clip; when isFinal: true,
-                                           clears isFinal on all sibling clips (same ideaId) and
-                                           all sibling timeline clips (same trackId+sectionName)
-                                           before setting the new one
+                                           clears isFinal on all sibling bucket clips (same ideaId),
+                                           marks ALL same-name timeline clips on the track as final,
+                                           and clears sibling timeline clips (same trackId+sectionName,
+                                           different name); when isFinal: false, clears all same-name
+                                           timeline clips on the track
 GET    /api/clips/:clipId/comments       — list comments on a bucket clip (ordered by timestamp asc)
 POST   /api/clips/:clipId/comments       — add a comment; body: { author, text }; timestamp set to Date.now()
 PATCH  /api/clip-comments/:id            — edit a comment's text; body: { text }
@@ -581,7 +584,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 - **Do not reintroduce free clip positioning** — clips on the timeline have no independent position. `clip.start` is always derived by `recalcAllStarts`, never set from a cursor pixel offset or stored as an arbitrary value. This is intentional.
 - **Do not add overlap capability to the timeline** — PatchBay is plug-and-play, not a freeform DAW. Clips on the same track cannot overlap under any circumstances. The only valid drop targets are append-to-end or insert-between within a section column.
 - **Do not remove Replit-specific vite plugins without updating `vite.config.ts`** — they are conditionally loaded only when `REPL_ID` is set, so they do no harm locally.
-- **Do not set `isFinal` on clips or `timeline_clips` outside the established three-entry-point sync** — `PATCH /api/clips/:clipId`, `PATCH /api/timeline-clips/:id`, and `PATCH /api/production-tasks/:id` all cascade `isFinal` changes across bucket clips, timeline clips, and production task status in a coordinated chain. A one-off `isFinal` write (direct DB update, ad-hoc route, or storage method call) will silently desync the three tables and create inconsistent "Complete" task states. Always go through one of the three established entry points.
+- **Do not set `isFinal` on clips or `timeline_clips` outside the established three-entry-point sync** — `PATCH /api/clips/:clipId`, `PATCH /api/timeline-clips/:id`, and `PATCH /api/production-tasks/:id` all cascade `isFinal` changes across bucket clips, timeline clips, and production task status using the same-name rule. A one-off `isFinal` write (direct DB update, ad-hoc route, or storage method call) will silently desync the three tables, leave stale checkmarks on same-name clip instances, and create inconsistent "Complete" task states. Always go through one of the three established entry points. See the "Same-name rule" section under isFinal ↔ task status bidirectional sync.
 - **Do not set `trimStart`/`trimEnd` anywhere except `PATCH /api/timeline-clips/:id/trim`** — trim values on `timeline_clips` must only be written via this dedicated route. Setting them inline in `PATCH /api/timeline-clips/:id` or through ad-hoc DB writes bypasses the query-invalidation path that keeps `Timeline.tsx`'s local state in sync (the live-sync effect re-runs `recalcAllStarts` only when trimmed durations arrive via the normal API poll). Also: `clip.duration` must never be modified by trim — it always stores the full file length.
 
 ---
@@ -640,6 +643,9 @@ Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.t
 - `pendingPlayRef` — `Set<string>` of clip IDs whose `.play()` Promise is still resolving. Guards against calling `.play()` again before the previous call settles, which would throw `AbortError`.
 - `audioCtxRef` — persistent `AudioContext | null`. Used solely to unlock Safari's audio pipeline; not used to route audio. Closed when playback stops.
 - `masterVolumeRef` — `number`, initialized to `0.8` (matching the Transport slider's default of 80). Updated by a `useEffect` listening for `update-master-volume` events (`e.detail.volume / 100`). The listener also immediately applies the new volume to all currently-playing elements in `customAudioRefs`. The rAF loop multiplies per-track volume by this ref: `audio.volume = (track.volume / 100) * masterVolumeRef.current`.
+
+**Playhead position model:**
+`playheadPositionState` (and `playheadRef`) store the playhead in **content-space pixels**: `256 + timeInSeconds * zoom`. The playhead DOM element is rendered *outside* the scrollable `timelineRef` container (it is a sibling of it, both inside the `position: relative` outer timeline div). Because of this, the rendered `left` must subtract the scroll offset: `left: ${playheadPositionState - timelineScrollLeft}px`. A `useEffect(fn, [])` registers a passive `scroll` listener on `timelineRef` to keep `timelineScrollLeft` state in sync — this triggers a re-render when the user scrolls while paused (during playback, `setPlayheadPositionState` fires every frame anyway). `handlePlayheadPointerDown` correctly adds `timelineRef.current.scrollLeft` when converting pointer clientX to content-space position. Do not position the playhead element *inside* the scrollable content — it would scroll away with the content.
 
 **Animation loop:**
 The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
@@ -752,14 +758,27 @@ Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] 
 
 Marking a clip as final and changing a task's status are kept in sync automatically. There are **three entry points**, all handled in `server/routes.ts`.
 
+#### Same-name rule (applies at all three entry points)
+
+**Same name = same version.** If two timeline clips on the same track have the same `name`, they are the same recording placed twice. Marking one final must mark ALL of them final — regardless of which section they sit in.
+
+**Sibling rule.** Only one version name per section per instrument can be final. When a name is marked final, all clips with a *different* name on the same `trackId + sectionName` are cleared. This is independent of the same-name rule — both run together on every `isFinal: true` write.
+
+**Unmarking** follows the same-name rule in reverse: clearing `isFinal` on one timeline clip clears it on every clip with the same `trackId + name`.
+
+These rules apply from all three entry points. Never write `isFinal` outside the three entry points or the rules will be silently bypassed.
+
 **Entry point 1 — bucket clip marked final (`PATCH /api/clips/:clipId`)**
 
 When `isFinal === true`:
-- Clears `isFinal` on all sibling clips in the same idea (`ideaId`, different `id`)
-- Clears `isFinal` on all `timelineClips` with the same `trackId + sectionName`, then re-sets `isFinal: true` on the matching timeline clip
+- Clears `isFinal` on all sibling bucket clips in the same idea (`ideaId`, different `id`)
+- Sets `isFinal: true` on ALL `timelineClips` where `trackId` matches AND `name` matches (same-name rule)
+- Clears `isFinal` on all `timelineClips` where `trackId + sectionName` matches AND `name` does NOT match (sibling rule)
 - If the linked task is not already "complete": walks clip → idea → track → `storage.getTaskByInstrumentSection`, calls `storage.updateTask(task.id, { status: "complete" })`, and logs `Clip marked as final: "{clip.name}"`
 
-When `isFinal === false` and the task is currently "complete": sets task to `"in-progress"` and logs `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
+When `isFinal === false`:
+- Clears `isFinal` on ALL `timelineClips` where `trackId` matches AND `name` matches
+- If the task is currently "complete": sets task to `"in-progress"` and logs `Clip unmarked as final: "{clip.name}". Status reverted to In Progress.`
 
 **Entry point 2 — timeline clip marked final (`PATCH /api/timeline-clips/:id`)**
 
@@ -767,19 +786,25 @@ When `isFinal === false` and the task is currently "complete": sets task to `"in
 
 The route strips only `author` from the body before passing the remainder to `storage.updateTimelineClip`. If `clipUpdates` is empty after stripping, the route fetches the clip directly instead of calling `.set({})` on an empty object (which would throw a Drizzle error).
 
-When `isFinal === true || false`, the route:
+When `isFinal === true`, the route:
 1. Calls `storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal)` to persist to the bucket
-2. If `isFinal === true`, clears `isFinal` on all other `timelineClips` with the same `trackId + sectionName`
-3. Looks up the track via `clip.trackId`, then calls `storage.getTaskByInstrumentSection` to find the task
-4. Applies the same complete/revert logic and comment as entry point 1
+2. Sets `isFinal: true` on ALL `timelineClips` where `trackId` matches AND `name` matches (same-name rule)
+3. Clears `isFinal` on all `timelineClips` where `trackId + sectionName` matches AND `name` does NOT match (sibling rule)
+4. Looks up the track via `clip.trackId`, then calls `storage.getTaskByInstrumentSection` to find the task
+5. Applies the same complete/revert logic and comment as entry point 1
+
+When `isFinal === false`, the route:
+1. Calls `storage.syncFinalClipFromTimeline` to clear the bucket clip
+2. Clears `isFinal` on ALL `timelineClips` where `trackId` matches AND `name` matches
+3. Applies the same task revert logic as entry point 1
+
+On success, `TimelineClip.handleMarkFinal` invalidates: `['production-tasks', songId]`, `['final-clips', songId]`, `['bucket', songId]`, `['/api/songs/${songId}/timeline']`, `['activity']`.
 
 **`syncFinalClipFromTimeline(trackId, sectionName, clipName, isFinal)`** (in `storage.ts`):
 - Looks up the idea via `trackId + sectionName`
 - Fetches all clips for that idea
 - If `isFinal: true`: clears `isFinal` on all sibling clips first, then sets `isFinal = true` on the clip whose name matches `clipName` (falls back to the most recently created clip if no exact match)
-- If `isFinal: false`: clears `isFinal` on any currently-final clip for that idea
-
-On success, `TimelineClip.handleMarkFinal` invalidates: `['production-tasks', 'patchbay-default']`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`.
+- If `isFinal: false`: clears `isFinal` on any currently-final clip for that idea whose name matches `clipName`
 
 **Entry point 3 — task manually set to "complete" (`PATCH /api/production-tasks/:id`)**
 
