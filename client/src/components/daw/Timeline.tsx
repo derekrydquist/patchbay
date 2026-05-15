@@ -358,6 +358,7 @@ export function Timeline({ songId }: { songId: string }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [playheadPositionState, setPlayheadPositionState] = useState(256);
   const playheadRef = React.useRef(256);
+  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
@@ -646,6 +647,14 @@ export function Timeline({ songId }: { songId: string }) {
     }
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
   }, [isPlaying, tracks, bpm, isLooping, sectionLayout, zoom, setPlayheadPosition]);
+
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const onScroll = () => setTimelineScrollLeft(el.scrollLeft);
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
@@ -1393,7 +1402,7 @@ export function Timeline({ songId }: { songId: string }) {
           {/* Global Playhead */}
           <div
             className="absolute top-0 bottom-0 w-[16px] z-50 flex justify-center cursor-ew-resize group"
-            style={{ left: `${playheadPositionState}px`, transform: 'translateX(-50%)' }}
+            style={{ left: `${playheadPositionState - timelineScrollLeft}px`, transform: 'translateX(-50%)' }}
             onPointerDown={handlePlayheadPointerDown}
           >
             <div className="w-[1px] h-full bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)] group-hover:w-[2px] transition-all" />

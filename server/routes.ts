@@ -226,12 +226,29 @@ export async function registerRoutes(
         // Sync isFinal to the corresponding bucket clip so it persists across reloads
         if (clip.sectionName) {
           await storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal);
+        }
 
-          if (isFinal === true) {
+        if (isFinal === true) {
+          // Same name = same version: mark all same-name clips on this track as final
+          db.update(timelineClips).set({ isFinal: true })
+            .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.name, clip.name)))
+            .run();
+          // Clear siblings in the same section with a different name
+          const clipSectionName = clip.sectionName;
+          if (clipSectionName) {
             db.update(timelineClips).set({ isFinal: false })
-              .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.sectionName, clip.sectionName), ne(timelineClips.id, clip.id)))
+              .where(and(
+                eq(timelineClips.trackId, clip.trackId),
+                eq(timelineClips.sectionName, clipSectionName),
+                ne(timelineClips.name, clip.name)
+              ))
               .run();
           }
+        } else {
+          // Clear isFinal on all same-name clips on this track
+          db.update(timelineClips).set({ isFinal: false })
+            .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.name, clip.name)))
+            .run();
         }
 
         const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clip.trackId)).get();
@@ -403,33 +420,25 @@ export async function registerRoutes(
             }
           }
 
-          // Sync isFinal to the corresponding timeline clip
+          // Sync isFinal to timeline clips using name-matching logic
           if (clipUpdates.isFinal === true) {
-            // Fetch all timeline clips for this section, clear them all, then set only the name-matching one
-            const sectionTimelineClips = db.select().from(timelineClips)
-              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.sectionName, idea.sectionName)))
-              .all();
-            console.log("[clear timeline siblings] trackId:", idea.trackId, "sectionName:", idea.sectionName);
-            console.log("[clear timeline siblings] clips being cleared:", sectionTimelineClips);
-            db.update(timelineClips).set({ isFinal: false })
-              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.sectionName, idea.sectionName)))
+            // Same name = same version: mark all same-name timeline clips on this track as final
+            db.update(timelineClips).set({ isFinal: true })
+              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.name, clip.name)))
               .run();
-            const matchingTimelineClip = sectionTimelineClips.find(tc => tc.name === clip.name);
-            if (matchingTimelineClip) {
-              await storage.updateTimelineClip(matchingTimelineClip.id, { isFinal: true });
-            }
-          } else {
-            // Only clear the timeline clip matching this clip's name — don't touch siblings
-            const matchingTimelineClip = db.select().from(timelineClips)
+            // Clear siblings in the same section with a different name
+            db.update(timelineClips).set({ isFinal: false })
               .where(and(
                 eq(timelineClips.trackId, idea.trackId),
                 eq(timelineClips.sectionName, idea.sectionName),
-                eq(timelineClips.name, clip.name)
+                ne(timelineClips.name, clip.name)
               ))
-              .get();
-            if (matchingTimelineClip) {
-              await storage.updateTimelineClip(matchingTimelineClip.id, { isFinal: false });
-            }
+              .run();
+          } else {
+            // Clear isFinal on all same-name timeline clips on this track
+            db.update(timelineClips).set({ isFinal: false })
+              .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.name, clip.name)))
+              .run();
           }
         }
       } catch (err) {
@@ -629,14 +638,17 @@ export async function registerRoutes(
                 await storage.updateTimelineClip(timelineClipForTask.id, { isFinal: true });
 
                 // Clear isFinal on any other timeline clips in the same section
-                db.update(timelineClips)
-                  .set({ isFinal: false })
-                  .where(and(
-                    eq(timelineClips.trackId, timelineClipForTask.trackId),
-                    eq(timelineClips.sectionName, timelineClipForTask.sectionName),
-                    ne(timelineClips.id, timelineClipForTask.id)
-                  ))
-                  .run();
+                const taskClipSection = timelineClipForTask.sectionName;
+                if (taskClipSection) {
+                  db.update(timelineClips)
+                    .set({ isFinal: false })
+                    .where(and(
+                      eq(timelineClips.trackId, timelineClipForTask.trackId),
+                      eq(timelineClips.sectionName, taskClipSection),
+                      ne(timelineClips.id, timelineClipForTask.id)
+                    ))
+                    .run();
+                }
 
                 await storage.addTaskComment({
                   id: randomUUID(),

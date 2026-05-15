@@ -648,6 +648,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
     } catch {
       setIsFinal(!newIsFinal); // revert
     }
@@ -715,7 +716,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             />
 
             {isFinal && (
-              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-lg">
+              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-lg z-10">
                 <CheckCircle2 size={10} className="text-black" />
               </div>
             )}
