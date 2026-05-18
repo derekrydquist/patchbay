@@ -72,7 +72,7 @@ async function uploadFile(
   instrument: string,
   section: string,
   ideaId: string,
-): Promise<{ url: string; duration: number; format: string; originalFileName: string }> {
+): Promise<{ url: string; duration: number; format: string; originalFileName: string; sampleRate: string; bitDepth: string; channels: string; uploadedDate: string; uploadedBy: string }> {
   const form = new FormData();
   form.append('file', file);
   form.append('instrument', instrument);
@@ -321,7 +321,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
 
       // Upload each file sequentially so version numbers increment correctly
       for (const { file } of uploadFiles) {
-        const { url, duration, format, originalFileName } = await uploadFile(
+        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } = await uploadFile(
           file,
           destTrack.name,
           destIdea.sectionName,
@@ -345,17 +345,17 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
           metadata: {
             format,
             originalFileName,
-            uploadedBy: 'You',
-            uploadedDate: new Date().toISOString().split('T')[0],
-            sampleRate: '48kHz',
-            bitDepth: '24-bit',
-            timeSignature: '4/4',
-            key: 'Unknown',
-            bpm: 120,
-            channels: 'Stereo',
-            peakLevel: '-1.0 dBFS',
-            description: `Uploaded file: ${originalFileName}`,
-            tags: ['upload', 'raw'],
+            uploadedBy,
+            uploadedDate,
+            sampleRate,
+            bitDepth,
+            channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
+            peakLevel: '',
+            timeSignature: '',
+            key: '',
+            bpm: 0,
+            description: '',
+            tags: [],
           },
         });
 

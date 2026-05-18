@@ -548,9 +548,12 @@ export async function registerRoutes(
         // Write buffer to disk
         fs.writeFileSync(destPath, req.file.buffer);
 
-        // Extract duration using music-metadata (reads from buffer — no ffmpeg needed)
+        // Extract duration and technical metadata using music-metadata
         let duration = 0;
         let format = path.extname(req.file.originalname).replace(".", "").toUpperCase() || "WAV";
+        let sampleRateHz: number | undefined;
+        let bitDepth: number | undefined;
+        let numChannels: number | undefined;
         try {
           // Try with mimetype string first
           let meta = await parseBuffer(req.file.buffer, req.file.mimetype, { duration: true });
@@ -563,14 +566,24 @@ export async function registerRoutes(
           }
 
           if (meta.format.container) format = meta.format.container;
+          sampleRateHz = meta.format.sampleRate;
+          bitDepth = meta.format.bitsPerSample;
+          numChannels = meta.format.numberOfChannels;
         } catch {
-          console.warn("[upload] could not parse duration for", req.file.originalname);
+          console.warn("[upload] could not parse metadata for", req.file.originalname);
         }
 
         // If duration is still 0, fall back to a default so the clip is visible on the timeline
         if (duration < 1) {
           duration = 5;
         }
+
+        // Format technical fields into display strings
+        const sampleRateStr = sampleRateHz
+          ? (sampleRateHz % 1000 === 0 ? `${sampleRateHz / 1000}kHz` : `${(sampleRateHz / 1000).toFixed(1)}kHz`)
+          : '';
+        const bitDepthStr = bitDepth ? `${bitDepth}-bit` : '';
+        const channelsStr = numChannels === 1 ? 'Mono' : numChannels === 2 ? 'Stereo' : numChannels === 6 ? '5.1' : '';
 
         // The URL the browser's <audio> tag will use
         const url = `/uploads/${filename}`;
@@ -580,6 +593,11 @@ export async function registerRoutes(
           duration,
           format,
           originalFileName: req.file.originalname,
+          sampleRate: sampleRateStr,
+          bitDepth: bitDepthStr,
+          channels: channelsStr,
+          uploadedDate: new Date().toISOString().split('T')[0],
+          uploadedBy: 'Jordan', // TODO: replace with real auth user
         });
       } catch (err) {
         console.error("[upload] error:", err);

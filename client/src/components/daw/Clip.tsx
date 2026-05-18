@@ -4,7 +4,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2 } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -33,7 +33,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 
@@ -79,9 +78,11 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
   );
 }
 
-export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, focusNotes, bucketClipId }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, bucketClipId?: string }) {
+export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, bucketClipId, audioBuffer, songId = 'patchbay-default' }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string }) {
   const queryClient = useQueryClient();
   const effectiveId = bucketClipId ?? clip.id;
+
+  // ── Comment state ──────────────────────────────────────────────────────────
   const [newComment, setNewComment] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -89,6 +90,93 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
 
+  // ── Musical Intelligence editable fields ────────────────────────────────────
+  const [bpm, setBpm] = useState<string>(clip.metadata?.bpm ? String(clip.metadata.bpm) : '');
+  const [keyScale, setKeyScale] = useState<string>(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
+  const [timeSignature, setTimeSignature] = useState<string>(clip.metadata?.timeSignature ?? '');
+  const [savedField, setSavedField] = useState<string | null>(null);
+
+  // ── Meta Tags ──────────────────────────────────────────────────────────────
+  const [tags, setTags] = useState<string[]>(clip.metadata?.tags ?? []);
+  const [tagInput, setTagInput] = useState('');
+
+  // ── Peak Level (computed client-side, never stored in DB) ─────────────────
+  const [peakLevel, setPeakLevel] = useState<string | null>(null);
+
+  // Re-sync editable fields when clip prop changes (e.g. after bucket refetch)
+  useEffect(() => {
+    setBpm(clip.metadata?.bpm ? String(clip.metadata.bpm) : '');
+    setKeyScale(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
+    setTimeSignature(clip.metadata?.timeSignature ?? '');
+    setTags(clip.metadata?.tags ?? []);
+  }, [clip.id]);
+
+  // Compute peak level — from provided buffer (TimelineClip) or decode on demand (BucketClip)
+  useEffect(() => {
+    if (!open) return;
+
+    const computePeak = (buf: AudioBuffer) => {
+      let peak = 0;
+      for (let c = 0; c < buf.numberOfChannels; c++) {
+        const data = buf.getChannelData(c);
+        for (let i = 0; i < data.length; i++) {
+          const abs = Math.abs(data[i]);
+          if (abs > peak) peak = abs;
+        }
+      }
+      if (peak > 0) setPeakLevel(`${(20 * Math.log10(peak)).toFixed(1)} dBFS`);
+    };
+
+    if (audioBuffer) {
+      computePeak(audioBuffer);
+      return;
+    }
+
+    if (!clip.src) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(clip.src!);
+        const ab = await res.arrayBuffer();
+        if (cancelled) return;
+        const ctx = new AudioContext();
+        const decoded = await ctx.decodeAudioData(ab);
+        ctx.close();
+        if (cancelled) return;
+        computePeak(decoded);
+      } catch { /* fail silently */ }
+    })();
+    return () => { cancelled = true; };
+  }, [open, audioBuffer, clip.src]);
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  const flashSaved = (field: string) => {
+    setSavedField(field);
+    setTimeout(() => setSavedField(null), 1500);
+  };
+
+  const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
+    const merged = { ...(clip.metadata ?? {}), ...updates } as NonNullable<Clip['metadata']>;
+    try {
+      await fetch(`/api/clips/${effectiveId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metadata: merged }),
+      });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+    } catch (err) {
+      console.error('[clip meta] patch failed:', err);
+    }
+  };
+
+  const formatDuration = (secs: number): string => {
+    if (secs < 60) return `${secs.toFixed(2)}s`;
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return `${m}m ${s}s`;
+  };
+
+  // ── Mention autocomplete ────────────────────────────────────────────────────
   const mentionMatches = mentionQuery !== null
     ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
     : [];
@@ -131,6 +219,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
     if (e.key === 'Enter') handleAddComment();
   };
 
+  // ── Comment API ────────────────────────────────────────────────────────────
   const { data: clipCommentsList = [] } = useQuery<ClipComment[]>({
     queryKey: ["clip-comments", effectiveId],
     queryFn: async () => {
@@ -188,6 +277,23 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
     }
   };
 
+  // ── Tag helpers ────────────────────────────────────────────────────────────
+  const addTag = async () => {
+    const t = tagInput.trim().toLowerCase().replace(/\s+/g, '-');
+    if (!t || tags.includes(t)) { setTagInput(''); return; }
+    const next = [...tags, t];
+    setTags(next);
+    setTagInput('');
+    await patchMeta({ tags: next });
+    flashSaved('tags');
+  };
+
+  const removeTag = async (tag: string) => {
+    const next = tags.filter(t => t !== tag);
+    setTags(next);
+    await patchMeta({ tags: next });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0" onPointerDown={e => e.stopPropagation()}>
@@ -201,10 +307,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
                 <DialogTitle className="text-2xl font-heading font-bold text-white tracking-tight uppercase">
                   {clip.name} {clip.isFinal && <span className="text-primary ml-2">(FINAL)</span>}
                 </DialogTitle>
-                <div className="flex items-center gap-2 mt-1">
-                   <Badge variant="outline" className="text-[10px] bg-primary/10 border-primary/20 text-primary uppercase">{clip.type}</Badge>
-                   <span className="text-[10px] text-muted-foreground font-mono">{clip.id}</span>
-                </div>
               </div>
             </div>
           </DialogHeader>
@@ -212,24 +314,81 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
 
         <ScrollArea className="max-h-[70vh]">
           <div className="p-6 space-y-6">
+
+            {/* ── Technical stats (read-only) ── */}
             <div className="grid grid-cols-4 gap-3">
-              <InfoStat icon={Clock} label="Duration" value={`${clip.duration} Units`} mono />
+              <InfoStat icon={Clock} label="Duration" value={formatDuration(clip.duration)} mono />
               <InfoStat icon={Hash} label="Sample Rate" value={clip.metadata?.sampleRate} mono />
               <InfoStat icon={Activity} label="Bit Depth" value={clip.metadata?.bitDepth} mono />
               <InfoStat icon={HardDrive} label="Format" value={clip.metadata?.format} mono />
             </div>
 
+            {/* ── Musical Intelligence (editable) ── */}
             <div>
               <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-primary/20" /> Musical Intelligence
               </h4>
               <div className="grid grid-cols-3 gap-3">
-                <InfoStat icon={Music} label="Key / Scale" value={clip.metadata?.key} />
-                <InfoStat icon={Clock} label="Time Sign." value={clip.metadata?.timeSignature} mono />
-                <InfoStat icon={Activity} label="BPM" value={clip.metadata?.bpm} mono />
+                {/* BPM */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 opacity-60">
+                    <Activity size={10} className="text-primary" />
+                    <span className="text-[9px] uppercase tracking-wider font-semibold">BPM</span>
+                    {savedField === 'bpm' && <span className="text-[9px] text-green-400 ml-auto">Saved</span>}
+                  </div>
+                  <Input
+                    type="text"
+                    inputMode="decimal"
+                    value={bpm}
+                    onChange={e => setBpm(e.target.value)}
+                    onBlur={async () => {
+                      const v = parseFloat(bpm);
+                      if (!isNaN(v) && v > 0) { await patchMeta({ bpm: v }); flashSaved('bpm'); }
+                    }}
+                    placeholder="—"
+                    className="bg-black/30 border-white/5 text-xs h-7 font-mono"
+                  />
+                </div>
+                {/* Time Signature */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 opacity-60">
+                    <Clock size={10} className="text-primary" />
+                    <span className="text-[9px] uppercase tracking-wider font-semibold">Time Sign.</span>
+                    {savedField === 'timeSignature' && <span className="text-[9px] text-green-400 ml-auto">Saved</span>}
+                  </div>
+                  <Input
+                    value={timeSignature}
+                    onChange={e => setTimeSignature(e.target.value)}
+                    onBlur={async () => {
+                      await patchMeta({ timeSignature });
+                      flashSaved('timeSignature');
+                    }}
+                    placeholder="4/4"
+                    className="bg-black/30 border-white/5 text-xs h-7 font-mono"
+                  />
+                </div>
+                {/* Key / Scale */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-1.5 opacity-60">
+                    <Music size={10} className="text-primary" />
+                    <span className="text-[9px] uppercase tracking-wider font-semibold">Key / Scale</span>
+                    {savedField === 'key' && <span className="text-[9px] text-green-400 ml-auto">Saved</span>}
+                  </div>
+                  <Input
+                    value={keyScale}
+                    onChange={e => setKeyScale(e.target.value)}
+                    onBlur={async () => {
+                      await patchMeta({ key: keyScale });
+                      flashSaved('key');
+                    }}
+                    placeholder="e.g. C Minor"
+                    className="bg-black/30 border-white/5 text-xs h-7 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
+                  />
+                </div>
               </div>
             </div>
 
+            {/* ── Asset Chain (read-only) ── */}
             <div>
               <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold mb-3 flex items-center gap-2">
                 <div className="h-px flex-1 bg-primary/20" /> Asset Chain
@@ -238,42 +397,59 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
                 <InfoStat icon={User} label="Uploaded By" value={clip.metadata?.uploadedBy} />
                 <InfoStat icon={Calendar} label="Date Added" value={clip.metadata?.uploadedDate} mono />
                 <div className="col-span-2">
-                   <InfoStat icon={Info} label="Original File Name" value={clip.metadata?.originalFileName} mono />
+                  <InfoStat icon={Info} label="Original File Name" value={clip.metadata?.originalFileName} mono />
                 </div>
               </div>
             </div>
 
+            {/* ── Technical + Meta Tags ── */}
             <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-4">
-                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
+              <div className="space-y-3">
+                <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
                   <div className="h-px flex-1 bg-primary/20" /> Technical
                 </h4>
                 <div className="space-y-2">
-                   <div className="flex justify-between text-[11px]">
-                      <span className="text-muted-foreground">Channels</span>
-                      <span className="text-foreground">{clip.metadata?.channels}</span>
-                   </div>
-                   <div className="flex justify-between text-[11px]">
-                      <span className="text-muted-foreground">Peak Level</span>
-                      <span className="text-foreground">{clip.metadata?.peakLevel}</span>
-                   </div>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-muted-foreground">Channels</span>
+                    <span className="text-foreground font-mono">{clip.metadata?.channels || '—'}</span>
+                  </div>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="text-muted-foreground">Peak Level</span>
+                    <span className="text-foreground font-mono">{peakLevel ?? '—'}</span>
+                  </div>
                 </div>
               </div>
-              
-              <div className="space-y-4">
+
+              <div className="space-y-3">
                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2">
                   <div className="h-px flex-1 bg-primary/20" /> Meta Tags
+                  {savedField === 'tags' && <span className="text-[9px] text-green-400 normal-case font-normal tracking-normal">Saved</span>}
                 </h4>
-                <div className="flex flex-wrap gap-1.5">
-                  {clip.metadata?.tags.map(tag => (
-                    <span key={tag} className="text-[9px] px-2 py-0.5 rounded bg-white/5 border border-white/10 text-muted-foreground hover:text-primary transition-colors cursor-default">
+                <div className="flex flex-wrap gap-1.5 min-h-[22px]">
+                  {tags.map(tag => (
+                    <span key={tag} className="flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-muted-foreground">
                       #{tag}
+                      <button
+                        onMouseDown={e => e.preventDefault()}
+                        onClick={() => removeTag(tag)}
+                        className="ml-0.5 hover:text-red-400 transition-colors"
+                      >
+                        <X size={8} />
+                      </button>
                     </span>
                   ))}
                 </div>
+                <Input
+                  value={tagInput}
+                  onChange={e => setTagInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
+                  placeholder="Add tag and press Enter…"
+                  className="bg-black/40 border-white/10 text-xs h-7 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
+                />
               </div>
             </div>
 
+            {/* ── Session Notes ── */}
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2 flex-1">
@@ -290,7 +466,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
                       value={newComment}
                       onChange={handleNoteChange}
                       onKeyDown={handleNoteKeyDown}
-                      className="bg-black/40 border-white/10 text-xs h-9 w-full"
+                      className="bg-black/40 border-white/10 text-xs h-9 w-full placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
                     />
                     {mentionQuery !== null && mentionMatches.length > 0 && (
                       <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-md shadow-xl overflow-hidden">
@@ -384,7 +560,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange, foc
           </div>
         </ScrollArea>
         <div className="p-4 bg-black/40 border-t border-white/5 flex justify-end">
-           <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-[10px] uppercase tracking-widest h-8 font-bold">Close Inspector</Button>
+          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} className="text-[10px] uppercase tracking-widest h-8 font-bold">Close Inspector</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -1049,6 +1225,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         open={showInfo}
         onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
         focusNotes={focusNotes}
+        songId={songId}
+        audioBuffer={decodedBufferRef.current ?? undefined}
         bucketClipId={(() => {
           const bucketData = queryClient.getQueryData<any[]>(['bucket', songId]);
           if (!bucketData || !trackId) return undefined;
@@ -1367,6 +1545,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         onCommentsChange={handleUpdateComments}
         bucketClipId={clip.id}
         focusNotes={focusNotes}
+        songId={songId}
       />
 
       <AlertDialog open={showChangeFinalConfirm} onOpenChange={setShowChangeFinalConfirm}>
