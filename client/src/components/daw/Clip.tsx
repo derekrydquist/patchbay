@@ -4,7 +4,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -62,6 +62,7 @@ interface ClipProps {
   sectionStart?: number;
   trackId?: string;
   songId?: string;
+  instanceCount?: number;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -399,7 +400,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default' }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1 }: ClipProps) {
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
@@ -414,6 +415,11 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const trimEndRef = useRef(trimEnd);
   const [isHovered, setIsHovered] = useState(false);
   const [isTrimDragging, setIsTrimDragging] = useState(false);
+  const [hasDecodedBuffer, setHasDecodedBuffer] = useState(false);
+  const [detectedTrim, setDetectedTrim] = useState<{ trimStart: number; trimEnd: number } | null>(null);
+  const [showApplyTrimConfirm, setShowApplyTrimConfirm] = useState(false);
+  const [applyTrimInstanceCount, setApplyTrimInstanceCount] = useState(0);
+  const [showResetTrimAllConfirm, setShowResetTrimAllConfirm] = useState(false);
   const queryClient = useQueryClient();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
@@ -486,6 +492,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         if (cancelled) return;
 
         decodedBufferRef.current = decoded;
+        setHasDecodedBuffer(true);
         drawRef.current?.();
       } catch {
         // fail silently — clip renders normally without waveform
@@ -612,6 +619,81 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     await patchTrim(0, null);
   };
 
+  const detectTrimPoints = () => {
+    const buffer = decodedBufferRef.current;
+    if (!buffer) return;
+
+    const channelData = buffer.getChannelData(0);
+    const sampleRate = buffer.sampleRate;
+    const totalSamples = channelData.length;
+    const windowSize = Math.floor(sampleRate * 0.1); // 100ms windows
+
+    // Find peak amplitude across all samples
+    let peak = 0;
+    for (let i = 0; i < totalSamples; i++) {
+      const abs = Math.abs(channelData[i]);
+      if (abs > peak) peak = abs;
+    }
+    if (peak === 0) return; // pure silence — nothing to detect
+
+    const threshold = peak * 0.01; // 1% of peak
+
+    // Scan forward: find first 100ms window whose average exceeds threshold
+    let detectedStart = 0;
+    for (let i = 0; i < totalSamples; i += windowSize) {
+      const windowEnd = Math.min(i + windowSize, totalSamples);
+      let sum = 0;
+      for (let j = i; j < windowEnd; j++) sum += Math.abs(channelData[j]);
+      if (sum / (windowEnd - i) > threshold) {
+        detectedStart = i / sampleRate;
+        break;
+      }
+    }
+
+    // Scan backward: find last 100ms window (from end) whose average exceeds threshold
+    let detectedEnd = clip.duration;
+    for (let i = totalSamples - windowSize; i >= 0; i -= windowSize) {
+      const windowStart = Math.max(i, 0);
+      const windowEnd = Math.min(windowStart + windowSize, totalSamples);
+      let sum = 0;
+      for (let j = windowStart; j < windowEnd; j++) sum += Math.abs(channelData[j]);
+      if (sum / (windowEnd - windowStart) > threshold) {
+        detectedEnd = windowEnd / sampleRate;
+        break;
+      }
+    }
+
+    // Enforce minimum effective duration of 0.5s
+    if (detectedEnd - detectedStart < 0.5) {
+      const mid = (detectedStart + detectedEnd) / 2;
+      detectedStart = Math.max(0, mid - 0.25);
+      detectedEnd = Math.min(clip.duration, mid + 0.25);
+    }
+
+    setDetectedTrim({ trimStart: detectedStart, trimEnd: detectedEnd });
+  };
+
+  const handleApplyTrimToInstances = () => {
+    // instanceCount includes this clip; "other" count = instanceCount - 1.
+    // The menu item is only rendered when instanceCount > 1, so this is always >= 1.
+    setApplyTrimInstanceCount(instanceCount - 1);
+    setShowApplyTrimConfirm(true);
+  };
+
+  const performApplyTrimToInstances = async () => {
+    setShowApplyTrimConfirm(false);
+    try {
+      await fetch('/api/timeline-clips/apply-trim-to-instances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId, name: clip.name, trimStart, trimEnd }),
+      });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+    } catch (err) {
+      console.error('Failed to apply trim to instances:', err);
+    }
+  };
+
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
@@ -683,6 +765,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         }),
       });
       if (res.ok) {
+        setDetectedTrim(null);
         window.dispatchEvent(new CustomEvent('clip-replaced', { detail: { clipId: clip.id } }));
         queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
         queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
@@ -790,6 +873,57 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 </div>
               )}
             </div>
+
+            {/* AI trim detection overlay */}
+            {!isOverlay && detectedTrim && (() => {
+              const currentEnd = trimEnd ?? clip.duration;
+              const leftPx = Math.max(0, Math.min(displayWidth, (detectedTrim.trimStart - trimStart) * zoom));
+              const rightPx = Math.max(0, Math.min(displayWidth, (currentEnd - detectedTrim.trimEnd) * zoom));
+              const activeLeft = leftPx;
+              const activeWidth = Math.max(0, displayWidth - leftPx - rightPx);
+              return (
+                <>
+                  {leftPx > 0 && (
+                    <div style={{ position: 'absolute', top: 0, left: 0, width: leftPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
+                  )}
+                  {rightPx > 0 && (
+                    <div style={{ position: 'absolute', top: 0, right: 0, width: rightPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
+                  )}
+                  <div style={{ position: 'absolute', top: 0, left: activeLeft, width: activeWidth, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 25 }}>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button
+                        onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const newTrimStart = detectedTrim.trimStart;
+                          const rawEnd = detectedTrim.trimEnd;
+                          const newTrimEnd = rawEnd >= clip.duration - 0.01 ? null : rawEnd;
+                          setTrimStart(newTrimStart);
+                          setTrimEnd(newTrimEnd);
+                          trimStartRef.current = newTrimStart;
+                          trimEndRef.current = newTrimEnd;
+                          window.dispatchEvent(new CustomEvent('trim-preview', {
+                            detail: { clipId: clip.id, trimStart: newTrimStart, trimEnd: newTrimEnd },
+                          }));
+                          patchTrim(newTrimStart, newTrimEnd);
+                          setDetectedTrim(null);
+                        }}
+                        style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: '#D4AF37', color: 'black', borderRadius: 3, border: 'none', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}
+                      >
+                        Apply
+                      </button>
+                      <button
+                        onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                        onClick={(e) => { e.stopPropagation(); setDetectedTrim(null); }}
+                        style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: 'rgba(0,0,0,0.6)', color: 'rgba(255,255,255,0.7)', borderRadius: 3, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">
@@ -816,14 +950,34 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             <FolderSearch size={14} className="text-primary" /> Show in File Browser
           </ContextMenuItem>
 
-          {(trimStart > 0 || trimEnd !== null) && (
-            <ContextMenuItem onClick={handleResetTrim} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <Scissors size={14} className="text-primary" /> Reset Trim
-            </ContextMenuItem>
-          )}
+          <ContextMenuSub>
+            <ContextMenuSubTrigger className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Scissors size={14} className="text-primary" /> Trim
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="bg-popover border-border min-w-[200px]">
+              <ContextMenuItem onClick={detectTrimPoints} disabled={!hasDecodedBuffer} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+                <Wand2 size={14} className="text-primary" /> Detect Trim Points
+              </ContextMenuItem>
+              {instanceCount > 1 && (trimStart > 0 || trimEnd !== null) && (
+                <ContextMenuItem onClick={handleApplyTrimToInstances} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+                  <Scissors size={14} className="text-primary" /> Apply Trim to All Instances
+                </ContextMenuItem>
+              )}
+              {instanceCount > 1 && (trimStart > 0 || trimEnd !== null) && (
+                <ContextMenuItem onClick={() => setShowResetTrimAllConfirm(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+                  <Scissors size={14} className="text-primary" /> Reset Trim on All Instances
+                </ContextMenuItem>
+              )}
+              {(trimStart > 0 || trimEnd !== null) && (
+                <ContextMenuItem onClick={handleResetTrim} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+                  <Scissors size={14} className="text-primary" /> Reset Trim
+                </ContextMenuItem>
+              )}
+            </ContextMenuSubContent>
+          </ContextMenuSub>
 
           <Separator className="my-1 bg-border/50" />
-          
+
           <ContextMenuSub onOpenChange={(open) => { if (open) fetchReplacements(); }}>
             <ContextMenuSubTrigger className="gap-2 text-xs uppercase tracking-wider font-semibold">
               <RefreshCw size={14} className="text-primary" /> Replace
@@ -945,6 +1099,52 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               }}
             >
               Replace
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showResetTrimAllConfirm} onOpenChange={(open) => { if (!open) setShowResetTrimAllConfirm(false); }}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Reset Trim on All Instances?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Reset trim on all {instanceCount - 1} other {instanceCount - 1 === 1 ? 'instance' : 'instances'} of &ldquo;{clip.name}&rdquo;?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={async () => {
+              setShowResetTrimAllConfirm(false);
+              try {
+                await fetch('/api/timeline-clips/apply-trim-to-instances', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ trackId, name: clip.name, trimStart: 0, trimEnd: null }),
+                });
+                queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+              } catch (err) {
+                console.error('Failed to reset trim on instances:', err);
+              }
+            }}>
+              Reset All
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={showApplyTrimConfirm} onOpenChange={(open) => { if (!open) setShowApplyTrimConfirm(false); }}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Apply Trim to All Instances?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Apply this trim to all {applyTrimInstanceCount} other {applyTrimInstanceCount === 1 ? 'instance' : 'instances'} of &ldquo;{clip.name}&rdquo;? This will overwrite any existing trim on those clips.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={performApplyTrimToInstances}>
+              Apply to All
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

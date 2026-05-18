@@ -300,6 +300,21 @@ export async function registerRoutes(
     res.json(clip);
   });
 
+  app.post("/api/timeline-clips/apply-trim-to-instances", async (req, res) => {
+    const { trackId, name, trimStart, trimEnd } = req.body;
+    if (!trackId || !name || typeof trimStart !== 'number') {
+      return res.status(400).json({ message: "trackId, name, and trimStart are required" });
+    }
+    if (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number') {
+      return res.status(400).json({ message: "trimEnd must be a number or null" });
+    }
+    db.update(timelineClips)
+      .set({ trimStart, trimEnd: trimEnd ?? null })
+      .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
+      .run();
+    res.json({ ok: true });
+  });
+
   app.get("/api/timeline-clips/:id/replacements", async (req, res) => {
     const clip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     if (!clip || !clip.sectionName) return res.json([]);

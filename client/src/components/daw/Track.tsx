@@ -23,6 +23,7 @@ interface SectionCellProps {
   sectionStart: number;
   sectionDuration: number;
   clips: Clip[];
+  allTrackClips: Clip[];
   zoom: number;
   isInvalid: boolean;
   insertionX?: number;
@@ -34,6 +35,7 @@ function SectionCell({
   sectionStart,
   sectionDuration,
   clips,
+  allTrackClips,
   zoom,
   isInvalid,
   insertionX,
@@ -45,9 +47,12 @@ function SectionCell({
       className="relative h-full border-r border-border/20 overflow-hidden"
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
-      {clips.map((clip) => (
-        <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} />
-      ))}
+      {clips.map((clip) => {
+        const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
+        return (
+          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} instanceCount={instanceCount} />
+        );
+      })}
       {insertionX !== undefined && (
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_8px_rgba(212,175,55,0.8)] z-20 pointer-events-none"
@@ -212,6 +217,7 @@ export function TimelineTrack({
               sectionStart={section.start}
               sectionDuration={section.duration}
               clips={sectionClips}
+              allTrackClips={track.clips}
               zoom={zoom}
               isInvalid={invalidSections.has(section.name)}
               trackId={track.id}
