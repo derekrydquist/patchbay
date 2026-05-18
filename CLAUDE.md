@@ -439,13 +439,16 @@ When implementing auth or any permission checks, always consult this table.
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
-| Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; "Reset Trim" context menu item |
+| Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; Trim submenu groups all trim actions |
 | Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD (GET/POST/PATCH/DELETE) against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; "Add Note" shortcut in both `BucketClip` and `TimelineClip` right-click menus opens the panel and focuses the input via `focusNotes` prop; @ mention autocomplete on the notes input matches the ProductionTracker pattern |
+| More Info panel — real file metadata | ✅ Done | Upload route extracts `sampleRate`, `bitDepth`, `channels` via music-metadata and returns them with `uploadedDate`/`uploadedBy`; `ClipInfoWindow` shows Duration (formatted), Sample Rate, Bit Depth, Format, Channels, Original File Name, Uploaded By, Date Added; Peak Level computed client-side from `AudioBuffer` (passed from `TimelineClip`'s decoded waveform buffer, or decoded on-demand for `BucketClip`), stored in state not DB; Musical Intelligence fields (BPM, Time Signature, Key/Scale) are editable inputs that PATCH `metadata` on blur with a 1.5s green "Saved" flash; Meta Tags pill input adds tags on Enter, removes with ×; `'Unknown'` key value treated as empty so placeholder shows; header shows clip name only (no badge or ID) |
 | Timeline clip waveform | ✅ Done | `<canvas>` inside each `TimelineClip`; decoded once via `AudioContext.decodeAudioData`, cached in `decodedBufferRef`; redrawn on trim change and on zoom/resize via `ResizeObserver`; rendered at device pixel ratio for retina sharpness; trim-aware (only the active region is drawn); fails silently |
 | Email notifications | ❌ Not built | Spec item for future |
 | @mentions (system-wide) | ❌ Not built | @ mention autocomplete exists in clip notes and production tracker comments, but there are no push notifications or @mention feeds yet |
 | Video → audio stripping | ❌ Not built | Spec item for future |
-| AI trim detection on upload | ❌ Not built | Spec item for future |
+| AI trim detection (client-side) | ✅ Done | "Detect Trim Points" in the Trim submenu — runs on the already-decoded `AudioBuffer`; 1% peak threshold, 100ms sustain windows; visual preview overlay before applying; no re-fetch |
+| Apply/Reset trim to all instances | ✅ Done | "Apply Trim to All Instances" / "Reset Trim on All Instances" in Trim submenu — shown when `instanceCount > 1` and trim is active; calls `POST /api/timeline-clips/apply-trim-to-instances`; `instanceCount` threaded via `SectionCell` from `track.clips` |
+| AI trim detection on upload | ❌ Not built | Server-side silence stripping on ingest — separate from client-side detection |
 
 ---
 
@@ -490,6 +493,11 @@ PATCH  /api/timeline-clips/:id/trim      — update trim points only; body: { tr
                                            trimEnd: number | null }; does not touch isFinal or start;
                                            client calls queryClient.invalidateQueries on success to
                                            push updated trimStart/trimEnd into the tracks state
+POST   /api/timeline-clips/apply-trim-to-instances — bulk-sets trimStart/trimEnd on all timeline clips
+                                           where trackId AND name match; body: { trackId, name,
+                                           trimStart, trimEnd }; used by both "Apply Trim to All
+                                           Instances" (current values) and "Reset Trim on All
+                                           Instances" (trimStart: 0, trimEnd: null); single DB UPDATE
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 GET    /api/timeline-clips/:id/replacements — returns bucket clips that can replace this timeline clip:
                                               looks up the clip's trackId+sectionName → idea → all
@@ -683,7 +691,7 @@ Timeline clips have left and right trim handles that physically resize the clip 
 - Local `trimStart`/`trimEnd` state is updated on every `pointermove` frame; `patchTrim` fires on `pointerup`
 - On every `pointermove` frame, `Clip.tsx` also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd }`. `Timeline.tsx` listens in a zero-dep `useEffect` and calls `setTracks(prev => recalcAllStarts(...))` with `sectionOrderRef.current` — so neighboring clips reflow in real time during drag without waiting for the server PATCH
 - A `useEffect` syncs `trimStart`/`trimEnd` from the prop whenever the API refetches (so a live-sync poll doesn't clobber active drag state — the effect only runs when the clip is not being dragged)
-- "Reset Trim" appears in the right-click context menu when `trimStart > 0 || trimEnd !== null`
+- All trim actions live inside a **▶ Trim submenu** (`ContextMenuSub`) in the `TimelineClip` right-click menu. Menu order: Detect Trim Points → Apply Trim to All Instances (conditional) → Reset Trim on All Instances (conditional) → Reset Trim (conditional). The submenu is always visible; individual items appear conditionally.
 
 **API — `PATCH /api/timeline-clips/:id/trim`:**
 Accepts `{ trimStart: number, trimEnd: number | null }`. Validates both fields. Calls `storage.updateTimelineClip`. Does not touch `isFinal` or `start`. On success, `patchTrim` in `TimelineClip` calls `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` to push the new trim values into the tracks state so the rAF loop and live-sync effect see them immediately.
@@ -699,6 +707,43 @@ After a trim PATCH, the server's `start` values for sibling clips may be stale (
 
 **Export:**
 `ExportDialog.tsx` passes trim to the `OfflineAudioContext` via `source.start(when, trimStartSecs, trimDuration)` where `trimDuration = (clip.trimEnd ?? decoded.duration) - trimStartSecs`. The total export duration also uses effective trimmed durations so silence is not rendered past the trim out-point.
+
+### AI trim detection (client-side) — ✅ Built
+
+"Detect Trim Points" in the Trim submenu runs entirely in the browser using the `AudioBuffer` already decoded for waveform rendering — no re-fetch, no re-decode.
+
+**Algorithm (`detectTrimPoints` in `TimelineClip`):**
+1. Read channel 0 from `decodedBufferRef.current`
+2. Find peak amplitude across all samples
+3. Threshold = 1% of peak — filters pops/clicks that would otherwise anchor the trim at the very first sample
+4. Scan forward in 100ms windows (`windowSize = Math.floor(sampleRate * 0.1)`); `trimStart` = start of first window whose average absolute amplitude exceeds threshold
+5. Scan backward in 100ms windows from the end; `trimEnd` = end of last active window
+6. Enforce minimum effective duration of 0.5s (expand from center if needed)
+
+**The menu item is disabled (`disabled={!hasDecodedBuffer}`)** until the `AudioBuffer` is ready. `hasDecodedBuffer` is a state boolean set to `true` inside the decode `useEffect` after `decodedBufferRef.current` is populated. Because refs don't trigger re-renders, this state flag is required — reading `decodedBufferRef.current` directly in JSX would not reflect async updates.
+
+**Visual preview overlay:** When `detectedTrim` state is set, two semi-transparent blue (`rgba(59,130,246,0.4)`) regions are rendered absolutely over the clip — one on the left (suggested silence to trim from start) and one on the right (from end). The active region between them shows gold **Apply** and muted **Dismiss** buttons. Both buttons use `onPointerDown` with `e.stopPropagation()` + `e.nativeEvent.stopImmediatePropagation()` to prevent dnd-kit from starting a drag. **Apply** dispatches `trim-preview` (immediate Timeline reflow), then calls `patchTrim`. **Dismiss** clears the state.
+
+**Do not** re-read `decodedBufferRef.current` to check if decoding is complete — use `hasDecodedBuffer` state instead.
+
+### Apply / Reset trim to all instances — ✅ Built
+
+The same clip name placed multiple times on the same track (same `trackId + name`) represents the same recording in different sections. "Apply Trim to All Instances" stamps the selected clip's current `trimStart`/`trimEnd` onto all of them. "Reset Trim on All Instances" sets `trimStart: 0, trimEnd: null` on all of them. Both reuse `POST /api/timeline-clips/apply-trim-to-instances`.
+
+**`instanceCount` prop threading:**
+`TimelineClip` receives an `instanceCount?: number` prop (default 1). The count is computed in `SectionCell` (`Track.tsx`) per clip using the full track clip array — not just the section slice, because the same name may appear in a different section:
+```ts
+const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
+```
+`allTrackClips` is passed from `TimelineTrack` as `track.clips` (all clips across all sections of the track). The `SectionCellProps` interface includes `allTrackClips: Clip[]`. Do not compute the instance count from query cache data — the prop is always fresh because `SectionCell` re-renders whenever `track.clips` changes.
+
+**Both instance actions are only shown when `instanceCount > 1 && (trimStart > 0 || trimEnd !== null)`.** When N = 1 (only this clip), the items are absent entirely — no toast, no confirmation.
+
+**Confirmation dialogs:** "Apply Trim to All Instances" shows the count as `instanceCount - 1` (excluding the selected clip itself). "Reset Trim on All Instances" shows the same count.
+
+**After success:** `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` is called so the live-sync effect picks up the new trim values for all affected clips within the next poll cycle.
+
+**`POST /api/timeline-clips/apply-trim-to-instances` route** is registered before `PATCH /api/timeline-clips/:id` in `routes.ts`. Although Express won't confuse a POST with a PATCH, keeping static paths before parameterized ones is the convention. The route runs a single `db.update(timelineClips).set({ trimStart, trimEnd }).where(and(eq(trackId), eq(name))).run()` — one DB round-trip regardless of instance count.
 
 ### Audio hover preview (Media Bucket) — ✅ Built
 
@@ -888,6 +933,44 @@ Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `t
 Matches the ProductionTracker pattern exactly. `BAND_MEMBERS` is a module-level constant in `Clip.tsx`. `handleNoteChange` detects `/@(\w*)$/` behind the cursor and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. The dropdown renders as an absolutely-positioned div below the Input, with colored avatar initials using `avatarColor(name)` (returns a hex string — use `style={{ backgroundColor }}`, not a CSS class). `onMouseDown + e.preventDefault()` on each dropdown item prevents the Input from blurring before the click registers.
 
 **`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper may return a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
+
+### More Info panel — real file metadata — ✅ Built
+
+`ClipInfoWindow` in `Clip.tsx` is fully populated with real data from both the upload pipeline and client-side audio analysis.
+
+**Upload pipeline (server):**
+`POST /api/upload` in `routes.ts` parses the audio buffer with `music-metadata` (`parseBuffer`) and extracts:
+- `sampleRate` — formatted as `"44.1kHz"` or `"48kHz"` (Hz → kHz with one decimal if not a round number)
+- `bitDepth` — formatted as `"24-bit"`
+- `channels` — `"Mono"` (1), `"Stereo"` (2), or `"5.1"` (6); empty string for other counts
+- `uploadedDate` — ISO date string of upload (e.g. `"2026-05-18"`)
+- `uploadedBy` — `"Jordan"` placeholder until auth is built (`// TODO: replace with real auth user`)
+
+These are returned in the upload response. `MediaBucket.tsx` destructures them and passes them into the `metadata` JSON when calling `POST /api/ideas/:ideaId/clips`. Musical Intelligence fields (`bpm`, `key`, `timeSignature`) and `tags` start empty for user entry — no longer hardcoded.
+
+**Peak level (client-side, state only):**
+`ClipInfoWindow` receives an optional `audioBuffer?: AudioBuffer` prop. `TimelineClip` passes `decodedBufferRef.current` (already decoded for waveform rendering — no extra fetch). For `BucketClip`, `audioBuffer` is undefined, so `ClipInfoWindow` decodes the audio on-demand when `open` becomes true by fetching `clip.src` and calling `AudioContext.decodeAudioData()`. Peak = `20 * Math.log10(max absolute sample across all channels)`, displayed as `"-7.1 dBFS"`. Stored in component state (`peakLevel`), never written to the DB.
+
+**Duration formatting:**
+`formatDuration(secs)` — under 60s: `"4.84s"`; 60s or more: `"1m 4s"`.
+
+**Musical Intelligence (editable, blur-to-save):**
+BPM, Time Signature, and Key/Scale are `<Input>` fields with local state initialized from `clip.metadata`. On blur, `patchMeta(updates)` merges the changed field into the existing metadata and sends `PATCH /api/clips/${effectiveId}` with `{ metadata: merged }`. A 1.5s green "Saved" flash appears next to the field label via `savedField` state + `flashSaved(field)` helper. BPM uses `type="text" inputMode="decimal"` (no spinner arrows). Key/Scale treats stored `'Unknown'` as empty so the placeholder `"e.g. C Minor"` shows. All three inputs have `placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic` styling.
+
+**Meta Tags (editable):**
+`tags` state initializes from `clip.metadata?.tags ?? []`. User types into a text `<Input>` and presses Enter to add a tag (lowercased, spaces → hyphens, deduped). Each existing tag renders as a pill with an `×` button that removes it immediately. Both add and remove call `patchMeta({ tags: next })` and invalidate `['bucket', songId]`. "Saved" flash on add only.
+
+**`patchMeta` and invalidation:**
+```ts
+const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
+  const merged = { ...(clip.metadata ?? {}), ...updates };
+  await fetch(`/api/clips/${effectiveId}`, { method: 'PATCH', ... body: JSON.stringify({ metadata: merged }) });
+  queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+};
+```
+The `PATCH /api/clips/:clipId` route handles metadata updates without triggering `isFinal` sync logic (since `isFinal` is not in the body). `ClipInfoWindow` receives `songId?: string` (default `'patchbay-default'`) for scoped invalidation.
+
+**Header:** Shows only the clip name (and `(FINAL)` if applicable). The type badge and clip ID have been removed.
 
 ### Timeline clip waveform — ✅ Built
 
