@@ -10,4 +10,5 @@ patchbay.db-shm
 patchbay.db-wal
 uploads/
 .local/server/db.sqlite
+.local/
 patchbay.db

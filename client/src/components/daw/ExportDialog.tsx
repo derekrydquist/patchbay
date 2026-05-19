@@ -111,6 +111,58 @@ function normalizeInPlace(buf: AudioBuffer): void {
   }
 }
 
+const MIN_SECTION_WIDTH = 4; // seconds — mirrors Timeline.tsx
+
+function computeExportSectionLayout(
+  tracks: ApiTrack[],
+  sectionOrder: string[],
+): { name: string; start: number; duration: number }[] {
+  const present = new Set(
+    tracks.flatMap((t) => t.timelineClips.map((c) => (c as any).sectionName as string | undefined).filter(Boolean) as string[]),
+  );
+  const ordered = sectionOrder.filter((s) => present.has(s));
+  present.forEach((s) => { if (!ordered.includes(s)) ordered.push(s); });
+
+  const sections: { name: string; start: number; duration: number }[] = [];
+  let cursor = 0;
+  for (const name of ordered) {
+    let maxWidth = MIN_SECTION_WIDTH;
+    for (const t of tracks) {
+      const total = t.timelineClips
+        .filter((c) => (c as any).sectionName === name)
+        .reduce((s, c) => s + (c.trimEnd ?? c.duration) - (c.trimStart ?? 0), 0);
+      if (total > maxWidth) maxWidth = total;
+    }
+    sections.push({ name, start: cursor, duration: maxWidth });
+    cursor += maxWidth;
+  }
+  return sections;
+}
+
+// Returns a Map of clipId → corrected absolute start in seconds.
+// Clips within each section are ordered by their existing start value (preserves relative order).
+function recalcStartsForExport(tracks: ApiTrack[], sectionOrder: string[]): Map<string, number> {
+  const layout = computeExportSectionLayout(tracks, sectionOrder);
+  const sectionStarts = new Map(layout.map((s) => [s.name, s.start]));
+  const sectionNames = layout.map((s) => s.name);
+
+  const result = new Map<string, number>();
+  for (const track of tracks) {
+    for (const name of sectionNames) {
+      const sectionClips = track.timelineClips
+        .filter((c) => (c as any).sectionName === name)
+        .slice()
+        .sort((a, b) => a.start - b.start);
+      let pos = sectionStarts.get(name) ?? 0;
+      for (const clip of sectionClips) {
+        result.set(clip.id, pos);
+        pos += (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
+      }
+    }
+  }
+  return result;
+}
+
 async function renderClips(
   clips: ExportClip[],
   totalDuration: number,
@@ -259,12 +311,18 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
     setProgress({ phase: 'Fetching timeline…', done: 0, total: 0 });
 
     try {
-      const res = await fetch(`/api/songs/${songId}/timeline`);
+      const [res, songRes] = await Promise.all([
+        fetch(`/api/songs/${songId}/timeline`),
+        fetch(`/api/songs/${songId}`),
+      ]);
       console.log('[Export] timeline fetch status:', res.status);
       if (!res.ok) throw new Error(`Timeline fetch failed: HTTP ${res.status}`);
       const body = await res.json();
+      const songData = songRes.ok ? await songRes.json() : null;
       const songName: string = body.songName ?? 'Untitled';
       const tracks: ApiTrack[] = body.tracks;
+      const sectionOrder: string[] = songData?.sections ?? [];
+      const correctedStarts = recalcStartsForExport(tracks, sectionOrder);
       console.log('[Export] songName:', songName, '| tracks:', tracks.map((t) => ({ id: t.id, name: t.name, clips: t.timelineClips.length })));
 
       const VOLUME = 0.8;
@@ -281,7 +339,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
       const allClips: ExportClip[] = tracksWithClips.flatMap((t) =>
         t.timelineClips.filter((c) => c.src).map((c) => ({
           src: c.src!,
-          start: c.start,
+          start: correctedStarts.get(c.id) ?? c.start,
           duration: c.duration,
           volume: VOLUME,
           trimStart: c.trimStart ?? 0,
@@ -301,7 +359,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
             .filter((c) => c.src)
             .map((c) => ({
               src: c.src!,
-              start: c.start,
+              start: correctedStarts.get(c.id) ?? c.start,
               duration: c.duration,
               volume: VOLUME,
               trimStart: c.trimStart ?? 0,
