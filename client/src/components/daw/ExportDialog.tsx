@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Download, FileAudio, Settings2, Loader2 } from 'lucide-react';
+import { Download, FileAudio, Settings2, Loader2, Share2 } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import JSZip from 'jszip';
 
@@ -229,8 +230,28 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
   const [format, setFormat] = useState('wav');
   const [normalize, setNormalize] = useState(true);
   const [exportStems, setExportStems] = useState(false);
+  const [shareToReview, setShareToReview] = useState(false);
+  const [reviewName, setReviewName] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
+  const { toast } = useToast();
+
+  // When "Share to Review" is toggled on, suggest the same filename the export would use.
+  useEffect(() => {
+    if (!shareToReview) return;
+    fetch(`/api/songs/${songId}`)
+      .then(r => r.json())
+      .then((song: { name: string }) => {
+        const suggested = `${slugify(song.name)}_${datestamp()}`;
+        setReviewName(prev => prev || suggested);
+      })
+      .catch(() => {});
+  }, [shareToReview, songId]);
+
+  const handleShareToReviewChange = (checked: boolean) => {
+    setShareToReview(checked);
+    if (!checked) setReviewName('');
+  };
 
   const handleExport = async () => {
     console.log('[Export] ——— handleExport START ———', { songId, format, normalize, exportStems });
@@ -328,6 +349,19 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
         const blob = format === 'mp3' ? encodeMp3(rendered) : encodeWav(rendered);
         console.log(`[Export] blob ready: ${blob.size} bytes | type: ${blob.type}`);
         await saveFile(blob, generateFilename(songName, ext));
+
+        if (shareToReview && reviewName.trim()) {
+          setProgress({ phase: 'Sharing to Review tab…', done: allClips.length, total: allClips.length });
+          const formData = new FormData();
+          formData.append('file', blob, `review.${ext}`);
+          formData.append('name', reviewName.trim());
+          formData.append('format', format);
+          formData.append('duration', String(totalDuration));
+          const uploadRes = await fetch(`/api/songs/${songId}/reviews`, { method: 'POST', body: formData });
+          if (uploadRes.ok) {
+            toast({ title: 'Shared to Review tab' });
+          }
+        }
       }
 
       console.log('[Export] ——— handleExport DONE ———');
@@ -424,6 +458,40 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
                   className="border-white/20 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
                 />
               </div>
+
+              {!exportStems && (
+                <>
+                  <div className="flex items-center justify-between space-x-2">
+                    <Label htmlFor="share-review" className="flex flex-col space-y-1 cursor-pointer">
+                      <span className="text-sm font-medium flex items-center gap-1.5">
+                        <Share2 size={13} className="text-primary/60" />
+                        Share to Review
+                      </span>
+                      <span className="font-normal text-[10px] text-muted-foreground uppercase tracking-wider">Post mix to Review tab</span>
+                    </Label>
+                    <Checkbox
+                      id="share-review"
+                      checked={shareToReview}
+                      onCheckedChange={(v) => handleShareToReviewChange(v === true)}
+                      className="border-white/20 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                    />
+                  </div>
+
+                  {shareToReview && (
+                    <div className="space-y-1.5 pl-1">
+                      <Label htmlFor="review-name" className="text-[10px] text-muted-foreground uppercase tracking-wider">Version Name</Label>
+                      <input
+                        id="review-name"
+                        type="text"
+                        value={reviewName}
+                        onChange={(e) => setReviewName(e.target.value)}
+                        placeholder="Demo v1"
+                        className="w-full bg-white/[0.03] border border-white/10 rounded-md px-3 py-1.5 text-sm text-white placeholder:text-white/20 outline-none focus:border-primary/40 transition-colors"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
 
@@ -456,6 +524,8 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
                 <Loader2 size={14} className="animate-spin" />
                 Rendering…
               </span>
+            ) : shareToReview && !exportStems ? (
+              'Export & Share'
             ) : (
               'Export File'
             )}

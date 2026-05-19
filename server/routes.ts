@@ -22,6 +22,7 @@ import {
   instrumentTracks,
   productionTasks,
   taskComments,
+  songReviewComments,
 } from "@shared/schema";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -797,6 +798,99 @@ export async function registerRoutes(
 
   app.delete("/api/task-comments/:id", async (req, res) => {
     await storage.deleteTaskComment(req.params.id);
+    res.status(204).send();
+  });
+
+  // ─── Reviews ────────────────────────────────────────────────────────────────
+
+  const REVIEWS_DIR = path.join(UPLOADS_DIR, "reviews");
+  if (!fs.existsSync(REVIEWS_DIR)) fs.mkdirSync(REVIEWS_DIR, { recursive: true });
+
+  app.get("/api/songs/:songId/reviews", async (req, res) => {
+    const reviews = await storage.getReviewsForSong(req.params.songId);
+    res.json(reviews);
+  });
+
+  app.post("/api/songs/:songId/reviews", upload.single("file"), async (req: Request, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ message: "No file provided" });
+      const name = String(req.body.name || "").trim();
+      const format = String(req.body.format || "").trim();
+      const duration = parseFloat(String(req.body.duration || "0")) || 0;
+      if (!name || !format) return res.status(400).json({ message: "name and format are required" });
+
+      const ext = format === "mp3" ? "mp3" : "wav";
+      const filename = `review_${req.params.songId}_${Date.now()}.${ext}`;
+      const destPath = path.join(REVIEWS_DIR, filename);
+      fs.writeFileSync(destPath, req.file.buffer);
+
+      const review = await storage.createReview({
+        id: randomUUID(),
+        songId: String(req.params.songId),
+        name,
+        src: `/uploads/reviews/${filename}`,
+        format,
+        duration,
+        createdBy: "Jordan", // TODO: replace with real auth user
+      });
+      res.status(201).json(review);
+    } catch (err) {
+      console.error("[review upload] error:", err);
+      res.status(500).json({ message: "Upload failed" });
+    }
+  });
+
+  app.delete("/api/reviews/:reviewId", async (req, res) => {
+    await storage.deleteReview(req.params.reviewId);
+    res.status(204).send();
+  });
+
+  app.get("/api/reviews/:reviewId/comments", async (req, res) => {
+    const comments = await storage.getReviewComments(req.params.reviewId);
+    res.json(comments);
+  });
+
+  app.post("/api/reviews/:reviewId/comments", async (req, res) => {
+    const { author, text, timestamp, parentId } = req.body as {
+      author: string; text: string; timestamp: number; parentId?: string;
+    };
+    if (!author || !text || typeof timestamp !== "number") {
+      return res.status(400).json({ message: "author, text, and timestamp are required" });
+    }
+    if (parentId) {
+      const parent = db.select().from(songReviewComments)
+        .where(eq(songReviewComments.id, parentId))
+        .get();
+      if (!parent || parent.parentId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      }
+    }
+    const comment = await storage.addReviewComment({
+      id: randomUUID(),
+      reviewId: req.params.reviewId,
+      author,
+      text,
+      timestamp,
+      parentId: parentId ?? null,
+    });
+    res.status(201).json(comment);
+  });
+
+  app.patch("/api/review-comments/:id", async (req, res) => {
+    const { text, resolved } = req.body as { text?: string; resolved?: boolean };
+    const updates: { text?: string; resolved?: boolean; editedAt?: string } = {};
+    if (text !== undefined) {
+      updates.text = text;
+      updates.editedAt = new Date().toISOString();
+    }
+    if (resolved !== undefined) updates.resolved = resolved;
+    const comment = await storage.updateReviewComment(req.params.id, updates);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+    res.json(comment);
+  });
+
+  app.delete("/api/review-comments/:id", async (req, res) => {
+    await storage.deleteReviewComment(req.params.id);
     res.status(204).send();
   });
 

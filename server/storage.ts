@@ -11,8 +11,10 @@ import {
   type ProductionTask, type InsertProductionTask,
   type TaskComment, type InsertTaskComment,
   type ClipComment, type InsertClipComment,
+  type SongReview, type InsertSongReview,
+  type SongReviewComment, type InsertSongReviewComment,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
-  productionTasks, taskComments, clipComments,
+  productionTasks, taskComments, clipComments, songReviews, songReviewComments,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -156,7 +158,23 @@ export interface IStorage {
   addClipComment(data: InsertClipComment): Promise<ClipComment>;
   updateClipComment(id: string, text: string): Promise<ClipComment | undefined>;
   deleteClipComment(id: string): Promise<void>;
+
+  // Reviews
+  getReviewsForSong(songId: string): Promise<SongReview[]>;
+  countReviewsForSong(songId: string): Promise<number>;
+  createReview(data: InsertSongReview): Promise<SongReview>;
+  deleteReview(id: string): Promise<void>;
+
+  // Review Comments
+  getReviewComments(reviewId: string): Promise<ReviewCommentWithReplies[]>;
+  addReviewComment(data: InsertSongReviewComment): Promise<SongReviewComment>;
+  updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined>;
+  deleteReviewComment(id: string): Promise<void>;
 }
+
+export type ReviewCommentWithReplies = SongReviewComment & {
+  replies: SongReviewComment[];
+};
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
@@ -886,6 +904,79 @@ export class SQLiteStorage implements IStorage {
 
   async deleteClipComment(id: string): Promise<void> {
     db.delete(clipComments).where(eq(clipComments.id, id)).run();
+  }
+
+  // ── Reviews ────────────────────────────────────────────────────────────────
+
+  async getReviewsForSong(songId: string): Promise<SongReview[]> {
+    return db.select().from(songReviews).where(eq(songReviews.songId, songId)).orderBy(desc(songReviews.createdAt)).all();
+  }
+
+  async countReviewsForSong(songId: string): Promise<number> {
+    const result = db.select({ value: count() }).from(songReviews).where(eq(songReviews.songId, songId)).get();
+    return result?.value ?? 0;
+  }
+
+  async createReview(data: InsertSongReview): Promise<SongReview> {
+    const now = new Date().toISOString();
+    const review: SongReview = { ...data, id: data.id ?? randomUUID(), createdAt: now };
+    db.insert(songReviews).values(review).run();
+    return db.select().from(songReviews).where(eq(songReviews.id, review.id)).get()!;
+  }
+
+  async deleteReview(id: string): Promise<void> {
+    db.delete(songReviews).where(eq(songReviews.id, id)).run();
+  }
+
+  // ── Review Comments ────────────────────────────────────────────────────────
+
+  async getReviewComments(reviewId: string): Promise<ReviewCommentWithReplies[]> {
+    const all = db.select().from(songReviewComments)
+      .where(eq(songReviewComments.reviewId, reviewId))
+      .all();
+    const topLevel = all
+      .filter(c => !c.parentId)
+      .sort((a, b) => a.timestamp - b.timestamp);
+    const replyMap = new Map<string, SongReviewComment[]>();
+    for (const c of all) {
+      if (!c.parentId) continue;
+      const bucket = replyMap.get(c.parentId) ?? [];
+      bucket.push(c);
+      replyMap.set(c.parentId, bucket);
+    }
+    return topLevel.map(c => ({
+      ...c,
+      replies: (replyMap.get(c.id) ?? []).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      ),
+    }));
+  }
+
+  async addReviewComment(data: InsertSongReviewComment): Promise<SongReviewComment> {
+    const now = new Date().toISOString();
+    const comment: SongReviewComment = {
+      ...data,
+      id: data.id ?? randomUUID(),
+      parentId: data.parentId ?? null,
+      resolved: false,
+      editedAt: null,
+      createdAt: now,
+    };
+    db.insert(songReviewComments).values(comment).run();
+    return db.select().from(songReviewComments).where(eq(songReviewComments.id, comment.id)).get()!;
+  }
+
+  async updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined> {
+    const existing = db.select().from(songReviewComments).where(eq(songReviewComments.id, id)).get();
+    if (!existing) return undefined;
+    db.update(songReviewComments).set(updates).where(eq(songReviewComments.id, id)).run();
+    return db.select().from(songReviewComments).where(eq(songReviewComments.id, id)).get();
+  }
+
+  async deleteReviewComment(id: string): Promise<void> {
+    // Delete replies first (no cascade FK since parentId has no .references())
+    db.delete(songReviewComments).where(eq(songReviewComments.parentId, id)).run();
+    db.delete(songReviewComments).where(eq(songReviewComments.id, id)).run();
   }
 }
 

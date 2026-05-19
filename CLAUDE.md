@@ -164,6 +164,8 @@ in route handlers.
 | `production_tasks` | Kanban tasks linked to a song |
 | `task_subtasks` | Checklist items on a task |
 | `task_comments` | Comments on a task |
+| `song_reviews` | Exported mix files shared for review (linked to `songs`); stores src URL, format, duration, createdBy |
+| `song_review_comments` | Timestamped comments on a review; `parentId` (nullable self-reference) supports one level of replies; `resolved` boolean; `editedAt` nullable ISO timestamp |
 
 **`timeline_clips` vs `clips`:** These are intentionally separate tables. `clips` holds the uploaded source material (versions inside bucket ideas). `timeline_clips` holds the arranged instances placed on the timeline with a `start` time. Dragging from the bucket to the timeline creates a new `timeline_clips` row — it does not move the source clip.
 
@@ -422,7 +424,8 @@ When implementing auth or any permission checks, always consult this table.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard page | ✅ Done | Fully wired to real API; song cards styled as gradient banners (gold chevron, BPM badge); cross-song task list filtered to current user sorted by due date; activity feed polling every 10s |
-| SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; "Resume Last Session" banner (reads `localStorage`); task list filtered to current user with 5-task cap + expand; file browser (MediaBucket); activity feed with deep-link navigation to workspace |
+| SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; "Resume Last Session" banner (reads `localStorage`); task list filtered to current user with 5-task cap + expand; file browser (MediaBucket); activity feed with deep-link navigation to workspace; Review tab — see Review Tab section below |
+| Review tab (SongHome) | ✅ Done | Per-song review tab at `/songs/:songId` — share exported mixes, SoundCloud-style waveform player with drag-to-scrub, avatar markers on waveform, timestamped comment threads with replies, resolve/edit/delete, @ mention autocomplete, Show Resolved toggle; see Review Tab architecture section below |
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; gap zones at clip boundaries enable clip reordering within a section; track-row drop snaps leftward drags to index 0, rightward to end; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20; valid track shows full-row gold border; MeasuringStrategy.Always + live getBoundingClientRect() in collision function for reliable gap zone hits; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate inner DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop; section headers are sticky (top-8 z-10 bg-[#09090b]) — pin below the ruler on vertical scroll while remaining draggable |
@@ -433,6 +436,7 @@ When implementing auth or any permission checks, always consult this table.
 | Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links) |
 | Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates 4 event types from existing tables — file uploads, clips marked final, clip comments, task comments/status changes; polls every 10s via `refetchInterval`; file uploads: "Jordan added X to Instrument — Section"; mark-final: "Jordan marked X as final" (sourced from task_comments with accurate timestamp); status changes: "Jordan changed status to X — Instrument · Section"; clip comments: "You commented on Instrument · Section"; task comments: "You commented on Instrument · Section task"; rows are deep-link clickable — status-change and task-comment events navigate to `?tab=production&taskId=`, clip-comment events navigate to `?instrument=X&section=Y&clipId=Z&openComments=true`, all other events navigate to `?instrument=X&section=Y`. See Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
+| Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Review`) is synced to `?tab=review` in the URL (Overview omits the param for a clean URL). Page refresh restores the correct tab. `useState` initializer reads `window.location.search` — **not** wouter's `useLocation()` value, which does not include query strings. |
 | Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); trim-aware — uses `source.start(when, trimStartSecs, trimDuration)` so only the trimmed region renders; WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace` |
 | User auth / login | ❌ Not built | Passport.js is installed |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload, cross-song tasks, activity feed — all built |
@@ -548,6 +552,27 @@ GET    /api/production-tasks/:id/comments         — list comments on a task
 POST   /api/production-tasks/:id/comments         — add a comment; body: { author, text }
 PATCH  /api/task-comments/:id                     — edit a comment's text; body: { text }
 DELETE /api/task-comments/:id                     — delete a comment → 204
+
+GET    /api/songs/:songId/reviews           — list all reviews for a song (ordered by createdAt desc)
+POST   /api/songs/:songId/reviews           — upload a review mix; multipart fields: file (audio);
+                                             writes to uploads/reviews/{reviewId}.{ext}; returns
+                                             SongReview with { id, name, src, format, duration,
+                                             createdAt, createdBy }
+DELETE /api/reviews/:reviewId               — delete a review and its comments
+
+GET    /api/reviews/:reviewId/comments      — list top-level comments + nested replies for a review;
+                                             ordered by timestamp asc; top-level comments include a
+                                             `replies` array of child comments; returns
+                                             ReviewCommentWithReplies[]
+POST   /api/reviews/:reviewId/comments      — add a comment; body: { author, text, timestamp,
+                                             parentId? }; validates that parentId (if set) is itself
+                                             a top-level comment (no grandchild replies); sets
+                                             resolved: false, editedAt: null; returns 201
+PATCH  /api/review-comments/:id            — partial update; body accepts { text?, resolved? };
+                                             when text is patched, sets editedAt to current ISO
+                                             timestamp automatically; returns updated comment
+DELETE /api/review-comments/:id            — deletes all child replies first (no FK cascade on
+                                             parentId), then deletes the parent → 204
 ```
 
 ---
@@ -1146,6 +1171,103 @@ A `useEffect(fn, [])` registers the handler. To avoid stale closures (the handle
 2. Finds the matching track — first by `trackId`, then by case-insensitive `instrumentName` match
 3. Finds the matching idea by case-insensitive `sectionName`
 4. Calls `setSelectedTrack(track)` + `setSelectedIdea(idea)` — the three-column UI updates immediately
+
+---
+
+### Review tab — ✅ Built
+
+The Review tab lives on the SongHome page (`/songs/:songId`) alongside the Overview tab. It lets band members share exported mixes and leave time-stamped feedback directly on the waveform.
+
+**Tab and data:**
+The `activeTab` state in `SongHome` is `'overview' | 'review'`. It is initialized with a lazy `useState` callback that reads `new URLSearchParams(window.location.search).get('tab') === 'review'` — **use `window.location.search`, not wouter's `useLocation()` value**, which does not include query strings. Clicking a tab calls `setLocation` with `?tab=review` appended (Overview deletes the param to keep the URL clean). This makes page refresh restore the correct tab. Reviews are fetched via `useQuery(['reviews', songId])` against `GET /api/songs/:songId/reviews`. The tab label shows `Review (N)` when at least one review exists. The upload button in the Review tab header fires `POST /api/songs/:songId/reviews` as multipart — no separate upload page.
+
+Review files are stored in `uploads/reviews/` (auto-created by the server if absent). Naming: `review_{songId}_{timestamp}.{ext}`. `GET /api/songs/:songId/reviews` returns reviews newest-first.
+
+**`ReviewPlayer` component (inline in `SongHome.tsx`):**
+
+Each `SongReview` row renders a `ReviewPlayer` — a self-contained card with its own audio element, waveform canvas, comment state, and input handlers. It is not a separate file.
+
+**Data types:**
+```ts
+interface ReviewType {
+  id: string; songId: string; name: string; src: string;
+  format: string; duration: number; createdAt: string; createdBy: string;
+}
+interface ReviewComment {
+  id: string; reviewId: string; parentId?: string | null;
+  author: string; text: string; timestamp: number; createdAt: string;
+  resolved?: boolean; editedAt?: string | null;
+  replies?: ReviewComment[];   // only present on top-level comments
+}
+```
+
+**Schema additions (`shared/schema.ts`):**
+`songReviewComments` has two extra columns beyond the base spec:
+- `resolved: integer("resolved", { mode: "boolean" }).notNull().default(false)` — whether a comment has been resolved
+- `editedAt: text("edited_at")` — nullable ISO timestamp; set automatically by the PATCH route when `text` is changed
+
+These were added after initial scaffolding via `npx drizzle-kit push --force` (interactive `db:push` fails without a TTY — always use `--force`).
+
+**`ReviewCommentWithReplies` (in `storage.ts`):**
+```ts
+type ReviewCommentWithReplies = SongReviewComment & { replies: SongReviewComment[] };
+```
+`getReviewComments` fetches all rows for the review, separates top-level (no `parentId`) from replies, builds a `replyMap`, and attaches replies to each parent. Ordered by `timestamp asc`.
+
+**`deleteReviewComment` (in `storage.ts`):**
+Deletes child replies first (parentId FK has no ON DELETE CASCADE since `parentId` is a self-reference), then deletes the parent. This prevents orphaned reply rows.
+
+**Audio playback:**
+`ReviewPlayer` creates `new Audio(review.src)` in a `useEffect([review.src])`. `timeupdate` events drive `currentTime` state. `ended` resets the player. The audio element is managed entirely through the `audioRef` ref — no Web Audio API routing.
+
+**Waveform canvas:**
+- `canvasRef` holds a `<canvas>` element inside the waveform div.
+- `decodedBufferRef` holds the decoded `AudioBuffer` (channel 0 only). Decoded once via a `fetch(review.src) → arrayBuffer() → AudioContext.decodeAudioData()` effect. Cancellation flag prevents stale writes after unmount.
+- `drawRef.current` is reassigned every render so it always closes over current `currentTime`. It reads `canvas.offsetWidth`/`offsetHeight`, applies device pixel ratio (`canvas.width = w * dpr; ctx.scale(dpr, dpr)`), and draws one vertical bar per CSS pixel. Played region: `rgba(212,175,55,0.85)` (gold); unplayed: `rgba(255,255,255,0.2)`. The gold playhead line is a separate `position: absolute` div (not canvas-drawn) to avoid full redraws on every timeupdate frame.
+- Three effects trigger redraws: decode complete, `currentTime` change, `ResizeObserver` on the canvas element.
+
+**Drag-to-scrub:**
+The waveform div uses pointer events (`onPointerDown`, `onPointerMove`, `onPointerUp`, `onPointerCancel`) with `setPointerCapture` for reliable cross-element drag. An `isDraggingRef` guards move events. A `dragTimeRef` holds the latest computed time so a rAF-throttled frame (`dragRafRef`) can call `setCurrentTime(dragTimeRef.current)` — one React state update per frame regardless of mouse speed. `audioRef.current.currentTime` is set on every move (immediate audio sync) while the React state update is throttled.
+
+**Avatar markers on waveform:**
+Top-level comments are grouped into clusters: `avatarGroups` is a `useMemo([visibleComments])` that sorts comments by timestamp and groups any within 0.25s of each other. **The dependency must be `[visibleComments]`, not `[comments]`** — if it were `[comments]`, toggling `showResolved` would not recompute the groups because `comments` (from TanStack Query) doesn't change when only the filter changes.
+
+Each group renders one marker element positioned absolutely below the waveform (`paddingBottom: '14px'` on the outer div lets markers straddle the bottom edge). Single comment → colored avatar circle with author initials. Multiple comments → gold circle with count. Both show a tooltip on hover (`hoveredAvatarId` state). Resolved markers render at `opacity: 0.35` (single: grey background; cluster: full opacity reduced).
+
+Clicking a single marker: seeks playhead + scrolls the comment into view + highlights it for 1500ms (`highlightedCommentId` state → `ring-1 ring-inset ring-primary/40 bg-primary/5`).
+Clicking a cluster: seeks to the first comment's timestamp, then highlights each comment in the group sequentially with a 1500ms gap (`setTimeout(fn, i * 1500)`).
+
+**Comment list:**
+`visibleComments = showResolved ? comments : comments.filter(c => !c.resolved)`, sorted by timestamp ascending. Rendered in a `max-h-64 overflow-y-auto` scrollable div. The main comment input is pinned below the scrollable area with a `border-t` separator — it is not inside the scrollable div.
+
+Clicking a comment card calls `toggleThread(comment.id)` (expand/collapse replies). The timestamp badge inside the card has its own `onClick` with `e.stopPropagation()` to seek the playhead without toggling the thread.
+
+When the ••• menu is open for a comment, that card has `bg-white/[0.04]` applied (active highlight) and the ••• button is forced fully visible with `bg-white/10` (activated state). This makes it unambiguous which comment's menu is open.
+
+**Thread expand/collapse:**
+`expandedThreadId: string | null` — one thread can be open at a time. `toggleThread` flips it and resets `replyText`/`replyMentionQuery`. When a thread is expanded, its replies render indented (`pl-14`) below the parent, followed by a reply input area. Replies inherit the parent's timestamp — `submitReply` reads `comments.find(c => c.id === parentId)?.timestamp` and sends it in the POST body so replies appear at the same waveform position as the parent.
+
+Replies support their own ••• menu (Edit + Delete only — no Resolve on replies). The ••• menu for replies uses the same `openMenu` / `menuOpenId` mechanism as top-level comments.
+
+**••• menu architecture:**
+`menuOpenId: string | null` tracks which comment's menu is open (works for both top-level and replies since all IDs are unique). `openMenu(e, id)` stores `e.currentTarget` in `menuButtonRef` and toggles `menuOpenId`. A document `click` capture listener closes the menu on outside clicks — but skips closing if the click target is `menuButtonRef.current` (the ••• button itself), letting `openMenu`'s toggle logic run cleanly so clicking ••• again closes the menu. All menu item actions use `onMouseDown` (not `onClick`) to prevent the document capture listener from closing the menu before the action fires.
+
+**Delete flow:**
+Clicking Delete in the ••• menu sets `deleteConfirmId`. An inline confirmation row appears below the comment (`bg-red-950/20 border-t border-red-900/30`) with Cancel and Delete buttons. Confirming calls `DELETE /api/review-comments/:id`. If the deleted comment has `expandedThreadId === commentId`, the thread is closed. For top-level deletions the message notes how many replies will also be deleted.
+
+**Resolve / edit flow:**
+- **Resolve:** `PATCH /api/review-comments/:id { resolved: true/false }`. Refetches comments. Resolved comments show `line-through text-white/40` text and a `CheckCircle2` icon in the header.
+- **Show resolved toggle:** Only shown when `resolvedCount > 0`. Toggles `showResolved` state. Both the comment list and the waveform avatar markers respect this filter.
+- **Edit:** `startEdit` sets `editingId` + `editText`, focuses `editInputRef`. Inline input replaces the comment text. Save calls `PATCH /api/review-comments/:id { text }` — the server sets `editedAt` automatically. `(edited)` label appears next to the author name when `editedAt` is set.
+
+**@ mention autocomplete:**
+`mainMentionQuery: string | null` (for the main input) and `replyMentionQuery: string | null` (for the reply input). **The type is `string | null`, not `string`** — `null` means not in mention mode; `''` means `@` was typed with no chars yet (show all members). Using `''` as the "inactive" sentinel is a bug because `''` is falsy — the `!== null` guard is required. `/@(\w*)$/` regex captures the characters after `@`; `setMainMentionQuery(m ? m[1] : null)` — `m[1]` is `''` when user types just `@`, which is intentionally shown (displays all members). `BAND_MEMBERS` is a module-level constant; results filter by `startsWith`. ArrowUp/Down navigate the list; Enter inserts the mention with a trailing space; Escape dismisses. Dropdown renders above the input (`bottom-full`) as an `absolute` positioned div. Each item uses `onMouseDown` + `e.preventDefault()` to prevent the input from losing focus before the click registers.
+
+**Helper functions (module-level in `SongHome.tsx`):**
+- `memberAvatarColor(name)` — deterministic hex color from a fixed palette, hashed from the name string
+- `memberInitials(name)` — first two chars of first + last name, or first two chars if single word
+- `formatTime(secs)` — `"M:SS"` format
+- `formatReviewDate(iso)` — `"Month D, YYYY"` display format
 
 ---
 

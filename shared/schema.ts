@@ -196,3 +196,38 @@ export const taskComments = sqliteTable("task_comments", {
 export const insertTaskCommentSchema = createInsertSchema(taskComments).omit({ createdAt: true });
 export type InsertTaskComment = z.infer<typeof insertTaskCommentSchema>;
 export type TaskComment = typeof taskComments.$inferSelect;
+
+// ─── Song Reviews ─────────────────────────────────────────────────────────────
+
+export const songReviews = sqliteTable("song_reviews", {
+  id: text("id").primaryKey(),
+  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  src: text("src").notNull(),
+  format: text("format").notNull(),
+  duration: real("duration").notNull(),
+  createdAt: text("created_at").notNull(),
+  createdBy: text("created_by").notNull(),
+});
+
+export const insertSongReviewSchema = createInsertSchema(songReviews).omit({ createdAt: true });
+export type InsertSongReview = z.infer<typeof insertSongReviewSchema>;
+export type SongReview = typeof songReviews.$inferSelect;
+
+// ─── Song Review Comments ─────────────────────────────────────────────────────
+
+export const songReviewComments = sqliteTable("song_review_comments", {
+  id: text("id").primaryKey(),
+  reviewId: text("review_id").notNull().references(() => songReviews.id, { onDelete: "cascade" }),
+  parentId: text("parent_id"), // null = top-level comment; set = reply (one level deep only)
+  author: text("author").notNull(),
+  text: text("text").notNull(),
+  timestamp: real("timestamp").notNull(), // playback position in seconds
+  createdAt: text("created_at").notNull(),
+  resolved: integer("resolved", { mode: "boolean" }).notNull().default(false),
+  editedAt: text("edited_at"),
+});
+
+export const insertSongReviewCommentSchema = createInsertSchema(songReviewComments).omit({ createdAt: true });
+export type InsertSongReviewComment = z.infer<typeof insertSongReviewCommentSchema>;
+export type SongReviewComment = typeof songReviewComments.$inferSelect;
