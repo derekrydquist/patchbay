@@ -1024,6 +1024,8 @@ export async function registerRoutes(
         type: 'review-reply',
         description: `${author} replied to ${parentAuthor}'s comment on ${review.name}`,
         timestamp: Date.now(),
+        reviewId: req.params.reviewId,
+        commentId: comment.id,
       }).catch(console.error);
     } else {
       storage.logActivity({
@@ -1032,6 +1034,8 @@ export async function registerRoutes(
         type: 'review-comment',
         description: `${author} commented on ${review.name}`,
         timestamp: Date.now(),
+        reviewId: req.params.reviewId,
+        commentId: comment.id,
       }).catch(console.error);
     }
 

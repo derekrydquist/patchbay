@@ -76,6 +76,7 @@ function parseLocalDate(dateStr: string): Date {
 
 function activityUrl(event: ActivityEvent): string {
   const base = `/songs/${event.songId}/workspace`;
+  const songBase = `/songs/${event.songId}`;
   if (event.type === 'status-change' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
@@ -91,10 +92,18 @@ function activityUrl(event: ActivityEvent): string {
     });
     return `${base}?${params}`;
   }
+  if (event.type === 'review-shared' && event.reviewId) {
+    return `${songBase}?tab=review&reviewId=${event.reviewId}`;
+  }
+  if ((event.type === 'review-comment' || event.type === 'review-reply') && event.reviewId) {
+    const params = new URLSearchParams({ tab: 'review', reviewId: event.reviewId });
+    if (event.commentId) params.set('commentId', event.commentId);
+    return `${songBase}?${params}`;
+  }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
   }
-  return `/songs/${event.songId}`;
+  return songBase;
 }
 
 function timeAgo(ms: number): string {
@@ -120,6 +129,8 @@ interface ActivityEvent {
   taskId?: string;
   source?: 'clip' | 'task';
   clipId?: string;
+  reviewId?: string;
+  commentId?: string;
 }
 
 function sortByDueDate(tasks: Task[]): Task[] {
@@ -476,6 +487,8 @@ export default function Dashboard() {
                       songId: event.songId,
                       instrument: event.instrument,
                       sectionName: event.sectionName,
+                      reviewId: event.reviewId,
+                      commentId: event.commentId,
                       url,
                     });
                     setLocation(url);

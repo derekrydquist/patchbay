@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
-import { useParams, useLocation } from 'wouter';
+import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DndContext } from '@dnd-kit/core';
 import {
@@ -36,6 +36,8 @@ interface ActivityEvent {
   taskId?: string;
   source?: 'clip' | 'task';
   clipId?: string;
+  reviewId?: string;
+  commentId?: string;
 }
 
 interface ReviewType {
@@ -100,6 +102,7 @@ function formatTime(secs: number): string {
 
 function activityUrl(songId: string, event: ActivityEvent): string {
   const base = `/songs/${songId}/workspace`;
+  const songBase = `/songs/${songId}`;
   if (event.type === 'status-change' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
@@ -115,10 +118,18 @@ function activityUrl(songId: string, event: ActivityEvent): string {
     });
     return `${base}?${params}`;
   }
+  if (event.type === 'review-shared' && event.reviewId) {
+    return `${songBase}?tab=review&reviewId=${event.reviewId}`;
+  }
+  if ((event.type === 'review-comment' || event.type === 'review-reply') && event.reviewId) {
+    const params = new URLSearchParams({ tab: 'review', reviewId: event.reviewId });
+    if (event.commentId) params.set('commentId', event.commentId);
+    return `${songBase}?${params}`;
+  }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
   }
-  return `/songs/${songId}`;
+  return songBase;
 }
 
 function timeAgo(ms: number): string {
@@ -154,7 +165,7 @@ function memberInitials(name: string): string {
 
 // ─── ReviewPlayer ─────────────────────────────────────────────────────────────
 
-function ReviewPlayer({ review }: { review: ReviewType }) {
+function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoCommentId?: string | null }) {
   const queryClient = useQueryClient();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -167,6 +178,7 @@ function ReviewPlayer({ review }: { review: ReviewType }) {
   const isDraggingRef = useRef(false);
   const dragTimeRef = useRef(0);
   const dragRafRef = useRef<number | null>(null);
+  const autoHighlightFired = useRef<string | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -193,6 +205,31 @@ function ReviewPlayer({ review }: { review: ReviewType }) {
     queryKey: ['review-comments', review.id],
     queryFn: () => fetch(`/api/reviews/${review.id}/comments`).then(r => r.json()),
   });
+
+  // Scroll to and highlight a specific comment when navigating from the activity feed
+  useEffect(() => {
+    if (!autoCommentId || autoHighlightFired.current === autoCommentId || comments.length === 0) return;
+    // Top-level comment
+    const topLevel = comments.find(c => c.id === autoCommentId);
+    if (topLevel) {
+      autoHighlightFired.current = autoCommentId;
+      setHighlightedCommentId(autoCommentId);
+      setTimeout(() => {
+        document.getElementById(`review-comment-${autoCommentId}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        setTimeout(() => setHighlightedCommentId(null), 1500);
+      }, 150);
+      return;
+    }
+    // Reply — scroll to parent and expand its thread
+    const parent = comments.find(c => (c.replies ?? []).some(r => r.id === autoCommentId));
+    if (parent) {
+      autoHighlightFired.current = autoCommentId;
+      setExpandedThreadId(parent.id);
+      setTimeout(() => {
+        document.getElementById(`review-comment-${parent.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 150);
+    }
+  }, [autoCommentId, comments.length]);
 
   const mainMentionResults = mainMentionQuery !== null
     ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(mainMentionQuery.toLowerCase()))
@@ -977,11 +1014,12 @@ function ReviewPlayer({ review }: { review: ReviewType }) {
 
 export default function SongHome() {
   const { songId = 'patchbay-default' } = useParams<{ songId: string }>();
-  const [location, setLocation] = useLocation();
-
-  const [activeTab, setActiveTab] = useState<'overview' | 'review'>(() => {
-    return new URLSearchParams(window.location.search).get('tab') === 'review' ? 'review' : 'overview';
-  });
+  const [, setLocation] = useLocation();
+  const search = useSearch();
+  const searchParams = new URLSearchParams(search);
+  const activeTab = searchParams.get('tab') === 'review' ? 'review' : 'overview';
+  const autoReviewId = searchParams.get('reviewId');
+  const autoCommentId = searchParams.get('commentId');
 
   const lastSession = useMemo(() => readLastSession(songId), [songId]);
 
@@ -1066,8 +1104,7 @@ export default function SongHome() {
             <button
               key={tab}
               onClick={() => {
-                setActiveTab(tab);
-                const params = new URLSearchParams(window.location.search);
+                const params = new URLSearchParams(search);
                 if (tab === 'overview') params.delete('tab');
                 else params.set('tab', tab);
                 const qs = params.toString();
@@ -1211,6 +1248,13 @@ export default function SongHome() {
                       key={i}
                       onClick={() => {
                         const url = activityUrl(songId, event);
+                        console.log('[Activity click]', {
+                          type: event.type,
+                          songId: event.songId,
+                          reviewId: event.reviewId,
+                          commentId: event.commentId,
+                          url,
+                        });
                         setLocation(url);
                       }}
                       className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer gap-4"
@@ -1253,7 +1297,11 @@ export default function SongHome() {
               </div>
             ) : (
               reviews.map(review => (
-                <ReviewPlayer key={review.id} review={review} />
+                <ReviewPlayer
+                  key={review.id}
+                  review={review}
+                  autoCommentId={review.id === autoReviewId ? autoCommentId : null}
+                />
               ))
             )}
           </div>

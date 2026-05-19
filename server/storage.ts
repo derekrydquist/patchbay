@@ -89,6 +89,9 @@ export interface ActivityEvent {
   // comment source routing — present on clip-comment and task-comment events
   source?: 'clip' | 'task';
   clipId?: string;
+  // review deep-link routing — present on review-shared, review-comment, review-reply events
+  reviewId?: string;
+  commentId?: string;
 }
 
 export interface IStorage {
@@ -864,6 +867,7 @@ export class SQLiteStorage implements IStorage {
         timestamp: new Date(row.createdAt).getTime(),
         songId: row.songId,
         songName: row.songName,
+        reviewId: row.reviewId,
       });
     }
 
@@ -876,6 +880,8 @@ export class SQLiteStorage implements IStorage {
         timestamp: activityLog.timestamp,
         instrument: activityLog.instrument,
         sectionName: activityLog.sectionName,
+        reviewId: activityLog.reviewId,
+        commentId: activityLog.commentId,
         songId: songs.id,
         songName: songs.name,
       })
@@ -893,6 +899,8 @@ export class SQLiteStorage implements IStorage {
         songName: row.songName,
         instrument: row.instrument ?? undefined,
         sectionName: row.sectionName ?? undefined,
+        reviewId: row.reviewId ?? undefined,
+        commentId: row.commentId ?? undefined,
       });
     }
 

@@ -243,6 +243,8 @@ export const activityLog = sqliteTable("activity_log", {
   timestamp: integer("timestamp").notNull(), // ms since epoch
   instrument: text("instrument"),
   sectionName: text("section_name"),
+  reviewId: text("review_id"),
+  commentId: text("comment_id"),
 });
 
 export type InsertActivityLog = typeof activityLog.$inferInsert;
