@@ -415,6 +415,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
     },
@@ -441,6 +442,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     },
     onSuccess: (newTrack) => {
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
       // Auto-select the new instrument after refetch
@@ -469,6 +471,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setSelectedTrack(null);
       setSelectedIdea(null);
     },
@@ -492,18 +495,17 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   // ── Delete section mutation ──────────────────────────────────────────────────
 
   const deleteSectionMutation = useMutation({
-    mutationFn: async (ideaId: string) => {
-      const res = await fetch(`/api/ideas/${ideaId}`, { method: 'PATCH' });
+    mutationFn: async ({ sectionName }: { sectionName: string }) => {
+      const res = await fetch(`/api/songs/${songId}/sections/${encodeURIComponent(sectionName)}`, { method: 'DELETE' });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed' }));
         throw new Error(err.message);
       }
-      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setSelectedIdea(null);
     },
     onError: (err: Error) => {
@@ -1013,7 +1015,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                     <ContextMenuContent className="bg-popover border-border">
                       <ContextMenuItem
                         className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-                        onClick={() => deleteSectionMutation.mutate(idea.id)}
+                        onClick={() => deleteSectionMutation.mutate({ sectionName: idea.sectionName })}
                       >
                         Remove Section
                       </ContextMenuItem>

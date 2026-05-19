@@ -166,6 +166,7 @@ in route handlers.
 | `task_comments` | Comments on a task |
 | `song_reviews` | Exported mix files shared for review (linked to `songs`); stores src URL, format, duration, createdBy |
 | `song_review_comments` | Timestamped comments on a review; `parentId` (nullable self-reference) supports one level of replies; `resolved` boolean; `editedAt` nullable ISO timestamp |
+| `activity_log` | Dedicated log store for song-structure events (section added/deleted, track added/deleted, clip added/removed from timeline, clip replaced/unmarked-final, review comments). No FK dependencies — `songId` is a plain text column so events survive even if associated rows are deleted. `type` and `description` are stored verbatim; `getActivity()` passes them through without text parsing. |
 
 **`timeline_clips` vs `clips`:** These are intentionally separate tables. `clips` holds the uploaded source material (versions inside bucket ideas). `timeline_clips` holds the arranged instances placed on the timeline with a `start` time. Dragging from the bucket to the timeline creates a new `timeline_clips` row — it does not move the source clip.
 
@@ -434,7 +435,7 @@ When implementing auth or any permission checks, always consult this table.
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
 | Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links) |
-| Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates 5 event types from existing tables — file uploads, clips marked final, clip comments, task comments/status changes, review shares; polls every 10s via `refetchInterval`; file uploads: "Jordan added X to Instrument — Section"; mark-final: "Jordan marked X as final" (sourced from task_comments with accurate timestamp); status changes: "Jordan changed status to X — Instrument · Section"; clip comments: "You commented on Instrument · Section"; task comments: "You commented on Instrument · Section task"; review shares: "Jordan exported {name} to Review"; rows are deep-link clickable — status-change and task-comment events navigate to `?tab=production&taskId=`, clip-comment events navigate to `?instrument=X&section=Y&clipId=Z&openComments=true`, all other events navigate to `?instrument=X&section=Y`. See Activity Feed architecture section below. |
+| Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates events from two sources — existing tables (clips, clip_comments, task_comments, song_reviews) and the dedicated `activity_log` table; polls every 10s via `refetchInterval`; `queryClient.invalidateQueries({ queryKey: ['activity'] })` is called in every mutation's `onSuccess` so the feed refreshes immediately on any action; see Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Review`) is synced to `?tab=review` in the URL (Overview omits the param for a clean URL). Page refresh restores the correct tab. `useState` initializer reads `window.location.search` — **not** wouter's `useLocation()` value, which does not include query strings. |
 | Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); trim-aware — uses `source.start(when, trimStartSecs, trimDuration)` so only the trimmed region renders; WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace`; fetches `/api/songs/:id` in parallel with the timeline to obtain the canonical `sections` array, then calls `recalcStartsForExport(tracks, sectionOrder)` — a module-level helper mirroring `computeSectionLayout`/`recalcAllStarts` from `Timeline.tsx` — and replaces each clip's DB `start` with the recomputed value before rendering; this is necessary because DB `start` values can be stale relative to live section geometry (e.g. after a trim change), and using them directly causes clips from different sections to overlap in the rendered output |
@@ -1029,7 +1030,10 @@ The activity feed aggregates recent events across the app into a unified timelin
 **`ActivityEvent` interface (in `storage.ts`):**
 ```ts
 interface ActivityEvent {
-  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'review-shared';
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change'
+      | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline'
+      | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted'
+      | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply';
   description: string;
   timestamp: number;
   songId: string;
@@ -1043,23 +1047,39 @@ interface ActivityEvent {
 }
 ```
 
-**Five event types and their sources:**
+**Two-tier event sourcing:**
 
+Events come from two sources that `getActivity()` merges and sorts by timestamp:
+
+**Tier 1 — existing tables (text-parsed at read time):**
 1. **`file-added`** — one event per `clips` row (joined through `ideas → instrument_tracks → songs`). Description: `"Jordan added {clipName} to {trackName} — {sectionName}"`. Timestamp: `clip.createdAt`.
-2. **`marked-final`** — from `task_comments` rows where `text.startsWith('Clip marked as final:')`. Clip name is extracted from the text: `'Clip marked as final: "Guitar 2 Verse 1 V2"'` → `"Jordan marked Guitar 2 Verse 1 V2 as final"`. Timestamp is accurate (the moment the user marked it final, not the upload time). Includes `taskId` for potential deep-linking.
+2. **`marked-final`** — from `task_comments` rows where `text.startsWith('Clip marked as final:')`. Clip name extracted from the text. Timestamp is the moment the user marked it final. Includes `taskId`.
 3. **`clip-comment`** — from `clip_comments` (joined through `clips → ideas → instrument_tracks → songs`). `author = 'Unknown'` renders as `"You"`. Description: `"You commented on {trackName} · {sectionName}"`. Includes `source: 'clip'` and `clipId`.
-4. **`task-comment` / `status-change`** — from `task_comments` (joined through `production_tasks → songs`). Routed by text pattern, not by `author`:
-5. **`review-shared`** — one event per `song_reviews` row (joined to `songs` for `songName`). Description: `"{createdBy} exported {name} to Review"`. Timestamp: `review.createdAt` parsed to ms. No `instrument`, `sectionName`, or `taskId` — these events are song-level only.
+4. **`task-comment` / `status-change`** — from `task_comments` (joined through `production_tasks → songs`). Routed by text pattern — see routing rules below.
+5. **`review-shared`** — one event per `song_reviews` row. Description: `"{createdBy} exported {name} to Review"`. Song-level only (no `instrument` or `sectionName`).
 
-**`task-comment` / `status-change` routing (event type 4):**
-   - `text.startsWith('Status changed to ')` → `status-change`: `"Jordan changed status to {label} — {instrument} · {sectionName}"`. Catches both new `author='System'` records and legacy `author='Unknown'` records.
+**Tier 2 — `activity_log` table (type + description stored verbatim at write time):**
+6. **`clip-added-to-timeline`** — logged from `POST /api/tracks/:trackId/clips`. Description: `"Someone added {clipName} to {trackName} — {sectionName}"`.
+7. **`clip-removed-from-timeline`** — logged from `DELETE /api/timeline-clips/:id`. Description: `"Someone removed {clipName} from {trackName} — {sectionName}"`.
+8. **`clip-replaced`** — logged from `PATCH /api/timeline-clips/:id` when name+src both change. Description: `"Someone replaced {oldName} with {newName} in {trackName} — {sectionName}"`.
+9. **`clip-unmarked-final`** — logged from `PATCH /api/timeline-clips/:id` and `PATCH /api/clips/:clipId` on `isFinal=false`. Description: `"Someone unmarked {clipName} as final"`.
+10. **`section-added`** — logged from `POST /api/tracks/:trackId/ideas` with 5-second dedup (N simultaneous requests from Promise.all collapse to one event). Description: `"Someone added section {sectionName}"`.
+11. **`section-deleted`** — logged from `DELETE /api/songs/:songId/sections/:sectionName`. Description: `"Someone deleted section {sectionName}"`.
+12. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description: `"Someone added an instrument — {trackName}"`.
+13. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"Someone deleted an instrument — {trackName}"`.
+14. **`review-comment`** — logged from `POST /api/reviews/:reviewId/comments` (top-level). Description: `"{author} commented on {reviewName}"`.
+15. **`review-reply`** — logged from `POST /api/reviews/:reviewId/comments` (reply). Description: `"{author} replied to {parentAuthor}'s comment on {reviewName}"`.
+
+**`task-comment` / `status-change` routing (tier 1, event type 4):**
+   - `text.startsWith('Status changed to ')` → `status-change`: `"Jordan changed status to {label} — {instrument} · {sectionName}"`.
    - `text.startsWith('Clip marked as final:')` → `marked-final` (see above).
-   - `author === 'System'` (any other text, e.g. assignee/due-date changes, "Clip unmarked as final") → silently skipped; these are audit trail, not activity feed material.
+   - `text.startsWith('Clip unmarked as final')` → skipped (these `task_comments` rows are written by `PATCH /api/production-tasks/:id` and would duplicate the `clip-unmarked-final` events already in `activity_log`).
+   - `author === 'System'` (any other text, e.g. assignee/due-date changes) → silently skipped; audit trail only.
    - All other comments → `task-comment`: `"You commented on {instrument} · {sectionName} task"`. Includes `source: 'task'` and `taskId`.
 
 **Implementation note — system vs user comments:** Status-change and mark-final comments in `task_comments` are written with `author: 'System'` by the server. The activity feed routes them by text pattern so that new system comment types can be added to routes.ts without accidentally bleeding into the `status-change` bucket. Never use the request body's author for system-generated comments.
 
-**JS-level merge, no SQL UNION:** Each event type is fetched with a separate Drizzle query and merged into a single `events[]` array in JavaScript, then sorted by `timestamp` descending. No SQL UNION needed.
+**JS-level merge, no SQL UNION:** Each event type is fetched with a separate Drizzle query (or read from `activity_log`) and merged into a single `events[]` array in JavaScript, then sorted by `timestamp` descending. No SQL UNION needed.
 
 **Frontend queries:**
 ```ts
@@ -1070,7 +1090,7 @@ useQuery({ queryKey: ['activity'], queryFn: () => fetch('/api/activity').then(r 
 useQuery({ queryKey: ['activity', songId], queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()), refetchInterval: 10000 })
 ```
 
-**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. This call should be added to the `onSuccess` of any mutation that creates activity-feed-visible data (uploads, status changes, comments). Check `routes.ts` when adding new mutations.
+**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers an activity event must call this in its `onSuccess` (or `.then()` for fire-and-forget fetches). Mutations that currently do this: file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track added, track deleted, review shared, review comment/reply posted.
 
 **Hardcoded current user:** `CURRENT_USER = 'Jordan'` appears in three places with `// TODO: replace with real auth user`:
 1. `server/storage.ts` — used to attribute file-added and status-change descriptions

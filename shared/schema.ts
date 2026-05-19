@@ -231,3 +231,19 @@ export const songReviewComments = sqliteTable("song_review_comments", {
 export const insertSongReviewCommentSchema = createInsertSchema(songReviewComments).omit({ createdAt: true });
 export type InsertSongReviewComment = z.infer<typeof insertSongReviewCommentSchema>;
 export type SongReviewComment = typeof songReviewComments.$inferSelect;
+
+// ─── Activity Log ─────────────────────────────────────────────────────────────
+// Song-structure events that don't belong to a specific task (sections, tracks).
+
+export const activityLog = sqliteTable("activity_log", {
+  id: text("id").primaryKey(),
+  songId: text("song_id").notNull(),
+  type: text("type").notNull(),
+  description: text("description").notNull(),
+  timestamp: integer("timestamp").notNull(), // ms since epoch
+  instrument: text("instrument"),
+  sectionName: text("section_name"),
+});
+
+export type InsertActivityLog = typeof activityLog.$inferInsert;
+export type ActivityLogEntry = typeof activityLog.$inferSelect;

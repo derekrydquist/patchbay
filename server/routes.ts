@@ -5,7 +5,7 @@ import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte } from "drizzle-orm";
 import { db } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS } from "./storage";
 import {
@@ -23,6 +23,8 @@ import {
   productionTasks,
   taskComments,
   songReviewComments,
+  songReviews,
+  activityLog,
 } from "@shared/schema";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -151,11 +153,32 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const track = await storage.createTrack(parsed.data);
+
+    storage.logActivity({
+      id: randomUUID(),
+      songId: req.params.songId,
+      type: 'track-added',
+      description: `Someone added an instrument — ${track.name}`,
+      timestamp: Date.now(),
+      instrument: track.name,
+    }).catch(console.error);
+
     res.status(201).json(track);
   });
 
   app.delete("/api/tracks/:trackId", async (req, res) => {
+    const trackToDelete = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, req.params.trackId)).get();
     await storage.hideTrack(req.params.trackId);
+    if (trackToDelete) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: trackToDelete.songId,
+        type: 'track-deleted',
+        description: `Someone deleted an instrument — ${trackToDelete.name}`,
+        timestamp: Date.now(),
+        instrument: trackToDelete.name,
+      }).catch(console.error);
+    }
     res.status(200).json({ ok: true });
   });
 
@@ -170,8 +193,20 @@ export async function registerRoutes(
   });
 
   app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {
-    console.log('[deleteSection]', req.params.songId, req.params.sectionName);
-    await storage.deleteSection(req.params.songId, decodeURIComponent(req.params.sectionName));
+    const decodedSection = decodeURIComponent(req.params.sectionName);
+    console.log('[route deleteSection] songId:', req.params.songId, 'sectionName:', decodedSection);
+    const deleteSectionResult = await storage.deleteSection(req.params.songId, decodedSection);
+    console.log('[route deleteSection] deleteSection returned:', deleteSectionResult);
+
+    storage.logActivity({
+      id: randomUUID(),
+      songId: req.params.songId,
+      type: 'section-deleted',
+      description: `Someone deleted section ${decodedSection}`,
+      timestamp: Date.now(),
+      sectionName: decodedSection,
+    }).catch(console.error);
+
     res.status(204).send();
   });
 
@@ -211,14 +246,38 @@ export async function registerRoutes(
       }
     }
 
+    // Log clip-added-to-timeline activity event
+    if (clip.sectionName) {
+      try {
+        const addTrack = db.select().from(instrumentTracks)
+          .where(eq(instrumentTracks.id, req.params.trackId))
+          .get();
+        if (addTrack) {
+          storage.logActivity({
+            id: randomUUID(),
+            songId: addTrack.songId,
+            type: 'clip-added-to-timeline',
+            description: `${req.body.author || 'Someone'} added ${clip.name} to ${addTrack.name} — ${clip.sectionName}`,
+            timestamp: Date.now(),
+            instrument: addTrack.name,
+            sectionName: clip.sectionName,
+          }).catch(console.error);
+        }
+      } catch (err) {
+        console.error("[timeline clip add] failed to log activity:", err);
+      }
+    }
+
     res.status(201).json(clip);
   });
 
   app.patch("/api/timeline-clips/:id", async (req, res) => {
     const { author: commentAuthor, ...clipUpdates } = req.body;
+    const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+    if (!existingClip) return res.status(404).json({ message: "Clip not found" });
     const clip = Object.keys(clipUpdates).length > 0
       ? await storage.updateTimelineClip(req.params.id, clipUpdates)
-      : db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+      : existingClip;
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
     const isFinal = clipUpdates.isFinal;
@@ -268,13 +327,15 @@ export async function registerRoutes(
               });
             } else if (isFinal === false && task.status === "complete") {
               await storage.updateTask(task.id, { status: "in-progress" });
-              await storage.addTaskComment({
+              storage.logActivity({
                 id: randomUUID(),
-                taskId: task.id,
-                author,
-                text: `Clip unmarked as final: "${clip.name}". Status reverted to In Progress.`,
+                songId: track.songId,
+                type: 'clip-unmarked-final',
+                description: `${commentAuthor || 'Someone'} unmarked ${clip.name} as final`,
                 timestamp: Date.now(),
-              });
+                instrument: track.name,
+                sectionName: clip.sectionName ?? undefined,
+              }).catch(console.error);
             }
           }
         }
@@ -283,11 +344,50 @@ export async function registerRoutes(
       }
     }
 
+    // Log clip-replaced activity when name+src both change (= replace operation from Replace submenu)
+    const isReplace = typeof clipUpdates.name === 'string' && typeof clipUpdates.src === 'string'
+      && clipUpdates.name !== existingClip.name;
+    if (isReplace && clip.sectionName) {
+      try {
+        const replaceTrack = db.select().from(instrumentTracks)
+          .where(eq(instrumentTracks.id, clip.trackId))
+          .get();
+        if (replaceTrack) {
+          storage.logActivity({
+            id: randomUUID(),
+            songId: replaceTrack.songId,
+            type: 'clip-replaced',
+            description: `${commentAuthor || 'Someone'} replaced ${existingClip.name} with ${clip.name} in ${replaceTrack.name} — ${clip.sectionName}`,
+            timestamp: Date.now(),
+            instrument: replaceTrack.name,
+            sectionName: clip.sectionName,
+          }).catch(console.error);
+        }
+      } catch (err) {
+        console.error("[timeline-clip replace] failed to log activity:", err);
+      }
+    }
+
     res.json(clip);
   });
 
   app.delete("/api/timeline-clips/:id", async (req, res) => {
+    const clipToRemove = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     await storage.deleteTimelineClip(req.params.id);
+    if (clipToRemove) {
+      const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clipToRemove.trackId)).get();
+      if (track) {
+        storage.logActivity({
+          id: randomUUID(),
+          songId: track.songId,
+          type: 'clip-removed-from-timeline',
+          description: `Someone removed ${clipToRemove.name} from ${track.name} — ${clipToRemove.sectionName}`,
+          timestamp: Date.now(),
+          instrument: track.name,
+          sectionName: clipToRemove.sectionName ?? undefined,
+        }).catch(console.error);
+      }
+    }
     res.status(204).send();
   });
 
@@ -374,6 +474,38 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const idea = await storage.createIdea(parsed.data);
+
+    // Log section-added once per user action. MediaBucket fires this route for every
+    // active track simultaneously (Promise.all), so deduplicate via a 5-second window.
+    try {
+      const ideaTrack = db.select().from(instrumentTracks)
+        .where(eq(instrumentTracks.id, req.params.trackId))
+        .get();
+      if (ideaTrack) {
+        const fiveSecondsAgo = Date.now() - 5000;
+        const recent = db.select().from(activityLog)
+          .where(and(
+            eq(activityLog.songId, ideaTrack.songId),
+            eq(activityLog.type, 'section-added'),
+            eq(activityLog.sectionName, idea.sectionName),
+            gte(activityLog.timestamp, fiveSecondsAgo)
+          ))
+          .get();
+        if (!recent) {
+          storage.logActivity({
+            id: randomUUID(),
+            songId: ideaTrack.songId,
+            type: 'section-added',
+            description: `Someone added section ${idea.sectionName}`,
+            timestamp: Date.now(),
+            sectionName: idea.sectionName,
+          }).catch(console.error);
+        }
+      }
+    } catch (err) {
+      console.error('[ideas] failed to log section-added activity:', err);
+    }
+
     res.status(201).json(idea);
   });
 
@@ -425,13 +557,15 @@ export async function registerRoutes(
                 });
               } else if (clipUpdates.isFinal === false && task.status === "complete") {
                 await storage.updateTask(task.id, { status: "in-progress" });
-                await storage.addTaskComment({
+                storage.logActivity({
                   id: randomUUID(),
-                  taskId: task.id,
-                  author,
-                  text: `Clip unmarked as final: "${clip.name}". Status reverted to In Progress.`,
+                  songId: track.songId,
+                  type: 'clip-unmarked-final',
+                  description: `${commentAuthor || 'Someone'} unmarked ${clip.name} as final`,
                   timestamp: Date.now(),
-                });
+                  instrument: track.name,
+                  sectionName: idea.sectionName,
+                }).catch(console.error);
               }
             }
           }
@@ -757,11 +891,13 @@ export async function registerRoutes(
             "in-progress": "In Progress",
             "will-not-play": "Will Not Play",
           };
+          const unmarkText = `Clip unmarked as final: "${finalClip.name}". Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`;
+          console.log('[addTaskComment isFinal=false] text:', unmarkText);
           await storage.addTaskComment({
             id: randomUUID(),
             taskId: req.params.id,
             author,
-            text: `Clip unmarked as final: "${finalClip.name}". Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`,
+            text: unmarkText,
             timestamp: Date.now(),
           });
         }
@@ -857,6 +993,11 @@ export async function registerRoutes(
     if (!author || !text || typeof timestamp !== "number") {
       return res.status(400).json({ message: "author, text, and timestamp are required" });
     }
+
+    const review = db.select().from(songReviews).where(eq(songReviews.id, req.params.reviewId)).get();
+    if (!review) return res.status(404).json({ message: "Review not found" });
+
+    let parentAuthor: string | undefined;
     if (parentId) {
       const parent = db.select().from(songReviewComments)
         .where(eq(songReviewComments.id, parentId))
@@ -864,7 +1005,9 @@ export async function registerRoutes(
       if (!parent || parent.parentId) {
         return res.status(400).json({ message: "parentId must reference a top-level comment" });
       }
+      parentAuthor = parent.author;
     }
+
     const comment = await storage.addReviewComment({
       id: randomUUID(),
       reviewId: req.params.reviewId,
@@ -873,6 +1016,25 @@ export async function registerRoutes(
       timestamp,
       parentId: parentId ?? null,
     });
+
+    if (parentId && parentAuthor !== undefined) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: review.songId,
+        type: 'review-reply',
+        description: `${author} replied to ${parentAuthor}'s comment on ${review.name}`,
+        timestamp: Date.now(),
+      }).catch(console.error);
+    } else {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: review.songId,
+        type: 'review-comment',
+        description: `${author} commented on ${review.name}`,
+        timestamp: Date.now(),
+      }).catch(console.error);
+    }
+
     res.status(201).json(comment);
   });
 

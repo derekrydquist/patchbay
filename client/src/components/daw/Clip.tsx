@@ -946,6 +946,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
         queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
         queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+        queryClient.invalidateQueries({ queryKey: ['activity'] });
       }
     } catch (err) {
       console.error('Failed to replace clip:', err);

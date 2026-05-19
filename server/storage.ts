@@ -13,8 +13,10 @@ import {
   type ClipComment, type InsertClipComment,
   type SongReview, type InsertSongReview,
   type SongReviewComment, type InsertSongReviewComment,
+  type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
+  activityLog,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -76,7 +78,7 @@ export type BucketTrack = InstrumentTrack & {
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface ActivityEvent {
-  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'review-shared';
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline' | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted' | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -139,6 +141,7 @@ export interface IStorage {
 
   // Activity
   getActivity(songId?: string): Promise<ActivityEvent[]>;
+  logActivity(entry: InsertActivityLog): Promise<void>;
 
   // Production Tasks
   getAllTasks(): Promise<(ProductionTask & { songName: string })[]>;
@@ -466,8 +469,10 @@ export class SQLiteStorage implements IStorage {
   }
 
   async deleteSection(songId: string, sectionName: string): Promise<void> {
+    console.log('[storage deleteSection] songId:', songId, 'sectionName:', sectionName);
     const songTracks = db.select().from(instrumentTracks)
       .where(eq(instrumentTracks.songId, songId)).all();
+    console.log('[storage deleteSection] songTracks.length:', songTracks.length);
     if (!songTracks.length) return;
     const trackIds = songTracks.map(t => t.id);
     db.delete(ideas)
@@ -774,11 +779,52 @@ export class SQLiteStorage implements IStorage {
           instrument: row.instrument,
           sectionName: row.sectionName,
         });
+      } else if (row.text.startsWith('Clip unmarked as final:')) {
+        const unmatchResult = row.text.match(/^Clip unmarked as final: "([^"]+)"/);
+        const unmarkName = unmatchResult ? unmatchResult[1] : 'clip';
+        events.push({
+          type: 'clip-unmarked-final',
+          description: `${CURRENT_USER} unmarked ${unmarkName} as final`,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+        });
+      } else if (row.text.startsWith('Clip replaced:')) {
+        const replaceMatch = row.text.match(/^Clip replaced: "(.+)" → "(.+)"$/);
+        if (replaceMatch) {
+          const [, oldName, newName] = replaceMatch;
+          events.push({
+            type: 'clip-replaced',
+            description: `${CURRENT_USER} replaced ${oldName} with ${newName} in ${row.instrument} — ${row.sectionName}`,
+            timestamp: row.timestamp,
+            songId: row.songId,
+            songName: row.songName,
+            taskId: row.taskId,
+            instrument: row.instrument,
+            sectionName: row.sectionName,
+          });
+        }
+      } else if (row.text.startsWith('Clip added to timeline:')) {
+        const addMatch = row.text.match(/^Clip added to timeline: "([^"]+)"$/);
+        const addName = addMatch ? addMatch[1] : 'clip';
+        events.push({
+          type: 'clip-added-to-timeline',
+          description: `${CURRENT_USER} added ${addName} to ${row.instrument} — ${row.sectionName}`,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+        });
       } else if (row.author === 'System') {
         // Other system comments (assignee changes, due date changes, clip unmarked) —
         // not surfaced in the activity feed
         continue;
-      } else {
+      } else if (!row.text.startsWith('Clip unmarked as final')) {
         // Human task comment — 'Unknown' means current user before auth is built
         const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
         events.push({
@@ -821,7 +867,40 @@ export class SQLiteStorage implements IStorage {
       });
     }
 
+    // Activity log: song-structure events (section-added, section-deleted, track-added)
+    const logFilter = songId ? eq(activityLog.songId, songId) : undefined;
+    const logRows = db
+      .select({
+        type: activityLog.type,
+        description: activityLog.description,
+        timestamp: activityLog.timestamp,
+        instrument: activityLog.instrument,
+        sectionName: activityLog.sectionName,
+        songId: songs.id,
+        songName: songs.name,
+      })
+      .from(activityLog)
+      .innerJoin(songs, eq(activityLog.songId, songs.id))
+      .where(logFilter)
+      .all();
+
+    for (const row of logRows) {
+      events.push({
+        type: row.type as ActivityEvent['type'],
+        description: row.description,
+        timestamp: row.timestamp,
+        songId: row.songId,
+        songName: row.songName,
+        instrument: row.instrument ?? undefined,
+        sectionName: row.sectionName ?? undefined,
+      });
+    }
+
     return events.sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  async logActivity(entry: InsertActivityLog): Promise<void> {
+    db.insert(activityLog).values(entry).run();
   }
 
   async getAllTasks(): Promise<(ProductionTask & { songName: string })[]> {

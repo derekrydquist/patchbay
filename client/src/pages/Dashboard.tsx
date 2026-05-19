@@ -480,7 +480,7 @@ export default function Dashboard() {
                     });
                     setLocation(url);
                   }}
-                  className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.03] hover:border-l-2 hover:border-primary/40 transition-all cursor-pointer group gap-4"
+                  className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer group gap-4"
                 >
                   <div className="min-w-0">
                     <p className="text-sm text-white/80 group-hover:text-white transition-colors truncate">

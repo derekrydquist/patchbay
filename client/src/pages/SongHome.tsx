@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useParams, useLocation } from 'wouter';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DndContext } from '@dnd-kit/core';
 import {
   ArrowLeft, ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
@@ -155,6 +155,7 @@ function memberInitials(name: string): string {
 // ─── ReviewPlayer ─────────────────────────────────────────────────────────────
 
 function ReviewPlayer({ review }: { review: ReviewType }) {
+  const queryClient = useQueryClient();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
@@ -494,6 +495,8 @@ function ReviewPlayer({ review }: { review: ReviewType }) {
       setNewComment('');
       setMainMentionQuery(null);
       refetchComments();
+      queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } finally {
       setIsSubmitting(false);
     }
@@ -512,6 +515,8 @@ function ReviewPlayer({ review }: { review: ReviewType }) {
       setReplyText('');
       setReplyMentionQuery(null);
       refetchComments();
+      queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } finally {
       setReplySubmitting(false);
     }
@@ -1208,7 +1213,7 @@ export default function SongHome() {
                         const url = activityUrl(songId, event);
                         setLocation(url);
                       }}
-                      className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.03] hover:border-l-2 hover:border-primary/40 transition-all cursor-pointer gap-4"
+                      className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer gap-4"
                     >
                       <p className="text-sm text-white/80 truncate">{event.description}</p>
                       <span className="text-[10px] text-muted-foreground shrink-0 mt-0.5">{timeAgo(event.timestamp)}</span>

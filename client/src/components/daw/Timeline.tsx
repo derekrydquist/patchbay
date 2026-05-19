@@ -711,9 +711,9 @@ export function Timeline({ songId }: { songId: string }) {
         const recalced = recalcAllStarts(draft, sectionOrderRef.current);
         const finalTrack = recalced.find((t) => t.id === track.id)!;
 
-        fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' }).catch((err) =>
-          console.error('Failed to delete timeline clip:', err)
-        );
+        fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' })
+          .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
+          .catch((err) => console.error('Failed to delete timeline clip:', err));
         track.clips.filter((c) => c.id !== clipId).forEach((old) => {
           const updated = finalTrack.clips.find((c) => c.id === old.id);
           if (updated && updated.start !== old.start) {
@@ -884,7 +884,9 @@ export function Timeline({ songId }: { songId: string }) {
           src: clip.src ?? null, sectionName,
           trimStart: 0, trimEnd: null,
         }),
-      }).catch((err) => console.error('Failed to persist timeline clip:', err));
+      })
+        .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
+        .catch((err) => console.error('Failed to persist timeline clip:', err));
 
       targetTrack.clips.forEach((old) => {
         const updated = finalTrack.clips.find((c) => c.id === old.id);

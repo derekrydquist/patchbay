@@ -6,6 +6,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Download, FileAudio, Settings2, Loader2, Share2 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { useQueryClient } from '@tanstack/react-query';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import JSZip from 'jszip';
 
@@ -287,6 +288,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState<Progress | null>(null);
   const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   // When "Share to Review" is toggled on, suggest the same filename the export would use.
   useEffect(() => {
@@ -418,6 +420,8 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
           const uploadRes = await fetch(`/api/songs/${songId}/reviews`, { method: 'POST', body: formData });
           if (uploadRes.ok) {
             toast({ title: 'Shared to Review tab' });
+            queryClient.invalidateQueries({ queryKey: ['reviews', songId] });
+            queryClient.invalidateQueries({ queryKey: ['activity'] });
           }
         }
       }
