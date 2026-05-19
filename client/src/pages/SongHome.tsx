@@ -6,7 +6,6 @@ import {
   ArrowLeft, ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
   CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { AppHeader } from '@/components/AppHeader';
 import { cn } from '@/lib/utils';
 import { MediaBucket } from '@/components/daw/MediaBucket';
@@ -1017,7 +1016,8 @@ export default function SongHome() {
   const [, setLocation] = useLocation();
   const search = useSearch();
   const searchParams = new URLSearchParams(search);
-  const activeTab = searchParams.get('tab') === 'review' ? 'review' : 'overview';
+  const tabParam = searchParams.get('tab');
+  const activeTab = (tabParam === 'review' || tabParam === 'files') ? tabParam : 'overview';
   const autoReviewId = searchParams.get('reviewId');
   const autoCommentId = searchParams.get('commentId');
 
@@ -1100,7 +1100,7 @@ export default function SongHome() {
 
         {/* ── Tab bar ──────────────────────────────────────────────────────── */}
         <div className="flex gap-1 bg-white/[0.03] p-1 rounded-lg border border-white/5 self-start w-fit">
-          {(['overview', 'review'] as const).map(tab => (
+          {(['overview', 'files', 'review'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => {
@@ -1117,7 +1117,7 @@ export default function SongHome() {
                   : 'text-white/40 hover:text-white/70'
               )}
             >
-              {tab === 'overview' ? 'Overview' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
+              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Files' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
             </button>
           ))}
         </div>
@@ -1228,16 +1228,6 @@ export default function SongHome() {
               )}
             </section>
 
-            {/* File Browser */}
-            <section>
-              <h3 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Files</h3>
-              <div className="rounded-xl border border-white/5 overflow-hidden" style={{ height: 520 }}>
-                <DndContext>
-                  <MediaBucket songId={songId} />
-                </DndContext>
-              </div>
-            </section>
-
             {/* Activity */}
             {activityEvents.length > 0 && (
               <section>
@@ -1275,6 +1265,15 @@ export default function SongHome() {
               </section>
             )}
 
+          </div>
+        )}
+
+        {/* ── Files tab ────────────────────────────────────────────────────── */}
+        {activeTab === 'files' && (
+          <div className="rounded-xl border border-white/5 overflow-hidden" style={{ height: 520 }}>
+            <DndContext>
+              <MediaBucket songId={songId} />
+            </DndContext>
           </div>
         )}
 
