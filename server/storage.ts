@@ -76,7 +76,7 @@ export type BucketTrack = InstrumentTrack & {
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface ActivityEvent {
-  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change';
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'review-shared';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -793,6 +793,32 @@ export class SQLiteStorage implements IStorage {
           source: 'task',
         });
       }
+    }
+
+    // Reviews: review-shared
+    const reviewFilter = songId ? eq(songReviews.songId, songId) : undefined;
+    const reviewRows = db
+      .select({
+        reviewId: songReviews.id,
+        name: songReviews.name,
+        createdBy: songReviews.createdBy,
+        createdAt: songReviews.createdAt,
+        songId: songs.id,
+        songName: songs.name,
+      })
+      .from(songReviews)
+      .innerJoin(songs, eq(songReviews.songId, songs.id))
+      .where(reviewFilter)
+      .all();
+
+    for (const row of reviewRows) {
+      events.push({
+        type: 'review-shared',
+        description: `${row.createdBy} exported ${row.name} to Review`,
+        timestamp: new Date(row.createdAt).getTime(),
+        songId: row.songId,
+        songName: row.songName,
+      });
     }
 
     return events.sort((a, b) => b.timestamp - a.timestamp);

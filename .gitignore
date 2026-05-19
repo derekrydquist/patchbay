@@ -9,6 +9,7 @@ patchbay.db
 patchbay.db-shm
 patchbay.db-wal
 uploads/
+server/db.sqlite
 .local/server/db.sqlite
 .local/
 patchbay.db
