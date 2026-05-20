@@ -753,7 +753,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                           </button>
                         </div>
                       ) : (
-                        <p className={cn('text-sm text-white/80', isResolved && 'line-through text-white/40')}>
+                        <p className={cn('text-sm text-white/80 break-words', isResolved && 'line-through text-white/40')}>
                           {comment.text}
                         </p>
                       )}
@@ -878,7 +878,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                                   <button onClick={() => setEditingId(null)} className="text-[10px] font-bold text-white/30 hover:text-white/60 shrink-0">Cancel</button>
                                 </div>
                               ) : (
-                                <span className="text-sm text-white/80">{reply.text}</span>
+                                <span className="text-sm text-white/80 break-words">{reply.text}</span>
                               )}
                             </div>
                             {/* ••• menu for replies */}
