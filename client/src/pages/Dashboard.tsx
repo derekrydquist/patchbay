@@ -326,18 +326,20 @@ export default function Dashboard() {
       />
 
       <main className="max-w-5xl mx-auto px-6 py-12">
+
+        {/* Full-width heading above the grid */}
+        <div className="mb-8">
+          <h2 className="text-2xl font-heading font-black tracking-tight mb-1">Your Songs</h2>
+          <p className="text-sm text-muted-foreground">Select a project to open its workspace.</p>
+        </div>
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
           {/* Left column — Songs + Tasks */}
           <div ref={leftColRef} className="lg:col-span-2 space-y-12">
 
-            {/* Your Songs */}
+            {/* Song list */}
             <div>
-              <div className="mb-8">
-                <h2 className="text-2xl font-heading font-black tracking-tight mb-1">Your Songs</h2>
-                <p className="text-sm text-muted-foreground">Select a project to open its workspace.</p>
-              </div>
-
               {isLoading && (
                 <div className="text-sm text-muted-foreground">Loading…</div>
               )}
@@ -488,7 +490,7 @@ export default function Dashboard() {
           </div>
 
           {/* Right column — Activity sidebar */}
-          <div className="lg:col-span-1 pt-1.5">
+          <div className="lg:col-span-1">
             <h2 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Activity</h2>
             {activityEvents.length === 0 ? (
               <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
