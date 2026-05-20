@@ -488,7 +488,7 @@ export default function Dashboard() {
           </div>
 
           {/* Right column — Activity sidebar */}
-          <div className="lg:col-span-1">
+          <div className="lg:col-span-1 pt-1.5">
             <h2 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Activity</h2>
             {activityEvents.length === 0 ? (
               <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
