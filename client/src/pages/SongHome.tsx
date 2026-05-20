@@ -1,4 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DndContext } from '@dnd-kit/core';
@@ -145,8 +147,6 @@ function timeAgo(ms: number): string {
 
 // ─── Review helpers ───────────────────────────────────────────────────────────
 
-// TODO: replace with real auth user list
-const BAND_MEMBERS = ['Alex', 'Jamie', 'Sam', 'Jordan', 'Taylor', 'Riley'];
 
 function memberAvatarColor(name: string): string {
   const palette = ['#D4AF37', '#5C7A8E', '#7A5C8E', '#5C8E6A', '#8E7A5C', '#5C6A8E'];
@@ -165,7 +165,13 @@ function memberInitials(name: string): string {
 // ─── ReviewPlayer ─────────────────────────────────────────────────────────────
 
 function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoCommentId?: string | null }) {
+  const { user } = useAuth();
   const queryClient = useQueryClient();
+  const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
+    queryKey: ['users'],
+    queryFn: () => fetch('/api/users').then(r => r.json()),
+  });
+  const bandMembers = usersData.map(u => u.username);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
@@ -231,10 +237,10 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
   }, [autoCommentId, comments.length]);
 
   const mainMentionResults = mainMentionQuery !== null
-    ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(mainMentionQuery.toLowerCase()))
+    ? bandMembers.filter(m => m.toLowerCase().startsWith(mainMentionQuery.toLowerCase()))
     : [];
   const replyMentionResults = replyMentionQuery !== null
-    ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(replyMentionQuery.toLowerCase()))
+    ? bandMembers.filter(m => m.toLowerCase().startsWith(replyMentionQuery.toLowerCase()))
     : [];
 
   const resolvedCount = comments.filter(c => c.resolved).length;
@@ -526,7 +532,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       await fetch(`/api/reviews/${review.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: 'Jordan', text: newComment.trim(), timestamp: currentTime }), // TODO: replace with real auth user
+        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: newComment.trim(), timestamp: currentTime }),
       });
       setNewComment('');
       setMainMentionQuery(null);
@@ -546,7 +552,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       await fetch(`/api/reviews/${review.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: 'Jordan', text: replyText.trim(), timestamp: parentTimestamp, parentId }), // TODO: replace with real auth user
+        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: replyText.trim(), timestamp: parentTimestamp, parentId }),
       });
       setReplyText('');
       setReplyMentionQuery(null);
@@ -720,7 +726,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                           {memberInitials(comment.author)}
                         </div>
                         <span className="text-[11px] font-semibold text-white/50">
-                          {comment.author === 'Jordan' ? 'You' : comment.author}
+                          {comment.author === user?.username ? 'You' : capitalize(comment.author)}
                         </span>
                         {isResolved && <CheckCircle2 size={11} className="text-green-500/70" />}
                         {comment.editedAt && <span className="text-[9px] text-white/25 italic">(edited)</span>}
@@ -857,7 +863,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5 mb-0.5">
                                 <span className="text-[11px] font-semibold text-white/50">
-                                  {reply.author === 'Jordan' ? 'You' : reply.author}
+                                  {reply.author === user?.username ? 'You' : capitalize(reply.author)}
                                 </span>
                                 {reply.editedAt && <span className="text-[9px] text-white/25 italic">(edited)</span>}
                               </div>
@@ -914,9 +920,9 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                         <div className="flex items-center gap-2">
                           <div
                             className="w-4 h-4 rounded-full flex items-center justify-center text-[7px] font-bold shrink-0"
-                            style={{ backgroundColor: memberAvatarColor('Jordan'), color: '#000' }}
+                            style={{ backgroundColor: memberAvatarColor(user?.username ?? ''), color: '#000' }}
                           >
-                            {memberInitials('Jordan')}
+                            {memberInitials(user?.username ?? '?')}
                           </div>
                           <input
                             ref={replyInputRef}
@@ -924,7 +930,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                             value={replyText}
                             onChange={handleReplyChange}
                             onKeyDown={e => handleReplyKeyDown(e, comment.id)}
-                            placeholder={`Reply to ${comment.author === 'Jordan' ? 'yourself' : comment.author}…`}
+                            placeholder={`Reply to ${comment.author === user?.username ? 'yourself' : capitalize(comment.author)}…`}
                             className="flex-1 bg-transparent text-sm text-white placeholder:text-white/20 outline-none min-w-0"
                             autoFocus={replyCount === 0}
                           />
@@ -949,7 +955,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                                 <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0" style={{ backgroundColor: memberAvatarColor(name), color: '#000' }}>
                                   {memberInitials(name)}
                                 </div>
-                                <span className="text-sm text-white/80">{name}</span>
+                                <span className="text-sm text-white/80">{capitalize(name)}</span>
                               </div>
                             ))}
                           </div>
@@ -997,7 +1003,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                   <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0" style={{ backgroundColor: memberAvatarColor(name), color: '#000' }}>
                     {memberInitials(name)}
                   </div>
-                  <span className="text-sm text-white/80">{name}</span>
+                  <span className="text-sm text-white/80">{capitalize(name)}</span>
                 </div>
               ))}
             </div>
@@ -1012,6 +1018,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
 // ─── SongHome ─────────────────────────────────────────────────────────────────
 
 export default function SongHome() {
+  const { user } = useAuth();
   const { songId = 'patchbay-default' } = useParams<{ songId: string }>();
   const [, setLocation] = useLocation();
   const search = useSearch();
@@ -1049,8 +1056,7 @@ export default function SongHome() {
     refetchInterval: 10000,
   });
 
-  // TODO: replace with real auth user
-  const CURRENT_USER = 'Jordan';
+  const CURRENT_USER = user?.username ?? '';
 
   const activeTasks = [...tasks.filter(t =>
     (t.status === 'todo' || t.status === 'in-progress') && t.assignee === CURRENT_USER
@@ -1269,7 +1275,7 @@ export default function SongHome() {
                       }}
                       className="flex items-start justify-between px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer gap-3"
                     >
-                      <p className="text-sm text-white/80 leading-snug">{event.description}</p>
+                      <p className="text-sm text-white/80 leading-snug">{capitalize(event.description)}</p>
                       <span className="text-[10px] text-muted-foreground shrink-0 mt-0.5">{timeAgo(event.timestamp)}</span>
                     </div>
                   ))}

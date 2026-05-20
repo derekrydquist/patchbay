@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
 import { Music2, Settings, SlidersHorizontal, Bell, Users, UserCircle, AtSign, Clock, MessageSquare, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -8,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { ProfileSettingsModal } from '@/components/ProfileSettingsModal';
-import { cn } from '@/lib/utils';
+import { cn, capitalize } from '@/lib/utils';
 
 interface AppHeaderProps {
   /** Rendered before the logo — e.g. a back-navigation button */
@@ -33,6 +34,10 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [showProfileSettings, setShowProfileSettings] = useState(false);
   const [members, setMembers] = useState(INITIAL_MEMBERS);
+  const { user } = useAuth();
+  const userInitials = user
+    ? capitalize(user.username).slice(0, 2).toUpperCase()
+    : '??';
 
   const logoContent = (
     <div className="flex items-center gap-2.5">
@@ -103,7 +108,7 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
           </DropdownMenu>
 
           <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-primary/20 to-white/10 border border-white/10 flex items-center justify-center cursor-pointer hover:border-primary/50 transition-colors">
-            <span className="text-[10px] font-bold text-primary">JD</span>
+            <span className="text-[10px] font-bold text-primary">{userInitials}</span>
           </div>
         </div>
       </header>

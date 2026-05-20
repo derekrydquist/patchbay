@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect, KeyboardEvent } from 'react';
+import { useAuth } from '@/contexts/AuthContext';
+import { capitalize } from '@/lib/utils';
 import { useLocation } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Music2, Plus, Clock, Gauge, X, MoreHorizontal, Trash2, ChevronRight, Circle } from 'lucide-react';
@@ -218,6 +220,7 @@ function EditableTagList({ label, items, onChange }: EditableTagListProps) {
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
 
   const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
   const [newName, setNewName] = useState('');
@@ -253,8 +256,7 @@ export default function Dashboard() {
     setActivityHeight(leftColRef.current.getBoundingClientRect().height);
   }, [songs.length, allTasks.length]);
 
-  // TODO: replace with real auth user
-  const CURRENT_USER = 'Jordan';
+  const CURRENT_USER = user?.username ?? '';
 
   const activeTasks = sortByDueDate(
     allTasks.filter(t =>
@@ -524,7 +526,7 @@ export default function Dashboard() {
                   >
                     <div className="min-w-0">
                       <p className="text-sm text-white/80 group-hover:text-white transition-colors leading-snug">
-                        {event.description}
+                        {capitalize(event.description)}
                       </p>
                       <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{event.songName}</p>
                     </div>

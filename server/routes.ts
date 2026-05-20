@@ -3,6 +3,7 @@ import fs from "fs";
 import { randomUUID } from "crypto";
 import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
+import bcrypt from "bcrypt";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte } from "drizzle-orm";
@@ -74,6 +75,49 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  // ─── Users ──────────────────────────────────────────────────────────────────
+
+  app.get("/api/users", async (_req, res) => {
+    const allUsers = await storage.getUsers();
+    res.json(allUsers.map(u => ({ id: u.id, username: u.username })));
+  });
+
+  // ─── Auth ───────────────────────────────────────────────────────────────────
+
+  app.post("/api/auth/login", async (req, res) => {
+    const { username: rawUsername, password } = req.body as { username?: string; password?: string };
+    if (!rawUsername || !password) {
+      return res.status(400).json({ message: "Username and password are required." });
+    }
+    const username = rawUsername.toLowerCase();
+    const user = await storage.getUserByUsername(username);
+    if (!user) {
+      return res.status(401).json({ message: "Invalid username or password." });
+    }
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(401).json({ message: "Invalid username or password." });
+    }
+    req.session.userId = user.id;
+    const { password: _pw, ...safeUser } = user;
+    return res.json(safeUser);
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    req.session.destroy(() => {
+      res.json({ ok: true });
+    });
+  });
+
+  app.get("/api/auth/me", async (req, res) => {
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ message: "Not logged in." });
+    const user = await storage.getUser(userId);
+    if (!user) return res.status(401).json({ message: "Not logged in." });
+    const { password: _pw, ...safeUser } = user;
+    return res.json(safeUser);
+  });
 
   // ─── Songs ──────────────────────────────────────────────────────────────────
 
@@ -732,7 +776,9 @@ export async function registerRoutes(
           bitDepth: bitDepthStr,
           channels: channelsStr,
           uploadedDate: new Date().toISOString().split('T')[0],
-          uploadedBy: 'Jordan', // TODO: replace with real auth user
+          uploadedBy: req.session.userId
+            ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
+            : 'Unknown',
         });
       } catch (err) {
         console.error("[upload] error:", err);
@@ -967,7 +1013,9 @@ export async function registerRoutes(
         src: `/uploads/reviews/${filename}`,
         format,
         duration,
-        createdBy: "Jordan", // TODO: replace with real auth user
+        createdBy: req.session.userId
+          ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
+          : 'Unknown',
       });
       res.status(201).json(review);
     } catch (err) {

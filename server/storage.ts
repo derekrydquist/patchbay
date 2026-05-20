@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import bcrypt from "bcrypt";
 import { eq, asc, desc, inArray, count, and } from "drizzle-orm";
 import { db } from "./db";
 import {
@@ -96,9 +97,11 @@ export interface ActivityEvent {
 
 export interface IStorage {
   // Users
+  getUsers(): Promise<User[]>;
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  seedUsers(): Promise<void>;
 
   // Songs
   getSongs(): Promise<Song[]>;
@@ -188,6 +191,10 @@ export class SQLiteStorage implements IStorage {
 
   // ── Users ──────────────────────────────────────────────────────────────────
 
+  async getUsers(): Promise<User[]> {
+    return db.select().from(users).all();
+  }
+
   async getUser(id: string): Promise<User | undefined> {
     return db.select().from(users).where(eq(users.id, id)).get();
   }
@@ -200,6 +207,17 @@ export class SQLiteStorage implements IStorage {
     const user: User = { ...insertUser, id: randomUUID() };
     db.insert(users).values(user).run();
     return user;
+  }
+
+  async seedUsers(): Promise<void> {
+    const SEED_USERS = ["jordan", "alex", "jamie", "sam", "taylor", "riley"];
+    for (const username of SEED_USERS) {
+      const existing = db.select().from(users).where(eq(users.username, username)).get();
+      if (!existing) {
+        const hashed = await bcrypt.hash("password", 10);
+        db.insert(users).values({ id: randomUUID(), username, password: hashed }).run();
+      }
+    }
   }
 
   // ── Songs ──────────────────────────────────────────────────────────────────

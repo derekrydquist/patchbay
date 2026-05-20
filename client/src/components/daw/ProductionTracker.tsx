@@ -1,18 +1,17 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
+import { useAuth } from '@/contexts/AuthContext';
 import {
   CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, capitalize } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
 import type { ProductionTask, TaskComment } from '@shared/schema';
 
-
-const ASSIGNEES = ['Alex', 'Jamie', 'Sam', 'Jordan', 'Taylor', 'Riley'];
 
 const AVATAR_COLORS = [
   'bg-blue-500', 'bg-emerald-500', 'bg-purple-500', 'bg-red-500', 'bg-orange-500', 'bg-pink-500',
@@ -39,8 +38,9 @@ type BucketIdea = { id: string; sectionName: string; clips: BucketClip[] };
 type BucketTrack = { id: string; name: string; ideas: BucketIdea[] };
 
 function avatarColor(name: string): string {
-  const idx = ASSIGNEES.indexOf(name);
-  return idx >= 0 ? AVATAR_COLORS[idx] : 'bg-white/20';
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
 function parseLocalDate(dateStr: string): Date {
@@ -65,11 +65,15 @@ function CellModal({
   onOpenChange,
   task,
   songId,
+  currentUser,
+  assignees,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   task: ProductionTask;
   songId: string;
+  currentUser: string;
+  assignees: string[];
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -82,7 +86,7 @@ function CellModal({
   const noteInputRef = useRef<HTMLInputElement>(null);
 
   const mentionMatches = mentionQuery !== null
-    ? ASSIGNEES.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
+    ? assignees.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
     : [];
 
   const insertMention = (name: string) => {
@@ -134,7 +138,7 @@ function CellModal({
       const r = await fetch(`/api/production-tasks/${task.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...updates, author: 'Unknown' }),
+        body: JSON.stringify({ ...updates, author: currentUser }),
       });
       if (!r.ok) {
         const body = await r.json().catch(() => ({}));
@@ -180,7 +184,7 @@ function CellModal({
       fetch(`/api/production-tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: 'You', text }),
+        body: JSON.stringify({ author: currentUser, text }),
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
@@ -296,9 +300,9 @@ function CellModal({
                       {task.assignee ? (
                         <>
                           <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(task.assignee))}>
-                            {task.assignee.charAt(0)}
+                            {capitalize(task.assignee).charAt(0)}
                           </div>
-                          <span>{task.assignee}</span>
+                          <span>{capitalize(task.assignee)}</span>
                         </>
                       ) : (
                         <span className="text-muted-foreground">Unassigned</span>
@@ -309,13 +313,13 @@ function CellModal({
                     <SelectItem value="unassigned" className="text-xs text-muted-foreground focus:bg-white/5 focus:text-white">
                       Unassigned
                     </SelectItem>
-                    {ASSIGNEES.map(name => (
+                    {assignees.map(name => (
                       <SelectItem key={name} value={name} className="text-xs focus:bg-white/5 focus:text-white">
                         <div className="flex items-center gap-2">
                           <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white', avatarColor(name))}>
-                            {name.charAt(0)}
+                            {capitalize(name).charAt(0)}
                           </div>
-                          {name}
+                          {capitalize(name)}
                         </div>
                       </SelectItem>
                     ))}
@@ -374,9 +378,9 @@ function CellModal({
                             )}
                           >
                             <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(name))}>
-                              {name.charAt(0)}
+                              {capitalize(name).charAt(0)}
                             </div>
-                            @{name}
+                            @{capitalize(name)}
                           </button>
                         ))}
                       </div>
@@ -418,9 +422,9 @@ function CellModal({
                               <div className="flex justify-between items-center mb-1">
                                 <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
                                   <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white', avatarColor(c.author))}>
-                                    {c.author.charAt(0)}
+                                    {capitalize(c.author).charAt(0)}
                                   </div>
-                                  {c.author}
+                                  {capitalize(c.author)}
                                 </span>
                                 <div className="flex items-center gap-2">
                                   <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatTimestamp(c.timestamp)}</span>
@@ -476,6 +480,14 @@ function CellModal({
 export function ProductionTracker({ songId }: { songId: string }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const taskIdFromUrl = new URLSearchParams(window.location.search).get('taskId');
+  const { user } = useAuth();
+  const currentUser = user?.username ?? 'Unknown';
+
+  const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
+    queryKey: ['users'],
+    queryFn: () => fetch('/api/users').then(r => r.json()),
+  });
+  const assignees = usersData.map(u => u.username);
 
   const { data: song } = useQuery<{ name: string }>({
     queryKey: ['song', songId],
@@ -625,7 +637,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
                           <div className="flex items-center gap-1.5">
                             {task?.assignee && (
                               <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(task.assignee))}>
-                                {task.assignee.charAt(0)}
+                                {capitalize(task.assignee).charAt(0)}
                               </div>
                             )}
                             {task?.dueDate && status !== 'complete' && status !== 'will-not-play' && (
@@ -664,6 +676,8 @@ export function ProductionTracker({ songId }: { songId: string }) {
           onOpenChange={(v) => !v && setActiveTaskId(null)}
           task={activeTask}
           songId={songId}
+          currentUser={currentUser}
+          assignees={assignees}
         />
       )}
     </div>

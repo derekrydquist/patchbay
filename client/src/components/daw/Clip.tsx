@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
+import { useAuth } from '@/contexts/AuthContext';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { cn } from '@/lib/utils';
+import { cn, capitalize } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X } from 'lucide-react';
 import {
@@ -52,7 +53,6 @@ function avatarColor(name: string): string {
   return colors[name.charCodeAt(0) % colors.length];
 }
 
-const BAND_MEMBERS = ["Alex", "Jamie", "Sam", "Jordan", "Taylor", "Riley"];
 
 interface ClipProps {
   clip: Clip;
@@ -80,7 +80,14 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
 
 export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, bucketClipId, audioBuffer, songId = 'patchbay-default' }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const effectiveId = bucketClipId ?? clip.id;
+
+  const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
+    queryKey: ['users'],
+    queryFn: () => fetch('/api/users').then(r => r.json()),
+  });
+  const bandMembers = usersData.map(u => u.username);
 
   // ── Comment state ──────────────────────────────────────────────────────────
   const [newComment, setNewComment] = useState("");
@@ -178,7 +185,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
 
   // ── Mention autocomplete ────────────────────────────────────────────────────
   const mentionMatches = mentionQuery !== null
-    ? BAND_MEMBERS.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
+    ? bandMembers.filter((m: string) => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
     : [];
 
   const insertMention = (name: string) => {
@@ -243,7 +250,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       await fetch(`/api/clips/${effectiveId}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: 'Unknown', text: newComment.trim() }),
+        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: newComment.trim() }),
       });
       setNewComment("");
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
@@ -394,7 +401,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                 <div className="h-px flex-1 bg-primary/20" /> Asset Chain
               </h4>
               <div className="grid grid-cols-2 gap-3">
-                <InfoStat icon={User} label="Uploaded By" value={clip.metadata?.uploadedBy} />
+                <InfoStat icon={User} label="Uploaded By" value={clip.metadata?.uploadedBy ? capitalize(clip.metadata.uploadedBy) : undefined} />
                 <InfoStat icon={Calendar} label="Date Added" value={clip.metadata?.uploadedDate} mono />
                 <div className="col-span-2">
                   <InfoStat icon={Info} label="Original File Name" value={clip.metadata?.originalFileName} mono />
@@ -483,9 +490,9 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                               className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-black shrink-0"
                               style={{ backgroundColor: avatarColor(name) }}
                             >
-                              {name.charAt(0)}
+                              {capitalize(name).charAt(0)}
                             </div>
-                            @{name}
+                            @{capitalize(name)}
                           </button>
                         ))}
                       </div>
@@ -507,9 +514,9 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                 className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-black shrink-0"
                                 style={{ backgroundColor: avatarColor(c.author) }}
                               >
-                                {c.author.charAt(0).toUpperCase()}
+                                {capitalize(c.author).charAt(0)}
                               </div>
-                              <span className="text-[11px] font-bold text-primary">{c.author}</span>
+                              <span className="text-[11px] font-bold text-primary">{capitalize(c.author)}</span>
                               <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(c.timestamp)}</span>
                             </div>
                             <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
@@ -577,6 +584,7 @@ type ReplacementClip = {
 };
 
 export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1 }: ClipProps) {
+  const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
@@ -896,7 +904,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       const res = await fetch(`/api/timeline-clips/${clip.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isFinal: newIsFinal, author: 'Unknown' }),
+        body: JSON.stringify({ isFinal: newIsFinal, author: user?.username ?? 'Unknown' }),
       });
       if (!res.ok) {
         setIsFinal(!newIsFinal); // revert
@@ -1344,6 +1352,7 @@ interface BucketClipProps {
 import { useLocation } from 'wouter';
 
 export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, siblingClips = [], autoOpenInfo }: BucketClipProps) {
+  const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
@@ -1424,7 +1433,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       const res = await fetch(`/api/clips/${clip.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isFinal: newIsFinal, author: 'Unknown' }),
+        body: JSON.stringify({ isFinal: newIsFinal, author: user?.username ?? 'Unknown' }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed' }));

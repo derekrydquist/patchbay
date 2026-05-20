@@ -29,7 +29,7 @@ The frontend UI is largely designed and functional. The backend is fully built o
 routes, database persistence, file uploads, and audio playback all work end-to-end. The primary
 remaining work is:
 
-1. Implementing auth (user accounts, roles, permissions) — Passport.js is installed but not wired up
+1. Auth roles and permissions — basic session auth (login/logout, route guard, seeded users) is built; role-based access control (Band Leader / Band Member / Engineer) is not yet enforced
 2. Real-time collaboration — WebSockets (`ws`) are installed but not used yet
 3. Deployment infrastructure (file storage, hosting)
 
@@ -46,6 +46,7 @@ remaining work is:
 | Styling | Tailwind CSS v4 | |
 | Drag and drop | dnd-kit | Used on the Timeline |
 | Backend | Express 5 (Node.js) | |
+| Auth | express-session + bcrypt | Session cookies; bcrypt cost 10; `SessionData` augmented with `userId` |
 | ORM | Drizzle ORM | |
 | Database | SQLite (via better-sqlite3) | See Database section below |
 | Build tool | Vite 7 | |
@@ -60,9 +61,12 @@ patchbay/
 ├── client/                     # All frontend code
 │   ├── index.html
 │   └── src/
-│       ├── App.tsx             # Router — three main routes: / (Dashboard), /songs/:songId (SongHome), /songs/:songId/workspace (Workspace)
-│       ├── main.tsx            # React entry point
+│       ├── App.tsx             # Router — routes: /login (Login), / (Dashboard), /songs/:songId (SongHome), /songs/:songId/workspace (Workspace); all non-login routes wrapped in RequireAuth
+│       ├── main.tsx            # React entry point; wraps app in AuthProvider + QueryClientProvider
+│       ├── contexts/
+│       │   └── AuthContext.tsx # Auth context — AuthProvider, useAuth(); checks /api/auth/me on mount; exposes user, isLoading, login(), logout()
 │       ├── pages/
+│       │   ├── Login.tsx       # Login page — dark PatchBay-branded card, username/password inputs, Sign In button, error display
 │       │   ├── Dashboard.tsx   # Landing page — all songs, cross-song task list, activity feed
 │       │   ├── SongHome.tsx    # Per-song homepage — two-column Overview (Resume + Tasks left, Activity sidebar right), Files tab, Review tab
 │       │   ├── Workspace.tsx   # Main DAW view — timeline, buckets, production tracker
@@ -85,7 +89,7 @@ patchbay/
 │       └── lib/
 │           ├── daw-data.ts     # ALL mock data + TypeScript types — this is the data model
 │           ├── queryClient.ts  # TanStack Query configuration
-│           └── utils.ts        # Tailwind class utility (cn())
+│           └── utils.ts        # Utilities: cn() for Tailwind class merging; capitalize(s) for display-layer username capitalization
 ├── server/
 │   ├── index.ts        # Express server entry — sets up middleware, starts on port 3001
 │   ├── routes.ts       # API route registration — all implemented routes go here
@@ -440,7 +444,7 @@ When implementing auth or any permission checks, always consult this table.
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Files` / `Review`) synced to URL: `?tab=files` or `?tab=review`; Overview omits the param for a clean URL. `activeTab` is derived from `useSearch()` (wouter) on every render — `tabParam === 'review' \|\| tabParam === 'files'` or falls back to `'overview'`. `autoReviewId` and `autoCommentId` are also derived from `useSearch()`. The tab button only calls `setLocation`; no separate `setActiveTab` state exists. |
 | Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); trim-aware — uses `source.start(when, trimStartSecs, trimDuration)` so only the trimmed region renders; WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace`; fetches `/api/songs/:id` in parallel with the timeline to obtain the canonical `sections` array, then calls `recalcStartsForExport(tracks, sectionOrder)` — a module-level helper mirroring `computeSectionLayout`/`recalcAllStarts` from `Timeline.tsx` — and replaces each clip's DB `start` with the recomputed value before rendering; this is necessary because DB `start` values can be stale relative to live section geometry (e.g. after a trim change), and using them directly causes clips from different sections to overlap in the rendered output |
-| User auth / login | ❌ Not built | Passport.js is installed |
+| User auth / login | ✅ Done | Session-based auth with express-session + bcrypt; POST /api/auth/login, POST /api/auth/logout, GET /api/auth/me; six seeded users (jordan/alex/jamie/sam/taylor/riley, all with password "password"); AuthContext + useAuth() hook; RequireAuth route guard in App.tsx; /login page; real user wired into all author fields throughout client and server; role-based permissions not yet enforced |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload, cross-song tasks, activity feed — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ✅ Done | Hovering a `BucketClip` in `Clip.tsx` plays the clip at 0.7 volume via `new Audio(clip.src)`; mouse leave pauses and resets; unmount cleanup via `useEffect` return. Only `BucketClip` — `TimelineClip` is untouched. No-ops if `clip.src` is null. |
@@ -470,6 +474,15 @@ Always return JSON. Use standard HTTP status codes. Wrap errors as:
 ### Implemented endpoints
 
 ```
+GET    /api/users                        — list all users; returns [{ id, username }] (password omitted);
+                                           used by assignee dropdowns and @ mention autocomplete
+
+POST   /api/auth/login                   — body: { username, password }; normalizes username to lowercase;
+                                           validates against users table via bcrypt.compare; sets
+                                           req.session.userId on success; returns user object without password
+POST   /api/auth/logout                  — destroys the session; returns { ok: true }
+GET    /api/auth/me                      — returns current user from session (without password) or 401
+
 GET    /api/songs                        — list all songs (ordered by createdAt)
 GET    /api/songs/:id                    — get a song with nested tracks → ideas → clips
 POST   /api/songs                        — create a song; body: { name, bpm?, sections }
@@ -597,6 +610,87 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 
 ---
 
+## Auth Architecture
+
+Session-based auth using `express-session` (server-side sessions, cookie transport) and `bcrypt` (password hashing, cost 10).
+
+### Server setup (`server/index.ts`)
+
+```ts
+declare module "express-session" { interface SessionData { userId: string; } }
+app.use(session({
+  secret: "patchbay-secret",
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
+}));
+```
+
+`storage.seedUsers()` is called at startup. It inserts six users (jordan, alex, jamie, sam, taylor, riley — all lowercase, all with password "password") using `INSERT OR IGNORE` semantics — safe to call on every boot.
+
+### Auth routes (`server/routes.ts`)
+
+- **`POST /api/auth/login`** — normalizes `username` to lowercase, looks up via `storage.getUserByUsername`, compares password with `bcrypt.compare`, sets `req.session.userId`, returns user without password field.
+- **`POST /api/auth/logout`** — calls `req.session.destroy()`, returns `{ ok: true }`.
+- **`GET /api/auth/me`** — reads `req.session.userId`, fetches user from DB, returns without password; 401 if not logged in.
+- **`GET /api/users`** — returns all users as `[{ id, username }]` (no passwords); used by assignee dropdowns and @ mention autocomplete.
+
+### Username normalization
+
+Usernames are stored and queried **lowercase** (seeded in lowercase; incoming login normalized with `.toLowerCase()`). The display layer capitalizes with `capitalize(s)` from `client/src/lib/utils.ts` — a pure helper that uppercases the first character only. **Never capitalize stored values; only the display layer capitalizes.**
+
+`capitalize()` is applied at every username render site: assignee dropdowns, mention autocomplete, comment author labels, avatar initials, and activity feed descriptions (which embed usernames at the start of the string).
+
+### Client auth context (`client/src/contexts/AuthContext.tsx`)
+
+```ts
+interface AuthUser { id: string; username: string; }
+```
+
+`AuthProvider` checks `GET /api/auth/me` on mount to restore session state. Exposes:
+- `user: AuthUser | null` — null while loading or logged out
+- `isLoading: boolean` — true during the initial /api/auth/me fetch
+- `login(username, password): Promise<void>` — POSTs to /api/auth/login, sets user on success, throws with server message on failure
+- `logout(): Promise<void>` — POSTs to /api/auth/logout, clears user
+
+`useAuth()` hook throws if called outside `AuthProvider`.
+
+### Route guard (`client/src/App.tsx`)
+
+`RequireAuth` component: returns `null` while `isLoading`, renders `<Redirect to="/login" />` if `!user`, otherwise renders children. All non-login routes are wrapped in it. The `/login` route itself redirects to `/` if the user is already authenticated (`!isLoading && user`).
+
+### Seeded users
+
+| Username | Password |
+|---|---|
+| jordan | password |
+| alex | password |
+| jamie | password |
+| sam | password |
+| taylor | password |
+| riley | password |
+
+These are development fixtures. All usernames are lowercase. Passwords are bcrypt-hashed at cost 10 and are never returned by any API route.
+
+### Author fields throughout the app
+
+- **Client** — all components read `user?.username ?? 'Unknown'` from `useAuth()` and send it as `author` in POST/PATCH bodies (clip comments, task comments, review comments, mark-final actions).
+- **Server** — `uploadedBy` (file upload) and `createdBy` (review upload) are resolved server-side via `req.session.userId → storage.getUser()`, falling back to `'Unknown'`. Never trust `author` from the request body for these two fields.
+- **System comments** (status changes, clip-final events) use `author: 'System'` — never the request body author.
+
+### Dynamic user list
+
+`GET /api/users` is fetched via `useQuery(['users'])` in any component that needs a member list (assignee dropdowns in ProductionTracker, @ mention autocomplete in ClipInfoWindow and ReviewPlayer). TanStack Query deduplicates the request — all components share one network call per query key.
+
+The `avatarColor(name)` helper in ProductionTracker and Clip.tsx uses a djb2-style hash of the username string to deterministically pick a color from a fixed palette — works for any username, not just members of a hardcoded array:
+```ts
+let h = 0;
+for (let i = 0; i < name.length; i++) h = name.charCodeAt(i) + ((h << 5) - h);
+return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
+```
+
+---
+
 ## Naming & Branding
 
 - The app is called **PatchBay** — always, everywhere
@@ -613,7 +707,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 
 - **Do not edit files in `client/src/components/ui/`** — these are auto-generated shadcn components. If a UI component needs customization, wrap it rather than editing it directly.
 - **Do not use `any` TypeScript types** — use the interfaces defined in `daw-data.ts` or `shared/schema.ts`.
-- **Do not hardcode data in components** — mock data lives in `daw-data.ts`. Real data comes from API calls via TanStack Query. The `CURRENT_USER = 'Jordan'` constant in Dashboard, SongHome, and `storage.ts` is a deliberate temporary placeholder until auth is built — it is marked with `// TODO: replace with real auth user` and should not be replicated to new components.
+- **Do not hardcode data in components** — mock data lives in `daw-data.ts`. Real data comes from API calls via TanStack Query. Never hardcode a username or author — always read from `useAuth()` on the client or `req.session.userId` → `storage.getUser()` on the server.
 - **Do not break the existing UI** — the visual design is intentional and represents significant work. Backend changes should not require redesigning pages.
 - **Do not add a PostgreSQL dependency** — we are using SQLite. Do not add `pg`, `postgres`, or `neon` packages.
 - **Do not reintroduce free clip positioning** — clips on the timeline have no independent position. `clip.start` is always derived by `recalcAllStarts`, never set from a cursor pixel offset or stored as an arbitrary value. This is intentional.
@@ -891,7 +985,7 @@ In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete
 
 **Author field**
 
-All three PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `'Unknown'` for all patches — a uniform placeholder until auth is built. Do not use `task.assignee` as the author.
+All three PATCH routes accept an optional `author` field in `req.body`. It is destructured out before passing updates to storage (so it never reaches Drizzle's `.set()`). Used as the comment author, falling back to `"Unknown"`. The frontend sends `user.username` from `useAuth()` for all patches. Do not use `task.assignee` as the author.
 
 **Change comment logging (manual)**
 
@@ -1096,12 +1190,7 @@ useQuery({ queryKey: ['activity', songId], queryFn: () => fetch(`/api/songs/${so
 
 **TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers an activity event must call this in its `onSuccess` (or `.then()` for fire-and-forget fetches). Mutations that currently do this: file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track added, track deleted, review shared, review comment/reply posted.
 
-**Hardcoded current user:** `CURRENT_USER = 'Jordan'` appears in three places with `// TODO: replace with real auth user`:
-1. `server/storage.ts` — used to attribute file-added and status-change descriptions
-2. `client/src/pages/Dashboard.tsx` — used to filter the task list
-3. `client/src/pages/SongHome.tsx` — used to filter the task list
-
-When auth is built, replace all three with the real authenticated user.
+**Current user:** Auth is built — `CURRENT_USER` is no longer a hardcoded constant. On the client, `Dashboard.tsx` and `SongHome.tsx` read `user?.username ?? ''` from `useAuth()` to filter tasks to the logged-in user. On the server, `uploadedBy` and `createdBy` fields are resolved from `req.session.userId` → `storage.getUser()` in the upload and review-upload routes.
 
 **Deep-link navigation from activity rows:**
 
@@ -1333,8 +1422,7 @@ These are things that need a decision before being built:
    the internet? Options: local disk (simple, free, not scalable), AWS S3, Cloudflare R2.
    Start with local disk; plan to abstract behind a storage interface.
 
-2. **Authentication provider:** Passport.js with username/password is installed. Could also
-   use a third-party auth service (Clerk, Auth0) for easier Google/Apple sign-in.
+2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Six seeded users exist (jordan/alex/jamie/sam/taylor/riley). Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
 
 3. **Real-time vs async:** The spec calls for async collaboration to start. WebSockets (`ws`)
    is installed. Leave real-time for a future milestone.
