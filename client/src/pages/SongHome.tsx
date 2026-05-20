@@ -1039,15 +1039,15 @@ export default function SongHome() {
   });
 
   const [showAllTasks, setShowAllTasks] = useState(false);
-  const [showAllActivity, setShowAllActivity] = useState(false);
+  const [activityHeight, setActivityHeight] = useState<number | null>(null);
+  const leftColRef = useRef<HTMLDivElement>(null);
+  const hasMeasured = useRef(false);
 
   const { data: activityEvents = [] } = useQuery<ActivityEvent[]>({
     queryKey: ['activity', songId],
     queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()),
     refetchInterval: 10000,
   });
-
-  const visibleActivity = showAllActivity ? activityEvents : activityEvents.slice(0, 5);
 
   // TODO: replace with real auth user
   const CURRENT_USER = 'Jordan';
@@ -1062,6 +1062,14 @@ export default function SongHome() {
       return new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime();
     });
   const visibleTasks = showAllTasks ? activeTasks : activeTasks.slice(0, 5);
+
+  // Measure the left column height once after tasks first load, then never again.
+  // This captures the default collapsed state (Resume card + up to 5 tasks).
+  useEffect(() => {
+    if (hasMeasured.current || !leftColRef.current || tasks.length === 0) return;
+    hasMeasured.current = true;
+    setActivityHeight(leftColRef.current.getBoundingClientRect().height);
+  }, [tasks.length]);
 
   const goToWorkspace = (params?: Record<string, string>) => {
     const search = params ? '?' + new URLSearchParams(params).toString() : '';
@@ -1124,116 +1132,128 @@ export default function SongHome() {
 
         {/* ── Overview tab ─────────────────────────────────────────────────── */}
         {activeTab === 'overview' && (
-          <div className="space-y-10">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
-            {/* Resume Last Session */}
-            <div
-              onClick={() => goToWorkspace()}
-              className="bg-gradient-to-r from-[#181C26] to-[#181C26]/80 rounded-2xl p-6 border border-white/5 hover:border-primary/30 hover:shadow-[0_0_30px_rgba(212,175,55,0.08)] transition-all cursor-pointer group relative overflow-hidden"
-            >
-              <div className="absolute right-0 top-0 bottom-0 w-48 bg-gradient-to-l from-primary/5 to-transparent pointer-events-none" />
-              <div className="flex items-center justify-between relative z-10">
-                <div>
-                  <p className="text-[10px] font-bold tracking-widest uppercase text-primary mb-2">
-                    {lastSession ? 'Resume Last Session' : 'Get Started'}
-                  </p>
-                  <h2 className="text-2xl font-heading font-black tracking-tight mb-2 group-hover:text-primary transition-colors">
-                    {song?.name ?? '…'}
-                  </h2>
-                  {lastSession ? (
-                    <p className="text-sm text-muted-foreground font-medium">
-                      {lastSession.instrument}
-                      <span className="mx-2 text-white/20">•</span>
-                      {lastSession.section}
+            {/* Left column — Resume + Tasks */}
+            <div ref={leftColRef} className="lg:col-span-2 space-y-10">
+
+              {/* Resume Last Session */}
+              <div
+                onClick={() => goToWorkspace()}
+                className="bg-gradient-to-r from-[#181C26] to-[#181C26]/80 rounded-2xl p-6 border border-white/5 hover:border-primary/30 hover:shadow-[0_0_30px_rgba(212,175,55,0.08)] transition-all cursor-pointer group relative overflow-hidden"
+              >
+                <div className="absolute right-0 top-0 bottom-0 w-48 bg-gradient-to-l from-primary/5 to-transparent pointer-events-none" />
+                <div className="flex items-center justify-between relative z-10">
+                  <div>
+                    <p className="text-[10px] font-bold tracking-widest uppercase text-primary mb-2">
+                      {lastSession ? 'Resume Last Session' : 'Get Started'}
                     </p>
-                  ) : (
-                    <p className="text-sm text-muted-foreground font-medium">Open Workspace to get started</p>
-                  )}
-                </div>
-                <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 group-hover:bg-primary transition-all shrink-0">
-                  <ChevronRight size={24} className="text-primary group-hover:text-black" />
+                    <h2 className="text-2xl font-heading font-black tracking-tight mb-2 group-hover:text-primary transition-colors">
+                      {song?.name ?? '…'}
+                    </h2>
+                    {lastSession ? (
+                      <p className="text-sm text-muted-foreground font-medium">
+                        {lastSession.instrument}
+                        <span className="mx-2 text-white/20">•</span>
+                        {lastSession.section}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground font-medium">Open Workspace to get started</p>
+                    )}
+                  </div>
+                  <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 group-hover:bg-primary transition-all shrink-0">
+                    <ChevronRight size={24} className="text-primary group-hover:text-black" />
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* Your Tasks */}
-            <section>
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-white/80">Your Tasks</h3>
-                <button
-                  onClick={() => goToWorkspace({ tab: 'production' })}
-                  className="flex items-center gap-1.5 text-xs font-bold text-primary/70 hover:text-primary transition-colors"
-                >
-                  Go to Tracker <ArrowRight size={12} />
-                </button>
-              </div>
-
-              {activeTasks.length === 0 ? (
-                <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
-                  <p className="text-xs text-muted-foreground">No open tasks — everything is done or in the tracker.</p>
+              {/* Your Tasks */}
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xs font-bold uppercase tracking-widest text-white/80">Your Tasks</h3>
+                  <button
+                    onClick={() => goToWorkspace({ tab: 'production' })}
+                    className="flex items-center gap-1.5 text-xs font-bold text-primary/70 hover:text-primary transition-colors"
+                  >
+                    Go to Tracker <ArrowRight size={12} />
+                  </button>
                 </div>
-              ) : (
-                <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden divide-y divide-white/5">
-                  {visibleTasks.map(task => (
-                    <div
-                      key={task.id}
-                      onClick={() => goToWorkspace({ instrument: task.instrument, section: task.sectionName })}
-                      className="flex items-center justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer group"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <Circle
-                          size={14}
-                          className={cn(
-                            'shrink-0',
-                            task.status === 'in-progress' ? 'text-primary fill-primary/20' : 'text-white/20'
+
+                {activeTasks.length === 0 ? (
+                  <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
+                    <p className="text-xs text-muted-foreground">No open tasks — everything is done or in the tracker.</p>
+                  </div>
+                ) : (
+                  <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden divide-y divide-white/5">
+                    {visibleTasks.map(task => (
+                      <div
+                        key={task.id}
+                        onClick={() => goToWorkspace({ instrument: task.instrument, section: task.sectionName })}
+                        className="flex items-center justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer group"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <Circle
+                            size={14}
+                            className={cn(
+                              'shrink-0',
+                              task.status === 'in-progress' ? 'text-primary fill-primary/20' : 'text-white/20'
+                            )}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-white/90 group-hover:text-primary transition-colors truncate">
+                              {task.instrument}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground truncate">{task.sectionName}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3 shrink-0 ml-4">
+                          {task.dueDate && (
+                            <span className={cn(
+                              'flex items-center gap-1 text-[10px] font-medium',
+                              parseLocalDate(task.dueDate) < new Date() ? 'text-red-400' : 'text-muted-foreground'
+                            )}>
+                              <Clock size={10} className={parseLocalDate(task.dueDate) < new Date() ? 'text-red-400' : 'text-primary/40'} />
+                              {formatDueDate(task.dueDate)}
+                            </span>
                           )}
-                        />
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold text-white/90 group-hover:text-primary transition-colors truncate">
-                            {task.instrument}
-                          </p>
-                          <p className="text-[11px] text-muted-foreground truncate">{task.sectionName}</p>
+                          <span className={cn(
+                            'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border',
+                            task.status === 'in-progress'
+                              ? 'bg-primary/10 text-primary border-primary/20'
+                              : 'bg-white/5 text-white/50 border-white/10'
+                          )}>
+                            {STATUS_LABEL[task.status] ?? task.status}
+                          </span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3 shrink-0 ml-4">
-                        {task.dueDate && (
-                          <span className={cn(
-                            'flex items-center gap-1 text-[10px] font-medium',
-                            parseLocalDate(task.dueDate) < new Date() ? 'text-red-400' : 'text-muted-foreground'
-                          )}>
-                            <Clock size={10} className={parseLocalDate(task.dueDate) < new Date() ? 'text-red-400' : 'text-primary/40'} />
-                            {formatDueDate(task.dueDate)}
-                          </span>
-                        )}
-                        <span className={cn(
-                          'text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border',
-                          task.status === 'in-progress'
-                            ? 'bg-primary/10 text-primary border-primary/20'
-                            : 'bg-white/5 text-white/50 border-white/10'
-                        )}>
-                          {STATUS_LABEL[task.status] ?? task.status}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {activeTasks.length > 5 && (
-                <button
-                  onClick={() => setShowAllTasks(v => !v)}
-                  className="mt-2 w-full text-center text-xs font-bold text-white/40 hover:text-primary transition-colors py-2"
-                >
-                  {showAllTasks ? 'Show less' : `Show all ${activeTasks.length} tasks`}
-                </button>
-              )}
-            </section>
+                    ))}
+                  </div>
+                )}
+                {activeTasks.length > 5 && (
+                  <button
+                    onClick={() => setShowAllTasks(v => !v)}
+                    className="mt-2 w-full text-center text-xs font-bold text-white/40 hover:text-primary transition-colors py-2"
+                  >
+                    {showAllTasks ? 'Show less' : `Show all ${activeTasks.length} tasks`}
+                  </button>
+                )}
+              </section>
 
-            {/* Activity */}
-            {activityEvents.length > 0 && (
-              <section>
-                <h3 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Activity</h3>
-                <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden divide-y divide-white/5">
-                  {visibleActivity.map((event, i) => (
+            </div>
+
+            {/* Right column — Activity sidebar */}
+            <div className="lg:col-span-1">
+              <h3 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Activity</h3>
+              {activityEvents.length === 0 ? (
+                <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
+                  <p className="text-xs text-muted-foreground">No activity yet.</p>
+                </div>
+              ) : (
+                <div
+                  className="bg-[#181C26] rounded-xl border border-white/5 divide-y divide-white/5 overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent"
+                  style={{ height: activityHeight ?? 496, scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
+                >
+                  {activityEvents.map((event, i) => (
                     <div
                       key={i}
                       onClick={() => {
@@ -1247,23 +1267,15 @@ export default function SongHome() {
                         });
                         setLocation(url);
                       }}
-                      className="flex items-start justify-between px-5 py-3.5 hover:bg-white/[0.02] transition-colors cursor-pointer gap-4"
+                      className="flex items-start justify-between px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer gap-3"
                     >
-                      <p className="text-sm text-white/80 truncate">{event.description}</p>
+                      <p className="text-sm text-white/80 leading-snug">{event.description}</p>
                       <span className="text-[10px] text-muted-foreground shrink-0 mt-0.5">{timeAgo(event.timestamp)}</span>
                     </div>
                   ))}
                 </div>
-                {activityEvents.length > 5 && (
-                  <button
-                    onClick={() => setShowAllActivity(v => !v)}
-                    className="mt-2 w-full text-center text-xs font-bold text-white/40 hover:text-primary transition-colors py-2"
-                  >
-                    {showAllActivity ? 'Show less' : `Show ${activityEvents.length - 5} more`}
-                  </button>
-                )}
-              </section>
-            )}
+              )}
+            </div>
 
           </div>
         )}

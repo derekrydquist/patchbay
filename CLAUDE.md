@@ -64,7 +64,7 @@ patchbay/
 │       ├── main.tsx            # React entry point
 │       ├── pages/
 │       │   ├── Dashboard.tsx   # Landing page — all songs, cross-song task list, activity feed
-│       │   ├── SongHome.tsx    # Per-song homepage — resume last session, tasks, file browser, activity feed; three tabs: Overview / Files / Review
+│       │   ├── SongHome.tsx    # Per-song homepage — two-column Overview (Resume + Tasks left, Activity sidebar right), Files tab, Review tab
 │       │   ├── Workspace.tsx   # Main DAW view — timeline, buckets, production tracker
 │       │   ├── home.tsx        # (Unused / legacy — can be removed)
 │       │   └── not-found.tsx   # 404 page
@@ -425,7 +425,7 @@ When implementing auth or any permission checks, always consult this table.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard page | ✅ Done | Fully wired to real API; song cards styled as gradient banners (gold chevron, BPM badge); cross-song task list filtered to current user sorted by due date; activity feed polling every 10s |
-| SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; "Resume Last Session" banner (reads `localStorage`); task list filtered to current user with 5-task cap + expand; activity feed with deep-link navigation to workspace; Review tab — see Review Tab section below |
+| SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; Overview uses a two-column grid: left column (2/3) has Resume Last Session card + Your Tasks (5-task cap + expand), right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height is measured once on mount via `getBoundingClientRect()` on the left column ref after tasks first load — never updates when the task list expands; stacks vertically on mobile; Review tab — see Review Tab section below |
 | Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity |
 | Review tab (SongHome) | ✅ Done | Per-song review tab at `/songs/:songId?tab=review` — share exported mixes, SoundCloud-style waveform player with drag-to-scrub, avatar markers on waveform, timestamped comment threads with replies, resolve/edit/delete, @ mention autocomplete, Show Resolved toggle; see Review Tab architecture section below |
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
