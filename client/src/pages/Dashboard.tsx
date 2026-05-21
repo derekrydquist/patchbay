@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle } from 'lucide-react';
+import { Music2, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Dialog,
@@ -31,6 +31,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { AppHeader } from '@/components/AppHeader';
 
 const DEFAULT_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
@@ -239,6 +240,7 @@ export default function Dashboard() {
   });
 
   const [showAllTasks, setShowAllTasks] = useState(false);
+  const [songSearch, setSongSearch] = useState('');
   const [activityHeight, setActivityHeight] = useState<number | null>(null);
   const leftColRef = useRef<HTMLDivElement>(null);
   const hasMeasured = useRef(false);
@@ -370,77 +372,139 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {!isLoading && songs.length > 0 && (
-                <div className="flex flex-col gap-3">
-                  {songs.map(song => (
-                    <div
-                      key={song.id}
-                      onClick={() => setLocation(`/songs/${song.id}`)}
-                      className="bg-gradient-to-r from-[#181C26] to-[#181C26]/80 rounded-2xl p-6 border border-white/5 hover:border-primary/30 hover:shadow-[0_0_30px_rgba(212,175,55,0.08)] transition-all cursor-pointer group relative overflow-hidden"
-                    >
-                      <div className="absolute right-0 top-0 bottom-0 w-48 bg-gradient-to-l from-primary/5 to-transparent pointer-events-none" />
-                      <div className="flex items-center justify-between relative z-10">
-                        <div className="flex items-center gap-4 min-w-0">
-                          <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 flex items-center justify-center shrink-0 group-hover:border-primary/40 transition-colors">
-                            <Music2 size={18} className="text-primary/70" />
-                          </div>
-                          <div className="min-w-0">
-                            <h3 className="text-xl font-heading font-black tracking-tight text-white group-hover:text-primary transition-colors truncate mb-1">
-                              {song.name}
-                            </h3>
-                            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                              <Clock size={10} className="text-primary/40 shrink-0" />
-                              Updated {formatDate(song.updatedAt)}
-                            </div>
-                          </div>
+              {!isLoading && songs.length > 0 && (() => {
+                const recentSongs = songs.slice(0, 3);
+                const renderCard = (song: Song) => (
+                  <div
+                    key={song.id}
+                    onClick={() => setLocation(`/songs/${song.id}`)}
+                    className="bg-gradient-to-r from-[#181C26] to-[#181C26]/80 rounded-2xl p-6 border border-white/5 hover:border-primary/30 hover:shadow-[0_0_30px_rgba(212,175,55,0.08)] transition-all cursor-pointer group relative overflow-hidden"
+                  >
+                    <div className="absolute right-0 top-0 bottom-0 w-48 bg-gradient-to-l from-primary/5 to-transparent pointer-events-none" />
+                    <div className="flex items-center justify-between relative z-10">
+                      <div className="flex items-center gap-4 min-w-0">
+                        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 flex items-center justify-center shrink-0 group-hover:border-primary/40 transition-colors">
+                          <Music2 size={18} className="text-primary/70" />
                         </div>
-                        <div className="flex items-center gap-3 shrink-0 ml-4">
-                          {(() => {
-                            const counts = taskCountsBySong[song.id];
-                            if (!counts) return null;
-                            const allDone = counts.completed === counts.total;
-                            return (
-                              <div className={cn(
-                                'text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border',
-                                allDone
-                                  ? 'bg-primary/10 text-primary border-primary/20'
-                                  : 'bg-black/40 text-muted-foreground border-white/5'
-                              )}>
-                                {counts.completed}/{counts.total} tasks
-                              </div>
-                            );
-                          })()}
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                onClick={e => e.stopPropagation()}
-                                className="w-7 h-7 rounded flex items-center justify-center text-white/0 group-hover:text-white/40 hover:!text-white hover:bg-white/8 transition-colors"
-                              >
-                                <MoreHorizontal size={15} />
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent
-                              align="end"
-                              className="bg-[#0c0c0e] border-white/10 min-w-[130px]"
-                              onClick={e => e.stopPropagation()}
-                            >
-                              <DropdownMenuItem
-                                className="text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer text-xs flex items-center gap-2"
-                                onClick={e => { e.stopPropagation(); setSongToDelete(song); }}
-                              >
-                                <Trash2 size={13} /> Delete
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                          <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 group-hover:bg-primary transition-all">
-                            <ChevronRight size={20} className="text-primary group-hover:text-black" />
+                        <div className="min-w-0">
+                          <h3 className="text-xl font-heading font-black tracking-tight text-white group-hover:text-primary transition-colors truncate mb-1">
+                            {song.name}
+                          </h3>
+                          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                            <Clock size={10} className="text-primary/40 shrink-0" />
+                            Updated {formatDate(song.updatedAt)}
                           </div>
                         </div>
                       </div>
+                      <div className="flex items-center gap-3 shrink-0 ml-4">
+                        {(() => {
+                          const counts = taskCountsBySong[song.id];
+                          if (!counts) return null;
+                          const allDone = counts.completed === counts.total;
+                          return (
+                            <div className={cn(
+                              'text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border',
+                              allDone
+                                ? 'bg-primary/10 text-primary border-primary/20'
+                                : 'bg-black/40 text-muted-foreground border-white/5'
+                            )}>
+                              {counts.completed}/{counts.total} tasks
+                            </div>
+                          );
+                        })()}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              onClick={e => e.stopPropagation()}
+                              className="w-7 h-7 rounded flex items-center justify-center text-white/0 group-hover:text-white/40 hover:!text-white hover:bg-white/8 transition-colors"
+                            >
+                              <MoreHorizontal size={15} />
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="end"
+                            className="bg-[#0c0c0e] border-white/10 min-w-[130px]"
+                            onClick={e => e.stopPropagation()}
+                          >
+                            <DropdownMenuItem
+                              className="text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer text-xs flex items-center gap-2"
+                              onClick={e => { e.stopPropagation(); setSongToDelete(song); }}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 group-hover:bg-primary transition-all">
+                          <ChevronRight size={20} className="text-primary group-hover:text-black" />
+                        </div>
+                      </div>
                     </div>
-                  ))}
-                </div>
-              )}
+                  </div>
+                );
+                const filteredSongs = songs.filter(s =>
+                  s.name.toLowerCase().includes(songSearch.toLowerCase())
+                );
+                return (
+                  <div className="flex flex-col gap-3">
+                    {recentSongs.map(renderCard)}
+                    {songs.length > 3 && (
+                      <Popover onOpenChange={open => { if (!open) setSongSearch(''); }}>
+                        <PopoverTrigger asChild>
+                          <button className="self-start text-xs text-white/30 hover:text-white/55 transition-colors py-1">
+                            Show all songs ↓
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          sideOffset={8}
+                          className="w-80 p-0 bg-[#0c0c0e] border-white/10"
+                        >
+                          <div className="flex items-center gap-2 px-3 py-2.5 border-b border-white/8">
+                            <Search size={13} className="text-white/30 shrink-0" />
+                            <input
+                              autoFocus
+                              value={songSearch}
+                              onChange={e => setSongSearch(e.target.value)}
+                              placeholder="Search songs…"
+                              className="flex-1 bg-transparent text-sm text-white placeholder:text-white/25 outline-none"
+                            />
+                          </div>
+                          <div className="max-h-64 overflow-y-auto divide-y divide-white/5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                            {filteredSongs.length === 0 ? (
+                              <p className="px-4 py-5 text-xs text-white/30 text-center">No songs match.</p>
+                            ) : filteredSongs.map(song => {
+                              const counts = taskCountsBySong[song.id];
+                              const allDone = counts && counts.completed === counts.total;
+                              return (
+                                <button
+                                  key={song.id}
+                                  onClick={() => setLocation(`/songs/${song.id}`)}
+                                  className="w-full text-left flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.03] transition-colors group"
+                                >
+                                  <span className="text-sm text-white/70 group-hover:text-white transition-colors truncate">{song.name}</span>
+                                  <div className="flex items-center gap-2.5 shrink-0 ml-3">
+                                    {counts && (
+                                      <span className={cn(
+                                        'text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 rounded border',
+                                        allDone
+                                          ? 'bg-primary/10 text-primary border-primary/20'
+                                          : 'bg-black/40 text-white/30 border-white/5'
+                                      )}>
+                                        {counts.completed}/{counts.total}
+                                      </span>
+                                    )}
+                                    <ChevronRight size={13} className="text-white/20 group-hover:text-white/50 transition-colors" />
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Upcoming Tasks */}
