@@ -292,6 +292,7 @@ export default function Dashboard() {
     },
     onSuccess: (song) => {
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       closeModal();
       setLocation(`/songs/${song.id}`);
     },
@@ -339,10 +340,18 @@ export default function Dashboard() {
 
       <main className="max-w-5xl mx-auto px-6 py-12">
 
-        {/* Full-width heading above the grid */}
-        <div className="mb-8">
-          <h2 className="text-2xl font-heading font-black tracking-tight mb-1">Your Songs</h2>
-          <p className="text-sm text-muted-foreground">Select a project to open its workspace.</p>
+        {/* Personalized greeting */}
+        <div className="mb-10">
+          <h1 className="text-3xl font-heading font-black tracking-tight text-white">
+            {(() => {
+              const h = new Date().getHours();
+              const name = capitalize(user?.username ?? '');
+              if (h >= 5 && h < 12) return `Good morning, ${name}. Let's make something.`;
+              if (h >= 12 && h < 17) return `Good afternoon, ${name}. The band's waiting.`;
+              if (h >= 17 && h < 21) return `Good evening, ${name}. Let's get loud.`;
+              return `Hey ${name}. Those riffs aren't going to record themselves.`;
+            })()}
+          </h1>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
@@ -352,6 +361,8 @@ export default function Dashboard() {
 
             {/* Song list */}
             <div>
+              <h2 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-1">Your Songs</h2>
+              <p className="text-sm text-muted-foreground mb-4">Select a project to open its workspace.</p>
               {isLoading && (
                 <div className="text-sm text-muted-foreground">Loading…</div>
               )}
