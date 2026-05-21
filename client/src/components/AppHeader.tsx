@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { Music2, Settings, SlidersHorizontal, Bell, Users, UserCircle, AtSign, Clock, MessageSquare, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe } from 'lucide-react';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { useLocation } from 'wouter';
+import { Music2, Settings, SlidersHorizontal, Bell, Users, UserCircle, AtSign, Clock, MessageSquare, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe, LogOut } from 'lucide-react';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
@@ -34,10 +35,16 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [showProfileSettings, setShowProfileSettings] = useState(false);
   const [members, setMembers] = useState(INITIAL_MEMBERS);
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
+  const [, setLocation] = useLocation();
   const userInitials = user
     ? capitalize(user.username).slice(0, 2).toUpperCase()
     : '??';
+
+  const handleSignOut = async () => {
+    await logout();
+    setLocation('/login');
+  };
 
   const logoContent = (
     <div className="flex items-center gap-2.5">
@@ -73,6 +80,7 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
         <div className="flex items-center gap-3">
           {actionSlot}
 
+          {/* Workspace settings dropdown */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="rounded-full hover:bg-white/5">
@@ -80,7 +88,6 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56 bg-[#0c0c0e] border-white/10">
-              <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">Workspace</DropdownMenuLabel>
               <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
                 <SlidersHorizontal size={14} className="mr-2 text-primary/70" /> Project Settings
               </DropdownMenuItem>
@@ -90,8 +97,17 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
               >
                 <Users size={14} className="mr-2 text-primary/70" /> Manage Access
               </DropdownMenuItem>
-              <DropdownMenuSeparator className="bg-white/10" />
-              <DropdownMenuLabel className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold">User</DropdownMenuLabel>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* User avatar dropdown */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="w-8 h-8 rounded-full bg-gradient-to-tr from-primary/20 to-white/10 border border-white/10 flex items-center justify-center hover:border-primary/50 transition-colors focus:outline-none">
+                <span className="text-[10px] font-bold text-primary">{userInitials}</span>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 bg-[#0c0c0e] border-white/10">
               <DropdownMenuItem
                 className="text-xs focus:bg-white/5 focus:text-white cursor-pointer"
                 onClick={() => setShowNotifications(true)}
@@ -104,12 +120,15 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
               >
                 <UserCircle size={14} className="mr-2 text-primary/70" /> Profile Settings
               </DropdownMenuItem>
+              <DropdownMenuSeparator className="bg-white/10" />
+              <DropdownMenuItem
+                className="text-xs focus:bg-white/5 focus:text-red-400 cursor-pointer text-red-400/70"
+                onClick={handleSignOut}
+              >
+                <LogOut size={14} className="mr-2" /> Sign Out
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-
-          <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-primary/20 to-white/10 border border-white/10 flex items-center justify-center cursor-pointer hover:border-primary/50 transition-colors">
-            <span className="text-[10px] font-bold text-primary">{userInitials}</span>
-          </div>
         </div>
       </header>
 

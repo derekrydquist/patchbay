@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Plus, Clock, Gauge, X, MoreHorizontal, Trash2, ChevronRight, Circle } from 'lucide-react';
+import { Music2, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Dialog,
@@ -260,10 +260,18 @@ export default function Dashboard() {
 
   const activeTasks = sortByDueDate(
     allTasks.filter(t =>
-      (t.status === 'todo' || t.status === 'in-progress') && t.assignee === CURRENT_USER
+      (t.status === 'todo' || t.status === 'in-progress') &&
+      t.assignee.toLowerCase() === CURRENT_USER.toLowerCase()
     )
   );
   const visibleTasks = showAllTasks ? activeTasks : activeTasks.slice(0, 5);
+
+  const taskCountsBySong = allTasks.reduce<Record<string, { completed: number; total: number }>>((acc, t) => {
+    if (!acc[t.songId]) acc[t.songId] = { completed: 0, total: 0 };
+    acc[t.songId].total += 1;
+    if (t.status === 'complete') acc[t.songId].completed += 1;
+    return acc;
+  }, {});
 
   const createSong = useMutation({
     mutationFn: async () => {
@@ -387,12 +395,21 @@ export default function Dashboard() {
                           </div>
                         </div>
                         <div className="flex items-center gap-3 shrink-0 ml-4">
-                          {song.bpm && (
-                            <div className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-widest text-muted-foreground bg-black/40 px-2 py-1 rounded border border-white/5">
-                              <Gauge size={10} className="text-primary/60" />
-                              {song.bpm} BPM
-                            </div>
-                          )}
+                          {(() => {
+                            const counts = taskCountsBySong[song.id];
+                            if (!counts) return null;
+                            const allDone = counts.completed === counts.total;
+                            return (
+                              <div className={cn(
+                                'text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border',
+                                allDone
+                                  ? 'bg-primary/10 text-primary border-primary/20'
+                                  : 'bg-black/40 text-muted-foreground border-white/5'
+                              )}>
+                                {counts.completed}/{counts.total} tasks
+                              </div>
+                            );
+                          })()}
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <button
@@ -427,11 +444,16 @@ export default function Dashboard() {
             </div>
 
             {/* Upcoming Tasks */}
-            {activeTasks.length > 0 && (
-              <section>
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-xs font-bold uppercase tracking-widest text-white/80">Upcoming Tasks</h2>
+            <section>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xs font-bold uppercase tracking-widest text-white/80">Upcoming Tasks</h2>
+              </div>
+              {activeTasks.length === 0 ? (
+                <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
+                  <p className="text-xs text-muted-foreground">You have no upcoming tasks.</p>
                 </div>
+              ) : (
+                <>
                 <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden divide-y divide-white/5">
                   {visibleTasks.map(task => (
                     <div
@@ -486,8 +508,9 @@ export default function Dashboard() {
                     {showAllTasks ? 'Show less' : `Show all ${activeTasks.length} tasks`}
                   </button>
                 )}
-              </section>
-            )}
+                </>
+              )}
+            </section>
 
           </div>
 

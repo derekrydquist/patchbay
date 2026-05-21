@@ -799,6 +799,17 @@ export async function registerRoutes(
     res.json(tasks);
   });
 
+  app.get("/api/songs/:songId/task-counts", (req, res) => {
+    const rows = db
+      .select({ status: productionTasks.status })
+      .from(productionTasks)
+      .where(eq(productionTasks.songId, req.params.songId))
+      .all();
+    const total = rows.length;
+    const completed = rows.filter(r => r.status === 'complete').length;
+    res.json({ completed, total });
+  });
+
   app.get("/api/songs/:songId/task-comment-counts", async (req, res) => {
     const rows = db
       .select({ taskId: taskComments.taskId, count: count() })

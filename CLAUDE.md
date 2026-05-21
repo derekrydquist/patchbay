@@ -428,7 +428,7 @@ When implementing auth or any permission checks, always consult this table.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Dashboard page | ✅ Done | "Your Songs" heading + subtitle spans full width above the grid; below it a two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar whose header naturally top-aligns with the first song card; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, BPM badge); cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
+| Dashboard page | ✅ Done | "Your Songs" heading + subtitle spans full width above the grid; below it a two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar whose header naturally top-aligns with the first song card; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
 | SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; Overview uses a two-column grid: left column (2/3) has Resume Last Session card + Your Tasks (5-task cap + expand), right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height is measured once on mount via `getBoundingClientRect()` on the left column ref after tasks first load — never updates when the task list expands; stacks vertically on mobile; Review tab — see Review Tab section below |
 | Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity |
 | Review tab (SongHome) | ✅ Done | Per-song review tab at `/songs/:songId?tab=review` — share exported mixes, SoundCloud-style waveform player with drag-to-scrub, avatar markers on waveform, timestamped comment threads with replies, resolve/edit/delete, @ mention autocomplete, Show Resolved toggle; see Review Tab architecture section below |
@@ -558,6 +558,9 @@ DELETE /api/clip-comments/:id            — delete a comment → 204
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
 
+GET    /api/songs/:songId/task-counts             — returns { completed: number, total: number } for
+                                                     a song; counts rows in production_tasks by status
+
 GET    /api/songs/:songId/task-comment-counts      — map of { taskId → count } for human comments
                                                      (excludes author = "System" or "Unknown")
 
@@ -658,6 +661,15 @@ interface AuthUser { id: string; username: string; }
 ### Route guard (`client/src/App.tsx`)
 
 `RequireAuth` component: returns `null` while `isLoading`, renders `<Redirect to="/login" />` if `!user`, otherwise renders children. All non-login routes are wrapped in it. The `/login` route itself redirects to `/` if the user is already authenticated (`!isLoading && user`).
+
+### AppHeader dropdowns (`client/src/components/AppHeader.tsx`)
+
+The header right side has two separate dropdowns — no combined settings menu:
+
+- **Gear icon** → workspace dropdown: Project Settings, Manage Access. No section label.
+- **Avatar button** (shows user initials) → user dropdown: Notification Settings, Profile Settings, then a divider and Sign Out. Sign Out calls `logout()` from `useAuth()` then `setLocation('/login')` via wouter. No section label.
+
+This split keeps workspace-level actions (shared settings, collaborator access) separate from per-user actions (personal preferences, session management).
 
 ### Seeded users
 
