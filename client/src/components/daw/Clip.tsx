@@ -879,7 +879,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     }
   };
 
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, transform } = useDraggable({
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
@@ -1462,7 +1462,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
               duration={clip.duration}
               isFinal={isFinal}
               color={clip.color}
-              waveformHeight={32}
+              waveformHeight={20}
               className={cn(
                 isHighlighted && 'ring-1 ring-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]'
               )}
