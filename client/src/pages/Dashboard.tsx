@@ -3,7 +3,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Play, Pause, Upload, Info, MessageSquare, CheckCircle2 } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2 } from 'lucide-react';
+import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { cn } from '@/lib/utils';
 import {
   Dialog,
@@ -256,133 +257,6 @@ function EditableTagList({ label, items, onChange }: EditableTagListProps) {
   );
 }
 
-function ClipPlayer({ clip }: { clip: ApiClipDash }) {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const bufferRef = useRef<AudioBuffer | null>(null);
-
-  function formatDur(s: number) {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${sec.toString().padStart(2, '0')}`;
-  }
-
-  function drawWaveform(time: number) {
-    const canvas = canvasRef.current;
-    const buffer = bufferRef.current;
-    if (!canvas || !buffer) return;
-    const w = canvas.offsetWidth;
-    const h = canvas.offsetHeight;
-    if (!w || !h) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = w * dpr;
-    canvas.height = h * dpr;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.scale(dpr, dpr);
-    const data = buffer.getChannelData(0);
-    const totalSamples = data.length;
-    const progress = clip.duration > 0 ? time / clip.duration : 0;
-    for (let x = 0; x < w; x++) {
-      const start = Math.floor((x / w) * totalSamples);
-      const end = Math.min(Math.floor(((x + 1) / w) * totalSamples), totalSamples);
-      let max = 0;
-      for (let i = start; i < end; i++) {
-        const abs = Math.abs(data[i]);
-        if (abs > max) max = abs;
-      }
-      const barH = Math.max(1, max * h * 0.9);
-      const midY = h / 2;
-      ctx.fillStyle = x / w < progress ? 'rgba(212,175,55,0.85)' : 'rgba(255,255,255,0.2)';
-      ctx.fillRect(x, midY - barH / 2, 1, barH);
-    }
-  }
-
-  useEffect(() => {
-    if (!clip.src) return;
-    let cancelled = false;
-    fetch(clip.src)
-      .then(r => r.arrayBuffer())
-      .then(ab => {
-        if (cancelled) return null;
-        const actx = new AudioContext();
-        return actx.decodeAudioData(ab).then(buf => { actx.close(); return buf; });
-      })
-      .then(buf => {
-        if (cancelled || !buf) return;
-        bufferRef.current = buf;
-        drawWaveform(0);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [clip.src]);
-
-  useEffect(() => {
-    drawWaveform(currentTime);
-  }, [currentTime]);
-
-  useEffect(() => {
-    if (!clip.src) return;
-    const audio = new Audio(clip.src);
-    audio.addEventListener('timeupdate', () => setCurrentTime(audio.currentTime));
-    audio.addEventListener('ended', () => { setIsPlaying(false); setCurrentTime(0); audio.currentTime = 0; });
-    audioRef.current = audio;
-    return () => { audio.pause(); audioRef.current = null; };
-  }, [clip.src]);
-
-  const toggle = () => {
-    const audio = audioRef.current;
-    if (!audio || !clip.src) return;
-    if (isPlaying) {
-      audio.pause();
-      setIsPlaying(false);
-    } else {
-      audio.play().catch(() => {});
-      setIsPlaying(true);
-    }
-  };
-
-  const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const audio = audioRef.current;
-    if (!audio || !clip.src) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const fraction = (e.clientX - rect.left) / rect.width;
-    const newTime = fraction * clip.duration;
-    audio.currentTime = newTime;
-    setCurrentTime(newTime);
-  };
-
-  return (
-    <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/[0.03] border border-white/5 hover:bg-white/[0.05] transition-colors">
-      <button
-        onClick={toggle}
-        className="w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 hover:bg-primary/30 transition-colors"
-      >
-        {isPlaying
-          ? <Pause size={11} className="text-primary" />
-          : <Play size={11} className="text-primary ml-0.5" />}
-      </button>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className={cn('text-xs font-medium truncate', clip.isFinal ? 'text-primary' : 'text-white/80')}>
-            {clip.name}
-            {clip.isFinal && (
-              <span className="ml-1.5 text-[9px] text-primary/60 font-bold uppercase tracking-wider">Final</span>
-            )}
-          </span>
-          <span className="text-[10px] text-white/30 ml-2 shrink-0 font-mono">{formatDur(currentTime)}</span>
-        </div>
-        <canvas
-          ref={canvasRef}
-          className="w-full h-5 rounded cursor-pointer"
-          onClick={handleCanvasClick}
-        />
-      </div>
-    </div>
-  );
-}
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
@@ -1410,7 +1284,7 @@ export default function Dashboard() {
                       {selectedSection.clips.map(clip => (
                         <ContextMenu key={clip.id}>
                           <ContextMenuTrigger asChild>
-                            <div><ClipPlayer clip={clip} /></div>
+                            <div><WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} /></div>
                           </ContextMenuTrigger>
                           <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
                             <ContextMenuItem
@@ -1636,7 +1510,7 @@ export default function Dashboard() {
                         {clips.map(clip => (
                           <ContextMenu key={clip.id}>
                             <ContextMenuTrigger asChild>
-                              <div><ClipPlayer clip={clip} /></div>
+                              <div><WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} /></div>
                             </ContextMenuTrigger>
                             <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
                               <ContextMenuItem

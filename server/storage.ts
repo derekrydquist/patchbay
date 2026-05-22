@@ -436,7 +436,7 @@ export class SQLiteStorage implements IStorage {
       ? db
           .select()
           .from(clips)
-          .where(inArray(clips.ideaId, allIdeas.map((i) => i.id)))
+          .where(and(inArray(clips.ideaId, allIdeas.map((i) => i.id)), eq(clips.active, true)))
           .all()
       : [];
 
@@ -545,6 +545,7 @@ export class SQLiteStorage implements IStorage {
     const clip: Clip = {
       start: 0,
       isFinal: false,
+      active: true,
       src: null,
       sectionName: null,
       metadata: null,

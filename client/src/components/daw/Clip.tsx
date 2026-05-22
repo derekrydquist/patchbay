@@ -5,7 +5,8 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus } from 'lucide-react';
+import { WaveformPlayerCard } from './WaveformPlayerCard';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -1359,11 +1360,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   const [comments, setComments] = useState(clip.comments || []);
   const [showChangeFinalConfirm, setShowChangeFinalConfirm] = useState(false);
   const [location] = useLocation();
-
   const [isHighlighted, setIsHighlighted] = useState(false);
-  const [contextMenuOpen, setContextMenuOpen] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const isRightClicking = useRef(false);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -1377,32 +1374,6 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     }
   }, [autoOpenInfo]);
 
-  const handleMouseEnter = () => {
-    if (!clip.src || isRightClicking.current || contextMenuOpen) return;
-    const audio = new Audio(clip.src);
-    audio.volume = 0.7;
-    audioRef.current = audio;
-    audio.play().catch(() => {});
-  };
-
-  const handleMouseLeave = () => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
-      audioRef.current = null;
-    }
-    setTimeout(() => { isRightClicking.current = false; }, 100);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-    };
-  }, []);
-
   useEffect(() => {
     const searchParams = new URLSearchParams(window.location.search);
     const urlFile = searchParams.get('file');
@@ -1413,7 +1384,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     }
   }, [location, clip.id]);
 
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, transform } = useDraggable({
     id: `bucket-${clip.id}`,
     data: { clip: { ...clip, isFinal, comments }, type: 'bucket-clip', trackId },
   });
@@ -1422,13 +1393,10 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     setComments(newComments);
   };
 
-  // Fixed drag style - ensures transform is applied correctly for dnd-kit
-  const style = {
-    transform: CSS.Translate.toString(transform),
-  };
+  const style = { transform: CSS.Translate.toString(transform) };
 
   const executeMark = async (newIsFinal: boolean) => {
-    setIsFinal(newIsFinal); // optimistic update
+    setIsFinal(newIsFinal);
     try {
       const res = await fetch(`/api/clips/${clip.id}`, {
         method: 'PATCH',
@@ -1438,7 +1406,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed' }));
         console.error('[markFinal] error:', err.message);
-        setIsFinal(!newIsFinal); // revert on failure
+        setIsFinal(!newIsFinal);
         return;
       }
       queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
@@ -1448,7 +1416,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch (err) {
       console.error('[markFinal] network error:', err);
-      setIsFinal(!newIsFinal); // revert on failure
+      setIsFinal(!newIsFinal);
     }
   };
 
@@ -1464,90 +1432,78 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     executeMark(newIsFinal);
   };
 
-  const handleAddClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    onAddToTimeline?.(clip);
+  const handleRemove = async () => {
+    try {
+      await fetch(`/api/clips/${clip.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: false }),
+      });
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+    } catch (err) {
+      console.error('[removeClip] error:', err);
+    }
   };
 
   return (
     <>
-      <div
-        ref={setNodeRef}
-        style={style}
-        {...listeners}
-        {...attributes}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
-        onContextMenu={() => { isRightClicking.current = true; }}
-        className={cn(
-          "p-2 py-1.5 rounded-md border border-border bg-card hover:bg-accent/50 flex items-center gap-3 transition-all duration-500 group h-10 w-full relative overflow-hidden select-none touch-none cursor-grab active:cursor-grabbing",
-          isFinal && "border-primary/50 bg-primary/5 shadow-[0_0_15px_rgba(212,175,55,0.1)]",
-          isHighlighted && "bg-primary/20 border-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]"
-        )}
-      >
-        <div 
-          className="w-1.5 h-full rounded-full shrink-0" 
-          style={{ backgroundColor: clip.color || 'hsl(var(--primary))' }}
-        />
-        <div className="flex flex-1 items-center justify-between min-w-0 pointer-events-none select-none">
-          <div className="flex items-center gap-2 truncate">
-            <span className={cn(
-              "text-xs font-bold truncate transition-colors tracking-tight",
-              isFinal ? "text-primary" : "text-white group-hover:text-primary"
-            )}>{clip.name}</span>
-            {isFinal && <CheckCircle2 size={10} className="text-primary" />}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={setNodeRef}
+            style={style}
+            {...listeners}
+            {...attributes}
+            className="select-none touch-none cursor-grab active:cursor-grabbing"
+          >
+            <WaveformPlayerCard
+              src={clip.src}
+              name={clip.name}
+              duration={clip.duration}
+              isFinal={isFinal}
+              color={clip.color}
+              waveformHeight={32}
+              className={cn(
+                isHighlighted && 'ring-1 ring-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]'
+              )}
+            />
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-2">
-            {clip.comments && clip.comments.length > 0 && <MessageSquare size={10} className="text-primary/60" />}
-            <span className="text-[10px] text-muted-foreground uppercase font-mono tracking-tighter">{clip.duration}s</span>
-          </div>
-        </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="bg-popover border-border min-w-[160px]">
+          <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Info size={14} className="text-primary" /> More Info
+          </ContextMenuItem>
+          <ContextMenuItem onClick={() => { setShowInfo(true); setFocusNotes(true); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <MessageSquare size={14} className="text-primary" /> Add Note
+          </ContextMenuItem>
+          <ContextMenuItem onClick={(e) => { e.stopPropagation(); handleToggleFinal(); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
+            {isFinal ? "Unmark Final" : "Mark as Final"}
+          </ContextMenuItem>
+          <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddToTimeline?.(clip); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Plus size={14} className="text-primary" /> Add to Timeline
+          </ContextMenuItem>
+          <Separator className="my-1 bg-border/50" />
+          <ContextMenuItem onClick={(e) => {
+            e.stopPropagation();
+            const link = document.createElement('a');
+            link.href = clip.src || '#';
+            link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+            <Download size={14} className="text-primary" /> Download
+          </ContextMenuItem>
+          <ContextMenuItem
+            onClick={(e) => { e.stopPropagation(); handleRemove(); }}
+            className="gap-2 text-xs uppercase tracking-wider font-semibold text-red-400 focus:text-red-400 focus:bg-red-400/10"
+          >
+            <Minus size={14} /> Remove
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
 
-        <ContextMenu onOpenChange={(open) => {
-            setContextMenuOpen(open);
-            if (open && audioRef.current) {
-              audioRef.current.pause();
-              audioRef.current.currentTime = 0;
-              audioRef.current = null;
-            }
-          }}>
-          <ContextMenuTrigger 
-            className="absolute inset-0 z-0" 
-            onMouseDown={(e) => {
-              // Ensure context menu doesn't steal the drag event
-              if (e.button !== 2) e.stopPropagation();
-            }}
-          />
-          <ContextMenuContent className="bg-popover border-border min-w-[160px]">
-            <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <Info size={14} className="text-primary" /> More Info
-            </ContextMenuItem>
-            <ContextMenuItem onClick={() => { setShowInfo(true); setFocusNotes(true); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <MessageSquare size={14} className="text-primary" /> Add Note
-            </ContextMenuItem>
-            <ContextMenuItem onClick={(e) => { e.stopPropagation(); handleToggleFinal(); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
-              {isFinal ? "Unmark Final" : "Mark as Final"}
-            </ContextMenuItem>
-            <ContextMenuItem onClick={handleAddClick} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <Plus size={14} className="text-primary" /> Add to Timeline
-            </ContextMenuItem>
-            <Separator className="my-1 bg-border/50" />
-            <ContextMenuItem onClick={(e) => {
-              e.stopPropagation();
-              const link = document.createElement('a');
-              link.href = clip.src || '#'; // In a real app this would be the actual audio URL
-              link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
-              document.body.appendChild(link);
-              link.click();
-              document.body.removeChild(link);
-            }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-              <Download size={14} className="text-primary" /> Download
-            </ContextMenuItem>
-          </ContextMenuContent>
-        </ContextMenu>
-      </div>
-      
       <ClipInfoWindow
         clip={{...clip, isFinal, comments}}
         open={showInfo}

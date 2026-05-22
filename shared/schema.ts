@@ -97,6 +97,7 @@ export const clips = sqliteTable("clips", {
   duration: real("duration").notNull(),
   src: text("src"),
   isFinal: integer("is_final", { mode: "boolean" }).notNull().default(false),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
   sectionName: text("section_name"),
   metadata: text("metadata", { mode: "json" }).$type<ClipMetadata>(),
   createdAt: text("created_at").notNull(),
