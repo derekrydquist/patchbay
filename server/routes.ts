@@ -17,6 +17,7 @@ import {
   insertClipSchema,
   insertProductionTaskSchema,
   insertTaskCommentSchema,
+  songs,
   ideas,
   clips,
   timelineClips,
@@ -154,11 +155,12 @@ export async function registerRoutes(
       : DEFAULT_INSTRUMENTS;
 
     const bodyForSchema = { ...req.body };
-    if (!Array.isArray(bodyForSchema.sections) || bodyForSchema.sections.length === 0) {
+    if (bodyForSchema.type !== 'idea' && (!Array.isArray(bodyForSchema.sections) || bodyForSchema.sections.length === 0)) {
       bodyForSchema.sections = DEFAULT_SECTIONS;
     }
 
     const parsed = insertSongSchema.safeParse(bodyForSchema);
+
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
@@ -800,6 +802,10 @@ export async function registerRoutes(
   });
 
   app.get("/api/songs/:songId/task-counts", (req, res) => {
+    const song = db.select({ type: songs.type }).from(songs).where(eq(songs.id, req.params.songId)).get();
+    if (song?.type === "idea") {
+      return res.json({ completed: 0, total: 0, applicable: false });
+    }
     const rows = db
       .select({ status: productionTasks.status })
       .from(productionTasks)
@@ -807,7 +813,7 @@ export async function registerRoutes(
       .all();
     const total = rows.length;
     const completed = rows.filter(r => r.status === 'complete').length;
-    res.json({ completed, total });
+    res.json({ completed, total, applicable: true });
   });
 
   app.get("/api/songs/:songId/task-comment-counts", async (req, res) => {

@@ -25,6 +25,7 @@ export const songs = sqliteTable("songs", {
   name: text("name").notNull(),
   bpm: integer("bpm"),
   sections: text("sections", { mode: "json" }).$type<string[]>().notNull(),
+  type: text("type", { enum: ["song", "idea"] }).notNull().default("song"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
