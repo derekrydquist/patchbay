@@ -429,15 +429,15 @@ When implementing auth or any permission checks, always consult this table.
 | Feature | Status | Notes |
 |---|---|---|
 | Dashboard page | ✅ Done | Personalized time-of-day greeting at the top (`Good morning/afternoon/evening/night, {name}. …`) using `useAuth()` + current hour; "Your Songs" section label below it in the same muted uppercase style as "Upcoming Tasks" with a subtitle; song list capped at 3 most recently updated — a "Show all songs ↓" text button below the cards opens a shadcn `Popover` (overlays content, no layout shift) listing all songs with task count pill and navigation arrow; popover has a search input that filters songs by name in real time; closing the popover resets the search; **both the 3 recent cards and the popover filter to `type === 'song' \|\| !s.type` — `type='idea'` rows are excluded entirely**; `realSongs` is the filtered base array; `recentSongs = realSongs.slice(0, 3)`; `filteredSongs = realSongs.filter(by search)`; popover trigger guard uses `realSongs.length > 3`; two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); **task count pill caveat** — `taskCountsBySong` is derived from the `['all-tasks']` cache; `createSong.onSuccess` must invalidate both `['songs']` and `['all-tasks']` so the pill appears immediately after song creation without a page refresh; Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
-| Dashboard Files tab | ✅ Done | Master file browser on Dashboard with **Songs / Ideas** filter toggle. **Songs mode** — 4-column browser: Songs → Instruments → Sections → Files; hover-reveal `+` on SONGS header (`group/songsheader`) creates a new song inline (`addSongInlineMutation` — POSTs `{ name, type: 'song', sections: DEFAULT_SECTIONS, instruments: DEFAULT_INSTRUMENTS }`), auto-selects the returned song in Column 1; hover-reveal `+` on INSTRUMENTS header creates a new instrument track (`POST /api/songs/:id/tracks`), auto-selects via `pendingInstrumentIdRef`; hover-reveal `+` on SECTIONS header adds a section to all tracks simultaneously (`Promise.all` over `POST /api/tracks/:id/ideas`), auto-selects via `pendingSectionNameRef`. **Ideas mode** — 3-column browser: Ideas → Parts → Files; an "Idea" is a `songs` row with `type='idea'`; its instrument_tracks are called "Parts"; files go into the first `ideas` sub-bucket of the selected Part; hover-reveal `+` on IDEAS header creates a new idea (`POST /api/songs` with `type: 'idea'`), auto-selected after creation; hover-reveal `+` on PARTS header creates a new part (`POST /api/songs/:id/tracks` + `POST /api/tracks/:id/ideas` with sectionName = part name). **Common**: all column header `+` buttons use the `group/Xheader` hover-reveal pattern with an inline input (Enter/✓ to confirm, Escape/× to cancel, blur-to-dismiss when empty); for SONGS and IDEAS columns the new item is returned from the mutationFn and passed directly to `setSelectedFile` in `onSuccess` — no ref sentinel needed; FILES column header has a fixed `h-8` height; FILES column supports upload button + drag-and-drop; right-click on a clip row opens More Info (reuses `ClipInfoWindow` from `Clip.tsx`); Lightbulb icon in IDEAS column is filled solid (`fill="currentColor"`) when `idea.hasFiles === true` (annotated from `GET /api/songs`); sort: Ideas list by `createdAt` desc, Songs list by `updatedAt` desc; `seedSong` is skipped for `type='idea'` songs so new ideas start with no instrument tracks. **Activity invalidation**: all creation mutations (`addSongInlineMutation`, `addIdeaInlineMutation`, `addPartMutation`, `addInstrumentSongMutation`, `addSectionSongMutation`, and the modal `createIdea`) call `queryClient.invalidateQueries({ queryKey: ['activity'] })` in `onSuccess`. **URL param auto-selection**: `useSearch()` from wouter is read reactively; a `useEffect([songs, search])` fires when songs are available and the search string changes — reads `?tab=files&filter=songs&songId=X` or `?tab=files&filter=ideas&ideaId=X`, sets `activeTab`, `filesFilter`, and auto-selects the matching `Song` from the `songs` array; `appliedSearchRef` stores the last applied search string to prevent double-firing on the same navigation |
+| Dashboard Files tab | ✅ Done | Master file browser on Dashboard with **Songs / Ideas** filter toggle. **Songs mode** — 4-column browser: Songs → Instruments → Sections → Files; hover-reveal `+` on SONGS header (`group/songsheader`) creates a new song inline (`addSongInlineMutation` — POSTs `{ name, type: 'song', sections: DEFAULT_SECTIONS, instruments: DEFAULT_INSTRUMENTS }`), auto-selects the returned song in Column 1; hover-reveal `+` on INSTRUMENTS header creates a new instrument track (`POST /api/songs/:id/tracks`), auto-selects via `pendingInstrumentIdRef`; hover-reveal `+` on SECTIONS header adds a section to all tracks simultaneously (`Promise.all` over `POST /api/tracks/:id/ideas`), auto-selects via `pendingSectionNameRef`. **Ideas mode** — 3-column browser: Ideas → Parts → Files; an "Idea" is a `songs` row with `type='idea'`; its instrument_tracks are called "Parts"; files go into the first `ideas` sub-bucket of the selected Part; hover-reveal `+` on IDEAS header creates a new idea (`POST /api/songs` with `type: 'idea'`), auto-selected after creation; hover-reveal `+` on PARTS header creates a new part (`POST /api/songs/:id/tracks` + `POST /api/tracks/:id/ideas` with sectionName = part name). **Common**: all column header `+` buttons use the `group/Xheader` hover-reveal pattern with an inline input (Enter/✓ to confirm, Escape/× to cancel, blur-to-dismiss when empty); for SONGS and IDEAS columns the new item is returned from the mutationFn and passed directly to `setSelectedFile` in `onSuccess` — no ref sentinel needed; FILES column header has a fixed `h-8` height; FILES column Upload button and drag-and-drop both open `UploadModal` (imported from `MediaBucket.tsx`) with `defaultIdeaId`, `defaultInstrumentName`, `defaultSectionName`, and `songType` pre-filled from the current column selection — the native file picker is not used; `songType='idea'` for Ideas mode, `'song'` for Songs mode; right-click on a clip row opens More Info (reuses `ClipInfoWindow` from `Clip.tsx`); **Music2 icon in SONGS column** is filled solid (`fill="currentColor"`) when `song.hasFiles === true` (from `GET /api/songs`), outline when false; Lightbulb icon in IDEAS column is filled solid when `idea.hasFiles === true`; sort: Ideas list by `createdAt` desc, Songs list by `updatedAt` desc; `seedSong` is skipped for `type='idea'` songs so new ideas start with no instrument tracks. **Activity invalidation**: all creation mutations (`addSongInlineMutation`, `addIdeaInlineMutation`, `addPartMutation`, `addInstrumentSongMutation`, `addSectionSongMutation`, and the modal `createIdea`) call `queryClient.invalidateQueries({ queryKey: ['activity'] })` in `onSuccess`. **URL param auto-selection**: `useSearch()` from wouter is read reactively; a `useEffect([songs, search])` fires when songs are available and the search string changes — reads `?tab=files&filter=songs&songId=X` or `?tab=files&filter=ideas&ideaId=X`, sets `activeTab`, `filesFilter`, and auto-selects the matching `Song` from the `songs` array; `appliedSearchRef` stores the last applied search string to prevent double-firing on the same navigation |
 | SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; Overview uses a two-column grid: left column (2/3) has Resume Last Session card + Your Tasks (5-task cap + expand), right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height is measured once on mount via `getBoundingClientRect()` on the left column ref after tasks first load — never updates when the task list expands; stacks vertically on mobile; Review tab — see Review Tab section below |
-| Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity |
+| Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity; MediaBucket is wrapped in a card container (`bg-[#181C26] rounded-xl border border-white/5 overflow-hidden`, no fixed height) so it matches the surface style of the Overview cards and auto-sizes to its content height |
 | Review tab (SongHome) | ✅ Done | Per-song review tab at `/songs/:songId?tab=review` — share exported mixes, SoundCloud-style waveform player with drag-to-scrub, avatar markers on waveform, timestamped comment threads with replies, resolve/edit/delete, @ mention autocomplete, Show Resolved toggle; see Review Tab architecture section below |
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; gap zones at clip boundaries enable clip reordering within a section; track-row drop snaps leftward drags to index 0, rightward to end; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20; valid track shows full-row gold border; MeasuringStrategy.Always + live getBoundingClientRect() in collision function for reliable gap zone hits; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate inner DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop; section headers are sticky (top-8 z-10 bg-[#09090b]) — pin below the ruler on vertical scroll while remaining draggable |
 | Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation); right-click timeline clip → Replace submenu (fetches real bucket versions from `/api/timeline-clips/:id/replacements` on open; confirmation dialog if clip is final; PATCHes name/src/duration/type/color + isFinal:false on select); "Show in File Browser" (dispatches `find-in-bucket` CustomEvent; MediaBucket navigates to matching instrument + section) |
-| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist |
+| Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist; **UploadModal** (exported from `MediaBucket.tsx`) is the single shared upload dialog used in both MediaBucket and Dashboard — see UploadModal architecture section below |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
 | Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links) |
@@ -609,7 +609,7 @@ DELETE /api/review-comments/:id            — deletes all child replies first (
 
 The upload pipeline is fully implemented. Here's how it works end-to-end:
 
-1. **Client** (`MediaBucket.tsx`) — `POST /api/upload` as multipart with fields: `file`, `instrument`, `section`, `ideaId`. On success, immediately fires `POST /api/ideas/:ideaId/clips` to persist the clip record to the DB.
+1. **Client** (`UploadModal` in `MediaBucket.tsx`) — `POST /api/upload` as multipart with fields: `file`, `instrument`, `section`, `ideaId`. On success, immediately fires `POST /api/ideas/:ideaId/clips` to persist the clip record to the DB.
 2. **Server** (`server/routes.ts`) — multer uses memory storage (50MB limit, audio/* filter). The handler:
    - Counts existing clips for the idea to assign the next version number
    - Writes the buffer to `uploads/{instrument}_{section}_v{n}.{ext}`
@@ -617,9 +617,43 @@ The upload pipeline is fully implemented. Here's how it works end-to-end:
    - Returns `{ url: '/uploads/...', duration, format, originalFileName }`
 3. **Static serving** — `server/index.ts` serves `/uploads` via `express.static` so `<audio src="/uploads/...">` works directly in the browser.
 
-Files are stored in `uploads/` in the project root (git-ignored). Naming convention: `{instrument}_{section}_v{n}.{ext}` where instrument and section are lowercased and spaces replaced with hyphens.
+Files are stored in `uploads/` in the project root (git-ignored). Physical file naming convention: `{instrument}_{section}_v{n}.{ext}` where instrument and section are lowercased and spaces replaced with hyphens.
+
+**Clip naming convention** differs by context:
+- **Songs** (`songType === 'song'`): clip name = `${trackName} ${sectionName} V${n}` (PatchBay naming convention)
+- **Ideas** (`songType === 'idea'`): clip name = original filename as uploaded (no renaming)
 
 Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for now.
+
+---
+
+## UploadModal Architecture
+
+`UploadModal` is an exported component from `MediaBucket.tsx` — the single upload dialog used everywhere in the app.
+
+```tsx
+interface UploadModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  songId: string;
+  defaultIdeaId?: string;         // pre-selects destination; user can still change
+  defaultInstrumentName?: string; // used for physical filename when pre-filled
+  defaultSectionName?: string;    // used for physical filename when pre-filled
+  initialFiles?: File[];          // pre-populate pending file list on open
+  songType?: 'song' | 'idea';     // controls clip naming convention (default: 'song')
+  onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
+}
+```
+
+**Destination dropdown** — always shown at the top of the modal in a consistent position, visible before any files are added. Options format: `"{Instrument} → {Section}"` (e.g. `"Guitar 2 → Chorus 2"`). The selected value also displays in this format. When `defaultIdeaId` is provided, the dropdown pre-selects the matching option but the user can change it. When `defaultIdeaId` is not provided, it shows "Select Destination" placeholder.
+
+**Instrument/section for physical filename** — `instrumentForUpload` and `sectionForUpload` use `defaultInstrumentName`/`defaultSectionName` props when the user hasn't changed the destination away from `defaultIdeaId`; otherwise fall back to `destTrack.name` / `destIdea.sectionName` from the DB. This matters for Ideas mode where the Dashboard passes `defaultSectionName = selectedFile.name` (the idea's display name) rather than the DB `sectionName`.
+
+**Scrollable pending list** — `max-h-48 overflow-y-auto` with a thin custom scrollbar; scrolls when more than ~4 files are queued.
+
+**Used in:**
+- `MediaBucket.tsx` — opened by the header Upload button and by drag-drop onto the versions column or section rows
+- `Dashboard.tsx` — opened by the FILES column Upload button and by drag-drop onto the FILES column; `defaultIdeaId` / `defaultInstrumentName` / `defaultSectionName` / `songType` pre-filled from current column selection
 
 ---
 
@@ -931,6 +965,29 @@ The `hiddenTracks` useQuery (key: `['hidden-tracks', DEFAULT_SONG_ID]`) has `ena
 2. `handleDeleteTrack` in `Timeline.tsx` — triggered when the user removes an instrument from the timeline track header right-click menu
 
 Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] })`. If either is missing, the restore dropdown in the Add Instrument dialog will show stale data until a manual page refresh.
+
+### Media Bucket — VERSIONS column empty state
+
+When a section is selected but has no clips, the VERSIONS column renders a full-height dashed-border drop zone (matching the Dashboard file browser empty state style) instead of plain text:
+
+```tsx
+<div className="flex-1 p-2">
+  <div className={cn(
+    'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors',
+    isVersionsDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
+  )}>
+    <Upload size={18} ... />
+    <p ...>{isVersionsDragOver ? 'Drop to upload' : 'No files yet'}</p>
+    <p ...>Drop audio files or use Upload above</p>
+  </div>
+</div>
+```
+
+The empty state is rendered **outside** `ScrollArea` as a `flex-1` sibling of the column header div — this is required so `h-full` on the inner bordered div has a proper flex parent (the `flex flex-col` versions column div) to fill against. When placed inside a `ScrollArea`, `h-full` has no bounded parent and the div collapses to its content height.
+
+`isVersionsDragOver` state (in `MediaBucket`) drives the gold border / tinted background. The `onDragLeave` handler uses `e.currentTarget.contains(e.relatedTarget as Node)` to avoid flickering when the pointer moves over child elements within the column.
+
+When clips exist (or a search query is active), `ScrollArea` renders as normal for the clip list.
 
 ### Media Bucket — session persistence
 

@@ -126,6 +126,208 @@ function toClip(apiClip: ApiClip): Clip {
   };
 }
 
+// ─── UploadModal ──────────────────────────────────────────────────────────────
+
+interface UploadModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  songId: string;
+  defaultIdeaId?: string;
+  defaultInstrumentName?: string;
+  defaultSectionName?: string;
+  initialFiles?: File[];
+  songType?: 'song' | 'idea';
+  onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
+}
+
+export function UploadModal({
+  open, onOpenChange, songId,
+  defaultIdeaId, defaultInstrumentName, defaultSectionName,
+  initialFiles, songType = 'song', onUploadSuccess,
+}: UploadModalProps) {
+  const queryClient = useQueryClient();
+  const [uploadFiles, setUploadFiles] = useState<{ name: string; size: string; file: File }[]>([]);
+  const [uploadDestination, setUploadDestination] = useState(defaultIdeaId ?? '');
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const { data: tracks = [] } = useQuery<ApiTrack[]>({
+    queryKey: ['bucket', songId],
+    queryFn: () => fetchBucket(songId),
+    enabled: open,
+  });
+
+  useEffect(() => {
+    if (open) {
+      setUploadDestination(defaultIdeaId ?? '');
+      setUploadError(null);
+      if (initialFiles?.length) {
+        setUploadFiles(initialFiles.map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f })));
+      }
+    } else {
+      setUploadFiles([]);
+      setUploadDestination('');
+      setUploadError(null);
+    }
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files)
+      .filter(f => f.type.startsWith('audio/'))
+      .map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
+    setUploadFiles(prev => [...prev, ...files]);
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const files = Array.from(e.target.files).map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
+    setUploadFiles(prev => [...prev, ...files]);
+    e.target.value = '';
+  };
+
+  const uploadMutation = useMutation({
+    mutationFn: async () => {
+      const destId = uploadDestination;
+      if (!destId || uploadFiles.length === 0) return;
+      setUploadError(null);
+      let destTrack: ApiTrack | null = null;
+      let destIdea: ApiIdea | null = null;
+      for (const t of tracks) {
+        const idea = t.ideas.find(i => i.id === destId);
+        if (idea) { destTrack = t; destIdea = idea; break; }
+      }
+      if (!destTrack || !destIdea) throw new Error('Destination not found');
+      const usingDefault = defaultIdeaId && uploadDestination === defaultIdeaId;
+      const instrumentForUpload = (usingDefault && defaultInstrumentName) ? defaultInstrumentName : destTrack.name;
+      const sectionForUpload = (usingDefault && defaultSectionName) ? defaultSectionName : destIdea.sectionName;
+      for (const { file } of uploadFiles) {
+        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } =
+          await uploadFile(file, instrumentForUpload, sectionForUpload, destIdea.id);
+        const versionNum = destIdea.clips.length + 1;
+        const clipName = songType === 'idea'
+          ? (originalFileName || file.name)
+          : `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
+        await createClip(destIdea.id, {
+          id: nanoid(),
+          name: clipName,
+          type: destTrack.type === 'vocal' ? 'vocal' : 'audio',
+          color: destTrack.color ?? 'hsl(var(--primary))',
+          duration, src: url, sectionName: destIdea.sectionName, isFinal: false,
+          metadata: {
+            format, originalFileName, uploadedBy, uploadedDate, sampleRate, bitDepth,
+            channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
+            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+          },
+        });
+        destIdea = { ...destIdea, clips: [...destIdea.clips, {} as ApiClip] };
+      }
+      return { destTrackId: destTrack.id, destIdeaId: destId };
+    },
+    onSuccess: (result) => {
+      if (!result) return;
+      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      onOpenChange(false);
+      setUploadFiles([]);
+      setUploadDestination('');
+      onUploadSuccess?.(result);
+    },
+    onError: (err: Error) => setUploadError(err.message),
+  });
+
+  const isPrefilled = !!defaultIdeaId;
+
+  return (
+    <Dialog open={open} onOpenChange={open => {
+      onOpenChange(open);
+      if (!open) { setUploadFiles([]); setUploadDestination(defaultIdeaId ?? ''); setUploadError(null); }
+    }}>
+      <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-xl p-0 overflow-hidden">
+        <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
+          <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
+          <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
+        </div>
+        <div className="p-6 space-y-6">
+          {/* Destination — always visible at top */}
+          <div className="space-y-1.5">
+            <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
+            <Select value={uploadDestination} onValueChange={setUploadDestination}>
+              <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
+                <SelectValue placeholder="Select Destination" />
+              </SelectTrigger>
+              <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
+                {tracks.flatMap(track =>
+                  track.ideas.map(idea => (
+                    <SelectItem key={idea.id} value={idea.id} className="text-xs">
+                      {track.name} → {idea.sectionName}
+                    </SelectItem>
+                  ))
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+          <div
+            onDragOver={e => e.preventDefault()}
+            onDrop={handleFileDrop}
+            onClick={() => fileInputRef.current?.click()}
+            className="border-2 border-dashed border-white/10 rounded-xl p-10 flex flex-col items-center justify-center gap-4 hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer group"
+          >
+            <input type="file" ref={fileInputRef} className="hidden" multiple accept="audio/*" onChange={handleFileSelect} />
+            <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform">
+              <Upload size={24} className="text-primary" />
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-bold text-white">Click or drag audio files here</p>
+              <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
+            </div>
+          </div>
+          {uploadFiles.length > 0 && (
+            <div className="space-y-3">
+              <h4 className="text-[10px] uppercase font-bold text-muted-foreground">
+                Pending Uploads ({uploadFiles.length})
+              </h4>
+              <div className="max-h-48 overflow-y-auto space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10">
+                {uploadFiles.map((f, i) => (
+                  <div key={i} className="flex items-center justify-between p-3 bg-white/5 border border-white/5 rounded-lg">
+                    <div className="flex items-center gap-3">
+                      <FileAudio size={16} className="text-primary" />
+                      <div className="flex flex-col">
+                        <span className="text-xs font-medium text-white">{f.name}</span>
+                        <span className="text-[10px] text-muted-foreground font-mono">{f.size}</span>
+                      </div>
+                    </div>
+                    <Button variant="ghost" size="icon" className="h-6 w-6"
+                      onClick={() => setUploadFiles(prev => prev.filter((_, idx) => idx !== i))}>
+                      <X size={14} />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-4 border-t border-white/5 flex justify-end">
+                <Button
+                  className="h-9 uppercase tracking-widest text-[10px] font-bold"
+                  onClick={() => uploadMutation.mutate()}
+                  disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending}
+                >
+                  {uploadMutation.isPending
+                    ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>
+                    : 'Confirm Ingestion'}
+                </Button>
+              </div>
+              {uploadError && (
+                <div className="flex items-center gap-2 text-[10px] text-red-400 pt-1">
+                  <AlertCircle size={12} /> {uploadError}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface MediaBucketProps {
@@ -143,9 +345,8 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
   const [autoOpenClipId, setAutoOpenClipId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
-  const [uploadFiles, setUploadFiles] = useState<{ name: string; size: string; file: File }[]>([]);
-  const [uploadDestination, setUploadDestination] = useState<string>(''); // ideaId
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadInitialIdeaId, setUploadInitialIdeaId] = useState('');
+  const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
@@ -155,7 +356,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
   const [selectedHiddenIdeaId, setSelectedHiddenIdeaId] = useState('');
   const [selectedHiddenTrackId, setSelectedHiddenTrackId] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isVersionsDragOver, setIsVersionsDragOver] = useState(false);
   const sessionRestored = useRef(false);
   const tracksRef = useRef<ApiTrack[]>([]);
   const [location] = useLocation();
@@ -303,91 +504,6 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     }
   }, [location, tracks]);
 
-  // ── Upload mutation ──────────────────────────────────────────────────────────
-
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!uploadDestination || uploadFiles.length === 0) return;
-      setUploadError(null);
-
-      // Find which track + idea the destination belongs to
-      let destTrack: ApiTrack | null = null;
-      let destIdea: ApiIdea | null = null;
-      for (const t of tracks) {
-        const idea = t.ideas.find(i => i.id === uploadDestination);
-        if (idea) { destTrack = t; destIdea = idea; break; }
-      }
-      if (!destTrack || !destIdea) throw new Error('Destination not found');
-
-      // Upload each file sequentially so version numbers increment correctly
-      for (const { file } of uploadFiles) {
-        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } = await uploadFile(
-          file,
-          destTrack.name,
-          destIdea.sectionName,
-          destIdea.id,
-        );
-
-        // Count existing clips to name this version
-        const existingCount = destIdea.clips.length;
-        const versionNum = existingCount + 1;
-        const clipName = `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
-
-        await createClip(destIdea.id, {
-          id: nanoid(),
-          name: clipName,
-          type: destTrack.type === 'vocal' ? 'vocal' : 'audio',
-          color: destTrack.color ?? 'hsl(var(--primary))',
-          duration,
-          src: url,
-          sectionName: destIdea.sectionName,
-          isFinal: false,
-          metadata: {
-            format,
-            originalFileName,
-            uploadedBy,
-            uploadedDate,
-            sampleRate,
-            bitDepth,
-            channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
-            peakLevel: '',
-            timeSignature: '',
-            key: '',
-            bpm: 0,
-            description: '',
-            tags: [],
-          },
-        });
-
-        // Optimistically update destIdea clip count for next iteration
-        destIdea = { ...destIdea, clips: [...destIdea.clips, {} as ApiClip] };
-      }
-
-      return { destTrackId: destTrack.id, destIdeaId: uploadDestination };
-    },
-    onSuccess: (result) => {
-      if (!result) return;
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsUploadOpen(false);
-      setUploadFiles([]);
-      setUploadDestination('');
-
-      // Auto-select the destination after refetch
-      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
-        const track = fresh.find(t => t.id === result.destTrackId);
-        if (track) {
-          setSelectedTrack(track);
-          const idea = track.ideas.find(i => i.id === result.destIdeaId);
-          setSelectedIdea(idea ?? null);
-        }
-      });
-    },
-    onError: (err: Error) => {
-      setUploadError(err.message);
-    },
-  });
-
   // ── Add section mutation — creates the idea on every track simultaneously ────
 
   const addSectionMutation = useMutation({
@@ -526,38 +642,14 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
 
   // ── File input helpers ───────────────────────────────────────────────────────
 
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files).map(f => ({
-      name: f.name,
-      size: (f.size / 1024 / 1024).toFixed(2) + ' MB',
-      file: f,
-    }));
-    setUploadFiles(prev => [...prev, ...files]);
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
-    const files = Array.from(e.target.files).map(f => ({
-      name: f.name,
-      size: (f.size / 1024 / 1024).toFixed(2) + ' MB',
-      file: f,
-    }));
-    setUploadFiles(prev => [...prev, ...files]);
-    e.target.value = '';
-  };
-
   const handleIdeaFileDrop = (e: React.DragEvent, idea: ApiIdea, track: ApiTrack) => {
     e.preventDefault();
     e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
     if (!e.dataTransfer.files?.length) return;
-    const audioFiles = Array.from(e.dataTransfer.files)
-      .filter(f => f.type.startsWith('audio/'))
-      .map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
+    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
     if (!audioFiles.length) return;
-    // Pre-fill the upload dialog
-    setUploadFiles(audioFiles);
-    setUploadDestination(idea.id);
+    setUploadInitialFiles(audioFiles);
+    setUploadInitialIdeaId(idea.id);
     setIsUploadOpen(true);
     setSelectedTrack(track);
     setSelectedIdea(idea);
@@ -613,122 +705,13 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
             />
           </div>
 
-          {/* Upload dialog */}
-          <Dialog open={isUploadOpen} onOpenChange={(open) => {
-            setIsUploadOpen(open);
-            if (!open) { setUploadFiles([]); setUploadDestination(''); setUploadError(null); }
-          }}>
-            <DialogTrigger asChild>
-              <Button size="sm" className="h-8 text-[10px] uppercase tracking-widest font-bold">
-                <Upload size={14} className="mr-2" /> Upload
-              </Button>
-            </DialogTrigger>
-            <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-xl p-0 overflow-hidden">
-              <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
-                <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
-                <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
-              </div>
-              <div className="p-6 space-y-6">
-                {/* Drop zone */}
-                <div
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={handleFileDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed border-white/10 rounded-xl p-10 flex flex-col items-center justify-center gap-4 hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer group"
-                >
-                  <input
-                    type="file"
-                    ref={fileInputRef}
-                    className="hidden"
-                    multiple
-                    accept="audio/*"
-                    onChange={handleFileSelect}
-                  />
-                  <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform">
-                    <Upload size={24} className="text-primary" />
-                  </div>
-                  <div className="text-center">
-                    <p className="text-sm font-bold text-white">Click or drag audio files here</p>
-                    <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
-                  </div>
-                </div>
-
-                {/* File list + destination */}
-                {uploadFiles.length > 0 && (
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] uppercase font-bold text-muted-foreground">
-                      Pending Uploads ({uploadFiles.length})
-                    </h4>
-                    <ScrollArea className="max-h-40 pr-4">
-                      <div className="space-y-2">
-                        {uploadFiles.map((f, i) => (
-                          <div key={i} className="flex items-center justify-between p-3 bg-white/5 border border-white/5 rounded-lg">
-                            <div className="flex items-center gap-3">
-                              <FileAudio size={16} className="text-primary" />
-                              <div className="flex flex-col">
-                                <span className="text-xs font-medium text-white">{f.name}</span>
-                                <span className="text-[10px] text-muted-foreground font-mono">{f.size}</span>
-                              </div>
-                            </div>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-6 w-6"
-                              onClick={() => setUploadFiles(prev => prev.filter((_, idx) => idx !== i))}
-                            >
-                              <X size={14} />
-                            </Button>
-                          </div>
-                        ))}
-                      </div>
-                    </ScrollArea>
-
-                    <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
-                      <div className="space-y-2">
-                        <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
-                        <Select value={uploadDestination} onValueChange={setUploadDestination}>
-                          <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
-                            <SelectValue placeholder="Select Destination" />
-                          </SelectTrigger>
-                          <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
-                            {tracks.map(track => (
-                              <React.Fragment key={track.id}>
-                                <div className="px-2 py-1 text-[9px] uppercase font-bold text-primary opacity-50">
-                                  {track.name}
-                                </div>
-                                {track.ideas.map(idea => (
-                                  <SelectItem key={idea.id} value={idea.id} className="text-xs pl-4">
-                                    {idea.sectionName}
-                                  </SelectItem>
-                                ))}
-                              </React.Fragment>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="flex items-end">
-                        <Button
-                          className="w-full h-9 uppercase tracking-widest text-[10px] font-bold"
-                          onClick={() => uploadMutation.mutate()}
-                          disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending}
-                        >
-                          {uploadMutation.isPending
-                            ? <><Loader2 size={14} className="mr-2 animate-spin" /> Uploading…</>
-                            : 'Confirm Ingestion'}
-                        </Button>
-                      </div>
-                    </div>
-
-                    {uploadError && (
-                      <div className="flex items-center gap-2 text-[10px] text-red-400 pt-1">
-                        <AlertCircle size={12} /> {uploadError}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </DialogContent>
-          </Dialog>
+          <Button
+            size="sm"
+            className="h-8 text-[10px] uppercase tracking-widest font-bold"
+            onClick={() => { setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
+          >
+            <Upload size={14} className="mr-2" /> Upload
+          </Button>
         </div>
       </div>
 
@@ -1033,17 +1016,19 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
 
         {/* ── Versions column ── */}
         <div
-          className="flex-1 flex flex-col bg-black/20 transition-all border border-transparent"
+          className="flex-1 flex flex-col bg-black/20"
           onDragOver={(e) => {
             if (!selectedIdea || !selectedTrack) return;
             e.preventDefault();
-            e.currentTarget.classList.add('bg-primary/5', 'border-primary/30');
+            setIsVersionsDragOver(true);
           }}
           onDragLeave={(e) => {
-            if (!selectedIdea || !selectedTrack) return;
-            e.currentTarget.classList.remove('bg-primary/5', 'border-primary/30');
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+              setIsVersionsDragOver(false);
+            }
           }}
           onDrop={(e) => {
+            setIsVersionsDragOver(false);
             if (!selectedIdea || !selectedTrack) return;
             handleIdeaFileDrop(e, selectedIdea, selectedTrack);
           }}
@@ -1051,11 +1036,30 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
             Versions
           </div>
-          <ScrollArea className="flex-1">
-            <div className="p-2 space-y-1">
-              {selectedIdea ? (
-                filteredVersions.length > 0
-                  ? filteredVersions.map(clip => (
+          {selectedIdea && filteredVersions.length === 0 && !searchQuery ? (
+            /* Empty state — rendered outside ScrollArea so h-full fills the column */
+            <div className="flex-1 p-2">
+              <div className={cn(
+                'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors',
+                isVersionsDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
+              )}>
+                <Upload size={18} className={cn('mb-2', isVersionsDragOver ? 'text-primary/60' : 'text-white/15')} />
+                <p className={cn('text-[10px] uppercase tracking-widest mb-1', isVersionsDragOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
+                  {isVersionsDragOver ? 'Drop to upload' : 'No files yet'}
+                </p>
+                <p className="text-[10px] text-muted-foreground/30">Drop audio files or use Upload above</p>
+              </div>
+            </div>
+          ) : (
+            <ScrollArea className="flex-1">
+              <div className="p-2 space-y-1">
+                {selectedIdea ? (
+                  filteredVersions.length === 0 && searchQuery ? (
+                    <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
+                      No versions match your search
+                    </div>
+                  ) : (
+                    filteredVersions.map(clip => (
                       <BucketClip
                         key={clip.id}
                         clip={toClip(clip)}
@@ -1066,21 +1070,38 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                         autoOpenInfo={clip.id === autoOpenClipId}
                       />
                     ))
-                  : (
-                    <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
-                      {searchQuery ? 'No versions match your search' : 'No versions yet — drop a file here to upload'}
-                    </div>
                   )
-              ) : (
-                <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
-                  Select a section to view or add versions
-                </div>
-              )}
-            </div>
-          </ScrollArea>
+                ) : (
+                  <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
+                    Select a section to view or add versions
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          )}
         </div>
 
       </div>
+
+      <UploadModal
+        open={isUploadOpen}
+        onOpenChange={setIsUploadOpen}
+        songId={songId}
+        defaultIdeaId={uploadInitialIdeaId || undefined}
+        defaultInstrumentName={uploadInitialIdeaId ? tracks.find(t => t.ideas.some(i => i.id === uploadInitialIdeaId))?.name : undefined}
+        defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}
+        initialFiles={uploadInitialFiles}
+        onUploadSuccess={({ destTrackId, destIdeaId }) => {
+          queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
+            const track = fresh.find(t => t.id === destTrackId);
+            if (track) {
+              setSelectedTrack(track);
+              const idea = track.ideas.find(i => i.id === destIdeaId);
+              setSelectedIdea(idea ?? null);
+            }
+          });
+        }}
+      />
     </div>
   );
 }

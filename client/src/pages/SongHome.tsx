@@ -1288,7 +1288,7 @@ export default function SongHome() {
 
         {/* ── Files tab ────────────────────────────────────────────────────── */}
         {activeTab === 'files' && (
-          <div className="rounded-xl border border-white/5 overflow-hidden" style={{ height: 520 }}>
+          <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
             <DndContext>
               <MediaBucket songId={songId} />
             </DndContext>

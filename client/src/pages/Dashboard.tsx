@@ -39,6 +39,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow } from '@/components/daw/Clip';
+import { UploadModal } from '@/components/daw/MediaBucket';
 import { Clip as DawClip } from '@/lib/daw-data';
 import { AppHeader } from '@/components/AppHeader';
 
@@ -415,9 +416,9 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrackDash | null>(null);
   const [selectedSection, setSelectedSection] = useState<ApiIdeaDash | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClipDash | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
   const [isAddingPart, setIsAddingPart] = useState(false);
@@ -740,58 +741,6 @@ export default function Dashboard() {
     setNewInstruments(DEFAULT_INSTRUMENTS);
   };
 
-  const handleUploadFiles = async (files: FileList | File[]) => {
-    if (!selectedFile || !selectedInstrument || !selectedSection) return;
-    setIsUploading(true);
-    try {
-      for (const file of Array.from(files)) {
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('instrument', selectedInstrument.name);
-        formData.append('section', selectedSection.sectionName);
-        formData.append('ideaId', selectedSection.id);
-        const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
-        if (!uploadRes.ok) continue;
-        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } = await uploadRes.json();
-        await fetch(`/api/ideas/${selectedSection.id}/clips`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            id: crypto.randomUUID(),
-            ideaId: selectedSection.id,
-            name: originalFileName || file.name,
-            type: selectedInstrument.name.toLowerCase().includes('vocal') ? 'vocal' : 'audio',
-            color: '#D4AF37',
-            start: 0,
-            duration,
-            src: url,
-            isFinal: false,
-            sectionName: selectedSection.sectionName,
-            metadata: {
-              format,
-              originalFileName,
-              uploadedBy,
-              uploadedDate,
-              sampleRate,
-              bitDepth,
-              channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
-              peakLevel: '',
-              timeSignature: '',
-              key: '',
-              bpm: 0,
-              description: '',
-              tags: [],
-            },
-          }),
-        });
-      }
-      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile.id] });
-    } catch (e) {
-      console.error('Upload failed:', e);
-    } finally {
-      setIsUploading(false);
-    }
-  };
 
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1177,16 +1126,6 @@ export default function Dashboard() {
               </DropdownMenu>
             </div>
 
-            {/* Hidden file input for upload */}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*"
-              multiple
-              className="hidden"
-              onChange={e => { if (e.target.files) { handleUploadFiles(e.target.files); e.target.value = ''; } }}
-            />
-
             {/* Browser — conditional by mode */}
             {filesFilter === 'songs' ? (
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
@@ -1249,7 +1188,7 @@ export default function Dashboard() {
                         <div className="flex items-center gap-2 min-w-0">
                           {isIdea
                             ? <Lightbulb size={13} className="shrink-0" />
-                            : <Music2 size={13} className="shrink-0" />}
+                            : <Music2 size={13} className="shrink-0" fill={item.hasFiles ? 'currentColor' : 'none'} />}
                           <span className="font-bold tracking-tight truncate">{item.name}</span>
                         </div>
                         <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
@@ -1413,7 +1352,10 @@ export default function Dashboard() {
                 onDrop={e => {
                   e.preventDefault();
                   setIsDragOver(false);
-                  if (selectedSection && e.dataTransfer.files.length > 0) handleUploadFiles(e.dataTransfer.files);
+                  if (selectedSection && e.dataTransfer.files.length > 0) {
+                    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
+                    if (audioFiles.length > 0) { setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                  }
                 }}
               >
                 <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
@@ -1429,12 +1371,11 @@ export default function Dashboard() {
                         </button>
                       )}
                       <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading}
-                        className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors rounded px-2 py-1 font-bold"
+                        onClick={() => { setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                        className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                       >
                         <Upload size={10} />
-                        {isUploading ? 'Uploading…' : 'Upload'}
+                        Upload
                       </button>
                     </div>
                   )}
@@ -1646,19 +1587,21 @@ export default function Dashboard() {
                 onDrop={e => {
                   e.preventDefault();
                   setIsDragOver(false);
-                  if (selectedSection && e.dataTransfer.files.length > 0) handleUploadFiles(e.dataTransfer.files);
+                  if (selectedSection && e.dataTransfer.files.length > 0) {
+                    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
+                    if (audioFiles.length > 0) { setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                  }
                 }}
               >
                 <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
                   {selectedSection && (
                     <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors rounded px-2 py-1 font-bold"
+                      onClick={() => { setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                      className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                     >
                       <Upload size={10} />
-                      {isUploading ? 'Uploading…' : 'Upload'}
+                      Upload
                     </button>
                   )}
                 </div>
@@ -1752,6 +1695,20 @@ export default function Dashboard() {
         )}
 
       </main>
+
+      {/* Upload Modal */}
+      {selectedSection && (
+        <UploadModal
+          open={isUploadOpen}
+          onOpenChange={setIsUploadOpen}
+          songId={selectedFile?.id ?? ''}
+          defaultIdeaId={selectedSection.id}
+          defaultInstrumentName={selectedInstrument?.name}
+          defaultSectionName={filesFilter === 'ideas' ? (selectedFile?.name ?? selectedSection.sectionName) : selectedSection.sectionName}
+          songType={filesFilter === 'ideas' ? 'idea' : 'song'}
+          initialFiles={uploadInitialFiles}
+        />
+      )}
 
       {/* Choice Modal — Song vs Idea */}
       <Dialog open={isChoiceOpen} onOpenChange={setIsChoiceOpen}>
