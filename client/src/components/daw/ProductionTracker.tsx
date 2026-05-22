@@ -558,7 +558,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
     <div className="h-full flex flex-col bg-[#09090b] text-foreground overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="px-6 py-4 border-b border-white/5 bg-black/40 backdrop-blur-md flex items-center justify-between">
+      <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2 mb-1">
             <div className="w-8 h-8 rounded-lg bg-primary/15 border border-primary/25 flex items-center justify-center">
@@ -572,7 +572,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
 
       {/* ── Grid ── */}
       <div className="flex-1 overflow-auto p-6">
-        <div className="min-w-[1100px] border border-white/5 bg-white/[0.02] shadow-2xl shadow-black/40 overflow-hidden">
+        <div className="min-w-[1100px] rounded-xl border border-white/5 bg-[#181C26] shadow-2xl shadow-black/40 overflow-hidden">
           <div
             className="grid"
             style={{ gridTemplateColumns: `220px repeat(${bucket.length}, minmax(150px, 1fr))` }}
@@ -583,7 +583,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
             </div>
             {bucket.map((track) => (
               <div key={track.id} className="border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
-                <div className="text-[11px] font-heading font-bold uppercase tracking-wider text-white/70 truncate">{track.name}</div>
+                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate">{track.name}</div>
               </div>
             ))}
 
@@ -591,7 +591,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
             {sections.map((section) => (
               <React.Fragment key={section}>
                 <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
-                  <div className="text-[10px] uppercase tracking-widest text-white/80 font-bold">{section}</div>
+                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{section}</div>
                 </div>
                 {bucket.map((track) => {
                   const task = findTask(track.name, section);
@@ -610,15 +610,15 @@ export function ProductionTracker({ songId }: { songId: string }) {
                     >
                       {/* TOP ZONE */}
                       <div className="flex-1 space-y-2 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <Icon size={13} className={cfg.iconClass} />
+                        <div>
                           <span className={cn(
-                            'text-[9px] uppercase tracking-[0.2em] font-bold truncate',
-                            status === 'complete'      && 'text-primary',
-                            status === 'in-progress'   && 'text-blue-300',
-                            status === 'will-not-play' && 'text-red-400/70',
-                            status === 'todo'          && 'text-white/45'
+                            'inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wide',
+                            status === 'complete'      && 'bg-primary/15 text-primary',
+                            status === 'in-progress'   && 'bg-blue-400/10 text-blue-300',
+                            status === 'will-not-play' && 'bg-red-950/40 text-red-400/70',
+                            status === 'todo'          && 'bg-white/[0.06] text-white/40'
                           )}>
+                            <Icon size={9} className={cfg.iconClass} />
                             {cfg.label}
                           </span>
                         </div>
