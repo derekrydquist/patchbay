@@ -428,7 +428,8 @@ When implementing auth or any permission checks, always consult this table.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Dashboard page | ✅ Done | Personalized time-of-day greeting at the top (`Good morning/afternoon/evening/night, {name}. …`) using `useAuth()` + current hour; "Your Songs" section label below it in the same muted uppercase style as "Upcoming Tasks" with a subtitle; song list capped at 3 most recently updated — a "Show all songs ↓" text button below the cards opens a shadcn `Popover` (overlays content, no layout shift) listing all songs with task count pill and navigation arrow; popover has a search input that filters songs by name in real time; closing the popover resets the search; two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); **task count pill caveat** — `taskCountsBySong` is derived from the `['all-tasks']` cache; `createSong.onSuccess` must invalidate both `['songs']` and `['all-tasks']` so the pill appears immediately after song creation without a page refresh; Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
+| Dashboard page | ✅ Done | Personalized time-of-day greeting at the top (`Good morning/afternoon/evening/night, {name}. …`) using `useAuth()` + current hour; "Your Songs" section label below it in the same muted uppercase style as "Upcoming Tasks" with a subtitle; song list capped at 3 most recently updated — a "Show all songs ↓" text button below the cards opens a shadcn `Popover` (overlays content, no layout shift) listing all songs with task count pill and navigation arrow; popover has a search input that filters songs by name in real time; closing the popover resets the search; **both the 3 recent cards and the popover filter to `type === 'song' \|\| !s.type` — `type='idea'` rows are excluded entirely**; `realSongs` is the filtered base array; `recentSongs = realSongs.slice(0, 3)`; `filteredSongs = realSongs.filter(by search)`; popover trigger guard uses `realSongs.length > 3`; two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); **task count pill caveat** — `taskCountsBySong` is derived from the `['all-tasks']` cache; `createSong.onSuccess` must invalidate both `['songs']` and `['all-tasks']` so the pill appears immediately after song creation without a page refresh; Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
+| Dashboard Files tab | ✅ Done | Master file browser on Dashboard with **Songs / Ideas** filter toggle. **Songs mode** — 4-column browser: Songs → Instruments → Sections → Files; hover-reveal `+` on SONGS header (`group/songsheader`) creates a new song inline (`addSongInlineMutation` — POSTs `{ name, type: 'song', sections: DEFAULT_SECTIONS, instruments: DEFAULT_INSTRUMENTS }`), auto-selects the returned song in Column 1; hover-reveal `+` on INSTRUMENTS header creates a new instrument track (`POST /api/songs/:id/tracks`), auto-selects via `pendingInstrumentIdRef`; hover-reveal `+` on SECTIONS header adds a section to all tracks simultaneously (`Promise.all` over `POST /api/tracks/:id/ideas`), auto-selects via `pendingSectionNameRef`. **Ideas mode** — 3-column browser: Ideas → Parts → Files; an "Idea" is a `songs` row with `type='idea'`; its instrument_tracks are called "Parts"; files go into the first `ideas` sub-bucket of the selected Part; hover-reveal `+` on IDEAS header creates a new idea (`POST /api/songs` with `type: 'idea'`), auto-selected after creation; hover-reveal `+` on PARTS header creates a new part (`POST /api/songs/:id/tracks` + `POST /api/tracks/:id/ideas` with sectionName = part name). **Common**: all column header `+` buttons use the `group/Xheader` hover-reveal pattern with an inline input (Enter/✓ to confirm, Escape/× to cancel, blur-to-dismiss when empty); for SONGS and IDEAS columns the new item is returned from the mutationFn and passed directly to `setSelectedFile` in `onSuccess` — no ref sentinel needed; FILES column header has a fixed `h-8` height; FILES column supports upload button + drag-and-drop; right-click on a clip row opens More Info (reuses `ClipInfoWindow` from `Clip.tsx`); Lightbulb icon in IDEAS column is filled solid (`fill="currentColor"`) when `idea.hasFiles === true` (annotated from `GET /api/songs`); sort: Ideas list by `createdAt` desc, Songs list by `updatedAt` desc; `seedSong` is skipped for `type='idea'` songs so new ideas start with no instrument tracks. **Activity invalidation**: all creation mutations (`addSongInlineMutation`, `addIdeaInlineMutation`, `addPartMutation`, `addInstrumentSongMutation`, `addSectionSongMutation`, and the modal `createIdea`) call `queryClient.invalidateQueries({ queryKey: ['activity'] })` in `onSuccess`. **URL param auto-selection**: `useSearch()` from wouter is read reactively; a `useEffect([songs, search])` fires when songs are available and the search string changes — reads `?tab=files&filter=songs&songId=X` or `?tab=files&filter=ideas&ideaId=X`, sets `activeTab`, `filesFilter`, and auto-selects the matching `Song` from the `songs` array; `appliedSearchRef` stores the last applied search string to prevent double-firing on the same navigation |
 | SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; Overview uses a two-column grid: left column (2/3) has Resume Last Session card + Your Tasks (5-task cap + expand), right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height is measured once on mount via `getBoundingClientRect()` on the left column ref after tasks first load — never updates when the task list expands; stacks vertically on mobile; Review tab — see Review Tab section below |
 | Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity |
 | Review tab (SongHome) | ✅ Done | Per-song review tab at `/songs/:songId?tab=review` — share exported mixes, SoundCloud-style waveform player with drag-to-scrub, avatar markers on waveform, timestamped comment threads with replies, resolve/edit/delete, @ mention autocomplete, Show Resolved toggle; see Review Tab architecture section below |
@@ -483,9 +484,18 @@ POST   /api/auth/login                   — body: { username, password }; norma
 POST   /api/auth/logout                  — destroys the session; returns { ok: true }
 GET    /api/auth/me                      — returns current user from session (without password) or 401
 
-GET    /api/songs                        — list all songs (ordered by createdAt)
+GET    /api/songs                        — list all songs (ordered by createdAt); each song is
+                                           annotated with `hasFiles: boolean` — computed via a
+                                           JOIN (clips → ideas → instrument_tracks) that builds
+                                           a Set of songIds with at least one clip; used by the
+                                           Dashboard Files tab to fill the Lightbulb icon on Ideas
 GET    /api/songs/:id                    — get a song with nested tracks → ideas → clips
-POST   /api/songs                        — create a song; body: { name, bpm?, sections }
+POST   /api/songs                        — create a song; body: { name, bpm?, sections, type?,
+                                           instruments? }; `type` defaults to `"song"`; when
+                                           `type === "idea"`, `seedSong` is skipped so the new
+                                           song has no instrument tracks or sections bootstrapped;
+                                           always logs a `song-created` or `idea-created` activity
+                                           event with the session-resolved username
 PATCH  /api/songs/:id                    — partial update of song metadata
 DELETE /api/songs/:id                    — delete a song and all associated data
 
@@ -1140,7 +1150,8 @@ interface ActivityEvent {
   type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change'
       | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline'
       | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted'
-      | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply';
+      | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply'
+      | 'song-created' | 'idea-created';
   description: string;
   timestamp: number;
   songId: string;
@@ -1169,16 +1180,21 @@ Events come from two sources that `getActivity()` merges and sorts by timestamp:
 5. **`review-shared`** — one event per `song_reviews` row. Description: `"{createdBy} exported {name} to Review"`. Song-level only (no `instrument` or `sectionName`).
 
 **Tier 2 — `activity_log` table (type + description stored verbatim at write time):**
-6. **`clip-added-to-timeline`** — logged from `POST /api/tracks/:trackId/clips`. Description: `"Someone added {clipName} to {trackName} — {sectionName}"`.
-7. **`clip-removed-from-timeline`** — logged from `DELETE /api/timeline-clips/:id`. Description: `"Someone removed {clipName} from {trackName} — {sectionName}"`.
-8. **`clip-replaced`** — logged from `PATCH /api/timeline-clips/:id` when name+src both change. Description: `"Someone replaced {oldName} with {newName} in {trackName} — {sectionName}"`.
-9. **`clip-unmarked-final`** — logged from `PATCH /api/timeline-clips/:id` and `PATCH /api/clips/:clipId` on `isFinal=false`. Description: `"Someone unmarked {clipName} as final"`.
-10. **`section-added`** — logged from `POST /api/tracks/:trackId/ideas` with 5-second dedup (N simultaneous requests from Promise.all collapse to one event). Description: `"Someone added section {sectionName}"`.
-11. **`section-deleted`** — logged from `DELETE /api/songs/:songId/sections/:sectionName`. Description: `"Someone deleted section {sectionName}"`.
-12. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description: `"Someone added an instrument — {trackName}"`.
-13. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"Someone deleted an instrument — {trackName}"`.
+
+All tier-2 events resolve the actor from `req.session.userId → storage.getUser()?.username`, falling back to `'Someone'` if the session can't be resolved. The pattern appears at the top of each route handler as a const before the `logActivity` call.
+
+6. **`clip-added-to-timeline`** — logged from `POST /api/tracks/:trackId/clips`. Description: `"{user} added {clipName} to {trackName} — {sectionName}"`.
+7. **`clip-removed-from-timeline`** — logged from `DELETE /api/timeline-clips/:id`. Description: `"{user} removed {clipName} from {trackName} — {sectionName}"`.
+8. **`clip-replaced`** — logged from `PATCH /api/timeline-clips/:id` when name+src both change. Description: `"{user} replaced {oldName} with {newName} in {trackName} — {sectionName}"`.
+9. **`clip-unmarked-final`** — logged from `PATCH /api/timeline-clips/:id` and `PATCH /api/clips/:clipId` on `isFinal=false`. Description: `"{user} unmarked {clipName} as final"`.
+10. **`section-added`** — logged from `POST /api/tracks/:trackId/ideas` with 5-second dedup. Description: `"{user} added section {sectionName}"`. **Skipped entirely when the parent song has `type='idea'`** — sub-bucket creation for idea Parts is an invisible implementation detail. The type check fetches the song via `storage.getSongById(ideaTrack.songId)` after the dedup check.
+11. **`section-deleted`** — logged from `DELETE /api/songs/:songId/sections/:sectionName`. Description: `"{user} deleted section {sectionName}"`.
+12. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description branches on parent song type: `"{user} added a part — {trackName}"` when `song.type === 'idea'`; `"{user} added an instrument — {trackName}"` when `song.type === 'song'`. Song is fetched via `storage.getSongById(req.params.songId)` after track creation.
+13. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"{user} deleted an instrument — {trackName}"`.
 14. **`review-comment`** — logged from `POST /api/reviews/:reviewId/comments` (top-level). Description: `"{author} commented on {reviewName}"`.
 15. **`review-reply`** — logged from `POST /api/reviews/:reviewId/comments` (reply). Description: `"{author} replied to {parentAuthor}'s comment on {reviewName}"`.
+16. **`song-created`** — logged from `POST /api/songs` when `type !== 'idea'`. Description: `"{user} created a new song — {name}"`.
+17. **`idea-created`** — logged from `POST /api/songs` when `type === 'idea'`. Description: `"{user} created a new idea — {name}"`.
 
 **`task-comment` / `status-change` routing (tier 1, event type 4):**
    - `text.startsWith('Status changed to ')` → `status-change`: `"Jordan changed status to {label} — {instrument} · {sectionName}"`.
@@ -1200,15 +1216,16 @@ useQuery({ queryKey: ['activity'], queryFn: () => fetch('/api/activity').then(r 
 useQuery({ queryKey: ['activity', songId], queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()), refetchInterval: 10000 })
 ```
 
-**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers an activity event must call this in its `onSuccess` (or `.then()` for fire-and-forget fetches). Mutations that currently do this: file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track added, track deleted, review shared, review comment/reply posted.
+**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers an activity event must call this in its `onSuccess` (or `.then()` for fire-and-forget fetches). Mutations that currently do this: song created (inline + modal), idea created (inline + modal), file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track (instrument/part) added, track deleted, review shared, review comment/reply posted.
 
 **Current user:** Auth is built — `CURRENT_USER` is no longer a hardcoded constant. On the client, `Dashboard.tsx` and `SongHome.tsx` read `user?.username ?? ''` from `useAuth()` to filter tasks to the logged-in user. On the server, `uploadedBy` and `createdBy` fields are resolved from `req.session.userId` → `storage.getUser()` in the upload and review-upload routes.
 
 **Deep-link navigation from activity rows:**
 
 ```ts
-function activityUrl(songId: string, event: ActivityEvent): string {
-  const base = `/songs/${songId}/workspace`;
+function activityUrl(event: ActivityEvent): string {
+  const base = `/songs/${event.songId}/workspace`;
+  const songBase = `/songs/${event.songId}`;
   if (event.type === 'status-change' && event.taskId)
     return `${base}?tab=production&taskId=${event.taskId}`;
   if (event.type === 'task-comment' && event.source === 'task' && event.taskId)
@@ -1222,14 +1239,27 @@ function activityUrl(songId: string, event: ActivityEvent): string {
     });
     return `${base}?${params}`;
   }
+  if (event.type === 'review-shared' && event.reviewId)
+    return `${songBase}?tab=review&reviewId=${event.reviewId}`;
+  if ((event.type === 'review-comment' || event.type === 'review-reply') && event.reviewId) {
+    const params = new URLSearchParams({ tab: 'review', reviewId: event.reviewId });
+    if (event.commentId) params.set('commentId', event.commentId);
+    return `${songBase}?${params}`;
+  }
+  if (event.type === 'song-created')
+    return `/?tab=files&filter=songs&songId=${event.songId}`;
+  if (event.type === 'idea-created')
+    return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   if (event.instrument && event.sectionName)
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
-  return `/songs/${songId}`;
+  return songBase;
 }
 ```
 
 - **`status-change`** and **`task-comment`** events open the workspace Production tab with the task modal auto-opened (ProductionTracker reads `?taskId=` from the URL on mount).
 - **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, then automatically open the More Info / inspection modal for the specific clip with the notes input focused. See `autoOpenInfo` prop below.
+- **`song-created`** navigates to `/?tab=files&filter=songs&songId=X` — Dashboard reads this via `useSearch()` and auto-selects the song in the Files tab Songs column.
+- **`idea-created`** navigates to `/?tab=files&filter=ideas&ideaId=X` — Dashboard reads this and auto-selects the idea in the Ideas column.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
 
 **`autoOpenInfo` — clip inspection modal auto-open:**

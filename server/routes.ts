@@ -139,7 +139,14 @@ export async function registerRoutes(
 
   app.get("/api/songs", async (_req, res) => {
     const result = await storage.getSongs();
-    res.json(result);
+    const rows = db
+      .select({ songId: instrumentTracks.songId })
+      .from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .all();
+    const hasFilesSet = new Set(rows.map(r => r.songId));
+    res.json(result.map(s => ({ ...s, hasFiles: hasFilesSet.has(s.id) })));
   });
 
   app.get("/api/songs/:id", async (req, res) => {
@@ -165,7 +172,23 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const song = await storage.createSong(parsed.data);
-    await storage.seedSong(song.id, instruments, song.sections);
+    if (song.type !== 'idea') {
+      await storage.seedSong(song.id, instruments, song.sections);
+    }
+
+    const songCreatedActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: song.id,
+      type: song.type === 'idea' ? 'idea-created' : 'song-created',
+      description: song.type === 'idea'
+        ? `${songCreatedActor} created a new idea — ${song.name}`
+        : `${songCreatedActor} created a new song — ${song.name}`,
+      timestamp: Date.now(),
+    }).catch(console.error);
+
     res.status(201).json(song);
   });
 
@@ -200,11 +223,19 @@ export async function registerRoutes(
     }
     const track = await storage.createTrack(parsed.data);
 
+    const trackAddedActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    const trackAddedSong = await storage.getSongById(req.params.songId);
+    const trackAddedDesc = trackAddedSong?.type === 'idea'
+      ? `${trackAddedActor} added a part — ${track.name}`
+      : `${trackAddedActor} added an instrument — ${track.name}`;
+
     storage.logActivity({
       id: randomUUID(),
       songId: req.params.songId,
       type: 'track-added',
-      description: `Someone added an instrument — ${track.name}`,
+      description: trackAddedDesc,
       timestamp: Date.now(),
       instrument: track.name,
     }).catch(console.error);
@@ -214,13 +245,16 @@ export async function registerRoutes(
 
   app.delete("/api/tracks/:trackId", async (req, res) => {
     const trackToDelete = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, req.params.trackId)).get();
+    const trackDeletedActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     await storage.hideTrack(req.params.trackId);
     if (trackToDelete) {
       storage.logActivity({
         id: randomUUID(),
         songId: trackToDelete.songId,
         type: 'track-deleted',
-        description: `Someone deleted an instrument — ${trackToDelete.name}`,
+        description: `${trackDeletedActor} deleted an instrument — ${trackToDelete.name}`,
         timestamp: Date.now(),
         instrument: trackToDelete.name,
       }).catch(console.error);
@@ -241,6 +275,9 @@ export async function registerRoutes(
   app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {
     const decodedSection = decodeURIComponent(req.params.sectionName);
     console.log('[route deleteSection] songId:', req.params.songId, 'sectionName:', decodedSection);
+    const sectionDeletedActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     const deleteSectionResult = await storage.deleteSection(req.params.songId, decodedSection);
     console.log('[route deleteSection] deleteSection returned:', deleteSectionResult);
 
@@ -248,7 +285,7 @@ export async function registerRoutes(
       id: randomUUID(),
       songId: req.params.songId,
       type: 'section-deleted',
-      description: `Someone deleted section ${decodedSection}`,
+      description: `${sectionDeletedActor} deleted section ${decodedSection}`,
       timestamp: Date.now(),
       sectionName: decodedSection,
     }).catch(console.error);
@@ -299,11 +336,14 @@ export async function registerRoutes(
           .where(eq(instrumentTracks.id, req.params.trackId))
           .get();
         if (addTrack) {
+          const clipAddedActor = req.session.userId
+            ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+            : 'Someone';
           storage.logActivity({
             id: randomUUID(),
             songId: addTrack.songId,
             type: 'clip-added-to-timeline',
-            description: `${req.body.author || 'Someone'} added ${clip.name} to ${addTrack.name} — ${clip.sectionName}`,
+            description: `${clipAddedActor} added ${clip.name} to ${addTrack.name} — ${clip.sectionName}`,
             timestamp: Date.now(),
             instrument: addTrack.name,
             sectionName: clip.sectionName,
@@ -319,6 +359,9 @@ export async function registerRoutes(
 
   app.patch("/api/timeline-clips/:id", async (req, res) => {
     const { author: commentAuthor, ...clipUpdates } = req.body;
+    const timelineClipActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
     const clip = Object.keys(clipUpdates).length > 0
@@ -377,7 +420,7 @@ export async function registerRoutes(
                 id: randomUUID(),
                 songId: track.songId,
                 type: 'clip-unmarked-final',
-                description: `${commentAuthor || 'Someone'} unmarked ${clip.name} as final`,
+                description: `${timelineClipActor} unmarked ${clip.name} as final`,
                 timestamp: Date.now(),
                 instrument: track.name,
                 sectionName: clip.sectionName ?? undefined,
@@ -403,7 +446,7 @@ export async function registerRoutes(
             id: randomUUID(),
             songId: replaceTrack.songId,
             type: 'clip-replaced',
-            description: `${commentAuthor || 'Someone'} replaced ${existingClip.name} with ${clip.name} in ${replaceTrack.name} — ${clip.sectionName}`,
+            description: `${timelineClipActor} replaced ${existingClip.name} with ${clip.name} in ${replaceTrack.name} — ${clip.sectionName}`,
             timestamp: Date.now(),
             instrument: replaceTrack.name,
             sectionName: clip.sectionName,
@@ -419,6 +462,9 @@ export async function registerRoutes(
 
   app.delete("/api/timeline-clips/:id", async (req, res) => {
     const clipToRemove = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+    const clipRemovedActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     await storage.deleteTimelineClip(req.params.id);
     if (clipToRemove) {
       const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clipToRemove.trackId)).get();
@@ -427,7 +473,7 @@ export async function registerRoutes(
           id: randomUUID(),
           songId: track.songId,
           type: 'clip-removed-from-timeline',
-          description: `Someone removed ${clipToRemove.name} from ${track.name} — ${clipToRemove.sectionName}`,
+          description: `${clipRemovedActor} removed ${clipToRemove.name} from ${track.name} — ${clipToRemove.sectionName}`,
           timestamp: Date.now(),
           instrument: track.name,
           sectionName: clipToRemove.sectionName ?? undefined,
@@ -538,14 +584,20 @@ export async function registerRoutes(
           ))
           .get();
         if (!recent) {
-          storage.logActivity({
-            id: randomUUID(),
-            songId: ideaTrack.songId,
-            type: 'section-added',
-            description: `Someone added section ${idea.sectionName}`,
-            timestamp: Date.now(),
-            sectionName: idea.sectionName,
-          }).catch(console.error);
+          const sectionAddedSong = await storage.getSongById(ideaTrack.songId);
+          if (sectionAddedSong?.type !== 'idea') {
+            const sectionAddedActor = req.session.userId
+              ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+              : 'Someone';
+            storage.logActivity({
+              id: randomUUID(),
+              songId: ideaTrack.songId,
+              type: 'section-added',
+              description: `${sectionAddedActor} added section ${idea.sectionName}`,
+              timestamp: Date.now(),
+              sectionName: idea.sectionName,
+            }).catch(console.error);
+          }
         }
       }
     } catch (err) {
@@ -574,6 +626,9 @@ export async function registerRoutes(
 
   app.patch("/api/clips/:clipId", async (req, res) => {
     const { author: commentAuthor, ...clipUpdates } = req.body;
+    const bucketClipActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     const clip = await storage.updateClip(req.params.clipId, clipUpdates);
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
@@ -607,7 +662,7 @@ export async function registerRoutes(
                   id: randomUUID(),
                   songId: track.songId,
                   type: 'clip-unmarked-final',
-                  description: `${commentAuthor || 'Someone'} unmarked ${clip.name} as final`,
+                  description: `${bucketClipActor} unmarked ${clip.name} as final`,
                   timestamp: Date.now(),
                   instrument: track.name,
                   sectionName: idea.sectionName,

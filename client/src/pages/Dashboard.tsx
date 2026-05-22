@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
-import { useLocation } from 'wouter';
+import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Play, Pause, Upload, Info, MessageSquare, CheckCircle2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -53,6 +53,7 @@ interface Song {
   type?: 'song' | 'idea';
   createdAt: string;
   updatedAt: string;
+  hasFiles?: boolean;
 }
 
 interface Task {
@@ -111,6 +112,12 @@ function activityUrl(event: ActivityEvent): string {
     const params = new URLSearchParams({ tab: 'review', reviewId: event.reviewId });
     if (event.commentId) params.set('commentId', event.commentId);
     return `${songBase}?${params}`;
+  }
+  if (event.type === 'song-created') {
+    return `/?tab=files&filter=songs&songId=${event.songId}`;
+  }
+  if (event.type === 'idea-created') {
+    return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
@@ -378,6 +385,7 @@ function ClipPlayer({ clip }: { clip: ApiClipDash }) {
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
+  const search = useSearch();
   const queryClient = useQueryClient();
   const { user } = useAuth();
 
@@ -402,7 +410,7 @@ export default function Dashboard() {
   });
 
   const [activeTab, setActiveTab] = useState<'dashboard' | 'files'>('dashboard');
-  const [filesFilter, setFilesFilter] = useState<'all' | 'songs' | 'ideas'>('all');
+  const [filesFilter, setFilesFilter] = useState<'songs' | 'ideas'>('songs');
   const [filesSort, setFilesSort] = useState<'recent' | 'name-asc' | 'name-desc'>('recent');
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrackDash | null>(null);
@@ -412,6 +420,19 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [infoClip, setInfoClip] = useState<ApiClipDash | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
+  const [isAddingPart, setIsAddingPart] = useState(false);
+  const [newPartName, setNewPartName] = useState('');
+  const [isAddingIdeaInline, setIsAddingIdeaInline] = useState(false);
+  const [newIdeaNameInline, setNewIdeaNameInline] = useState('');
+  const [isAddingSongInline, setIsAddingSongInline] = useState(false);
+  const [newSongNameInline, setNewSongNameInline] = useState('');
+  const [isAddingInstrument, setIsAddingInstrument] = useState(false);
+  const [newInstrumentName, setNewInstrumentName] = useState('');
+  const [isAddingSection, setIsAddingSection] = useState(false);
+  const [newSectionName, setNewSectionName] = useState('');
+  const pendingInstrumentIdRef = useRef<string | null>(null);
+  const pendingSectionNameRef = useRef<string | null>(null);
+  const appliedSearchRef = useRef<string | null>(null);
 
   const [showAllTasks, setShowAllTasks] = useState(false);
   const [songSearch, setSongSearch] = useState('');
@@ -431,8 +452,32 @@ export default function Dashboard() {
     enabled: !!selectedFile && activeTab === 'files',
   });
 
-  // Sync selectedInstrument and selectedSection from fresh bucket data after upload/refetch
+  // Sync selectedInstrument/selectedSection from fresh bucket data; also handles
+  // pending auto-selection after instrument or section creation.
   useEffect(() => {
+    if (pendingInstrumentIdRef.current) {
+      const found = fileBucket.find(t => t.id === pendingInstrumentIdRef.current);
+      if (found) {
+        pendingInstrumentIdRef.current = null;
+        setSelectedInstrument(found);
+        setSelectedSection(null);
+        return;
+      }
+    }
+    if (pendingSectionNameRef.current) {
+      const trackToSearch = selectedInstrument
+        ? fileBucket.find(t => t.id === selectedInstrument.id)
+        : null;
+      if (trackToSearch) {
+        const newIdea = trackToSearch.ideas.find(i => i.sectionName === pendingSectionNameRef.current);
+        if (newIdea) {
+          pendingSectionNameRef.current = null;
+          setSelectedInstrument(trackToSearch);
+          setSelectedSection(newIdea);
+          return;
+        }
+      }
+    }
     if (!selectedInstrument) return;
     const freshTrack = fileBucket.find(t => t.id === selectedInstrument.id);
     if (!freshTrack) return;
@@ -449,6 +494,30 @@ export default function Dashboard() {
     hasMeasured.current = true;
     setActivityHeight(leftColRef.current.getBoundingClientRect().height);
   }, [songs.length, allTasks.length]);
+
+  useEffect(() => {
+    if (!songs.length || appliedSearchRef.current === search) return;
+    const params = new URLSearchParams(search);
+    if (params.get('tab') !== 'files') return;
+    appliedSearchRef.current = search;
+    setActiveTab('files');
+    const filter = params.get('filter');
+    if (filter === 'ideas') {
+      setFilesFilter('ideas');
+      const ideaId = params.get('ideaId');
+      if (ideaId) {
+        const idea = songs.find(s => s.id === ideaId);
+        if (idea) { setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null); }
+      }
+    } else {
+      setFilesFilter('songs');
+      const songId = params.get('songId');
+      if (songId) {
+        const song = songs.find(s => s.id === songId);
+        if (song) { setSelectedFile(song); setSelectedInstrument(null); setSelectedSection(null); }
+      }
+    }
+  }, [songs, search]);
 
   const CURRENT_USER = user?.username ?? '';
 
@@ -468,15 +537,14 @@ export default function Dashboard() {
   }, {});
 
   const filteredFiles = songs
-    .filter(s => {
-      if (filesFilter === 'songs') return s.type === 'song' || !s.type;
-      if (filesFilter === 'ideas') return s.type === 'idea';
-      return true;
-    })
+    .filter(s => filesFilter === 'songs' ? (s.type === 'song' || !s.type) : s.type === 'idea')
     .sort((a, b) => {
       if (filesSort === 'name-asc') return a.name.localeCompare(b.name);
       if (filesSort === 'name-desc') return b.name.localeCompare(a.name);
-      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      // Ideas sort by createdAt so newly created ideas always appear at the top.
+      // Songs sort by updatedAt to surface recently active projects first.
+      const dateKey = filesFilter === 'ideas' ? 'createdAt' : 'updatedAt';
+      return new Date(b[dateKey]).getTime() - new Date(a[dateKey]).getTime();
     });
 
   const createSong = useMutation({
@@ -514,6 +582,7 @@ export default function Dashboard() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsNewIdeaOpen(false);
       setNewIdeaName('');
       setLocation('/');
@@ -548,6 +617,121 @@ export default function Dashboard() {
     },
   });
 
+  const addPartMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const trackRes = await fetch(`/api/songs/${selectedFile!.id}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!trackRes.ok) throw new Error('Failed to create part');
+      const newTrack = await trackRes.json();
+      await fetch(`/api/tracks/${newTrack.id}/ideas`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, sectionName: name, sortOrder: 0 }),
+      });
+      return newTrack;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      setIsAddingPart(false);
+      setNewPartName('');
+    },
+  });
+
+  const addIdeaInlineMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, type: 'idea', sections: [] }),
+      });
+      if (!res.ok) throw new Error('Failed to create idea');
+      return res.json() as Promise<Song>;
+    },
+    onSuccess: (newIdea) => {
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      setIsAddingIdeaInline(false);
+      setNewIdeaNameInline('');
+      setSelectedFile(newIdea);
+      setSelectedInstrument(null);
+      setSelectedSection(null);
+    },
+  });
+
+  const addSongInlineMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          type: 'song',
+          sections: ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'],
+          instruments: ['Drums', 'Bass', 'Guitar 1', 'Guitar 2', 'Vocals'],
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to create song');
+      return res.json() as Promise<Song>;
+    },
+    onSuccess: (newSong) => {
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      setIsAddingSongInline(false);
+      setNewSongNameInline('');
+      setSelectedFile(newSong);
+      setSelectedInstrument(null);
+      setSelectedSection(null);
+    },
+  });
+
+  const addInstrumentSongMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch(`/api/songs/${selectedFile!.id}/tracks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error('Failed to create instrument');
+      return res.json();
+    },
+    onSuccess: (newTrack) => {
+      pendingInstrumentIdRef.current = newTrack.id;
+      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      setIsAddingInstrument(false);
+      setNewInstrumentName('');
+    },
+  });
+
+  const addSectionSongMutation = useMutation({
+    mutationFn: async (sectionName: string) => {
+      await Promise.all(
+        fileBucket.map((track, i) =>
+          fetch(`/api/tracks/${track.id}/ideas`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: `${track.name} ${sectionName}`,
+              sectionName,
+              sortOrder: track.ideas.length + i,
+            }),
+          })
+        )
+      );
+    },
+    onSuccess: (_, sectionName) => {
+      pendingSectionNameRef.current = sectionName;
+      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      setIsAddingSection(false);
+      setNewSectionName('');
+    },
+  });
+
   const closeModal = () => {
     setIsNewProjectOpen(false);
     setNewName('');
@@ -568,7 +752,7 @@ export default function Dashboard() {
         formData.append('ideaId', selectedSection.id);
         const uploadRes = await fetch('/api/upload', { method: 'POST', body: formData });
         if (!uploadRes.ok) continue;
-        const { url, duration, originalFileName } = await uploadRes.json();
+        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } = await uploadRes.json();
         await fetch(`/api/ideas/${selectedSection.id}/clips`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -576,13 +760,28 @@ export default function Dashboard() {
             id: crypto.randomUUID(),
             ideaId: selectedSection.id,
             name: originalFileName || file.name,
-            type: 'audio',
+            type: selectedInstrument.name.toLowerCase().includes('vocal') ? 'vocal' : 'audio',
             color: '#D4AF37',
             start: 0,
             duration,
             src: url,
             isFinal: false,
             sectionName: selectedSection.sectionName,
+            metadata: {
+              format,
+              originalFileName,
+              uploadedBy,
+              uploadedDate,
+              sampleRate,
+              bitDepth,
+              channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
+              peakLevel: '',
+              timeSignature: '',
+              key: '',
+              bpm: 0,
+              description: '',
+              tags: [],
+            },
           }),
         });
       }
@@ -682,7 +881,8 @@ export default function Dashboard() {
               )}
 
               {!isLoading && songs.length > 0 && (() => {
-                const recentSongs = songs.slice(0, 3);
+                const realSongs = songs.filter(s => s.type === 'song' || !s.type);
+                const recentSongs = realSongs.slice(0, 3);
                 const renderCard = (song: Song) => (
                   <div
                     key={song.id}
@@ -750,13 +950,13 @@ export default function Dashboard() {
                     </div>
                   </div>
                 );
-                const filteredSongs = songs.filter(s =>
+                const filteredSongs = realSongs.filter(s =>
                   s.name.toLowerCase().includes(songSearch.toLowerCase())
                 );
                 return (
                   <div className="flex flex-col gap-3">
                     {recentSongs.map(renderCard)}
-                    {songs.length > 3 && (
+                    {realSongs.length > 3 && (
                       <Popover onOpenChange={open => { if (!open) setSongSearch(''); }}>
                         <PopoverTrigger asChild>
                           <button className="self-start text-xs text-white/30 hover:text-white/55 transition-colors py-1">
@@ -942,7 +1142,7 @@ export default function Dashboard() {
             {/* Controls row — filter buttons + sort dropdown */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-1 bg-white/[0.04] rounded-lg p-1 border border-white/5">
-                {(['all', 'songs', 'ideas'] as const).map(f => (
+                {(['songs', 'ideas'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => { setFilesFilter(f); setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null); }}
@@ -951,7 +1151,7 @@ export default function Dashboard() {
                       filesFilter === f ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
                     )}
                   >
-                    {f === 'all' ? 'All' : f === 'songs' ? 'Songs' : 'Ideas'}
+                    {f === 'songs' ? 'Songs' : 'Ideas'}
                   </button>
                 ))}
               </div>
@@ -987,16 +1187,51 @@ export default function Dashboard() {
               onChange={e => { if (e.target.files) { handleUploadFiles(e.target.files); e.target.value = ''; } }}
             />
 
-            {/* Four-column browser */}
+            {/* Browser — conditional by mode */}
+            {filesFilter === 'songs' ? (
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
-              {/* Column 1 — Projects */}
+              {/* Column 1 — Songs */}
               <div className="w-52 shrink-0 border-r border-white/5 flex flex-col">
-                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
-                  {filesFilter === 'ideas' ? 'Ideas' : filesFilter === 'songs' ? 'Songs' : 'All Projects'}
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/songsheader">
+                  <span>Songs</span>
+                  <button
+                    onClick={() => setIsAddingSongInline(true)}
+                    className="opacity-0 group-hover/songsheader:opacity-100 hover:text-primary transition-all p-0.5"
+                  >
+                    <Plus size={12} />
+                  </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {filteredFiles.length === 0 ? (
+                  {isAddingSongInline && (
+                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
+                      <input
+                        autoFocus
+                        value={newSongNameInline}
+                        onChange={e => setNewSongNameInline(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); if (newSongNameInline.trim()) addSongInlineMutation.mutate(newSongNameInline.trim()); }
+                          if (e.key === 'Escape') { setIsAddingSongInline(false); setNewSongNameInline(''); }
+                        }}
+                        onBlur={() => { if (!newSongNameInline.trim()) { setIsAddingSongInline(false); setNewSongNameInline(''); } }}
+                        placeholder="Song name…"
+                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); if (newSongNameInline.trim()) addSongInlineMutation.mutate(newSongNameInline.trim()); }}
+                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
+                      >
+                        <Check size={11} />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setIsAddingSongInline(false); setNewSongNameInline(''); }}
+                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
+                  {filteredFiles.length === 0 && !isAddingSongInline ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No items</p>
                   ) : filteredFiles.map(item => {
                     const isIdea = item.type === 'idea';
@@ -1026,13 +1261,49 @@ export default function Dashboard() {
 
               {/* Column 2 — Instruments / Folders */}
               <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/10">
-                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
-                  {selectedFile?.type === 'idea' ? 'Folders' : 'Instruments'}
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/instrheader">
+                  <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Instruments'}</span>
+                  {selectedFile && selectedFile.type !== 'idea' && (
+                    <button
+                      onClick={() => setIsAddingInstrument(true)}
+                      className="opacity-0 group-hover/instrheader:opacity-100 hover:text-primary transition-all p-0.5"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {isAddingInstrument && (
+                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
+                      <input
+                        autoFocus
+                        value={newInstrumentName}
+                        onChange={e => setNewInstrumentName(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }
+                          if (e.key === 'Escape') { setIsAddingInstrument(false); setNewInstrumentName(''); }
+                        }}
+                        onBlur={() => { if (!newInstrumentName.trim()) { setIsAddingInstrument(false); setNewInstrumentName(''); } }}
+                        placeholder="Instrument name…"
+                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }}
+                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
+                      >
+                        <Check size={11} />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setIsAddingInstrument(false); setNewInstrumentName(''); }}
+                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
                   {!selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select a project</p>
-                  ) : fileBucket.length === 0 ? (
+                  ) : fileBucket.length === 0 && !isAddingInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       No {selectedFile.type === 'idea' ? 'folders' : 'instruments'}
                     </p>
@@ -1062,15 +1333,51 @@ export default function Dashboard() {
 
               {/* Column 3 — Sections / Subfolders */}
               <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15]">
-                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
-                  {selectedFile?.type === 'idea' ? 'Subfolders' : 'Sections'}
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/sectheader">
+                  <span>{selectedFile?.type === 'idea' ? 'Subfolders' : 'Sections'}</span>
+                  {selectedInstrument && selectedFile?.type !== 'idea' && (
+                    <button
+                      onClick={() => setIsAddingSection(true)}
+                      className="opacity-0 group-hover/sectheader:opacity-100 hover:text-primary transition-all p-0.5"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {isAddingSection && (
+                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
+                      <input
+                        autoFocus
+                        value={newSectionName}
+                        onChange={e => setNewSectionName(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }
+                          if (e.key === 'Escape') { setIsAddingSection(false); setNewSectionName(''); }
+                        }}
+                        onBlur={() => { if (!newSectionName.trim()) { setIsAddingSection(false); setNewSectionName(''); } }}
+                        placeholder="Section name…"
+                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }}
+                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
+                      >
+                        <Check size={11} />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setIsAddingSection(false); setNewSectionName(''); }}
+                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
                   {!selectedInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       Select {selectedFile?.type === 'idea' ? 'a folder' : 'an instrument'}
                     </p>
-                  ) : selectedInstrument.ideas.length === 0 ? (
+                  ) : selectedInstrument.ideas.length === 0 && !isAddingSection ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">No sections</p>
                   ) : selectedInstrument.ideas.map(idea => {
                     const hasFiles = idea.clips.length > 0;
@@ -1109,7 +1416,7 @@ export default function Dashboard() {
                   if (selectedSection && e.dataTransfer.files.length > 0) handleUploadFiles(e.dataTransfer.files);
                 }}
               >
-                <div className="px-3 py-2 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
+                <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
                   {selectedSection && (
                     <div className="flex items-center gap-3">
@@ -1194,6 +1501,232 @@ export default function Dashboard() {
               </div>
 
             </div>
+            ) : (
+            /* Ideas — 3-column browser */
+            <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
+
+              {/* Column 1 — Ideas list */}
+              <div className="w-52 shrink-0 border-r border-white/5 flex flex-col">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/ideasheader">
+                  <span>Ideas</span>
+                  <button
+                    onClick={() => setIsAddingIdeaInline(true)}
+                    className="opacity-0 group-hover/ideasheader:opacity-100 hover:text-primary transition-all p-0.5"
+                  >
+                    <Plus size={12} />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {isAddingIdeaInline && (
+                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
+                      <input
+                        autoFocus
+                        value={newIdeaNameInline}
+                        onChange={e => setNewIdeaNameInline(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); if (newIdeaNameInline.trim()) addIdeaInlineMutation.mutate(newIdeaNameInline.trim()); }
+                          if (e.key === 'Escape') { setIsAddingIdeaInline(false); setNewIdeaNameInline(''); }
+                        }}
+                        onBlur={() => { if (!newIdeaNameInline.trim()) { setIsAddingIdeaInline(false); setNewIdeaNameInline(''); } }}
+                        placeholder="Idea name…"
+                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); if (newIdeaNameInline.trim()) addIdeaInlineMutation.mutate(newIdeaNameInline.trim()); }}
+                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
+                      >
+                        <Check size={11} />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setIsAddingIdeaInline(false); setNewIdeaNameInline(''); }}
+                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
+                  {filteredFiles.length === 0 && !isAddingIdeaInline ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No ideas yet</p>
+                  ) : filteredFiles.map(idea => (
+                    <button
+                      key={idea.id}
+                      onClick={() => { setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null); }}
+                      className={cn(
+                        'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
+                        selectedFile?.id === idea.id
+                          ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+                          : 'text-muted-foreground hover:bg-white/5 hover:text-white'
+                      )}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Lightbulb size={13} className="shrink-0" fill={idea.hasFiles ? 'currentColor' : 'none'} />
+                        <span className="font-bold tracking-tight truncate">{idea.name}</span>
+                      </div>
+                      <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Column 2 — Parts (instrument_tracks) */}
+              <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/10">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/partsheader">
+                  <span>Parts</span>
+                  {selectedFile && (
+                    <button
+                      onClick={() => setIsAddingPart(true)}
+                      className="opacity-0 group-hover/partsheader:opacity-100 hover:text-primary transition-all p-0.5"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {isAddingPart && (
+                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
+                      <input
+                        autoFocus
+                        value={newPartName}
+                        onChange={e => setNewPartName(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }
+                          if (e.key === 'Escape') { setIsAddingPart(false); setNewPartName(''); }
+                        }}
+                        onBlur={() => { if (!newPartName.trim()) { setIsAddingPart(false); setNewPartName(''); } }}
+                        placeholder="Part name…"
+                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
+                      />
+                      <button
+                        onMouseDown={e => { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }}
+                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
+                      >
+                        <Check size={11} />
+                      </button>
+                      <button
+                        onMouseDown={e => { e.preventDefault(); setIsAddingPart(false); setNewPartName(''); }}
+                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  )}
+                  {!selectedFile ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select an idea</p>
+                  ) : fileBucket.length === 0 && !isAddingPart ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 leading-relaxed">No parts yet. Add a part to get started.</p>
+                  ) : fileBucket.map(track => {
+                    const hasFiles = track.ideas.some(i => i.clips.length > 0);
+                    return (
+                      <button
+                        key={track.id}
+                        onClick={() => { setSelectedInstrument(track); setSelectedSection(track.ideas[0] ?? null); }}
+                        className={cn(
+                          'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
+                          selectedInstrument?.id === track.id
+                            ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+                            : 'text-muted-foreground hover:bg-white/5 hover:text-white'
+                        )}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Folder size={13} className="shrink-0" fill={hasFiles ? 'currentColor' : 'none'} />
+                          <span className="font-bold tracking-tight truncate">{track.name}</span>
+                        </div>
+                        <ChevronRight size={12} className="opacity-40 shrink-0" />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Column 3 — Files (first idea slot of selected part) */}
+              <div
+                className={cn('flex-1 flex flex-col transition-colors', isDragOver && selectedSection ? 'bg-primary/5' : 'bg-black/20')}
+                onDragOver={e => { e.preventDefault(); if (selectedSection) setIsDragOver(true); }}
+                onDragLeave={e => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsDragOver(false); }}
+                onDrop={e => {
+                  e.preventDefault();
+                  setIsDragOver(false);
+                  if (selectedSection && e.dataTransfer.files.length > 0) handleUploadFiles(e.dataTransfer.files);
+                }}
+              >
+                <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
+                  <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
+                  {selectedSection && (
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isUploading}
+                      className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 disabled:opacity-50 transition-colors rounded px-2 py-1 font-bold"
+                    >
+                      <Upload size={10} />
+                      {isUploading ? 'Uploading…' : 'Upload'}
+                    </button>
+                  )}
+                </div>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {!selectedInstrument ? (
+                    <div className="flex items-center justify-center h-full">
+                      <p className="text-[10px] text-muted-foreground/40 italic text-center uppercase tracking-widest leading-relaxed px-4">
+                        Select a part to view files
+                      </p>
+                    </div>
+                  ) : (() => {
+                    const clips = selectedInstrument.ideas[0]?.clips ?? [];
+                    if (clips.length === 0) return (
+                      <div className={cn(
+                        'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors mx-1',
+                        isDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
+                      )}>
+                        <Upload size={20} className={cn('mb-3', isDragOver ? 'text-primary/60' : 'text-white/15')} />
+                        <p className={cn('text-[10px] uppercase tracking-widest mb-1', isDragOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
+                          {isDragOver ? 'Drop to upload' : 'No files yet'}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground/30">Drop audio files or use Upload above</p>
+                      </div>
+                    );
+                    return (
+                      <>
+                        {isDragOver && (
+                          <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
+                            <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to add more files</p>
+                          </div>
+                        )}
+                        {clips.map(clip => (
+                          <ContextMenu key={clip.id}>
+                            <ContextMenuTrigger asChild>
+                              <div><ClipPlayer clip={clip} /></div>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+                              <ContextMenuItem
+                                onClick={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
+                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                              >
+                                <Info size={13} className="text-white/50" /> More Info
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onClick={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
+                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                              >
+                                <MessageSquare size={13} className="text-white/50" /> Add Note
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onClick={() => markFinalMutation.mutate(clip.id)}
+                                disabled={clip.isFinal}
+                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
+                              >
+                                <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
+                                {clip.isFinal ? 'Already Final' : 'Mark as Final'}
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          </ContextMenu>
+                        ))}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
+            </div>
+            )}
 
             {infoClip && (
               <ClipInfoWindow
