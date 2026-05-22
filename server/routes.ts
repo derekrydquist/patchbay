@@ -867,7 +867,7 @@ export async function registerRoutes(
       .where(eq(productionTasks.songId, req.params.songId))
       .all();
     const total = rows.length;
-    const completed = rows.filter(r => r.status === 'complete').length;
+    const completed = rows.filter(r => r.status === 'complete' || r.status === 'will-not-play').length;
     res.json({ completed, total, applicable: true });
   });
 
@@ -960,10 +960,12 @@ export async function registerRoutes(
     if (previous && taskUpdates.status && taskUpdates.status !== previous.status) {
       const label = STATUS_LABELS[taskUpdates.status as string];
       if (label) {
+        const sessionUser = req.session.userId ? await storage.getUser(req.session.userId) : null;
+        const actorName = sessionUser?.username ?? author;
         storage.addTaskComment({
           id: randomUUID(),
           taskId: req.params.id,
-          author: 'System',
+          author: actorName,
           text: label,
           timestamp: Date.now(),
         }).catch(console.error);

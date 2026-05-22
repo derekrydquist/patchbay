@@ -407,7 +407,7 @@ export default function Dashboard() {
   const taskCountsBySong = allTasks.reduce<Record<string, { completed: number; total: number }>>((acc, t) => {
     if (!acc[t.songId]) acc[t.songId] = { completed: 0, total: 0 };
     acc[t.songId].total += 1;
-    if (t.status === 'complete') acc[t.songId].completed += 1;
+    if (t.status === 'complete' || t.status === 'will-not-play') acc[t.songId].completed += 1;
     return acc;
   }, {});
 

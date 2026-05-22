@@ -694,6 +694,7 @@ export class SQLiteStorage implements IStorage {
         trackName: instrumentTracks.name,
         songId: songs.id,
         songName: songs.name,
+        metadata: clips.metadata,
       })
       .from(clips)
       .innerJoin(ideas, eq(clips.ideaId, ideas.id))
@@ -704,11 +705,10 @@ export class SQLiteStorage implements IStorage {
 
     for (const row of clipRows) {
       const ts = new Date(row.createdAt).getTime();
-      // TODO: replace with real auth user
-      const CURRENT_USER = 'Jordan';
+      const uploader = row.metadata?.uploadedBy || 'Someone';
       events.push({
         type: 'file-added',
-        description: `${CURRENT_USER} added ${row.clipName} to ${row.trackName}${row.sectionName ? ` — ${row.sectionName}` : ''}`,
+        description: `${uploader} added ${row.clipName} to ${row.trackName}${row.sectionName ? ` — ${row.sectionName}` : ''}`,
         timestamp: ts,
         songId: row.songId,
         songName: row.songName,
@@ -773,15 +773,12 @@ export class SQLiteStorage implements IStorage {
       .all();
 
     for (const row of taskCommentRows) {
-      // TODO: replace with real auth user
-      const CURRENT_USER = 'Jordan';
-
       if (row.text.startsWith('Status changed to ')) {
-        // Legacy fallback: old records written with author=Unknown instead of System
         const statusLabel = row.text.replace(/^Status changed to /, '');
+        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
         events.push({
           type: 'status-change',
-          description: `${CURRENT_USER} changed status to ${statusLabel} — ${row.instrument} · ${row.sectionName}`,
+          description: `${actor} changed status to ${statusLabel} — ${row.instrument} · ${row.sectionName}`,
           timestamp: row.timestamp,
           songId: row.songId,
           songName: row.songName,
@@ -792,9 +789,10 @@ export class SQLiteStorage implements IStorage {
       } else if (row.text.startsWith('Clip marked as final:')) {
         // Extract clip name from text: 'Clip marked as final: "Guitar 2 Verse 1 V2"'
         const clipName = row.text.slice('Clip marked as final: '.length).replace(/^"|"$/g, '');
+        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
         events.push({
           type: 'marked-final',
-          description: `${CURRENT_USER} marked ${clipName} as final`,
+          description: `${actor} marked ${clipName} as final`,
           timestamp: row.timestamp,
           songId: row.songId,
           songName: row.songName,
@@ -805,9 +803,10 @@ export class SQLiteStorage implements IStorage {
       } else if (row.text.startsWith('Clip unmarked as final:')) {
         const unmatchResult = row.text.match(/^Clip unmarked as final: "([^"]+)"/);
         const unmarkName = unmatchResult ? unmatchResult[1] : 'clip';
+        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
         events.push({
           type: 'clip-unmarked-final',
-          description: `${CURRENT_USER} unmarked ${unmarkName} as final`,
+          description: `${actor} unmarked ${unmarkName} as final`,
           timestamp: row.timestamp,
           songId: row.songId,
           songName: row.songName,
@@ -819,9 +818,10 @@ export class SQLiteStorage implements IStorage {
         const replaceMatch = row.text.match(/^Clip replaced: "(.+)" → "(.+)"$/);
         if (replaceMatch) {
           const [, oldName, newName] = replaceMatch;
+          const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
           events.push({
             type: 'clip-replaced',
-            description: `${CURRENT_USER} replaced ${oldName} with ${newName} in ${row.instrument} — ${row.sectionName}`,
+            description: `${actor} replaced ${oldName} with ${newName} in ${row.instrument} — ${row.sectionName}`,
             timestamp: row.timestamp,
             songId: row.songId,
             songName: row.songName,
@@ -833,9 +833,10 @@ export class SQLiteStorage implements IStorage {
       } else if (row.text.startsWith('Clip added to timeline:')) {
         const addMatch = row.text.match(/^Clip added to timeline: "([^"]+)"$/);
         const addName = addMatch ? addMatch[1] : 'clip';
+        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
         events.push({
           type: 'clip-added-to-timeline',
-          description: `${CURRENT_USER} added ${addName} to ${row.instrument} — ${row.sectionName}`,
+          description: `${actor} added ${addName} to ${row.instrument} — ${row.sectionName}`,
           timestamp: row.timestamp,
           songId: row.songId,
           songName: row.songName,
