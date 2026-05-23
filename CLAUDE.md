@@ -164,10 +164,10 @@ in route handlers.
 | `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
 | `clips` | Versions uploaded to a bucket idea (linked to `ideas`); `isFinal` marks the chosen version |
 | `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`); `isFinal` mirrors the corresponding bucket clip's final state; `trimStart` (real, default 0) and `trimEnd` (real, nullable) store non-destructive trim points in seconds |
-| `clip_comments` | Timestamped comments on bucket clips |
+| `clip_comments` | Timestamped comments on bucket clips; `parentId` (nullable self-reference, no FK) supports one level of replies — same pattern as `song_review_comments` |
 | `production_tasks` | Kanban tasks linked to a song |
 | `task_subtasks` | Checklist items on a task |
-| `task_comments` | Comments on a task |
+| `task_comments` | Comments on a task; `parentId` (nullable self-reference, no FK) supports one level of replies |
 | `song_reviews` | Exported mix files shared for review (linked to `songs`); stores src URL, format, duration, createdBy |
 | `song_review_comments` | Timestamped comments on a review; `parentId` (nullable self-reference) supports one level of replies; `resolved` boolean; `editedAt` nullable ISO timestamp |
 | `activity_log` | Dedicated log store for song-structure events (section added/deleted, track added/deleted, clip added/removed from timeline, clip replaced/unmarked-final, review comments). No FK dependencies — `songId` is a plain text column so events survive even if associated rows are deleted. `type` and `description` are stored verbatim; `getActivity()` passes them through without text parsing. Optional `review_id` and `comment_id` columns support deep-link routing for review-comment and review-reply events. |
@@ -440,7 +440,7 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist; VERSIONS column shows compact `WaveformPlayerCard` rows (32px canvas, play button, colored left border, gold checkmark for FINAL); right-click clip → More Info / Add Note / Mark as Final / Add to Timeline / Download / **Remove** (soft-delete via `PATCH /api/clips/:clipId { active: false }`); `getBucket` filters `active = true` clips; **UploadModal** (exported from `MediaBucket.tsx`) is the single shared upload dialog used in both MediaBucket and Dashboard — see UploadModal architecture section below |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with inline edit/delete; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links); **visual layout** — outer container is `bg-[#09090b]` dark page background; header sits outside the card against that dark background; grid is wrapped in a `rounded-xl border border-white/5 bg-[#181C26]` card that floats inside a `p-6` padded scroll area; column and section header labels use `text-xs font-bold uppercase tracking-widest text-muted-foreground`; status indicators render as `rounded-full` pill badges with soft tinted backgrounds (`bg-primary/15`, `bg-blue-400/10`, `bg-red-950/40`, `bg-white/[0.06]`) rather than bare text |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with one-level threading (Reply link, N replies toggle, indented replies, inline reply input — same pattern as ClipInfoWindow); thread stays open after posting and scrolls new reply into view; author display uses "You" for logged-in user; section labeled "COMMENTS"; @ mention dropdowns portaled to `document.body` via `createPortal`; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links); **visual layout** — outer container is `bg-[#09090b]` dark page background; header sits outside the card against that dark background; grid is wrapped in a `rounded-xl border border-white/5 bg-[#181C26]` card that floats inside a `p-6` padded scroll area; column and section header labels use `text-xs font-bold uppercase tracking-widest text-muted-foreground`; status indicators render as `rounded-full` pill badges with soft tinted backgrounds (`bg-primary/15`, `bg-blue-400/10`, `bg-red-950/40`, `bg-white/[0.06]`) rather than bare text |
 | Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates events from two sources — existing tables (clips, clip_comments, task_comments, song_reviews) and the dedicated `activity_log` table; polls every 10s via `refetchInterval`; `queryClient.invalidateQueries({ queryKey: ['activity'] })` is called in every mutation's `onSuccess` so the feed refreshes immediately on any action; see Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Files` / `Review`) synced to URL: `?tab=files` or `?tab=review`; Overview omits the param for a clean URL. `activeTab` is derived from `useSearch()` (wouter) on every render — `tabParam === 'review' \|\| tabParam === 'files'` or falls back to `'overview'`. `autoReviewId` and `autoCommentId` are also derived from `useSearch()`. The tab button only calls `setLocation`; no separate `setActiveTab` state exists. |
@@ -451,7 +451,7 @@ When implementing auth or any permission checks, always consult this table.
 | Audio hover preview (Media Bucket) | ❌ Removed | Hover-to-play was removed from `BucketClip`. Playback is now explicit — click the play button on the `WaveformPlayerCard` card. No hover audio anywhere in the bucket. |
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
 | Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; Trim submenu groups all trim actions |
-| Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD (GET/POST/PATCH/DELETE) against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; "Add Note" shortcut in both `BucketClip` and `TimelineClip` right-click menus opens the panel and focuses the input via `focusNotes` prop; @ mention autocomplete on the notes input matches the ProductionTracker pattern |
+| Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD with one-level threading against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; top-level comments show "Reply" link and "N replies" toggle; replies indented under parent with inline reply input; thread stays open after posting and scrolls new reply into view; "Add Note" shortcut focuses the input via `focusNotes` prop; @ mention dropdowns portaled to `document.body` via `createPortal` to escape modal overflow/transform stacking context; section header labeled "COMMENTS"; placeholder "Add a comment..." |
 | More Info panel — real file metadata | ✅ Done | Upload route extracts `sampleRate`, `bitDepth`, `channels` via music-metadata and returns them with `uploadedDate`/`uploadedBy`; `ClipInfoWindow` shows Duration (formatted), Sample Rate, Bit Depth, Format, Channels, Original File Name, Uploaded By, Date Added; Peak Level computed client-side from `AudioBuffer` (passed from `TimelineClip`'s decoded waveform buffer, or decoded on-demand for `BucketClip`), stored in state not DB; Musical Intelligence fields (BPM, Time Signature, Key/Scale) are editable inputs that PATCH `metadata` on blur with a 1.5s green "Saved" flash; Meta Tags pill input adds tags on Enter, removes with ×; `'Unknown'` key value treated as empty so placeholder shows; header shows clip name only (no badge or ID) |
 | Timeline clip waveform | ✅ Done | `<canvas>` inside each `TimelineClip`; decoded once via `AudioContext.decodeAudioData`, cached in `decodedBufferRef`; redrawn on trim change and on zoom/resize via `ResizeObserver`; rendered at device pixel ratio for retina sharpness; trim-aware (only the active region is drawn); fails silently |
 | Email notifications | ❌ Not built | Spec item for future |
@@ -560,10 +560,15 @@ PATCH  /api/clips/:clipId               — partial update of a bucket clip; whe
                                            and clears sibling timeline clips (same trackId+sectionName,
                                            different name); when isFinal: false, clears all same-name
                                            timeline clips on the track
-GET    /api/clips/:clipId/comments       — list comments on a bucket clip (ordered by timestamp asc)
-POST   /api/clips/:clipId/comments       — add a comment; body: { author, text }; timestamp set to Date.now()
+GET    /api/clips/:clipId/comments       — list comments on a bucket clip; returns ClipCommentWithReplies[]
+                                           (top-level comments with a `replies` array); ordered by
+                                           timestamp asc; replies ordered by createdAt asc
+POST   /api/clips/:clipId/comments       — add a comment; body: { author, text, parentId? }; timestamp
+                                           set to Date.now(); if parentId provided, validates it
+                                           references a top-level comment (no grandchild replies → 400)
 PATCH  /api/clip-comments/:id            — edit a comment's text; body: { text }
-DELETE /api/clip-comments/:id            — delete a comment → 204
+DELETE /api/clip-comments/:id            — deletes child replies first (no FK cascade on parentId),
+                                           then deletes the parent → 204
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
@@ -577,10 +582,15 @@ GET    /api/songs/:songId/task-comment-counts      — map of { taskId → count
 
 GET    /api/songs/:songId/production-tasks        — list all tasks for a song
 PATCH  /api/production-tasks/:id                  — partial update of a task (status, assignee, dueDate, etc.)
-GET    /api/production-tasks/:id/comments         — list comments on a task
-POST   /api/production-tasks/:id/comments         — add a comment; body: { author, text }
+GET    /api/production-tasks/:id/comments         — list comments on a task; returns
+                                                     TaskCommentWithReplies[] (top-level comments
+                                                     with a `replies` array); ordered by timestamp asc
+POST   /api/production-tasks/:id/comments         — add a comment; body: { author, text, parentId? };
+                                                     if parentId provided, validates it references a
+                                                     top-level comment (no grandchild replies → 400)
 PATCH  /api/task-comments/:id                     — edit a comment's text; body: { text }
-DELETE /api/task-comments/:id                     — delete a comment → 204
+DELETE /api/task-comments/:id                     — deletes child replies first, then deletes
+                                                     the parent → 204
 
 GET    /api/songs/:songId/reviews           — list all reviews for a song (ordered by createdAt desc)
 POST   /api/songs/:songId/reviews           — upload a review mix; multipart fields: file (audio);
@@ -1126,16 +1136,23 @@ This is synchronous — no extra API call — because the bucket query is always
 **`focusNotes` prop:**
 Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `true` when "Add Note" is selected from the context menu and reset to `false` when the dialog closes. `ClipInfoWindow` receives this as a prop and triggers `setTimeout(() => noteInputRef.current?.focus(), 150)` inside `useEffect([open, focusNotes])`.
 
-**Comment CRUD:**
-- `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`
-- `POST /api/clips/:clipId/comments` — `{ author: 'Unknown', text }` — invalidates the query key on success
-- `PATCH /api/clip-comments/:id` — inline edit; Input shown in place of the comment text on click of pencil icon
-- `DELETE /api/clip-comments/:id` — immediate, no confirmation
+**Comment CRUD with threading:**
+- `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`; returns `ClipCommentWithReplies[]` (top-level comments each with a `replies: ClipComment[]` array)
+- `POST /api/clips/:clipId/comments` — `{ author, text, parentId? }` — `parentId` omitted for top-level, set to parent comment ID for replies; invalidates query key on success
+- `PATCH /api/clip-comments/:id` — inline edit; pencil icon on hover
+- `DELETE /api/clip-comments/:id` — server deletes replies first, then the parent
 
-**@ mention autocomplete:**
-Matches the ProductionTracker pattern exactly. `BAND_MEMBERS` is a module-level constant in `Clip.tsx`. `handleNoteChange` detects `/@(\w*)$/` behind the cursor and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. The dropdown renders as an absolutely-positioned div below the Input, with colored avatar initials using `avatarColor(name)` (returns a hex string — use `style={{ backgroundColor }}`, not a CSS class). `onMouseDown + e.preventDefault()` on each dropdown item prevents the Input from blurring before the click registers.
+**Threading UI:**
+`expandedThreadId: string | null` — one thread open at a time. `toggleThread(commentId)` flips it and resets `replyText`/`replyMentionQuery`. Top-level comments show a "Reply" link and, when replies exist, a "N replies" toggle with `ChevronDown`/`ChevronUp`. Expanded thread renders replies indented (`ml-7 border-l pl-3`) followed by the reply input row. `lastReplyRef` attaches to the last reply element; after `handleAddReply` resolves, `setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50)` scrolls it into view. Thread stays open after posting (no `setExpandedThreadId(null)`). Author display: `c.author === user?.username ? 'You' : capitalize(c.author)`.
 
-**`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper may return a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
+Reply input uses `placeholder={\`Reply to {Author}…\`}` (or "yourself" for self-replies) and is styled identically to the main comment input (`bg-black/40 border-white/10 text-sm h-9 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic`).
+
+**@ mention autocomplete — portal pattern:**
+Both the main comment input and the reply input use `createPortal` (from `react-dom`) to render their dropdowns into `document.body`, escaping the modal's `transform` stacking context that would otherwise clip `position: fixed` children. The rect is read from the input ref during render: `noteInputRef.current?.getBoundingClientRect()`. Main input opens dropdown downward (`top: rect.bottom + 4`); reply input opens upward (`bottom: window.innerHeight - rect.top + 4`). Both use `zIndex: 9999`.
+
+`handleNoteChange` detects `/@(\w*)$/` and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. `onMouseDown + e.preventDefault()` on each dropdown item prevents blur before the click registers.
+
+**`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper returns a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
 
 ### More Info panel — real file metadata — ✅ Built
 
@@ -1235,8 +1252,8 @@ Events come from two sources that `getActivity()` merges and sorts by timestamp:
 **Tier 1 — existing tables (text-parsed at read time):**
 1. **`file-added`** — one event per `clips` row (joined through `ideas → instrument_tracks → songs`). Description: `"{uploadedBy} added {clipName} to {trackName} — {sectionName}"` — actor resolved from `clip.metadata.uploadedBy`, falling back to `'Someone'`. Timestamp: `clip.createdAt`.
 2. **`marked-final`** — from `task_comments` rows where `text.startsWith('Clip marked as final:')`. Clip name extracted from the text. Timestamp is the moment the user marked it final. Includes `taskId`.
-3. **`clip-comment`** — from `clip_comments` (joined through `clips → ideas → instrument_tracks → songs`). `author = 'Unknown'` renders as `"You"`. Description: `"You commented on {trackName} · {sectionName}"`. Includes `source: 'clip'` and `clipId`.
-4. **`task-comment` / `status-change`** — from `task_comments` (joined through `production_tasks → songs`). Routed by text pattern — see routing rules below.
+3. **`clip-comment`** — from `clip_comments` where `isNull(parentId)` (top-level only — replies are excluded to avoid duplicate events). Joined through `clips → ideas → instrument_tracks → songs`. `author = 'Unknown'` renders as `"You"`. Description: `"You commented on {trackName} · {sectionName}"`. Includes `source: 'clip'` and `clipId`.
+4. **`task-comment` / `status-change`** — from `task_comments` where `isNull(parentId)` (top-level only). Joined through `production_tasks → songs`. Routed by text pattern — see routing rules below.
 5. **`review-shared`** — one event per `song_reviews` row. Description: `"{createdBy} exported {name} to Review"`. Song-level only (no `instrument` or `sectionName`).
 
 **Tier 2 — `activity_log` table (type + description stored verbatim at write time):**
@@ -1437,14 +1454,16 @@ interface ReviewComment {
 
 These were added after initial scaffolding via `npx drizzle-kit push --force` (interactive `db:push` fails without a TTY — always use `--force`).
 
-**`ReviewCommentWithReplies` (in `storage.ts`):**
+**Threaded comment types (in `storage.ts`):**
 ```ts
+export type ClipCommentWithReplies  = ClipComment  & { replies: ClipComment[] };
+export type TaskCommentWithReplies  = TaskComment  & { replies: TaskComment[] };
 type ReviewCommentWithReplies = SongReviewComment & { replies: SongReviewComment[] };
 ```
-`getReviewComments` fetches all rows for the review, separates top-level (no `parentId`) from replies, builds a `replyMap`, and attaches replies to each parent. Ordered by `timestamp asc`.
+All three use the same pattern: fetch all rows for the parent entity, separate top-level (`!parentId`) from replies, build a `replyMap`, and attach replies to each parent. `getClipComments` and `getTaskComments` are exported from `IStorage` and return the `WithReplies` shapes. `getReviewComments` is internal to the review section.
 
-**`deleteReviewComment` (in `storage.ts`):**
-Deletes child replies first (parentId FK has no ON DELETE CASCADE since `parentId` is a self-reference), then deletes the parent. This prevents orphaned reply rows.
+**`delete*Comment` methods in `storage.ts`:**
+All three (`deleteClipComment`, `deleteTaskComment`, `deleteReviewComment`) delete child replies first (no FK ON DELETE CASCADE since `parentId` is a self-reference), then delete the parent. This prevents orphaned reply rows.
 
 **Audio playback:**
 `ReviewPlayer` creates `new Audio(review.src)` in a `useEffect([review.src])`. `timeupdate` events drive `currentTime` state. `ended` resets the player. The audio element is managed entirely through the `audioRef` ref — no Web Audio API routing.

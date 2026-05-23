@@ -1256,16 +1256,14 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedSection ? (
-                    <div className="flex items-center justify-center h-full">
-                      <p className="text-[10px] text-muted-foreground/40 italic text-center uppercase tracking-widest leading-relaxed px-4">
-                        {!selectedInstrument
-                          ? 'Select an instrument to browse sections'
-                          : `Select a ${selectedFile?.type === 'idea' ? 'subfolder' : 'section'} to view files`}
-                      </p>
-                    </div>
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
+                      {!selectedInstrument
+                        ? 'Select an instrument to browse sections'
+                        : `Select a ${selectedFile?.type === 'idea' ? 'subfolder' : 'section'} to view files`}
+                    </p>
                   ) : selectedSection.clips.length === 0 ? (
                     <div className={cn(
-                      'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors mx-1',
+                      'flex flex-col items-center justify-start pt-4 border-2 border-dashed rounded-lg transition-colors mx-1',
                       isDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
                     )}>
                       <Upload size={20} className={cn('mb-3', isDragOver ? 'text-primary/60' : 'text-white/15')} />
@@ -1481,16 +1479,14 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedInstrument ? (
-                    <div className="flex items-center justify-center h-full">
-                      <p className="text-[10px] text-muted-foreground/40 italic text-center uppercase tracking-widest leading-relaxed px-4">
-                        Select a part to view files
-                      </p>
-                    </div>
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
+                      Select a part to view files
+                    </p>
                   ) : (() => {
                     const clips = selectedInstrument.ideas[0]?.clips ?? [];
                     if (clips.length === 0) return (
                       <div className={cn(
-                        'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors mx-1',
+                        'flex flex-col items-center justify-start pt-4 border-2 border-dashed rounded-lg transition-colors mx-1',
                         isDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
                       )}>
                         <Upload size={20} className={cn('mb-3', isDragOver ? 'text-primary/60' : 'text-white/15')} />
