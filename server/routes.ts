@@ -24,6 +24,7 @@ import {
   instrumentTracks,
   productionTasks,
   taskComments,
+  clipComments,
   songReviewComments,
   songReviews,
   activityLog,
@@ -721,13 +722,20 @@ export async function registerRoutes(
   });
 
   app.post("/api/clips/:clipId/comments", async (req, res) => {
-    const { author, text } = req.body as { author: string; text: string };
+    const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
+    if (parentId) {
+      const parent = db.select().from(clipComments).where(eq(clipComments.id, parentId)).get();
+      if (!parent || parent.parentId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      }
+    }
     const comment = await storage.addClipComment({
       id: randomUUID(),
       clipId: req.params.clipId,
       author,
       text,
       timestamp: Date.now(),
+      parentId: parentId ?? null,
     });
     res.status(201).json(comment);
   });
@@ -1035,13 +1043,20 @@ export async function registerRoutes(
   });
 
   app.post("/api/production-tasks/:id/comments", async (req, res) => {
-    const { author, text } = req.body as { author: string; text: string };
+    const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
+    if (parentId) {
+      const parent = db.select().from(taskComments).where(eq(taskComments.id, parentId)).get();
+      if (!parent || parent.parentId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      }
+    }
     const comment = await storage.addTaskComment({
       id: randomUUID(),
       taskId: req.params.id,
       author,
       text,
       timestamp: Date.now(),
+      parentId: parentId ?? null,
     });
     res.status(201).json(comment);
   });

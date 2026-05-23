@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, count, and } from "drizzle-orm";
+import { eq, asc, desc, inArray, count, and, isNull } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -158,13 +158,13 @@ export interface IStorage {
   getTimelineClipForTask(instrument: string, sectionName: string, songId: string): Promise<TimelineClip | undefined>;
   upsertTask(data: InsertProductionTask): Promise<ProductionTask>;
   updateTask(id: string, updates: Partial<InsertProductionTask>): Promise<ProductionTask | undefined>;
-  getTaskComments(taskId: string): Promise<TaskComment[]>;
+  getTaskComments(taskId: string): Promise<TaskCommentWithReplies[]>;
   addTaskComment(data: InsertTaskComment): Promise<TaskComment>;
   updateTaskComment(id: string, text: string): Promise<TaskComment | undefined>;
   deleteTaskComment(id: string): Promise<void>;
 
   // Clip Comments
-  getClipComments(clipId: string): Promise<ClipComment[]>;
+  getClipComments(clipId: string): Promise<ClipCommentWithReplies[]>;
   addClipComment(data: InsertClipComment): Promise<ClipComment>;
   updateClipComment(id: string, text: string): Promise<ClipComment | undefined>;
   deleteClipComment(id: string): Promise<void>;
@@ -185,6 +185,9 @@ export interface IStorage {
 export type ReviewCommentWithReplies = SongReviewComment & {
   replies: SongReviewComment[];
 };
+
+export type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
+export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
@@ -719,7 +722,7 @@ export class SQLiteStorage implements IStorage {
       // not from clips.isFinal here — which would only have the upload timestamp.
     }
 
-    // Clip comments
+    // Clip comments (top-level only — replies don't generate separate activity events)
     const clipCommentRows = db
       .select({
         clipId: clipComments.clipId,
@@ -735,7 +738,7 @@ export class SQLiteStorage implements IStorage {
       .innerJoin(ideas, eq(clips.ideaId, ideas.id))
       .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
       .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
-      .where(songFilter)
+      .where(songFilter ? and(songFilter, isNull(clipComments.parentId)) : isNull(clipComments.parentId))
       .all();
 
     for (const row of clipCommentRows) {
@@ -769,7 +772,7 @@ export class SQLiteStorage implements IStorage {
       .from(taskComments)
       .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
       .innerJoin(songs, eq(productionTasks.songId, songs.id))
-      .where(songFilter)
+      .where(songFilter ? and(songFilter, isNull(taskComments.parentId)) : isNull(taskComments.parentId))
       .all();
 
     for (const row of taskCommentRows) {
@@ -994,13 +997,27 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(productionTasks).where(eq(productionTasks.id, id)).get();
   }
 
-  async getTaskComments(taskId: string): Promise<TaskComment[]> {
-    return db.select().from(taskComments).where(eq(taskComments.taskId, taskId)).orderBy(asc(taskComments.createdAt)).all();
+  async getTaskComments(taskId: string): Promise<TaskCommentWithReplies[]> {
+    const all = db.select().from(taskComments).where(eq(taskComments.taskId, taskId)).orderBy(asc(taskComments.createdAt)).all();
+    const topLevel = all.filter(c => !c.parentId);
+    const replyMap = new Map<string, TaskComment[]>();
+    for (const c of all) {
+      if (!c.parentId) continue;
+      const bucket = replyMap.get(c.parentId) ?? [];
+      bucket.push(c);
+      replyMap.set(c.parentId, bucket);
+    }
+    return topLevel.map(c => ({
+      ...c,
+      replies: (replyMap.get(c.id) ?? []).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      ),
+    }));
   }
 
   async addTaskComment(data: InsertTaskComment): Promise<TaskComment> {
     const now = new Date().toISOString();
-    const comment: TaskComment = { ...data, id: data.id ?? randomUUID(), createdAt: now };
+    const comment: TaskComment = { ...data, id: data.id ?? randomUUID(), parentId: data.parentId ?? null, createdAt: now };
     db.insert(taskComments).values(comment).run();
     return db.select().from(taskComments).where(eq(taskComments.id, comment.id)).get()!;
   }
@@ -1013,18 +1030,33 @@ export class SQLiteStorage implements IStorage {
   }
 
   async deleteTaskComment(id: string): Promise<void> {
+    db.delete(taskComments).where(eq(taskComments.parentId, id)).run();
     db.delete(taskComments).where(eq(taskComments.id, id)).run();
   }
 
   // ── Clip Comments ──────────────────────────────────────────────────────────
 
-  async getClipComments(clipId: string): Promise<ClipComment[]> {
-    return db.select().from(clipComments).where(eq(clipComments.clipId, clipId)).orderBy(asc(clipComments.timestamp)).all();
+  async getClipComments(clipId: string): Promise<ClipCommentWithReplies[]> {
+    const all = db.select().from(clipComments).where(eq(clipComments.clipId, clipId)).orderBy(asc(clipComments.timestamp)).all();
+    const topLevel = all.filter(c => !c.parentId);
+    const replyMap = new Map<string, ClipComment[]>();
+    for (const c of all) {
+      if (!c.parentId) continue;
+      const bucket = replyMap.get(c.parentId) ?? [];
+      bucket.push(c);
+      replyMap.set(c.parentId, bucket);
+    }
+    return topLevel.map(c => ({
+      ...c,
+      replies: (replyMap.get(c.id) ?? []).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      ),
+    }));
   }
 
   async addClipComment(data: InsertClipComment): Promise<ClipComment> {
     const now = new Date().toISOString();
-    const comment: ClipComment = { ...data, id: data.id ?? randomUUID(), createdAt: now };
+    const comment: ClipComment = { ...data, id: data.id ?? randomUUID(), parentId: data.parentId ?? null, createdAt: now };
     db.insert(clipComments).values(comment).run();
     return db.select().from(clipComments).where(eq(clipComments.id, comment.id)).get()!;
   }
@@ -1037,6 +1069,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   async deleteClipComment(id: string): Promise<void> {
+    db.delete(clipComments).where(eq(clipComments.parentId, id)).run();
     db.delete(clipComments).where(eq(clipComments.id, id)).run();
   }
 

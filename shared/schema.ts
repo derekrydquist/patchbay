@@ -112,6 +112,7 @@ export type Clip = typeof clips.$inferSelect;
 export const clipComments = sqliteTable("clip_comments", {
   id: text("id").primaryKey(),
   clipId: text("clip_id").notNull().references(() => clips.id, { onDelete: "cascade" }),
+  parentId: text("parent_id"), // null = top-level; set = reply (one level deep only)
   author: text("author").notNull(),
   text: text("text").notNull(),
   timestamp: real("timestamp").notNull(),
@@ -189,6 +190,7 @@ export const deletedSections = sqliteTable("deleted_sections", {
 export const taskComments = sqliteTable("task_comments", {
   id: text("id").primaryKey(),
   taskId: text("task_id").notNull().references(() => productionTasks.id, { onDelete: "cascade" }),
+  parentId: text("parent_id"), // null = top-level; set = reply (one level deep only)
   author: text("author").notNull(),
   text: text("text").notNull(),
   timestamp: real("timestamp").notNull(),

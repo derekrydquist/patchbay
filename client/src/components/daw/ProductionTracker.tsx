@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import {
-  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check,
+  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { cn, capitalize } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -32,6 +33,8 @@ const STATUS_CONFIG: Record<TaskStatus, StatusCfg> = {
   'complete':      { label: 'COMPLETE',       icon: CheckCircle2, iconClass: 'text-primary',  cellBg: 'bg-primary/10' },
   'will-not-play': { label: 'WILL NOT PLAY', icon: Ban,          iconClass: 'text-red-400/70', cellBg: 'bg-red-950/30 shadow-[inset_0_0_0_1px_rgba(220,38,38,0.3)]' },
 };
+
+type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
 
 type BucketClip = { id: string; name: string; isFinal: boolean };
 type BucketIdea = { id: string; sectionName: string; clips: BucketClip[] };
@@ -83,7 +86,13 @@ function CellModal({
   const [savedField, setSavedField] = useState<string | null>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [replyMentionQuery, setReplyMentionQuery] = useState<string | null>(null);
+  const [replyMentionIndex, setReplyMentionIndex] = useState(0);
   const noteInputRef = useRef<HTMLInputElement>(null);
+  const replyInputRef = useRef<HTMLInputElement>(null);
+  const lastReplyRef = useRef<HTMLDivElement | null>(null);
 
   const mentionMatches = mentionQuery !== null
     ? assignees.filter(m => m.toLowerCase().startsWith(mentionQuery.toLowerCase()))
@@ -127,7 +136,7 @@ function CellModal({
     if (e.key === 'Enter') submitComment();
   };
 
-  const { data: comments = [] } = useQuery<TaskComment[]>({
+  const { data: comments = [] } = useQuery<TaskCommentWithReplies[]>({
     queryKey: ['task-comments', task.id],
     queryFn: () => fetch(`/api/production-tasks/${task.id}/comments`).then(r => r.json()),
     enabled: open,
@@ -214,7 +223,62 @@ function CellModal({
     },
   });
 
+  const addReply = useMutation({
+    mutationFn: ({ parentId, text }: { parentId: string; text: string }) =>
+      fetch(`/api/production-tasks/${task.id}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: currentUser, text, parentId }),
+      }).then(r => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+      queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
+      setReplyText('');
+      setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
+    },
+  });
+
   const status = task.status as TaskStatus;
+
+  const replyMentionMatches = replyMentionQuery !== null
+    ? assignees.filter(m => m.toLowerCase().startsWith(replyMentionQuery.toLowerCase()))
+    : [];
+
+  const insertReplyMention = (name: string) => {
+    setReplyText(prev => prev.replace(/@\w*$/, `@${name} `));
+    setReplyMentionQuery(null);
+    setTimeout(() => replyInputRef.current?.focus(), 0);
+  };
+
+  const handleReplyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setReplyText(val);
+    const m = /@(\w*)$/.exec(val);
+    setReplyMentionQuery(m ? m[1] : null);
+    setReplyMentionIndex(0);
+  };
+
+  const handleReplyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, commentId: string) => {
+    if (replyMentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setReplyMentionIndex(i => Math.min(i + 1, replyMentionMatches.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setReplyMentionIndex(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Enter') { e.preventDefault(); insertReplyMention(replyMentionMatches[replyMentionIndex]); return; }
+      if (e.key === 'Escape') { setReplyMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter') submitReply(commentId);
+    if (e.key === 'Escape') { setExpandedThreadId(null); setReplyText(''); }
+  };
+
+  const toggleThread = (commentId: string) => {
+    setExpandedThreadId(prev => prev === commentId ? null : commentId);
+    setReplyText('');
+    setReplyMentionQuery(null);
+  };
+
+  const submitReply = (parentId: string) => {
+    const text = replyText.trim();
+    if (text) addReply.mutate({ parentId, text });
+  };
 
   function submitComment() {
     const text = newComment.trim();
@@ -352,7 +416,7 @@ function CellModal({
             <div className="pt-4 border-t border-white/5">
               <div className="flex items-center justify-between mb-3">
                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2 flex-1">
-                  <div className="h-px flex-1 bg-primary/20" /> Session Notes
+                  <div className="h-px flex-1 bg-primary/20" /> Comments
                 </h4>
               </div>
               <div className="space-y-4">
@@ -360,31 +424,36 @@ function CellModal({
                   <div className="relative flex-1">
                     <Input
                       ref={noteInputRef}
-                      placeholder="Add a collaboration note..."
+                      placeholder="Add a comment..."
                       value={newComment}
                       onChange={handleNoteChange}
                       onKeyDown={handleNoteKeyDown}
-                      className="bg-black/40 border-white/10 text-xs h-9 w-full"
+                      className="bg-black/40 border-white/10 text-sm h-9 w-full placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
                     />
-                    {mentionQuery !== null && mentionMatches.length > 0 && (
-                      <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-md shadow-xl overflow-hidden">
-                        {mentionMatches.map((name, i) => (
-                          <button
-                            key={name}
-                            onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
-                            className={cn(
-                              'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
-                              i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
-                            )}
-                          >
-                            <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(name))}>
-                              {capitalize(name).charAt(0)}
-                            </div>
-                            @{capitalize(name)}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                    {mentionQuery !== null && mentionMatches.length > 0 && (() => {
+                      const rect = noteInputRef.current?.getBoundingClientRect();
+                      if (!rect) return null;
+                      return createPortal(
+                        <div style={{ position: 'fixed', top: rect.bottom + 4, left: rect.left, width: rect.width, zIndex: 9999 }} className="bg-popover border border-border rounded-md shadow-xl overflow-hidden">
+                          {mentionMatches.map((name, i) => (
+                            <button
+                              key={name}
+                              onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
+                                i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
+                              )}
+                            >
+                              <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(name))}>
+                                {capitalize(name).charAt(0)}
+                              </div>
+                              @{capitalize(name)}
+                            </button>
+                          ))}
+                        </div>,
+                        document.body
+                      );
+                    })()}
                   </div>
                   <Button size="sm" onClick={submitComment} className="h-9 px-3">
                     <Plus size={14} />
@@ -394,59 +463,156 @@ function CellModal({
                 <div className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
                   {comments.length > 0 ? (
                     <div className="space-y-1">
-                      {comments.map(c => (
-                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded">
-                          {editingId === c.id ? (
-                            <div className="space-y-2">
-                              <Input
-                                value={editText}
-                                onChange={(e) => setEditText(e.target.value)}
-                                className="bg-black/40 border-white/10 text-xs h-8"
-                                autoFocus
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') editComment.mutate({ id: c.id, text: editText });
-                                  if (e.key === 'Escape') setEditingId(null);
-                                }}
-                              />
-                              <div className="flex gap-2">
-                                <Button size="sm" className="h-7 text-[10px] px-2" onClick={() => editComment.mutate({ id: c.id, text: editText })}>
-                                  Save
-                                </Button>
-                                <Button size="sm" variant="ghost" className="h-7 text-[10px] px-2 text-muted-foreground" onClick={() => setEditingId(null)}>
-                                  Cancel
-                                </Button>
-                              </div>
-                            </div>
-                          ) : (
-                            <>
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
-                                  <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white', avatarColor(c.author))}>
-                                    {capitalize(c.author).charAt(0)}
+                      {comments.map(c => {
+                        const replyCount = (c.replies ?? []).length;
+                        const isExpanded = expandedThreadId === c.id;
+                        const displayAuthor = c.author === currentUser ? 'You' : capitalize(c.author);
+                        return (
+                          <div key={c.id}>
+                            {/* Top-level comment */}
+                            <div className="p-3 hover:bg-white/5 transition-colors rounded">
+                              {editingId === c.id ? (
+                                <div className="space-y-2">
+                                  <Input
+                                    value={editText}
+                                    onChange={(e) => setEditText(e.target.value)}
+                                    className="bg-black/40 border-white/10 text-xs h-8"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') editComment.mutate({ id: c.id, text: editText });
+                                      if (e.key === 'Escape') setEditingId(null);
+                                    }}
+                                  />
+                                  <div className="flex gap-2">
+                                    <Button size="sm" className="h-7 text-[10px] px-2" onClick={() => editComment.mutate({ id: c.id, text: editText })}>Save</Button>
+                                    <Button size="sm" variant="ghost" className="h-7 text-[10px] px-2 text-muted-foreground" onClick={() => setEditingId(null)}>Cancel</Button>
                                   </div>
-                                  {capitalize(c.author)}
-                                </span>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatTimestamp(c.timestamp)}</span>
-                                  <button
-                                    onClick={() => { setEditingId(c.id); setEditText(c.text); }}
-                                    className="text-white/20 hover:text-white/60 transition-colors"
-                                  >
-                                    <Pencil size={10} />
-                                  </button>
-                                  <button
-                                    onClick={() => deleteComment.mutate(c.id)}
-                                    className="text-white/20 hover:text-red-400 transition-colors"
-                                  >
-                                    <Trash2 size={10} />
-                                  </button>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="flex justify-between items-center mb-1">
+                                    <span className="text-[11px] font-bold text-primary flex items-center gap-1.5">
+                                      <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(c.author))}>
+                                        {capitalize(c.author).charAt(0)}
+                                      </div>
+                                      {displayAuthor}
+                                    </span>
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatTimestamp(c.timestamp)}</span>
+                                      <button onClick={() => { setEditingId(c.id); setEditText(c.text); }} className="text-white/20 hover:text-white/60 transition-colors">
+                                        <Pencil size={10} />
+                                      </button>
+                                      <button onClick={() => deleteComment.mutate(c.id)} className="text-white/20 hover:text-red-400 transition-colors">
+                                        <Trash2 size={10} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <p className="text-xs text-foreground/80 leading-relaxed">{c.text}</p>
+                                  <div className="mt-1.5">
+                                    {replyCount > 0 ? (
+                                      <button onClick={() => toggleThread(c.id)} className="text-[10px] font-bold text-white/30 hover:text-primary/80 transition-colors flex items-center gap-1">
+                                        {isExpanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                                        {isExpanded ? 'Hide' : `${replyCount} ${replyCount === 1 ? 'reply' : 'replies'}`}
+                                      </button>
+                                    ) : (
+                                      <button onClick={() => toggleThread(c.id)} className="text-[10px] font-bold text-white/30 hover:text-primary/80 transition-colors">
+                                        {isExpanded ? 'Cancel' : 'Reply'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+
+                            {/* Expanded thread — replies + reply input */}
+                            {isExpanded && (
+                              <div>
+                                {(c.replies ?? []).map((reply, ri) => {
+                                  const replyDisplayAuthor = reply.author === currentUser ? 'You' : capitalize(reply.author);
+                                  return (
+                                    <div key={reply.id} ref={ri === (c.replies ?? []).length - 1 ? lastReplyRef : null} className="pl-8 pr-3 py-2 border-t border-white/[0.03] hover:bg-white/[0.02] transition-colors group/reply">
+                                      {editingId === reply.id ? (
+                                        <div className="flex gap-2">
+                                          <Input
+                                            value={editText}
+                                            onChange={(e) => setEditText(e.target.value)}
+                                            className="bg-black/40 border-white/10 text-xs h-7 flex-1"
+                                            autoFocus
+                                            onKeyDown={(e) => {
+                                              if (e.key === 'Enter') editComment.mutate({ id: reply.id, text: editText });
+                                              if (e.key === 'Escape') setEditingId(null);
+                                            }}
+                                          />
+                                          <Button size="sm" className="h-7 px-2 text-[10px]" onClick={() => editComment.mutate({ id: reply.id, text: editText })}>Save</Button>
+                                          <Button size="sm" variant="ghost" className="h-7 px-2 text-[10px] text-muted-foreground" onClick={() => setEditingId(null)}>Cancel</Button>
+                                        </div>
+                                      ) : (
+                                        <div className="flex items-start gap-2">
+                                          <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0 mt-0.5', avatarColor(reply.author))}>
+                                            {capitalize(reply.author).charAt(0)}
+                                          </div>
+                                          <div className="min-w-0 flex-1">
+                                            <div className="flex items-center justify-between mb-0.5">
+                                              <span className="text-[11px] font-bold text-primary/80">{replyDisplayAuthor}</span>
+                                              <div className="flex items-center gap-1 opacity-0 group-hover/reply:opacity-100 transition-opacity">
+                                                <button onClick={() => { setEditingId(reply.id); setEditText(reply.text); }} className="text-white/20 hover:text-white/60 transition-colors">
+                                                  <Pencil size={9} />
+                                                </button>
+                                                <button onClick={() => deleteComment.mutate(reply.id)} className="text-white/20 hover:text-red-400 transition-colors">
+                                                  <Trash2 size={9} />
+                                                </button>
+                                              </div>
+                                            </div>
+                                            <p className="text-xs text-foreground/70 leading-relaxed">{reply.text}</p>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                                {/* Reply input */}
+                                <div className="px-3 py-2 border-t border-white/[0.03] bg-white/[0.01] relative">
+                                  <div className="flex gap-2">
+                                    <Input
+                                      ref={replyInputRef}
+                                      value={replyText}
+                                      onChange={handleReplyChange}
+                                      onKeyDown={(e) => handleReplyKeyDown(e, c.id)}
+                                      placeholder={`Reply to ${c.author === currentUser ? 'yourself' : capitalize(c.author)}…`}
+                                      className="bg-black/40 border-white/10 text-sm h-9 flex-1 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
+                                      autoFocus={replyCount === 0}
+                                    />
+                                    <Button size="sm" onClick={() => submitReply(c.id)} className="h-9 px-3 shrink-0">
+                                      Reply
+                                    </Button>
+                                  </div>
+                                  {replyMentionMatches.length > 0 && (() => {
+                                    const rect = replyInputRef.current?.getBoundingClientRect();
+                                    if (!rect) return null;
+                                    return createPortal(
+                                      <div style={{ position: 'fixed', bottom: window.innerHeight - rect.top + 4, left: rect.left, width: Math.max(rect.width, 160), zIndex: 9999 }} className="bg-[#09090b] border border-white/10 rounded-md overflow-hidden shadow-lg">
+                                        {replyMentionMatches.map((name, i) => (
+                                          <div
+                                            key={name}
+                                            className={cn('flex items-center gap-2 px-3 py-1.5 cursor-pointer', i === replyMentionIndex ? 'bg-primary/10' : 'hover:bg-white/5')}
+                                            onMouseDown={(e) => { e.preventDefault(); insertReplyMention(name); }}
+                                          >
+                                            <div className={cn('w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-white shrink-0', avatarColor(name))}>
+                                              {capitalize(name).charAt(0)}
+                                            </div>
+                                            <span className="text-xs text-white/80">{capitalize(name)}</span>
+                                          </div>
+                                        ))}
+                                      </div>,
+                                      document.body
+                                    );
+                                  })()}
                                 </div>
                               </div>
-                              <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
-                            </>
-                          )}
-                        </div>
-                      ))}
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="py-8 flex flex-col items-center justify-center text-muted-foreground text-[11px] italic opacity-40">

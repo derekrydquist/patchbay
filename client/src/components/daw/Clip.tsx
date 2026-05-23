@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import {
   ContextMenu,
@@ -37,6 +38,8 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
+
+type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
 
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
@@ -94,7 +97,13 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const [newComment, setNewComment] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const [replyMentionQuery, setReplyMentionQuery] = useState<string | null>(null);
+  const [replyMentionIndex, setReplyMentionIndex] = useState(0);
   const noteInputRef = useRef<HTMLInputElement | null>(null);
+  const replyInputRef = useRef<HTMLInputElement | null>(null);
+  const lastReplyRef = useRef<HTMLDivElement | null>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
 
@@ -228,7 +237,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   };
 
   // ── Comment API ────────────────────────────────────────────────────────────
-  const { data: clipCommentsList = [] } = useQuery<ClipComment[]>({
+  const { data: clipCommentsList = [] } = useQuery<ClipCommentWithReplies[]>({
     queryKey: ["clip-comments", effectiveId],
     queryFn: async () => {
       const res = await fetch(`/api/clips/${effectiveId}/comments`);
@@ -283,6 +292,58 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     } catch (err) {
       console.error('[clip comment] delete failed:', err);
     }
+  };
+
+  const handleAddReply = async (parentId: string) => {
+    const text = replyText.trim();
+    if (!text) return;
+    try {
+      await fetch(`/api/clips/${effectiveId}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ author: user?.username ?? 'Unknown', text, parentId }),
+      });
+      setReplyText('');
+      await queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
+    } catch (err) {
+      console.error('[clip comment] reply failed:', err);
+    }
+  };
+
+  const replyMentionMatches = replyMentionQuery !== null
+    ? bandMembers.filter((m: string) => m.toLowerCase().startsWith(replyMentionQuery.toLowerCase()))
+    : [];
+
+  const insertReplyMention = (name: string) => {
+    setReplyText(prev => prev.replace(/@\w*$/, `@${name} `));
+    setReplyMentionQuery(null);
+    setTimeout(() => replyInputRef.current?.focus(), 0);
+  };
+
+  const handleReplyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setReplyText(val);
+    const m = /@(\w*)$/.exec(val);
+    setReplyMentionQuery(m ? m[1] : null);
+    setReplyMentionIndex(0);
+  };
+
+  const handleReplyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, commentId: string) => {
+    if (replyMentionMatches.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setReplyMentionIndex(i => Math.min(i + 1, replyMentionMatches.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setReplyMentionIndex(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Enter') { e.preventDefault(); insertReplyMention(replyMentionMatches[replyMentionIndex]); return; }
+      if (e.key === 'Escape') { setReplyMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter') handleAddReply(commentId);
+    if (e.key === 'Escape') { setExpandedThreadId(null); setReplyText(''); }
+  };
+
+  const toggleThread = (commentId: string) => {
+    setExpandedThreadId(prev => prev === commentId ? null : commentId);
+    setReplyText('');
+    setReplyMentionQuery(null);
   };
 
   // ── Tag helpers ────────────────────────────────────────────────────────────
@@ -461,7 +522,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h4 className="text-[10px] text-primary/60 uppercase tracking-[0.2em] font-bold flex items-center gap-2 flex-1">
-                  <div className="h-px flex-1 bg-primary/20" /> Session Notes
+                  <div className="h-px flex-1 bg-primary/20" /> Comments
                 </h4>
               </div>
 
@@ -470,34 +531,39 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                   <div className="relative flex-1">
                     <Input
                       ref={noteInputRef}
-                      placeholder="Add a collaboration note..."
+                      placeholder="Add a comment..."
                       value={newComment}
                       onChange={handleNoteChange}
                       onKeyDown={handleNoteKeyDown}
-                      className="bg-black/40 border-white/10 text-xs h-9 w-full placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
+                      className="bg-black/40 border-white/10 text-sm h-9 w-full placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
                     />
-                    {mentionQuery !== null && mentionMatches.length > 0 && (
-                      <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-popover border border-border rounded-md shadow-xl overflow-hidden">
-                        {mentionMatches.map((name, i) => (
-                          <button
-                            key={name}
-                            onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
-                            className={cn(
-                              'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
-                              i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
-                            )}
-                          >
-                            <div
-                              className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-black shrink-0"
-                              style={{ backgroundColor: avatarColor(name) }}
+                    {mentionQuery !== null && mentionMatches.length > 0 && (() => {
+                      const rect = noteInputRef.current?.getBoundingClientRect();
+                      if (!rect) return null;
+                      return createPortal(
+                        <div style={{ position: 'fixed', top: rect.bottom + 4, left: rect.left, width: rect.width, zIndex: 9999 }} className="bg-popover border border-border rounded-md shadow-xl overflow-hidden">
+                          {mentionMatches.map((name, i) => (
+                            <button
+                              key={name}
+                              onMouseDown={(e) => { e.preventDefault(); insertMention(name); }}
+                              className={cn(
+                                'w-full text-left px-3 py-2 text-xs flex items-center gap-2 transition-colors',
+                                i === mentionIndex ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/10 hover:text-white'
+                              )}
                             >
-                              {capitalize(name).charAt(0)}
-                            </div>
-                            @{capitalize(name)}
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                              <div
+                                className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-black shrink-0"
+                                style={{ backgroundColor: avatarColor(name) }}
+                              >
+                                {capitalize(name).charAt(0)}
+                              </div>
+                              @{capitalize(name)}
+                            </button>
+                          ))}
+                        </div>,
+                        document.body
+                      );
+                    })()}
                   </div>
                   <Button size="sm" onClick={handleAddComment} className="h-9 px-3">
                     <Plus size={14} />
@@ -508,50 +574,171 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                   {clipCommentsList.length > 0 ? (
                     <div className="space-y-1">
                       {clipCommentsList.map(c => (
-                        <div key={c.id} className="p-3 hover:bg-white/5 transition-colors rounded group/comment">
-                          <div className="flex justify-between items-start mb-1">
-                            <div className="flex items-center gap-2">
-                              <div
-                                className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-black shrink-0"
-                                style={{ backgroundColor: avatarColor(c.author) }}
-                              >
-                                {capitalize(c.author).charAt(0)}
+                        <div key={c.id}>
+                          {/* Top-level comment */}
+                          <div className="p-3 hover:bg-white/5 transition-colors rounded group/comment">
+                            <div className="flex justify-between items-start mb-1">
+                              <div className="flex items-center gap-2">
+                                <div
+                                  className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-black shrink-0"
+                                  style={{ backgroundColor: avatarColor(c.author) }}
+                                >
+                                  {capitalize(c.author).charAt(0)}
+                                </div>
+                                <span className="text-[11px] font-bold text-primary">
+                                  {c.author === (user?.username ?? '') ? 'You' : capitalize(c.author)}
+                                </span>
+                                <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(c.timestamp)}</span>
                               </div>
-                              <span className="text-[11px] font-bold text-primary">{capitalize(c.author)}</span>
-                              <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(c.timestamp)}</span>
+                              <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                                <button
+                                  onClick={() => { setEditingId(c.id); setEditText(c.text); }}
+                                  className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
+                                >
+                                  <Pencil size={10} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteComment(c.id)}
+                                  className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors"
+                                >
+                                  <Trash2 size={10} />
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                            {editingId === c.id ? (
+                              <div className="flex gap-2 mt-2">
+                                <Input
+                                  value={editText}
+                                  onChange={(e) => setEditText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleSaveEdit(c.id);
+                                    if (e.key === 'Escape') setEditingId(null);
+                                  }}
+                                  className="bg-black/40 border-white/10 text-xs h-7 flex-1"
+                                  autoFocus
+                                />
+                                <Button size="sm" onClick={() => handleSaveEdit(c.id)} className="h-7 px-2 text-[10px]">Save</Button>
+                                <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-7 px-2 text-[10px]">Cancel</Button>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-foreground/80 leading-relaxed">{c.text}</p>
+                            )}
+                            {/* Reply controls */}
+                            <div className="flex items-center gap-3 mt-1.5">
                               <button
-                                onClick={() => { setEditingId(c.id); setEditText(c.text); }}
-                                className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
+                                onClick={() => toggleThread(c.id)}
+                                className="text-[10px] text-muted-foreground hover:text-primary transition-colors"
                               >
-                                <Pencil size={10} />
+                                Reply
                               </button>
-                              <button
-                                onClick={() => handleDeleteComment(c.id)}
-                                className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors"
-                              >
-                                <Trash2 size={10} />
-                              </button>
+                              {c.replies.length > 0 && (
+                                <button
+                                  onClick={() => toggleThread(c.id)}
+                                  className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-primary transition-colors"
+                                >
+                                  {expandedThreadId === c.id
+                                    ? <ChevronUp size={10} />
+                                    : <ChevronDown size={10} />}
+                                  {c.replies.length} {c.replies.length === 1 ? 'reply' : 'replies'}
+                                </button>
+                              )}
                             </div>
                           </div>
-                          {editingId === c.id ? (
-                            <div className="flex gap-2 mt-2">
-                              <Input
-                                value={editText}
-                                onChange={(e) => setEditText(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleSaveEdit(c.id);
-                                  if (e.key === 'Escape') setEditingId(null);
-                                }}
-                                className="bg-black/40 border-white/10 text-xs h-7 flex-1"
-                                autoFocus
-                              />
-                              <Button size="sm" onClick={() => handleSaveEdit(c.id)} className="h-7 px-2 text-[10px]">Save</Button>
-                              <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-7 px-2 text-[10px]">Cancel</Button>
+
+                          {/* Replies + reply input */}
+                          {expandedThreadId === c.id && (
+                            <div className="ml-7 border-l border-white/10 pl-3 space-y-1 mb-1">
+                              {c.replies.map((r, ri) => (
+                                <div key={r.id} ref={ri === c.replies.length - 1 ? lastReplyRef : null} className="p-2 hover:bg-white/5 transition-colors rounded group/reply">
+                                  <div className="flex justify-between items-start mb-1">
+                                    <div className="flex items-center gap-2">
+                                      <div
+                                        className="w-4 h-4 rounded-full flex items-center justify-center text-[8px] font-bold text-black shrink-0"
+                                        style={{ backgroundColor: avatarColor(r.author) }}
+                                      >
+                                        {capitalize(r.author).charAt(0)}
+                                      </div>
+                                      <span className="text-[10px] font-bold text-primary">
+                                        {r.author === (user?.username ?? '') ? 'You' : capitalize(r.author)}
+                                      </span>
+                                      <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(r.timestamp)}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1 opacity-0 group-hover/reply:opacity-100 transition-opacity">
+                                      <button
+                                        onClick={() => { setEditingId(r.id); setEditText(r.text); }}
+                                        className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
+                                      >
+                                        <Pencil size={9} />
+                                      </button>
+                                      <button
+                                        onClick={() => handleDeleteComment(r.id)}
+                                        className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors"
+                                      >
+                                        <Trash2 size={9} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  {editingId === r.id ? (
+                                    <div className="flex gap-2 mt-1">
+                                      <Input
+                                        value={editText}
+                                        onChange={(e) => setEditText(e.target.value)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') handleSaveEdit(r.id);
+                                          if (e.key === 'Escape') setEditingId(null);
+                                        }}
+                                        className="bg-black/40 border-white/10 text-xs h-6 flex-1"
+                                        autoFocus
+                                      />
+                                      <Button size="sm" onClick={() => handleSaveEdit(r.id)} className="h-6 px-2 text-[10px]">Save</Button>
+                                      <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-6 px-2 text-[10px]">Cancel</Button>
+                                    </div>
+                                  ) : (
+                                    <p className="text-xs text-foreground/70 leading-relaxed">{r.text}</p>
+                                  )}
+                                </div>
+                              ))}
+                              {/* Reply input */}
+                              <div className="flex gap-2 pt-1 pb-2 relative">
+                                <Input
+                                  ref={replyInputRef}
+                                  value={replyText}
+                                  onChange={handleReplyChange}
+                                  onKeyDown={(e) => handleReplyKeyDown(e, c.id)}
+                                  placeholder={`Reply to ${c.author === (user?.username ?? '') ? 'yourself' : capitalize(c.author)}…`}
+                                  className="bg-black/40 border-white/10 text-sm h-9 flex-1 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
+                                  autoFocus
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() => handleAddReply(c.id)}
+                                  className="h-9 px-3 text-[10px] shrink-0"
+                                >
+                                  Reply
+                                </Button>
+                                {replyMentionQuery !== null && replyMentionMatches.length > 0 && (() => {
+                                  const rect = replyInputRef.current?.getBoundingClientRect();
+                                  if (!rect) return null;
+                                  return createPortal(
+                                    <div style={{ position: 'fixed', bottom: window.innerHeight - rect.top + 4, left: rect.left, width: Math.max(rect.width, 160), zIndex: 9999 }} className="bg-[#1a1f2e] border border-white/10 rounded shadow-lg overflow-hidden">
+                                      {replyMentionMatches.map((m: string, i: number) => (
+                                        <div
+                                          key={m}
+                                          onMouseDown={(e) => { e.preventDefault(); insertReplyMention(m); }}
+                                          className={cn('flex items-center gap-2 px-2 py-1.5 cursor-pointer text-xs', i === replyMentionIndex ? 'bg-primary/20 text-primary' : 'hover:bg-white/5')}
+                                        >
+                                          <div className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-bold text-black shrink-0" style={{ backgroundColor: avatarColor(m) }}>
+                                            {capitalize(m).charAt(0)}
+                                          </div>
+                                          {capitalize(m)}
+                                        </div>
+                                      ))}
+                                    </div>,
+                                    document.body
+                                  );
+                                })()}
+                              </div>
                             </div>
-                          ) : (
-                            <p className="text-xs text-foreground/80 leading-relaxed italic">"{c.text}"</p>
                           )}
                         </div>
                       ))}
