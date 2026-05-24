@@ -552,6 +552,7 @@ export class SQLiteStorage implements IStorage {
       src: null,
       sectionName: null,
       metadata: null,
+      addedToSongs: null,
       ...data,
       id: data.id ?? randomUUID(),
       createdAt: now,

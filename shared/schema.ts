@@ -100,6 +100,8 @@ export const clips = sqliteTable("clips", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   sectionName: text("section_name"),
   metadata: text("metadata", { mode: "json" }).$type<ClipMetadata>(),
+  addedToSongs: text("added_to_songs", { mode: "json" })
+    .$type<Array<{ songId: string; songName: string; instrument: string; section: string }>>(),
   createdAt: text("created_at").notNull(),
 });
 

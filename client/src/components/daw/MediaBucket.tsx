@@ -249,24 +249,35 @@ export function UploadModal({
           <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
         </div>
         <div className="p-6 space-y-6">
-          {/* Destination — always visible at top */}
-          <div className="space-y-1.5">
-            <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
-            <Select value={uploadDestination} onValueChange={setUploadDestination}>
-              <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
-                <SelectValue placeholder="Select Destination" />
-              </SelectTrigger>
-              <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
-                {tracks.flatMap(track =>
-                  track.ideas.map(idea => (
-                    <SelectItem key={idea.id} value={idea.id} className="text-xs">
-                      {track.name} → {idea.sectionName}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-          </div>
+          {/* Destination — show static label for idea uploads; full dropdown for song uploads */}
+          {songType === 'idea' ? (
+            defaultInstrumentName && (
+              <div className="space-y-1.5">
+                <label className="text-[10px] uppercase font-bold text-muted-foreground">Uploading to</label>
+                <p className="text-xs text-white/80 font-medium px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-md">
+                  {defaultInstrumentName}{defaultSectionName ? ` → ${defaultSectionName}` : ''}
+                </p>
+              </div>
+            )
+          ) : (
+            <div className="space-y-1.5">
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
+              <Select value={uploadDestination} onValueChange={setUploadDestination}>
+                <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
+                  <SelectValue placeholder="Select Destination" />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
+                  {tracks.flatMap(track =>
+                    track.ideas.map(idea => (
+                      <SelectItem key={idea.id} value={idea.id} className="text-xs">
+                        {track.name} → {idea.sectionName}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div
             onDragOver={e => e.preventDefault()}
             onDrop={handleFileDrop}

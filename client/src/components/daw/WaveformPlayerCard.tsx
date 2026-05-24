@@ -10,10 +10,11 @@ export interface WaveformPlayerCardProps {
   color?: string;
   waveformHeight?: number;
   className?: string;
+  children?: React.ReactNode;
 }
 
 export function WaveformPlayerCard({
-  src, name, duration, isFinal, color, waveformHeight = 20, className,
+  src, name, duration, isFinal, color, waveformHeight = 20, className, children,
 }: WaveformPlayerCardProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -122,7 +123,7 @@ export function WaveformPlayerCard({
 
   return (
     <div className={cn(
-      'flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.03] border border-white/5 hover:bg-white/[0.05] transition-colors relative overflow-hidden',
+      'flex flex-col rounded-lg bg-white/[0.03] border border-white/5 hover:bg-white/[0.05] transition-colors relative overflow-hidden',
       isFinal && 'border-primary/30 bg-primary/[0.04]',
       className,
     )}>
@@ -132,35 +133,38 @@ export function WaveformPlayerCard({
           style={{ backgroundColor: color }}
         />
       )}
-      <button
-        onPointerDown={e => e.stopPropagation()}
-        onClick={toggle}
-        className="relative z-10 w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 hover:bg-primary/30 transition-colors"
-      >
-        {isPlaying
-          ? <Pause size={11} className="text-primary" />
-          : <Play size={11} className="text-primary ml-0.5" />}
-      </button>
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className={cn('text-xs font-medium truncate', isFinal ? 'text-primary' : 'text-white/80')}>
-              {name}
-            </span>
-            {isFinal && <CheckCircle2 size={10} className="text-primary shrink-0" />}
-          </div>
-          <span className="text-[10px] text-white/30 ml-2 shrink-0 font-mono">
-            {formatDur(isPlaying ? currentTime : duration)}
-          </span>
-        </div>
-        <canvas
-          ref={canvasRef}
-          className="w-full rounded relative z-10 cursor-pointer"
-          style={{ height: waveformHeight }}
+      <div className="flex items-center gap-2 px-2.5 py-1.5">
+        <button
           onPointerDown={e => e.stopPropagation()}
-          onClick={handleCanvasClick}
-        />
+          onClick={toggle}
+          className="relative z-10 w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 hover:bg-primary/30 transition-colors"
+        >
+          {isPlaying
+            ? <Pause size={11} className="text-primary" />
+            : <Play size={11} className="text-primary ml-0.5" />}
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between mb-1">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className={cn('text-xs font-medium truncate', isFinal ? 'text-primary' : 'text-white/80')}>
+                {name}
+              </span>
+              {isFinal && <CheckCircle2 size={10} className="text-primary shrink-0" />}
+            </div>
+            <span className="text-[10px] text-white/30 ml-2 shrink-0 font-mono">
+              {formatDur(isPlaying ? currentTime : duration)}
+            </span>
+          </div>
+          <canvas
+            ref={canvasRef}
+            className="w-full rounded relative z-10 cursor-pointer"
+            style={{ height: waveformHeight }}
+            onPointerDown={e => e.stopPropagation()}
+            onClick={handleCanvasClick}
+          />
+        </div>
       </div>
+      {children}
     </div>
   );
 }

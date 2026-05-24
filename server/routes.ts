@@ -633,6 +633,12 @@ export async function registerRoutes(
     const clip = await storage.updateClip(req.params.clipId, clipUpdates);
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
+    // Temporary debug — write incoming body + updated clip to /tmp for Add to Song verification
+    try {
+      fs.writeFileSync('/tmp/patchbay-addsong-debug.json', JSON.stringify({ body: req.body, updatedClip: clip }, null, 2));
+    } catch (_) {}
+
+
     if (clipUpdates.isFinal === true || clipUpdates.isFinal === false) {
       try {
         const idea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();

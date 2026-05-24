@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2 } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2 } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { cn } from '@/lib/utils';
 import {
@@ -43,6 +43,9 @@ import { ClipInfoWindow } from '@/components/daw/Clip';
 import { UploadModal } from '@/components/daw/MediaBucket';
 import { Clip as DawClip } from '@/lib/daw-data';
 import { AppHeader } from '@/components/AppHeader';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useToast } from '@/hooks/use-toast';
+import { ToastAction } from '@/components/ui/toast';
 
 const DEFAULT_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
 const DEFAULT_INSTRUMENTS = ['Drums', 'Bass', 'Guitar 1', 'Guitar 2', 'Vocals'];
@@ -154,6 +157,13 @@ interface ActivityEvent {
   commentId?: string;
 }
 
+interface AddedToSong {
+  songId: string;
+  songName: string;
+  instrument: string;
+  section: string;
+}
+
 interface ApiClipDash {
   id: string;
   name: string;
@@ -161,6 +171,7 @@ interface ApiClipDash {
   src: string | null;
   isFinal: boolean;
   metadata?: DawClip['metadata'];
+  addedToSongs?: AddedToSong[] | null;
 }
 
 interface ApiIdeaDash {
@@ -172,6 +183,7 @@ interface ApiIdeaDash {
 interface ApiTrackDash {
   id: string;
   name: string;
+  color?: string | null;
   ideas: ApiIdeaDash[];
 }
 
@@ -284,8 +296,10 @@ export default function Dashboard() {
     queryFn: () => fetch('/api/tasks').then(r => r.json()),
   });
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'files'>('dashboard');
-  const [filesFilter, setFilesFilter] = useState<'songs' | 'ideas'>('songs');
+  const tabParam = new URLSearchParams(search).get('tab');
+  const filterParam = new URLSearchParams(search).get('filter');
+  const activeTab: 'dashboard' | 'files' = tabParam === 'files' ? 'files' : 'dashboard';
+  const filesFilter: 'songs' | 'ideas' = filterParam === 'ideas' ? 'ideas' : 'songs';
   const [filesSort, setFilesSort] = useState<'recent' | 'name-asc' | 'name-desc'>('recent');
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrackDash | null>(null);
@@ -295,6 +309,13 @@ export default function Dashboard() {
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClipDash | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
+
+  const [addToSongClip, setAddToSongClip] = useState<ApiClipDash | null>(null);
+  const [destSongId, setDestSongId] = useState('');
+  const [destInstrumentId, setDestInstrumentId] = useState('');
+  const [destSectionId, setDestSectionId] = useState('');
+  const [isAddingToSong, setIsAddingToSong] = useState(false);
+  const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
   const [isAddingPart, setIsAddingPart] = useState(false);
   const [newPartName, setNewPartName] = useState('');
   const [isAddingIdeaInline, setIsAddingIdeaInline] = useState(false);
@@ -321,10 +342,18 @@ export default function Dashboard() {
     refetchInterval: 10000,
   });
 
+  const { toast } = useToast();
+
   const { data: fileBucket = [] } = useQuery<ApiTrackDash[]>({
     queryKey: ['bucket', selectedFile?.id],
     queryFn: () => fetch(`/api/songs/${selectedFile!.id}/bucket`).then(r => r.json()),
     enabled: !!selectedFile && activeTab === 'files',
+  });
+
+  const { data: destBucket = [] } = useQuery<ApiTrackDash[]>({
+    queryKey: ['bucket', destSongId],
+    queryFn: () => fetch(`/api/songs/${destSongId}/bucket`).then(r => r.json()),
+    enabled: !!destSongId && !!addToSongClip,
   });
 
   // Sync selectedInstrument/selectedSection from fresh bucket data; also handles
@@ -375,17 +404,15 @@ export default function Dashboard() {
     const params = new URLSearchParams(search);
     if (params.get('tab') !== 'files') return;
     appliedSearchRef.current = search;
-    setActiveTab('files');
+    // activeTab and filesFilter are now derived from URL params — no setState needed here
     const filter = params.get('filter');
     if (filter === 'ideas') {
-      setFilesFilter('ideas');
       const ideaId = params.get('ideaId');
       if (ideaId) {
         const idea = songs.find(s => s.id === ideaId);
         if (idea) { setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null); }
       }
     } else {
-      setFilesFilter('songs');
       const songId = params.get('songId');
       if (songId) {
         const song = songs.find(s => s.id === songId);
@@ -607,6 +634,149 @@ export default function Dashboard() {
     },
   });
 
+  const closeAddToSongModal = () => {
+    setAddToSongClip(null);
+    setDestSongId('');
+    setDestInstrumentId('');
+    setDestSectionId('');
+    setIsAddingToSong(false);
+    setAddToSongDuplicateError(null);
+  };
+
+  const handleAddToSong = async () => {
+    if (!addToSongClip?.src || !destSectionId) return;
+    const destTrack = destBucket.find(t => t.ideas.some(i => i.id === destSectionId));
+    const destIdea = destBucket.flatMap(t => t.ideas).find(i => i.id === destSectionId);
+    const destSong = songs.find(s => s.id === destSongId);
+    if (!destTrack || !destIdea || !destSong) return;
+
+    // Capture source ID before any awaits so it stays stable through the async chain
+    const sourceClipId = addToSongClip.id;
+    const sourceFileId = selectedFile?.id;
+
+    // Duplicate check: reject if destination already contains a clip with the same originalFileName
+    const sourceOriginalFilename = (addToSongClip.metadata as { originalFileName?: string } | undefined)?.originalFileName;
+    if (sourceOriginalFilename) {
+      const dup = destIdea.clips.find(c => {
+        const m = c.metadata as { originalFileName?: string } | undefined;
+        return m?.originalFileName === sourceOriginalFilename;
+      });
+      if (dup) {
+        setAddToSongDuplicateError(
+          `This file was already added as '${dup.name}' in ${destTrack.name} · ${destIdea.sectionName} of ${destSong.name}`
+        );
+        return;
+      }
+    }
+
+    setIsAddingToSong(true);
+    setAddToSongDuplicateError(null);
+    try {
+      // Fetch the source file and re-upload it to the destination
+      const fileRes = await fetch(addToSongClip.src);
+      if (!fileRes.ok) throw new Error('Failed to fetch source file');
+      const blob = await fileRes.blob();
+      const origName = sourceOriginalFilename ?? addToSongClip.name;
+      const file = new File([blob], origName, { type: blob.type || 'audio/mpeg' });
+
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('instrument', destTrack.name);
+      fd.append('section', destIdea.sectionName);
+      fd.append('ideaId', destSectionId);
+
+      const uploadRes = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!uploadRes.ok) throw new Error('Upload failed');
+      const up = await uploadRes.json();
+
+      const versionNum = destIdea.clips.length + 1;
+      const clipName = `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
+
+      const clipRes = await fetch(`/api/ideas/${destSectionId}/clips`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: crypto.randomUUID(),
+          name: clipName,
+          type: 'audio',
+          color: destTrack.color ?? 'hsl(var(--primary))',
+          start: 0,
+          duration: up.duration,
+          src: up.url,
+          isFinal: false,
+          active: true,
+          sectionName: destIdea.sectionName,
+          metadata: {
+            format: up.format, originalFileName: up.originalFileName,
+            uploadedBy: up.uploadedBy, uploadedDate: up.uploadedDate,
+            sampleRate: up.sampleRate, bitDepth: up.bitDepth,
+            channels: up.channels || 'Stereo',
+            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+          },
+        }),
+      });
+      if (!clipRes.ok) throw new Error('Failed to create clip record');
+
+      // Track which songs this idea file has been added to, then update local state immediately
+      const currentAddedTo = addToSongClip.addedToSongs ?? [];
+      const newAddedToSongs = [
+        ...currentAddedTo,
+        { songId: destSongId, songName: destSong.name, instrument: destTrack.name, section: destIdea.sectionName },
+      ];
+      const patchRes = await fetch(`/api/clips/${sourceClipId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addedToSongs: newAddedToSongs }),
+      });
+      const patchBody = await patchRes.json().catch(() => null);
+      console.log('[AddToSong PATCH]', { ok: patchRes.ok, status: patchRes.status, body: patchBody });
+      if (patchRes.ok) {
+        // Update selectedInstrument immediately so pills appear without waiting for refetch
+        setSelectedInstrument(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            ideas: prev.ideas.map(idea => ({
+              ...idea,
+              clips: idea.clips.map(c =>
+                c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
+              ),
+            })),
+          };
+        });
+      }
+
+      // Background refetch to keep cache consistent
+      queryClient.invalidateQueries({ queryKey: ['bucket', sourceFileId] });
+      queryClient.invalidateQueries({ queryKey: ['bucket', destSongId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+
+      const instrName = destTrack.name;
+      const sectName = destIdea.sectionName;
+      const songName = destSong.name;
+      const navSongId = destSongId;
+
+      closeAddToSongModal();
+
+      toast({
+        title: `Added to ${songName} — ${instrName} · ${sectName}`,
+        action: (
+          <ToastAction
+            altText="Open Workspace"
+            className="bg-primary text-black border-primary hover:bg-primary/90 font-bold text-xs"
+            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}`)}
+          >
+            Open Workspace →
+          </ToastAction>
+        ),
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Failed to add to song', description: (err as Error).message });
+    } finally {
+      setIsAddingToSong(false);
+    }
+  };
+
   const closeModal = () => {
     setIsNewProjectOpen(false);
     setNewName('');
@@ -654,7 +824,7 @@ export default function Dashboard() {
         {/* Tab switcher */}
         <div className="flex items-center gap-1 mb-8 bg-white/[0.04] rounded-lg p-1 w-fit border border-white/5">
           <button
-            onClick={() => setActiveTab('dashboard')}
+            onClick={() => setLocation('/')}
             className={cn(
               'px-4 py-1.5 rounded-md text-xs font-bold transition-all',
               activeTab === 'dashboard' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
@@ -663,7 +833,7 @@ export default function Dashboard() {
             Dashboard
           </button>
           <button
-            onClick={() => setActiveTab('files')}
+            onClick={() => setLocation(`/?tab=files&filter=${filesFilter}`)}
             className={cn(
               'px-4 py-1.5 rounded-md text-xs font-bold transition-all',
               activeTab === 'files' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
@@ -968,7 +1138,7 @@ export default function Dashboard() {
                 {(['songs', 'ideas'] as const).map(f => (
                   <button
                     key={f}
-                    onClick={() => { setFilesFilter(f); setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null); }}
+                    onClick={() => { setLocation(`/?tab=files&filter=${f}`); setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null); }}
                     className={cn(
                       'px-3 py-1.5 rounded-md text-xs font-bold transition-all',
                       filesFilter === f ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
@@ -1506,7 +1676,19 @@ export default function Dashboard() {
                         {clips.map(clip => (
                           <ContextMenu key={clip.id}>
                             <ContextMenuTrigger asChild>
-                              <div><WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} /></div>
+                              <div>
+                                <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+                                  {clip.addedToSongs && clip.addedToSongs.length > 0 && (
+                                    <div className="flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]">
+                                      {clip.addedToSongs.map((a, i) => (
+                                        <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
+                                          {a.songName}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                </WaveformPlayerCard>
+                              </div>
                             </ContextMenuTrigger>
                             <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
                               <ContextMenuItem
@@ -1528,6 +1710,12 @@ export default function Dashboard() {
                               >
                                 <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
                                 {clip.isFinal ? 'Already Final' : 'Mark as Final'}
+                              </ContextMenuItem>
+                              <ContextMenuItem
+                                onClick={() => setAddToSongClip(clip)}
+                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                              >
+                                <Share2 size={13} className="text-white/50" /> Add to Song
                               </ContextMenuItem>
                             </ContextMenuContent>
                           </ContextMenu>
@@ -1566,6 +1754,102 @@ export default function Dashboard() {
 
       </main>
 
+      {/* Add to Song Modal */}
+      <Dialog open={!!addToSongClip} onOpenChange={open => { if (!open) closeAddToSongModal(); }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add to Song
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            {addToSongClip && (
+              <p className="text-xs text-muted-foreground truncate">
+                Copying <span className="text-white/80 font-medium">{addToSongClip.name}</span> to a song destination.
+              </p>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Song</Label>
+              <Select
+                value={destSongId}
+                onValueChange={v => { setDestSongId(v); setDestInstrumentId(''); setDestSectionId(''); setAddToSongDuplicateError(null); }}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder="Select a song…" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {songs.filter(s => s.type === 'song' || !s.type).map(s => (
+                    <SelectItem key={s.id} value={s.id} className="text-xs focus:bg-white/8 focus:text-white">
+                      {s.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Instrument</Label>
+              <Select
+                value={destInstrumentId}
+                onValueChange={v => { setDestInstrumentId(v); setDestSectionId(''); setAddToSongDuplicateError(null); }}
+                disabled={!destSongId || destBucket.length === 0}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder={destSongId ? 'Select an instrument…' : 'Select a song first'} />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {destBucket.map(t => (
+                    <SelectItem key={t.id} value={t.id} className="text-xs focus:bg-white/8 focus:text-white">
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section</Label>
+              <Select
+                value={destSectionId}
+                onValueChange={v => { setDestSectionId(v); setAddToSongDuplicateError(null); }}
+                disabled={!destInstrumentId}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder={destInstrumentId ? 'Select a section…' : 'Select an instrument first'} />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {(destBucket.find(t => t.id === destInstrumentId)?.ideas ?? []).map(idea => (
+                    <SelectItem key={idea.id} value={idea.id} className="text-xs focus:bg-white/8 focus:text-white">
+                      {idea.sectionName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {addToSongDuplicateError && (
+            <p className="text-xs text-red-400 bg-red-950/30 border border-red-900/40 rounded-md px-3 py-2 mt-2 leading-snug">
+              {addToSongDuplicateError}
+            </p>
+          )}
+          <DialogFooter className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={closeAddToSongModal}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddToSong}
+              disabled={!destSectionId || isAddingToSong}
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+            >
+              {isAddingToSong ? 'Adding…' : 'Add to Song'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Upload Modal */}
       {selectedSection && (
         <UploadModal
@@ -1573,10 +1857,13 @@ export default function Dashboard() {
           onOpenChange={setIsUploadOpen}
           songId={selectedFile?.id ?? ''}
           defaultIdeaId={selectedSection.id}
-          defaultInstrumentName={selectedInstrument?.name}
-          defaultSectionName={filesFilter === 'ideas' ? (selectedFile?.name ?? selectedSection.sectionName) : selectedSection.sectionName}
+          defaultInstrumentName={filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? '')}
+          defaultSectionName={filesFilter === 'ideas' ? (selectedInstrument?.name ?? '') : selectedSection.sectionName}
           songType={filesFilter === 'ideas' ? 'idea' : 'song'}
           initialFiles={uploadInitialFiles}
+          onUploadSuccess={() => {
+            if (filesFilter === 'ideas') queryClient.invalidateQueries({ queryKey: ['songs'] });
+          }}
         />
       )}
 
