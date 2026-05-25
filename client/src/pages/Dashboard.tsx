@@ -331,6 +331,7 @@ export default function Dashboard() {
   const pendingSectionIdRef = useRef<string | null>(null);
   const appliedSearchRef = useRef<string | null>(null);
   const hasRestoredFromUrl = useRef<boolean>(false);
+  const pendingNewIdeaIdRef = useRef<string | null>(null);
 
   const [showAllTasks, setShowAllTasks] = useState(false);
   const [songSearch, setSongSearch] = useState('');
@@ -426,8 +427,13 @@ export default function Dashboard() {
             const partId = params.get('partId');
             if (partId) pendingInstrumentIdRef.current = partId;
           }
+          hasRestoredFromUrl.current = true;
         }
+        // if idea not found yet (query hasn't refetched), leave hasRestoredFromUrl false
+        // so the retry effect below can select it once songs updates
       }
+      // no ideaId in params: leave hasRestoredFromUrl false so the retry effect can fire
+      // if setLocation adds an ideaId after mount (e.g. immediately after idea creation)
     } else {
       const songId = params.get('songId');
       if (songId) {
@@ -442,11 +448,44 @@ export default function Dashboard() {
             if (instrumentId) pendingInstrumentIdRef.current = instrumentId;
             if (sectionId) pendingSectionIdRef.current = sectionId;
           }
+          hasRestoredFromUrl.current = true;
         }
       }
+      // no songId in params: leave hasRestoredFromUrl false for the same reason
     }
-    hasRestoredFromUrl.current = true;
   }, [songs, search]);
+
+  // Retry idea auto-selection after songs query refetches with the newly created idea.
+  // The effect above sets appliedSearchRef immediately but leaves hasRestoredFromUrl false
+  // when the idea isn't in the list yet (race between navigation and query invalidation).
+  useEffect(() => {
+    if (hasRestoredFromUrl.current) return;
+    const params = new URLSearchParams(search);
+    if (params.get('tab') !== 'files' || params.get('filter') !== 'ideas') return;
+    const ideaId = params.get('ideaId');
+    if (!ideaId || !songs.length) return;
+    const ideas = songs.filter(s => s.type === 'idea');
+    const idea = ideas.find(s => s.id === ideaId);
+    if (!idea) return;
+    setSelectedFile(idea);
+    setSelectedInstrument(null);
+    setSelectedSection(null);
+    const partId = params.get('partId');
+    if (partId) pendingInstrumentIdRef.current = partId;
+    hasRestoredFromUrl.current = true;
+  }, [songs]);
+
+  // Direct selection path for newly created ideas — bypasses URL restoration entirely.
+  // Sets pendingNewIdeaIdRef in onSuccess, then picks up the idea here once songs refetches.
+  useEffect(() => {
+    if (!pendingNewIdeaIdRef.current || !songs.length) return;
+    const idea = songs.find(s => s.type === 'idea' && s.id === pendingNewIdeaIdRef.current);
+    if (!idea) return;
+    setSelectedFile(idea);
+    setSelectedInstrument(null);
+    setSelectedSection(null);
+    pendingNewIdeaIdRef.current = null;
+  }, [songs]);
 
   const CURRENT_USER = user?.username ?? '';
 
@@ -509,12 +548,14 @@ export default function Dashboard() {
       if (!res.ok) throw new Error('Failed to create idea');
       return res.json() as Promise<Song>;
     },
-    onSuccess: () => {
+    onSuccess: (newIdea) => {
+      pendingNewIdeaIdRef.current = newIdea.id;
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsNewIdeaOpen(false);
       setNewIdeaName('');
-      setLocation('/');
+      toast({ description: `Idea '${newIdea.name}' created` });
+      setLocation(`/?tab=files&filter=ideas&ideaId=${newIdea.id}`);
     },
   });
 
@@ -581,13 +622,13 @@ export default function Dashboard() {
       return res.json() as Promise<Song>;
     },
     onSuccess: (newIdea) => {
+      pendingNewIdeaIdRef.current = newIdea.id;
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddingIdeaInline(false);
       setNewIdeaNameInline('');
-      setSelectedFile(newIdea);
-      setSelectedInstrument(null);
-      setSelectedSection(null);
+      toast({ description: `Idea '${newIdea.name}' created` });
+      setLocation(`/?tab=files&filter=ideas&ideaId=${newIdea.id}`);
     },
   });
 
