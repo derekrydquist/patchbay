@@ -534,6 +534,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       closeModal();
+      toast({ description: `Song '${song.name}' created` });
       setLocation(`/songs/${song.id}`);
     },
   });
