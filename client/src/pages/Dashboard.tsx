@@ -328,7 +328,9 @@ export default function Dashboard() {
   const [newSectionName, setNewSectionName] = useState('');
   const pendingInstrumentIdRef = useRef<string | null>(null);
   const pendingSectionNameRef = useRef<string | null>(null);
+  const pendingSectionIdRef = useRef<string | null>(null);
   const appliedSearchRef = useRef<string | null>(null);
+  const hasRestoredFromUrl = useRef<boolean>(false);
 
   const [showAllTasks, setShowAllTasks] = useState(false);
   const [songSearch, setSongSearch] = useState('');
@@ -364,7 +366,13 @@ export default function Dashboard() {
       if (found) {
         pendingInstrumentIdRef.current = null;
         setSelectedInstrument(found);
-        setSelectedSection(null);
+        if (pendingSectionIdRef.current) {
+          const idea = found.ideas.find(i => i.id === pendingSectionIdRef.current);
+          pendingSectionIdRef.current = null;
+          setSelectedSection(idea ?? null);
+        } else {
+          setSelectedSection(null);
+        }
         return;
       }
     }
@@ -410,15 +418,34 @@ export default function Dashboard() {
       const ideaId = params.get('ideaId');
       if (ideaId) {
         const idea = songs.find(s => s.id === ideaId);
-        if (idea) { setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null); }
+        if (idea) {
+          setSelectedFile(idea);
+          setSelectedInstrument(null);
+          setSelectedSection(null);
+          if (!hasRestoredFromUrl.current) {
+            const partId = params.get('partId');
+            if (partId) pendingInstrumentIdRef.current = partId;
+          }
+        }
       }
     } else {
       const songId = params.get('songId');
       if (songId) {
         const song = songs.find(s => s.id === songId);
-        if (song) { setSelectedFile(song); setSelectedInstrument(null); setSelectedSection(null); }
+        if (song) {
+          setSelectedFile(song);
+          setSelectedInstrument(null);
+          setSelectedSection(null);
+          if (!hasRestoredFromUrl.current) {
+            const instrumentId = params.get('instrumentId');
+            const sectionId = params.get('sectionId');
+            if (instrumentId) pendingInstrumentIdRef.current = instrumentId;
+            if (sectionId) pendingSectionIdRef.current = sectionId;
+          }
+        }
       }
     }
+    hasRestoredFromUrl.current = true;
   }, [songs, search]);
 
   const CURRENT_USER = user?.username ?? '';
@@ -1221,7 +1248,11 @@ export default function Dashboard() {
                     return (
                       <button
                         key={item.id}
-                        onClick={() => { setSelectedFile(item); setSelectedInstrument(null); setSelectedSection(null); }}
+                        onClick={() => {
+                          setSelectedFile(item); setSelectedInstrument(null); setSelectedSection(null);
+                          const s = `tab=files&filter=songs&songId=${item.id}`;
+                          appliedSearchRef.current = s; setLocation(`/?${s}`);
+                        }}
                         className={cn(
                           'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                           selectedFile?.id === item.id
@@ -1295,7 +1326,13 @@ export default function Dashboard() {
                     return (
                       <button
                         key={track.id}
-                        onClick={() => { setSelectedInstrument(track); setSelectedSection(null); }}
+                        onClick={() => {
+                          setSelectedInstrument(track); setSelectedSection(null);
+                          if (selectedFile) {
+                            const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${track.id}`;
+                            appliedSearchRef.current = s; setLocation(`/?${s}`);
+                          }
+                        }}
                         className={cn(
                           'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                           selectedInstrument?.id === track.id
@@ -1367,7 +1404,13 @@ export default function Dashboard() {
                     return (
                       <button
                         key={idea.id}
-                        onClick={() => setSelectedSection(idea)}
+                        onClick={() => {
+                          setSelectedSection(idea);
+                          if (selectedFile && selectedInstrument) {
+                            const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${selectedInstrument.id}&sectionId=${idea.id}`;
+                            appliedSearchRef.current = s; setLocation(`/?${s}`);
+                          }
+                        }}
                         className={cn(
                           'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                           selectedSection?.id === idea.id
@@ -1533,7 +1576,11 @@ export default function Dashboard() {
                   ) : filteredFiles.map(idea => (
                     <button
                       key={idea.id}
-                      onClick={() => { setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null); }}
+                      onClick={() => {
+                        setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null);
+                        const s = `tab=files&filter=ideas&ideaId=${idea.id}`;
+                        appliedSearchRef.current = s; setLocation(`/?${s}`);
+                      }}
                       className={cn(
                         'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                         selectedFile?.id === idea.id
@@ -1602,7 +1649,13 @@ export default function Dashboard() {
                     return (
                       <button
                         key={track.id}
-                        onClick={() => { setSelectedInstrument(track); setSelectedSection(track.ideas[0] ?? null); }}
+                        onClick={() => {
+                          setSelectedInstrument(track); setSelectedSection(track.ideas[0] ?? null);
+                          if (selectedFile) {
+                            const s = `tab=files&filter=ideas&ideaId=${selectedFile.id}&partId=${track.id}`;
+                            appliedSearchRef.current = s; setLocation(`/?${s}`);
+                          }
+                        }}
                         className={cn(
                           'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                           selectedInstrument?.id === track.id
