@@ -317,12 +317,12 @@ export default function Dashboard() {
   const [destSectionId, setDestSectionId] = useState('');
   const [isAddingToSong, setIsAddingToSong] = useState(false);
   const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
-  const [isAddingPart, setIsAddingPart] = useState(false);
   const [newPartName, setNewPartName] = useState('');
-  const [isAddingInstrument, setIsAddingInstrument] = useState(false);
   const [newInstrumentName, setNewInstrumentName] = useState('');
-  const [isAddingSection, setIsAddingSection] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
+  const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
+  const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
+  const [isAddPartOpen, setIsAddPartOpen] = useState(false);
   const pendingInstrumentIdRef = useRef<string | null>(null);
   const pendingSectionNameRef = useRef<string | null>(null);
   const pendingSectionIdRef = useRef<string | null>(null);
@@ -613,7 +613,7 @@ export default function Dashboard() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddingPart(false);
+      setIsAddPartOpen(false);
       setNewPartName('');
     },
   });
@@ -632,7 +632,7 @@ export default function Dashboard() {
       pendingInstrumentIdRef.current = newTrack.id;
       queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddingInstrument(false);
+      setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
     },
   });
@@ -657,7 +657,7 @@ export default function Dashboard() {
       pendingSectionNameRef.current = sectionName;
       queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddingSection(false);
+      setIsAddSectionOpen(false);
       setNewSectionName('');
     },
   });
@@ -1252,7 +1252,7 @@ export default function Dashboard() {
                   <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Instruments'}</span>
                   {selectedFile && selectedFile.type !== 'idea' && (
                     <button
-                      onClick={() => setIsAddingInstrument(true)}
+                      onClick={() => { setNewInstrumentName(''); setIsAddInstrumentOpen(true); }}
                       className="opacity-0 group-hover/instrheader:opacity-100 hover:text-primary transition-all p-0.5"
                     >
                       <Plus size={12} />
@@ -1260,37 +1260,9 @@ export default function Dashboard() {
                   )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {isAddingInstrument && (
-                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
-                      <input
-                        autoFocus
-                        value={newInstrumentName}
-                        onChange={e => setNewInstrumentName(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }
-                          if (e.key === 'Escape') { setIsAddingInstrument(false); setNewInstrumentName(''); }
-                        }}
-                        onBlur={() => { if (!newInstrumentName.trim()) { setIsAddingInstrument(false); setNewInstrumentName(''); } }}
-                        placeholder="Instrument name…"
-                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }}
-                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
-                      >
-                        <Check size={11} />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setIsAddingInstrument(false); setNewInstrumentName(''); }}
-                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  )}
                   {!selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select a project</p>
-                  ) : fileBucket.length === 0 && !isAddingInstrument ? (
+                  ) : fileBucket.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       No {selectedFile.type === 'idea' ? 'folders' : 'instruments'}
                     </p>
@@ -1330,7 +1302,7 @@ export default function Dashboard() {
                   <span>{selectedFile?.type === 'idea' ? 'Subfolders' : 'Sections'}</span>
                   {selectedInstrument && selectedFile?.type !== 'idea' && (
                     <button
-                      onClick={() => setIsAddingSection(true)}
+                      onClick={() => { setNewSectionName(''); setIsAddSectionOpen(true); }}
                       className="opacity-0 group-hover/sectheader:opacity-100 hover:text-primary transition-all p-0.5"
                     >
                       <Plus size={12} />
@@ -1338,39 +1310,11 @@ export default function Dashboard() {
                   )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {isAddingSection && (
-                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
-                      <input
-                        autoFocus
-                        value={newSectionName}
-                        onChange={e => setNewSectionName(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }
-                          if (e.key === 'Escape') { setIsAddingSection(false); setNewSectionName(''); }
-                        }}
-                        onBlur={() => { if (!newSectionName.trim()) { setIsAddingSection(false); setNewSectionName(''); } }}
-                        placeholder="Section name…"
-                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }}
-                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
-                      >
-                        <Check size={11} />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setIsAddingSection(false); setNewSectionName(''); }}
-                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  )}
                   {!selectedInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       Select {selectedFile?.type === 'idea' ? 'a folder' : 'an instrument'}
                     </p>
-                  ) : selectedInstrument.ideas.length === 0 && !isAddingSection ? (
+                  ) : selectedInstrument.ideas.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">No sections</p>
                   ) : selectedInstrument.ideas.map(idea => {
                     const hasFiles = idea.clips.length > 0;
@@ -1549,7 +1493,7 @@ export default function Dashboard() {
                   <span>Parts</span>
                   {selectedFile && (
                     <button
-                      onClick={() => setIsAddingPart(true)}
+                      onClick={() => { setNewPartName(''); setIsAddPartOpen(true); }}
                       className="opacity-0 group-hover/partsheader:opacity-100 hover:text-primary transition-all p-0.5"
                     >
                       <Plus size={12} />
@@ -1557,37 +1501,9 @@ export default function Dashboard() {
                   )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {isAddingPart && (
-                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
-                      <input
-                        autoFocus
-                        value={newPartName}
-                        onChange={e => setNewPartName(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }
-                          if (e.key === 'Escape') { setIsAddingPart(false); setNewPartName(''); }
-                        }}
-                        onBlur={() => { if (!newPartName.trim()) { setIsAddingPart(false); setNewPartName(''); } }}
-                        placeholder="Part name…"
-                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }}
-                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
-                      >
-                        <Check size={11} />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setIsAddingPart(false); setNewPartName(''); }}
-                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  )}
                   {!selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select an idea</p>
-                  ) : fileBucket.length === 0 && !isAddingPart ? (
+                  ) : fileBucket.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 leading-relaxed">No parts yet. Add a part to get started.</p>
                   ) : fileBucket.map(track => {
                     const hasFiles = track.ideas.some(i => i.clips.length > 0);
@@ -2006,6 +1922,95 @@ export default function Dashboard() {
                 className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
               >
                 {createSong.isPending ? 'Creating…' : 'Create'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Instrument Modal */}
+      <Dialog open={isAddInstrumentOpen} onOpenChange={open => { if (!open) { setIsAddInstrumentOpen(false); setNewInstrumentName(''); } }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add Instrument
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={e => { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }} className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Instrument Name</Label>
+              <Input
+                autoFocus
+                placeholder="e.g. Keys"
+                value={newInstrumentName}
+                onChange={e => setNewInstrumentName(e.target.value)}
+                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50"
+              />
+              <p className="text-[11px] text-muted-foreground">This instrument will be added across all sections.</p>
+            </div>
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddInstrumentOpen(false); setNewInstrumentName(''); }}>Cancel</Button>
+              <Button type="submit" disabled={!newInstrumentName.trim() || addInstrumentSongMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
+                {addInstrumentSongMutation.isPending ? 'Adding…' : 'Add Instrument'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Section Modal */}
+      <Dialog open={isAddSectionOpen} onOpenChange={open => { if (!open) { setIsAddSectionOpen(false); setNewSectionName(''); } }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add Section
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={e => { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }} className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section Name</Label>
+              <Input
+                autoFocus
+                placeholder="e.g. Pre-Chorus"
+                value={newSectionName}
+                onChange={e => setNewSectionName(e.target.value)}
+                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50"
+              />
+              <p className="text-[11px] text-muted-foreground">This section will be added to all instrument tracks simultaneously.</p>
+            </div>
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddSectionOpen(false); setNewSectionName(''); }}>Cancel</Button>
+              <Button type="submit" disabled={!newSectionName.trim() || addSectionSongMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
+                {addSectionSongMutation.isPending ? 'Adding…' : 'Add Section'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Part Modal */}
+      <Dialog open={isAddPartOpen} onOpenChange={open => { if (!open) { setIsAddPartOpen(false); setNewPartName(''); } }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add Part
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={e => { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }} className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Part Name</Label>
+              <Input
+                autoFocus
+                placeholder="e.g. Guitar"
+                value={newPartName}
+                onChange={e => setNewPartName(e.target.value)}
+                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50"
+              />
+            </div>
+            <DialogFooter className="pt-2">
+              <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddPartOpen(false); setNewPartName(''); }}>Cancel</Button>
+              <Button type="submit" disabled={!newPartName.trim() || addPartMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
+                {addPartMutation.isPending ? 'Adding…' : 'Add Part'}
               </Button>
             </DialogFooter>
           </form>
