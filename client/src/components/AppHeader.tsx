@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLocation } from 'wouter';
-import { Music2, Settings, SlidersHorizontal, Bell, Users, UserCircle, AtSign, Clock, MessageSquare, Copy, UserPlus, X, Shield, Link as LinkIcon, Globe, LogOut } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Music2, Settings, SlidersHorizontal, Bell, Users, UserCircle, AtSign, Clock, MessageSquare, Copy, UserPlus, X, Plus, Shield, Link as LinkIcon, Globe, LogOut } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
@@ -24,6 +25,10 @@ interface AppHeaderProps {
   className?: string;
 }
 
+const FACTORY_INSTRUMENTS = ['Drums', 'Bass', 'Guitar 1', 'Guitar 2', 'Vocals'];
+const FACTORY_SECTIONS = ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'];
+const FACTORY_BPM = 120;
+
 const INITIAL_MEMBERS = [
   { id: 1, name: 'John Doe (You)', email: 'john@example.com', role: 'Owner', instrument: 'All Tracks', initials: 'JD', color: 'bg-primary/20 text-primary' },
   { id: 2, name: 'Sarah Smith',    email: 'sarah@example.com', role: 'Editor', instrument: 'Vocals',     initials: 'SS', color: 'bg-blue-500/20 text-blue-400' },
@@ -34,9 +39,49 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [showProfileSettings, setShowProfileSettings] = useState(false);
+  const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [members, setMembers] = useState(INITIAL_MEMBERS);
   const { user, logout } = useAuth();
   const [, setLocation] = useLocation();
+
+  const queryClient = useQueryClient();
+  const [draftInstruments, setDraftInstruments] = useState<string[]>([]);
+  const [draftSections, setDraftSections] = useState<string[]>([]);
+  const [draftBpm, setDraftBpm] = useState('120');
+  const [addingInstrument, setAddingInstrument] = useState(false);
+  const [addingSection, setAddingSection] = useState(false);
+  const [newInstrumentDraft, setNewInstrumentDraft] = useState('');
+  const [newSectionDraft, setNewSectionDraft] = useState('');
+
+  const { data: settings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => fetch('/api/settings').then(r => r.json()),
+  });
+
+  const saveSettings = useMutation({
+    mutationFn: () => fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        defaultInstruments: draftInstruments,
+        defaultSections: draftSections,
+        defaultBpm: parseInt(draftBpm, 10) || 120,
+      }),
+    }).then(r => r.json()),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setShowProjectSettings(false);
+    },
+  });
+
+  const openProjectSettings = () => {
+    if (settings) {
+      setDraftInstruments(settings.defaultInstruments);
+      setDraftSections(settings.defaultSections);
+      setDraftBpm(String(settings.defaultBpm));
+    }
+    setShowProjectSettings(true);
+  };
   const userInitials = user
     ? capitalize(user.username).slice(0, 2).toUpperCase()
     : '??';
@@ -88,7 +133,10 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56 bg-[#0c0c0e] border-white/10">
-              <DropdownMenuItem className="text-xs focus:bg-white/5 focus:text-white cursor-pointer">
+              <DropdownMenuItem
+                className="text-xs focus:bg-white/5 focus:text-white cursor-pointer"
+                onClick={openProjectSettings}
+              >
                 <SlidersHorizontal size={14} className="mr-2 text-primary/70" /> Project Settings
               </DropdownMenuItem>
               <DropdownMenuItem
@@ -332,6 +380,139 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
       </Dialog>
 
       <ProfileSettingsModal open={showProfileSettings} onOpenChange={setShowProfileSettings} />
+
+      {/* Project Settings Modal */}
+      <Dialog open={showProjectSettings} onOpenChange={open => { if (!open) setShowProjectSettings(false); }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-md p-0 overflow-hidden">
+          <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
+            <DialogHeader>
+              <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white flex items-center gap-2">
+                <SlidersHorizontal size={16} className="text-primary" /> Project Settings
+              </DialogTitle>
+            </DialogHeader>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-widest mt-2">
+              Defaults applied when creating a new song
+            </p>
+          </div>
+          <div className="p-6 space-y-6">
+
+            {/* Default BPM */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold">Default BPM</Label>
+              <Input
+                type="number"
+                min={40}
+                max={300}
+                value={draftBpm}
+                onChange={e => setDraftBpm(e.target.value)}
+                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50 w-32"
+              />
+            </div>
+
+            {/* Default Instruments */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold border-b border-white/5 pb-2 block">Default Instruments</Label>
+              <div className="min-h-[44px] rounded-md border border-white/10 bg-black/40 px-2 py-1.5 flex flex-wrap gap-1.5 items-center">
+                {draftInstruments.map((item, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 bg-white/8 border border-white/10 rounded px-2 py-0.5 text-xs font-medium text-white/80">
+                    {item}
+                    <button type="button" onClick={() => setDraftInstruments(prev => prev.filter((_, idx) => idx !== i))} className="text-white/40 hover:text-white transition-colors">
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+                {addingInstrument ? (
+                  <input
+                    autoFocus
+                    value={newInstrumentDraft}
+                    onChange={e => setNewInstrumentDraft(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const v = newInstrumentDraft.trim();
+                        if (v && !draftInstruments.includes(v)) setDraftInstruments(prev => [...prev, v]);
+                        setNewInstrumentDraft(''); setAddingInstrument(false);
+                      }
+                      if (e.key === 'Escape') { setNewInstrumentDraft(''); setAddingInstrument(false); }
+                    }}
+                    onBlur={() => {
+                      const v = newInstrumentDraft.trim();
+                      if (v && !draftInstruments.includes(v)) setDraftInstruments(prev => [...prev, v]);
+                      setNewInstrumentDraft(''); setAddingInstrument(false);
+                    }}
+                    className="inline-flex bg-white/8 border border-primary/50 rounded px-2 py-0.5 text-xs text-white outline-none min-w-[80px] w-24"
+                  />
+                ) : (
+                  <button type="button" onClick={() => setAddingInstrument(true)} className="inline-flex items-center gap-1 border border-dashed border-white/20 rounded px-2 py-0.5 text-xs font-medium text-white/35 hover:text-white/70 hover:border-white/35 transition-colors">
+                    <Plus size={10} /> Add
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Default Sections */}
+            <div className="space-y-2">
+              <Label className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold border-b border-white/5 pb-2 block">Default Sections</Label>
+              <div className="min-h-[44px] rounded-md border border-white/10 bg-black/40 px-2 py-1.5 flex flex-wrap gap-1.5 items-center">
+                {draftSections.map((item, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 bg-white/8 border border-white/10 rounded px-2 py-0.5 text-xs font-medium text-white/80">
+                    {item}
+                    <button type="button" onClick={() => setDraftSections(prev => prev.filter((_, idx) => idx !== i))} className="text-white/40 hover:text-white transition-colors">
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+                {addingSection ? (
+                  <input
+                    autoFocus
+                    value={newSectionDraft}
+                    onChange={e => setNewSectionDraft(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        const v = newSectionDraft.trim();
+                        if (v && !draftSections.includes(v)) setDraftSections(prev => [...prev, v]);
+                        setNewSectionDraft(''); setAddingSection(false);
+                      }
+                      if (e.key === 'Escape') { setNewSectionDraft(''); setAddingSection(false); }
+                    }}
+                    onBlur={() => {
+                      const v = newSectionDraft.trim();
+                      if (v && !draftSections.includes(v)) setDraftSections(prev => [...prev, v]);
+                      setNewSectionDraft(''); setAddingSection(false);
+                    }}
+                    className="inline-flex bg-white/8 border border-primary/50 rounded px-2 py-0.5 text-xs text-white outline-none min-w-[80px] w-24"
+                  />
+                ) : (
+                  <button type="button" onClick={() => setAddingSection(true)} className="inline-flex items-center gap-1 border border-dashed border-white/20 rounded px-2 py-0.5 text-xs font-medium text-white/35 hover:text-white/70 hover:border-white/35 transition-colors">
+                    <Plus size={10} /> Add
+                  </button>
+                )}
+              </div>
+            </div>
+
+          </div>
+          <div className="px-6 py-4 border-t border-white/5 flex items-center justify-between">
+            <Button
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs text-white/50 hover:text-white"
+              onClick={() => {
+                setDraftInstruments(FACTORY_INSTRUMENTS);
+                setDraftSections(FACTORY_SECTIONS);
+                setDraftBpm(String(FACTORY_BPM));
+              }}
+            >
+              Restore Defaults
+            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => setShowProjectSettings(false)}>
+                Cancel
+              </Button>
+              <Button onClick={() => saveSettings.mutate()} disabled={saveSettings.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
+                {saveSettings.isPending ? 'Saving…' : 'Save Changes'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

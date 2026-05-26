@@ -292,6 +292,11 @@ export default function Dashboard() {
     queryFn: () => fetch('/api/songs').then(r => r.json()),
   });
 
+  const { data: settings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => fetch('/api/settings').then(r => r.json()),
+  });
+
   const { data: allTasks = [] } = useQuery<Task[]>({
     queryKey: ['all-tasks'],
     queryFn: () => fetch('/api/tasks').then(r => r.json()),
@@ -520,8 +525,8 @@ export default function Dashboard() {
         body: JSON.stringify({
           name: newName.trim(),
           bpm: newBpm ? parseInt(newBpm, 10) : null,
-          sections: newSections.length > 0 ? newSections : DEFAULT_SECTIONS,
-          instruments: newInstruments.length > 0 ? newInstruments : DEFAULT_INSTRUMENTS,
+          sections: newSections.length > 0 ? newSections : (settings?.defaultSections ?? DEFAULT_SECTIONS),
+          instruments: newInstruments.length > 0 ? newInstruments : (settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS),
         }),
       });
       if (!res.ok) throw new Error('Failed to create song');
@@ -805,12 +810,17 @@ export default function Dashboard() {
     }
   };
 
+  const openProjectModal = () => {
+    setNewName('');
+    setNewBpm(String(settings?.defaultBpm ?? 120));
+    setNewSections(settings?.defaultSections ?? DEFAULT_SECTIONS);
+    setNewInstruments(settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS);
+    setIsNewProjectOpen(true);
+  };
+
   const closeModal = () => {
     setIsNewProjectOpen(false);
     setNewName('');
-    setNewBpm('120');
-    setNewSections(DEFAULT_SECTIONS);
-    setNewInstruments(DEFAULT_INSTRUMENTS);
   };
 
 
@@ -1207,7 +1217,7 @@ export default function Dashboard() {
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/songsheader">
                   <span>Songs</span>
                   <button
-                    onClick={() => { closeModal(); setCreateSongSource('browser'); setIsNewProjectOpen(true); }}
+                    onClick={() => { setCreateSongSource('browser'); openProjectModal(); }}
                     className="opacity-0 group-hover/songsheader:opacity-100 hover:text-primary transition-all p-0.5"
                   >
                     <Plus size={12} />
@@ -1791,7 +1801,7 @@ export default function Dashboard() {
           </DialogHeader>
           <div className="grid grid-cols-2 gap-4 pt-2 pb-1">
             <button
-              onClick={() => { setIsChoiceOpen(false); setCreateSongSource('header'); setIsNewProjectOpen(true); }}
+              onClick={() => { setIsChoiceOpen(false); setCreateSongSource('header'); openProjectModal(); }}
               className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 text-left hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
             >
               <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">

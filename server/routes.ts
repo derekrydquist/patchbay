@@ -121,6 +121,19 @@ export async function registerRoutes(
     return res.json(safeUser);
   });
 
+  // ─── Settings ───────────────────────────────────────────────────────────────
+
+  app.get("/api/settings", async (_req, res) => {
+    const settings = await storage.getSettings();
+    res.json(settings);
+  });
+
+  app.patch("/api/settings", async (req, res) => {
+    const { defaultInstruments, defaultSections, defaultBpm } = req.body;
+    await storage.updateSettings({ defaultInstruments, defaultSections, defaultBpm });
+    res.json({ ok: true });
+  });
+
   // ─── Songs ──────────────────────────────────────────────────────────────────
 
   app.get("/api/tasks", async (_req, res) => {

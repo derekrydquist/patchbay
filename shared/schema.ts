@@ -255,3 +255,12 @@ export const activityLog = sqliteTable("activity_log", {
 
 export type InsertActivityLog = typeof activityLog.$inferInsert;
 export type ActivityLogEntry = typeof activityLog.$inferSelect;
+
+// ─── Global Settings ──────────────────────────────────────────────────────────
+
+export const globalSettings = sqliteTable("global_settings", {
+  id: text("id").primaryKey(),
+  defaultInstruments: text("default_instruments", { mode: "json" }).$type<string[]>().notNull(),
+  defaultSections: text("default_sections", { mode: "json" }).$type<string[]>().notNull(),
+  defaultBpm: integer("default_bpm").notNull().default(120),
+});

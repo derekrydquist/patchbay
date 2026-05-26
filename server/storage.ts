@@ -17,7 +17,7 @@ import {
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
-  activityLog,
+  activityLog, globalSettings,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -180,6 +180,10 @@ export interface IStorage {
   addReviewComment(data: InsertSongReviewComment): Promise<SongReviewComment>;
   updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined>;
   deleteReviewComment(id: string): Promise<void>;
+
+  // Settings
+  getSettings(): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }>;
+  updateSettings(data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void>;
 }
 
 export type ReviewCommentWithReplies = SongReviewComment & {
@@ -1145,6 +1149,30 @@ export class SQLiteStorage implements IStorage {
     // Delete replies first (no cascade FK since parentId has no .references())
     db.delete(songReviewComments).where(eq(songReviewComments.parentId, id)).run();
     db.delete(songReviewComments).where(eq(songReviewComments.id, id)).run();
+  }
+
+  // ── Settings ───────────────────────────────────────────────────────────────
+
+  async getSettings(): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }> {
+    const row = db.select().from(globalSettings).where(eq(globalSettings.id, 'global')).get();
+    if (!row) {
+      db.insert(globalSettings).values({
+        id: 'global',
+        defaultInstruments: DEFAULT_INSTRUMENTS,
+        defaultSections: DEFAULT_SECTIONS,
+        defaultBpm: 120,
+      }).run();
+      return { defaultInstruments: DEFAULT_INSTRUMENTS, defaultSections: DEFAULT_SECTIONS, defaultBpm: 120 };
+    }
+    return { defaultInstruments: row.defaultInstruments, defaultSections: row.defaultSections, defaultBpm: row.defaultBpm };
+  }
+
+  async updateSettings(data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void> {
+    const current = await this.getSettings();
+    db.insert(globalSettings)
+      .values({ id: 'global', ...current, ...data })
+      .onConflictDoUpdate({ target: globalSettings.id, set: data })
+      .run();
   }
 }
 
