@@ -1288,10 +1288,12 @@ export default function SongHome() {
 
         {/* ── Files tab ────────────────────────────────────────────────────── */}
         {activeTab === 'files' && (
-          <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
-            <DndContext>
-              <MediaBucket songId={songId} />
-            </DndContext>
+          <div className="p-6">
+            <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
+              <DndContext>
+                <MediaBucket songId={songId} />
+              </DndContext>
+            </div>
           </div>
         )}
 

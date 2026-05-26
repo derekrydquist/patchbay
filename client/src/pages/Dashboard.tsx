@@ -278,6 +278,7 @@ export default function Dashboard() {
 
   const [isChoiceOpen, setIsChoiceOpen] = useState(false);
   const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
+  const [createSongSource, setCreateSongSource] = useState<'header' | 'browser'>('header');
   const [newName, setNewName] = useState('');
   const [newBpm, setNewBpm] = useState('120');
   const [newSections, setNewSections] = useState<string[]>(DEFAULT_SECTIONS);
@@ -318,10 +319,6 @@ export default function Dashboard() {
   const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
   const [isAddingPart, setIsAddingPart] = useState(false);
   const [newPartName, setNewPartName] = useState('');
-  const [isAddingIdeaInline, setIsAddingIdeaInline] = useState(false);
-  const [newIdeaNameInline, setNewIdeaNameInline] = useState('');
-  const [isAddingSongInline, setIsAddingSongInline] = useState(false);
-  const [newSongNameInline, setNewSongNameInline] = useState('');
   const [isAddingInstrument, setIsAddingInstrument] = useState(false);
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [isAddingSection, setIsAddingSection] = useState(false);
@@ -535,7 +532,16 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       closeModal();
       toast({ description: `Song '${song.name}' created` });
-      setLocation(`/songs/${song.id}`);
+      if (createSongSource === 'browser') {
+        setSelectedFile(song);
+        setSelectedInstrument(null);
+        setSelectedSection(null);
+        const s = `tab=files&filter=songs&songId=${song.id}`;
+        appliedSearchRef.current = s;
+        setLocation(`/?${s}`);
+      } else {
+        setLocation(`/songs/${song.id}`);
+      }
     },
   });
 
@@ -609,53 +615,6 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddingPart(false);
       setNewPartName('');
-    },
-  });
-
-  const addIdeaInlineMutation = useMutation({
-    mutationFn: async (name: string) => {
-      const res = await fetch('/api/songs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, type: 'idea', sections: [] }),
-      });
-      if (!res.ok) throw new Error('Failed to create idea');
-      return res.json() as Promise<Song>;
-    },
-    onSuccess: (newIdea) => {
-      pendingNewIdeaIdRef.current = newIdea.id;
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddingIdeaInline(false);
-      setNewIdeaNameInline('');
-      toast({ description: `Idea '${newIdea.name}' created` });
-      setLocation(`/?tab=files&filter=ideas&ideaId=${newIdea.id}`);
-    },
-  });
-
-  const addSongInlineMutation = useMutation({
-    mutationFn: async (name: string) => {
-      const res = await fetch('/api/songs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name,
-          type: 'song',
-          sections: ['Intro', 'Verse 1', 'Chorus 1', 'Verse 2', 'Chorus 2', 'Bridge', 'Outro'],
-          instruments: ['Drums', 'Bass', 'Guitar 1', 'Guitar 2', 'Vocals'],
-        }),
-      });
-      if (!res.ok) throw new Error('Failed to create song');
-      return res.json() as Promise<Song>;
-    },
-    onSuccess: (newSong) => {
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddingSongInline(false);
-      setNewSongNameInline('');
-      setSelectedFile(newSong);
-      setSelectedInstrument(null);
-      setSelectedSection(null);
     },
   });
 
@@ -866,7 +825,7 @@ export default function Dashboard() {
       <AppHeader
         actionSlot={
           <Button
-            onClick={() => setIsChoiceOpen(true)}
+            onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
             className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
           >
             <Plus size={14} /> New Project
@@ -1248,42 +1207,14 @@ export default function Dashboard() {
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/songsheader">
                   <span>Songs</span>
                   <button
-                    onClick={() => setIsAddingSongInline(true)}
+                    onClick={() => { closeModal(); setCreateSongSource('browser'); setIsNewProjectOpen(true); }}
                     className="opacity-0 group-hover/songsheader:opacity-100 hover:text-primary transition-all p-0.5"
                   >
                     <Plus size={12} />
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {isAddingSongInline && (
-                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
-                      <input
-                        autoFocus
-                        value={newSongNameInline}
-                        onChange={e => setNewSongNameInline(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') { e.preventDefault(); if (newSongNameInline.trim()) addSongInlineMutation.mutate(newSongNameInline.trim()); }
-                          if (e.key === 'Escape') { setIsAddingSongInline(false); setNewSongNameInline(''); }
-                        }}
-                        onBlur={() => { if (!newSongNameInline.trim()) { setIsAddingSongInline(false); setNewSongNameInline(''); } }}
-                        placeholder="Song name…"
-                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); if (newSongNameInline.trim()) addSongInlineMutation.mutate(newSongNameInline.trim()); }}
-                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
-                      >
-                        <Check size={11} />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setIsAddingSongInline(false); setNewSongNameInline(''); }}
-                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  )}
-                  {filteredFiles.length === 0 && !isAddingSongInline ? (
+                  {filteredFiles.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No items</p>
                   ) : filteredFiles.map(item => {
                     const isIdea = item.type === 'idea';
@@ -1578,42 +1509,14 @@ export default function Dashboard() {
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/ideasheader">
                   <span>Ideas</span>
                   <button
-                    onClick={() => setIsAddingIdeaInline(true)}
+                    onClick={() => { setNewIdeaName(''); setIsNewIdeaOpen(true); }}
                     className="opacity-0 group-hover/ideasheader:opacity-100 hover:text-primary transition-all p-0.5"
                   >
                     <Plus size={12} />
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
-                  {isAddingIdeaInline && (
-                    <div className="flex items-center gap-1 px-1.5 py-1 mx-1 mt-1 border border-primary/30 rounded bg-primary/5">
-                      <input
-                        autoFocus
-                        value={newIdeaNameInline}
-                        onChange={e => setNewIdeaNameInline(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === 'Enter') { e.preventDefault(); if (newIdeaNameInline.trim()) addIdeaInlineMutation.mutate(newIdeaNameInline.trim()); }
-                          if (e.key === 'Escape') { setIsAddingIdeaInline(false); setNewIdeaNameInline(''); }
-                        }}
-                        onBlur={() => { if (!newIdeaNameInline.trim()) { setIsAddingIdeaInline(false); setNewIdeaNameInline(''); } }}
-                        placeholder="Idea name…"
-                        className="flex-1 min-w-0 bg-transparent text-xs text-white outline-none placeholder:text-white/25"
-                      />
-                      <button
-                        onMouseDown={e => { e.preventDefault(); if (newIdeaNameInline.trim()) addIdeaInlineMutation.mutate(newIdeaNameInline.trim()); }}
-                        className="text-primary/70 hover:text-primary transition-colors p-0.5 shrink-0"
-                      >
-                        <Check size={11} />
-                      </button>
-                      <button
-                        onMouseDown={e => { e.preventDefault(); setIsAddingIdeaInline(false); setNewIdeaNameInline(''); }}
-                        className="text-white/30 hover:text-white/60 transition-colors p-0.5 shrink-0"
-                      >
-                        <X size={11} />
-                      </button>
-                    </div>
-                  )}
-                  {filteredFiles.length === 0 && !isAddingIdeaInline ? (
+                  {filteredFiles.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No ideas yet</p>
                   ) : filteredFiles.map(idea => (
                     <button
@@ -1972,7 +1875,7 @@ export default function Dashboard() {
           </DialogHeader>
           <div className="grid grid-cols-2 gap-4 pt-2 pb-1">
             <button
-              onClick={() => { setIsChoiceOpen(false); setIsNewProjectOpen(true); }}
+              onClick={() => { setIsChoiceOpen(false); setCreateSongSource('header'); setIsNewProjectOpen(true); }}
               className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 text-left hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
             >
               <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
