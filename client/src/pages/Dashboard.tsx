@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2 } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { cn } from '@/lib/utils';
 import {
@@ -37,6 +37,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow } from '@/components/daw/Clip';
@@ -322,6 +323,12 @@ export default function Dashboard() {
   const [destSectionId, setDestSectionId] = useState('');
   const [isAddingToSong, setIsAddingToSong] = useState(false);
   const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
+
+  const [promoteClip, setPromoteClip] = useState<ApiClipDash | null>(null);
+  const [promoteSongName, setPromoteSongName] = useState('');
+  const [promoteInstrument, setPromoteInstrument] = useState('');
+  const [promoteSection, setPromoteSection] = useState('');
+  const [isPromoting, setIsPromoting] = useState(false);
   const [newPartName, setNewPartName] = useState('');
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [newSectionName, setNewSectionName] = useState('');
@@ -674,6 +681,136 @@ export default function Dashboard() {
     setDestSectionId('');
     setIsAddingToSong(false);
     setAddToSongDuplicateError(null);
+  };
+
+  const closePromoteModal = () => {
+    setPromoteClip(null);
+    setPromoteSongName('');
+    setPromoteInstrument('');
+    setPromoteSection('');
+  };
+
+  const handlePromoteToSong = async () => {
+    if (!promoteClip?.src || !promoteInstrument || !promoteSection || !promoteSongName.trim()) return;
+    setIsPromoting(true);
+    try {
+      const songRes = await fetch('/api/songs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: promoteSongName.trim(),
+          bpm: settings?.defaultBpm ?? 120,
+          sections: settings?.defaultSections ?? DEFAULT_SECTIONS,
+          instruments: settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS,
+          type: 'song',
+        }),
+      });
+      if (!songRes.ok) throw new Error('Failed to create song');
+      const newSong = await songRes.json();
+
+      const bucketRes = await fetch(`/api/songs/${newSong.id}/bucket`);
+      if (!bucketRes.ok) throw new Error('Failed to fetch new song bucket');
+      const bucket = await bucketRes.json();
+
+      const destTrack = bucket.find((t: any) => t.name === promoteInstrument);
+      const destIdea = destTrack?.ideas?.find((i: any) => i.sectionName === promoteSection);
+      if (!destTrack || !destIdea) throw new Error('Could not find instrument/section in new song');
+
+      const fileRes = await fetch(promoteClip.src!);
+      if (!fileRes.ok) throw new Error('Failed to fetch source file');
+      const blob = await fileRes.blob();
+      const originalFileName = (promoteClip.metadata as any)?.originalFileName ?? promoteClip.name;
+      const file = new File([blob], originalFileName, { type: blob.type || 'audio/mpeg' });
+
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('instrument', destTrack.name);
+      fd.append('section', destIdea.sectionName);
+      fd.append('ideaId', destIdea.id);
+
+      const uploadRes = await fetch('/api/upload', { method: 'POST', body: fd });
+      if (!uploadRes.ok) throw new Error('Upload failed');
+      const up = await uploadRes.json();
+
+      const clipName = `${destTrack.name} ${destIdea.sectionName} V1`;
+      const clipRes = await fetch(`/api/ideas/${destIdea.id}/clips`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: crypto.randomUUID(),
+          name: clipName,
+          type: 'audio',
+          color: destTrack.color ?? 'hsl(var(--primary))',
+          start: 0,
+          duration: up.duration,
+          src: up.url,
+          isFinal: false,
+          active: true,
+          sectionName: destIdea.sectionName,
+          metadata: {
+            format: up.format, originalFileName: up.originalFileName,
+            uploadedBy: up.uploadedBy, uploadedDate: up.uploadedDate,
+            sampleRate: up.sampleRate, bitDepth: up.bitDepth,
+            channels: up.channels || 'Stereo',
+            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+          },
+        }),
+      });
+      if (!clipRes.ok) throw new Error('Failed to create clip record');
+
+      const currentAddedTo = promoteClip.addedToSongs ?? [];
+      const newAddedToSongs = [
+        ...currentAddedTo,
+        { songId: newSong.id, songName: newSong.name, instrument: destTrack.name, section: destIdea.sectionName },
+      ];
+      const sourceClipId = promoteClip.id;
+      const sourceFileId = selectedFile?.id;
+      await fetch(`/api/clips/${sourceClipId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addedToSongs: newAddedToSongs }),
+      });
+
+      setSelectedInstrument(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          ideas: prev.ideas.map(idea => ({
+            ...idea,
+            clips: idea.clips.map(c =>
+              c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
+            ),
+          })),
+        };
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['bucket', sourceFileId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+
+      const instrName = destTrack.name;
+      const sectName = destIdea.sectionName;
+      const navSongId = newSong.id;
+      const songName = newSong.name;
+
+      closePromoteModal();
+
+      toast({
+        title: `Promoted to ${songName} — ${instrName} · ${sectName}`,
+        action: (
+          <ToastAction
+            altText="Open Workspace"
+            className="bg-primary text-black border-primary hover:bg-primary/90 font-bold text-xs"
+            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}`)}
+          >
+            Open Workspace →
+          </ToastAction>
+        ),
+      });
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Failed to promote to song', description: (err as Error).message });
+    } finally {
+      setIsPromoting(false);
+    }
   };
 
   const handleAddToSong = async () => {
@@ -1641,6 +1778,18 @@ export default function Dashboard() {
                               >
                                 <Share2 size={13} className="text-white/50" /> Add to Song
                               </ContextMenuItem>
+                              <ContextMenuSeparator className="bg-white/5" />
+                              <ContextMenuItem
+                                onClick={() => {
+                                  setPromoteClip(clip);
+                                  setPromoteSongName(clip.name.replace(/\.[^.]+$/, ''));
+                                  setPromoteInstrument(settings?.defaultInstruments?.[0] ?? DEFAULT_INSTRUMENTS[0]);
+                                  setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
+                                }}
+                                className="text-xs text-primary/80 focus:bg-white/8 focus:text-primary cursor-pointer flex items-center gap-2"
+                              >
+                                <Sparkles size={13} className="text-primary/50" /> Promote to Song
+                              </ContextMenuItem>
                             </ContextMenuContent>
                           </ContextMenu>
                         ))}
@@ -1769,6 +1918,81 @@ export default function Dashboard() {
               className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
             >
               {isAddingToSong ? 'Adding…' : 'Add to Song'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Promote to Song Modal */}
+      <Dialog open={!!promoteClip} onOpenChange={open => { if (!open) closePromoteModal(); }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Promote to Song
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            {promoteClip && (
+              <p className="text-xs text-muted-foreground truncate">
+                Creating a new song from <span className="text-white/80 font-medium">{promoteClip.name}</span>
+              </p>
+            )}
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Song Name</Label>
+              <Input
+                autoFocus
+                value={promoteSongName}
+                onChange={e => setPromoteSongName(e.target.value)}
+                placeholder="e.g. Neon Static"
+                className="bg-black/40 border-white/10 text-xs h-9 focus-visible:ring-primary/50"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Place in Instrument</Label>
+              <Select value={promoteInstrument} onValueChange={setPromoteInstrument}>
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder="Select an instrument…" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {(settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS).map((instr: string) => (
+                    <SelectItem key={instr} value={instr} className="text-xs focus:bg-white/8 focus:text-white">
+                      {instr}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Place in Section</Label>
+              <Select value={promoteSection} onValueChange={setPromoteSection}>
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder="Select a section…" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {(settings?.defaultSections ?? DEFAULT_SECTIONS).map((sect: string) => (
+                    <SelectItem key={sect} value={sect} className="text-xs focus:bg-white/8 focus:text-white">
+                      {sect}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={closePromoteModal}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePromoteToSong}
+              disabled={!promoteSongName.trim() || !promoteInstrument || !promoteSection || isPromoting}
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+            >
+              {isPromoting ? 'Promoting…' : 'Promote to Song'}
             </Button>
           </DialogFooter>
         </DialogContent>
