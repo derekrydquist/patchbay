@@ -7,6 +7,7 @@ import {
   CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { cn, capitalize } from '@/lib/utils';
+import { bucketKeys } from '@/lib/bucket-api';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -182,7 +183,7 @@ function CellModal({
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
     },
@@ -673,7 +674,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
   }, [taskIdFromUrl, tasks.length]);
 
   const { data: bucket = [] } = useQuery<BucketTrack[]>({
-    queryKey: ['bucket', songId],
+    queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
 

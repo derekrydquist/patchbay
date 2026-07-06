@@ -43,6 +43,7 @@ import {
 import { ClipInfoWindow } from '@/components/daw/Clip';
 import { UploadModal } from '@/components/daw/MediaBucket';
 import { Clip as DawClip } from '@/lib/daw-data';
+import { type ApiClip, type ApiIdea, type ApiTrack, type AddedToSong, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
@@ -158,35 +159,6 @@ interface ActivityEvent {
   commentId?: string;
 }
 
-interface AddedToSong {
-  songId: string;
-  songName: string;
-  instrument: string;
-  section: string;
-}
-
-interface ApiClipDash {
-  id: string;
-  name: string;
-  duration: number;
-  src: string | null;
-  isFinal: boolean;
-  metadata?: DawClip['metadata'];
-  addedToSongs?: AddedToSong[] | null;
-}
-
-interface ApiIdeaDash {
-  id: string;
-  sectionName: string;
-  clips: ApiClipDash[];
-}
-
-interface ApiTrackDash {
-  id: string;
-  name: string;
-  color?: string | null;
-  ideas: ApiIdeaDash[];
-}
 
 function sortByDueDate(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
@@ -309,22 +281,22 @@ export default function Dashboard() {
   const filesFilter: 'songs' | 'ideas' = filterParam === 'ideas' ? 'ideas' : 'songs';
   const [filesSort, setFilesSort] = useState<'recent' | 'name-asc' | 'name-desc'>('recent');
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
-  const [selectedInstrument, setSelectedInstrument] = useState<ApiTrackDash | null>(null);
-  const [selectedSection, setSelectedSection] = useState<ApiIdeaDash | null>(null);
+  const [selectedInstrument, setSelectedInstrument] = useState<ApiTrack | null>(null);
+  const [selectedSection, setSelectedSection] = useState<ApiIdea | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
-  const [infoClip, setInfoClip] = useState<ApiClipDash | null>(null);
+  const [infoClip, setInfoClip] = useState<ApiClip | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
 
-  const [addToSongClip, setAddToSongClip] = useState<ApiClipDash | null>(null);
+  const [addToSongClip, setAddToSongClip] = useState<ApiClip | null>(null);
   const [destSongId, setDestSongId] = useState('');
   const [destInstrumentId, setDestInstrumentId] = useState('');
   const [destSectionId, setDestSectionId] = useState('');
   const [isAddingToSong, setIsAddingToSong] = useState(false);
   const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
 
-  const [promoteClip, setPromoteClip] = useState<ApiClipDash | null>(null);
+  const [promoteClip, setPromoteClip] = useState<ApiClip | null>(null);
   const [promoteSongName, setPromoteSongName] = useState('');
   const [promoteInstrument, setPromoteInstrument] = useState('');
   const [promoteSection, setPromoteSection] = useState('');
@@ -356,15 +328,15 @@ export default function Dashboard() {
 
   const { toast } = useToast();
 
-  const { data: fileBucket = [] } = useQuery<ApiTrackDash[]>({
-    queryKey: ['bucket', selectedFile?.id],
-    queryFn: () => fetch(`/api/songs/${selectedFile!.id}/bucket`).then(r => r.json()),
+  const { data: fileBucket = [] } = useQuery<ApiTrack[]>({
+    queryKey: bucketKeys.bucket(selectedFile?.id),
+    queryFn: () => fetchBucket(selectedFile!.id),
     enabled: !!selectedFile && activeTab === 'files',
   });
 
-  const { data: destBucket = [] } = useQuery<ApiTrackDash[]>({
-    queryKey: ['bucket', destSongId],
-    queryFn: () => fetch(`/api/songs/${destSongId}/bucket`).then(r => r.json()),
+  const { data: destBucket = [] } = useQuery<ApiTrack[]>({
+    queryKey: bucketKeys.bucket(destSongId),
+    queryFn: () => fetchBucket(destSongId),
     enabled: !!destSongId && !!addToSongClip,
   });
 
@@ -601,7 +573,7 @@ export default function Dashboard() {
       if (!res.ok) throw new Error('Failed to mark as final');
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
     },
   });
@@ -623,7 +595,7 @@ export default function Dashboard() {
       return newTrack;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddPartOpen(false);
       setNewPartName('');
@@ -642,7 +614,7 @@ export default function Dashboard() {
     },
     onSuccess: (newTrack) => {
       pendingInstrumentIdRef.current = newTrack.id;
-      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
@@ -667,7 +639,7 @@ export default function Dashboard() {
     },
     onSuccess: (_, sectionName) => {
       pendingSectionNameRef.current = sectionName;
-      queryClient.invalidateQueries({ queryKey: ['bucket', selectedFile?.id] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
@@ -708,12 +680,10 @@ export default function Dashboard() {
       if (!songRes.ok) throw new Error('Failed to create song');
       const newSong = await songRes.json();
 
-      const bucketRes = await fetch(`/api/songs/${newSong.id}/bucket`);
-      if (!bucketRes.ok) throw new Error('Failed to fetch new song bucket');
-      const bucket = await bucketRes.json();
+      const bucket = await fetchBucket(newSong.id);
 
-      const destTrack = bucket.find((t: any) => t.name === promoteInstrument);
-      const destIdea = destTrack?.ideas?.find((i: any) => i.sectionName === promoteSection);
+      const destTrack = bucket.find(t => t.name === promoteInstrument);
+      const destIdea = destTrack?.ideas?.find(i => i.sectionName === promoteSection);
       if (!destTrack || !destIdea) throw new Error('Could not find instrument/section in new song');
 
       const fileRes = await fetch(promoteClip.src!);
@@ -784,7 +754,7 @@ export default function Dashboard() {
         };
       });
 
-      queryClient.invalidateQueries({ queryKey: ['bucket', sourceFileId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
 
       const instrName = destTrack.name;
@@ -917,8 +887,8 @@ export default function Dashboard() {
       }
 
       // Background refetch to keep cache consistent
-      queryClient.invalidateQueries({ queryKey: ['bucket', sourceFileId] });
-      queryClient.invalidateQueries({ queryKey: ['bucket', destSongId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(destSongId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
 
       const instrName = destTrack.name;
@@ -1813,7 +1783,7 @@ export default function Dashboard() {
                   duration: infoClip.duration,
                   src: infoClip.src ?? undefined,
                   isFinal: infoClip.isFinal,
-                  metadata: infoClip.metadata,
+                  metadata: infoClip.metadata ?? undefined,
                 }}
                 open={true}
                 onOpenChange={open => { if (!open) { setInfoClip(null); setInfoFocusNotes(false); } }}

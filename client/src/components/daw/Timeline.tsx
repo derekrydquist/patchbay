@@ -30,6 +30,7 @@ import {
 import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
 import { cn } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
+import { bucketKeys } from '@/lib/bucket-api';
 import { TimelineTrack, SectionInfo } from './Track';
 import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
@@ -1111,7 +1112,7 @@ export function Timeline({ songId }: { songId: string }) {
   const handleDeleteTrack = (trackId: string) => {
     fetch(`/api/tracks/${trackId}`, { method: 'DELETE' }).catch(console.error);
     setTracks(prev => prev.filter(t => t.id !== trackId));
-    queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+    queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
     queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
   };
 

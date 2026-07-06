@@ -6,6 +6,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
+import { bucketKeys } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import {
@@ -180,7 +181,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ metadata: merged }),
       });
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
     } catch (err) {
       console.error('[clip meta] patch failed:', err);
     }
@@ -1100,7 +1101,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       }
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
     } catch {
@@ -1140,7 +1141,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         setDetectedTrim(null);
         window.dispatchEvent(new CustomEvent('clip-replaced', { detail: { clipId: clip.id } }));
         queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-        queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+        queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
         queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
         queryClient.invalidateQueries({ queryKey: ['activity'] });
       }
@@ -1425,7 +1426,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         songId={songId}
         audioBuffer={decodedBufferRef.current ?? undefined}
         bucketClipId={(() => {
-          const bucketData = queryClient.getQueryData<any[]>(['bucket', songId]);
+          const bucketData = queryClient.getQueryData<any[]>(bucketKeys.bucket(songId));
           if (!bucketData || !trackId) return undefined;
           const track = bucketData.find((t: any) => t.id === trackId);
           const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
@@ -1596,7 +1597,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         setIsFinal(!newIsFinal);
         return;
       }
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
@@ -1626,7 +1627,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active: false }),
       });
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
     } catch (err) {
       console.error('[removeClip] error:', err);
     }

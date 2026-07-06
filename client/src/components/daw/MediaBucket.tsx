@@ -3,6 +3,7 @@ import { useLocation } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { nanoid } from 'nanoid';
 import { type Clip } from '@/lib/daw-data';
+import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import { BucketClip } from './Clip';
 import {
   ChevronRight, Folder, Music, Library, Search,
@@ -22,50 +23,7 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface ApiClip {
-  id: string;
-  ideaId: string;
-  name: string;
-  type: string;
-  color: string;
-  start: number;
-  duration: number;
-  src: string | null;
-  isFinal: boolean;
-  sectionName: string | null;
-  metadata: Record<string, unknown> | null;
-  createdAt: string;
-}
-
-interface ApiIdea {
-  id: string;
-  trackId: string;
-  name: string;
-  sectionName: string;
-  sortOrder: number;
-  clips: ApiClip[];
-}
-
-interface ApiTrack {
-  id: string;
-  songId: string;
-  name: string;
-  type: string;
-  color: string | null;
-  sortOrder: number;
-  ideas: ApiIdea[];
-}
-
 // ─── API helpers ──────────────────────────────────────────────────────────────
-
-
-async function fetchBucket(id: string): Promise<ApiTrack[]> {
-  const res = await fetch(`/api/songs/${id}/bucket`);
-  if (!res.ok) throw new Error('Failed to load bucket');
-  return res.json();
-}
 
 async function uploadFile(
   file: File,
@@ -152,7 +110,7 @@ export function UploadModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: tracks = [] } = useQuery<ApiTrack[]>({
-    queryKey: ['bucket', songId],
+    queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetchBucket(songId),
     enabled: open,
   });
@@ -226,7 +184,7 @@ export function UploadModal({
     },
     onSuccess: (result) => {
       if (!result) return;
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       onOpenChange(false);
       setUploadFiles([]);
@@ -375,7 +333,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   // ── Fetch bucket from API ────────────────────────────────────────────────────
 
   const { data: tracks = [], isLoading, isError } = useQuery<ApiTrack[]>({
-    queryKey: ['bucket', songId],
+    queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetchBucket(songId),
   });
 
@@ -385,7 +343,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   });
 
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
-    queryKey: ['hidden-ideas', selectedTrack?.id],
+    queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id),
     queryFn: async () => {
       const res = await fetch(`/api/tracks/${selectedTrack!.id}/hidden-ideas`);
       return res.json();
@@ -394,7 +352,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   });
 
   const { data: hiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
-    queryKey: ['hidden-tracks', songId],
+    queryKey: bucketKeys.hiddenTracks(songId),
     queryFn: async () => {
       const res = await fetch(`/api/songs/${songId}/hidden-tracks`);
       return res.json();
@@ -541,7 +499,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
@@ -568,12 +526,12 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       return res.json() as Promise<ApiTrack>;
     },
     onSuccess: (newTrack) => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
       // Auto-select the new instrument after refetch
-      queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
+      queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
         const track = fresh.find(t => t.id === newTrack.id);
         if (track) { setSelectedTrack(track); setSelectedIdea(null); }
       });
@@ -595,9 +553,9 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setSelectedTrack(null);
       setSelectedIdea(null);
@@ -611,8 +569,8 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     mutationFn: (trackId: string) =>
       fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       setSelectedHiddenTrackId('');
       setIsAddInstrumentOpen(false);
@@ -630,7 +588,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       setSelectedIdea(null);
@@ -644,8 +602,8 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     mutationFn: (ideaId: string) =>
       fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
-      queryClient.invalidateQueries({ queryKey: ['hidden-ideas', selectedTrack?.id] });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id) });
       setSelectedHiddenIdeaId('');
       setIsAddSectionOpen(false);
     },
@@ -1103,7 +1061,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
         defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}
         initialFiles={uploadInitialFiles}
         onUploadSuccess={({ destTrackId, destIdeaId }) => {
-          queryClient.fetchQuery<ApiTrack[]>({ queryKey: ['bucket', songId], queryFn: () => fetchBucket(songId) }).then(fresh => {
+          queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
             const track = fresh.find(t => t.id === destTrackId);
             if (track) {
               setSelectedTrack(track);
