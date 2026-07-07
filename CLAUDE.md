@@ -798,6 +798,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Bucket mutations live in `client/src/hooks/use-bucket-mutations.ts`** — surface-specific post-success behavior (auto-select, navigation, pending refs) goes in `onCreated` callbacks at the call site, not inside the hooks themselves.
 - **Never force-remount a component via a `key` bump to refresh data** — invalidate the right query key instead. A `key` bump destroys all local state and races against any async callbacks that fire after the unmount.
 - **Shared creation modals live in `client/src/components/daw/modals/`** — `AddInstrumentModal` and `AddSectionModal` are controlled presentational components; error state and mutation pending state come from the parent.
+- **Section "remove" is per-instrument soft-hide (`useHideIdea`)** — right-clicking a section in the bucket hides that idea for one instrument only (sets `active = false` on the `ideas` row) and is fully restorable. A song-wide section-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists and `useDeleteSection` was removed from the hook file as unused; do not re-add it without a product decision on whether full section deletion belongs in the UI.
 
 ---
 
