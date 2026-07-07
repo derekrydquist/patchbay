@@ -13,7 +13,7 @@ import { UploadModal } from './UploadModal';
 import { AddInstrumentModal } from './modals/AddInstrumentModal';
 import { AddSectionModal } from './modals/AddSectionModal';
 import {
-  ChevronRight, Folder, Library, Search,
+  ChevronRight, Folder, Search,
   Upload, Plus, Loader2, AlertCircle,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -80,10 +80,6 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     queryFn: () => fetchBucket(songId),
   });
 
-  const { data: songData } = useQuery<{ name: string }>({
-    queryKey: ['song', songId],
-    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
-  });
 
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
     queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id),
@@ -321,13 +317,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     <div className="w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0">
 
       {/* Header */}
-      <div className="flex items-center justify-between px-6 h-14 border-b border-white/5 shrink-0">
-        <div className="flex items-center gap-3">
-          <Library size={18} className="text-primary" />
-          <h2 className="text-sm font-heading font-bold uppercase tracking-widest text-white">
-            Project: {songData?.name ?? '…'}
-          </h2>
-        </div>
+      <div className="flex items-center justify-end px-6 h-14 border-b border-white/5 shrink-0">
         <div className="flex items-center gap-3">
           <div className="relative w-64">
             <Search size={14} className="absolute left-2.5 top-2.5 text-muted-foreground" />

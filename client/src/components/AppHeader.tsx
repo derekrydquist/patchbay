@@ -16,12 +16,14 @@ import { cn, capitalize } from '@/lib/utils';
 interface AppHeaderProps {
   /** Rendered before the logo — e.g. a back-navigation button */
   preLogoSlot?: React.ReactNode;
-  /** Called when the logo wordmark is clicked — omit to make it non-interactive */
-  onLogoClick?: () => void;
-  /** Rendered after the logo — e.g. a breadcrumb or tab bar */
+  /** Highlights one of the global nav links; omit on song-level surfaces */
+  activeNav?: 'home' | 'library';
+  /** Rendered after the logo and nav links — e.g. a breadcrumb or tab bar */
   postLogoSlot?: React.ReactNode;
   /** Rendered before the gear icon — e.g. a primary action button */
   actionSlot?: React.ReactNode;
+  /** Rendered immediately before the gear/settings icon — e.g. mode tabs */
+  preActionSlot?: React.ReactNode;
   className?: string;
 }
 
@@ -35,7 +37,7 @@ const INITIAL_MEMBERS = [
   { id: 3, name: 'Mike Johnson',   email: 'mike@example.com',  role: 'Viewer', instrument: 'Drums',      initials: 'MJ', color: 'bg-purple-500/20 text-purple-400' },
 ];
 
-export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, className }: AppHeaderProps) {
+export function AppHeader({ preLogoSlot, activeNav, postLogoSlot, actionSlot, preActionSlot, className }: AppHeaderProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showAccessModal, setShowAccessModal] = useState(false);
   const [showProfileSettings, setShowProfileSettings] = useState(false);
@@ -108,22 +110,39 @@ export function AppHeader({ preLogoSlot, onLogoClick, postLogoSlot, actionSlot, 
         {/* Left side */}
         <div className="flex items-center gap-4">
           {preLogoSlot}
-          {onLogoClick ? (
+          <button
+            onClick={() => setLocation('/')}
+            className="flex items-center gap-2.5 hover:opacity-80 transition-opacity cursor-pointer"
+          >
+            {logoContent}
+          </button>
+          <nav className="flex items-center gap-1">
             <button
-              onClick={onLogoClick}
-              className="flex items-center gap-2.5 hover:opacity-80 transition-opacity"
+              onClick={() => setLocation('/?tab=dashboard')}
+              className={cn(
+                'text-[10px] font-bold uppercase tracking-[0.2em] px-3 py-1.5 transition-colors cursor-pointer',
+                activeNav === 'home' ? 'text-primary' : 'text-white/40 hover:text-white/70'
+              )}
             >
-              {logoContent}
+              Home
             </button>
-          ) : (
-            logoContent
-          )}
+            <button
+              onClick={() => setLocation('/?tab=files')}
+              className={cn(
+                'text-[10px] font-bold uppercase tracking-[0.2em] px-3 py-1.5 transition-colors cursor-pointer',
+                activeNav === 'library' ? 'text-primary' : 'text-white/40 hover:text-white/70'
+              )}
+            >
+              Library
+            </button>
+          </nav>
           {postLogoSlot}
         </div>
 
         {/* Right side */}
         <div className="flex items-center gap-3">
           {actionSlot}
+          {preActionSlot}
 
           {/* Workspace settings dropdown */}
           <DropdownMenu>

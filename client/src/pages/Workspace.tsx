@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation, useParams } from 'wouter';
+import { useQuery } from '@tanstack/react-query';
 import { MediaBucket } from '@/components/daw/MediaBucket';
 import { Timeline } from '@/components/daw/Timeline';
 import { Transport } from '@/components/daw/Transport';
@@ -17,6 +18,11 @@ export default function Workspace() {
     return params.get('tab') === 'production' ? 'tasks' : 'timeline';
   });
   const [workingContext, setWorkingContext] = useState<{ instrument: string | null, section: string | null }>({ instrument: null, section: null });
+
+  const { data: workspaceSong } = useQuery<{ name: string }>({
+    queryKey: ['song', songId],
+    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
+  });
 
   useEffect(() => {
     // Parse URL params for context
@@ -40,19 +46,29 @@ export default function Workspace() {
   return (
     <div className="h-screen flex flex-col bg-[#09090b] text-foreground overflow-hidden font-sans selection:bg-primary/30">
       <AppHeader
-        onLogoClick={() => setLocation(`/songs/${songId}`)}
-        postLogoSlot={
+        postLogoSlot={workspaceSong?.name && (
+          <>
+            <span className="text-white/20">/</span>
+            <button
+              onClick={() => setLocation(`/songs/${songId}`)}
+              className="text-sm font-semibold text-white/70 truncate max-w-[200px] hover:text-white/90 transition-colors cursor-pointer"
+            >
+              {workspaceSong.name}
+            </button>
+          </>
+        )}
+        preActionSlot={
           <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full">
             <TabsList className="bg-transparent border-none p-0 h-14 gap-1">
               <TabsTrigger
                 value="timeline"
-                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all"
+                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
               >
                 <Layout size={14} className="mr-2" /> Arrangement
               </TabsTrigger>
               <TabsTrigger
                 value="tasks"
-                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all"
+                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
               >
                 <CheckSquare size={14} className="mr-2" /> Production
               </TabsTrigger>

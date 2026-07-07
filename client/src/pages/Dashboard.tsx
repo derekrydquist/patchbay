@@ -279,7 +279,9 @@ export default function Dashboard() {
 
   const tabParam = new URLSearchParams(search).get('tab');
   const filterParam = new URLSearchParams(search).get('filter');
-  const activeTab: 'dashboard' | 'files' = tabParam === 'files' ? 'files' : 'dashboard';
+  const activeTab: 'dashboard' | 'files' = tabParam === 'files' ? 'files'
+    : tabParam === 'dashboard' ? 'dashboard'
+    : (localStorage.getItem('patchbay-last-home-tab') === 'files' ? 'files' : 'dashboard');
   const filesFilter: 'songs' | 'ideas' = filterParam === 'ideas' ? 'ideas' : 'songs';
   const [filesSort, setFilesSort] = useState<'recent' | 'name-asc' | 'name-desc'>('recent');
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
@@ -472,6 +474,11 @@ export default function Dashboard() {
     pendingNewIdeaIdRef.current = null;
   }, [songs]);
 
+  // Persist the active tab to localStorage whenever it changes.
+  useEffect(() => {
+    localStorage.setItem('patchbay-last-home-tab', activeTab);
+  }, [activeTab]);
+
   const CURRENT_USER = user?.username ?? '';
 
   const activeTasks = sortByDueDate(
@@ -481,6 +488,53 @@ export default function Dashboard() {
     )
   );
   const visibleTasks = showAllTasks ? activeTasks : activeTasks.slice(0, 5);
+
+  const greetingMain = (() => {
+    const h = new Date().getHours();
+    const name = capitalize(user?.username ?? '');
+    if (h >= 5 && h < 12) return `Good morning, ${name}.`;
+    if (h >= 12 && h < 17) return `Good afternoon, ${name}.`;
+    if (h >= 17 && h < 21) return `Good evening, ${name}.`;
+    return `Hey ${name}.`;
+  })();
+
+  const greetingFlavor = (() => {
+    const h = new Date().getHours();
+    if (h >= 5 && h < 12) return "Let's make something.";
+    if (h >= 12 && h < 17) return "The band's waiting.";
+    if (h >= 17 && h < 21) return "Let's get loud.";
+    return "Those riffs aren't going to record themselves.";
+  })();
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const sevenDaysFromNow = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const overdueCount = activeTasks.filter(t => t.dueDate && parseLocalDate(t.dueDate) < today).length;
+  const dueSoonCount = overdueCount === 0
+    ? activeTasks.filter(t => t.dueDate && parseLocalDate(t.dueDate) >= today && parseLocalDate(t.dueDate) <= sevenDaysFromNow).length
+    : 0;
+  const newFilesCount = activityEvents.filter(e =>
+    e.type === 'file-added' && e.timestamp > Date.now() - 48 * 60 * 60 * 1000
+  ).length;
+  const clauseA = overdueCount > 0
+    ? `${overdueCount} overdue task${overdueCount === 1 ? '' : 's'}`
+    : dueSoonCount > 0
+      ? `${dueSoonCount} task${dueSoonCount === 1 ? '' : 's'} due this week`
+      : null;
+  const clauseB = newFilesCount > 0
+    ? `${newFilesCount} new file${newFilesCount === 1 ? '' : 's'} since yesterday`
+    : null;
+  const statusSublineNode: React.ReactNode = (() => {
+    if (!clauseA && !clauseB) return null;
+    return (
+      <>
+        {clauseA && <span className="text-primary font-semibold">{clauseA}</span>}
+        {clauseA && clauseB && ' and '}
+        {clauseB && <span className="text-primary font-semibold">{clauseB}</span>}
+        {'.'}
+      </>
+    );
+  })();
 
   const taskCountsBySong = allTasks.reduce<Record<string, { completed: number; total: number }>>((acc, t) => {
     if (!acc[t.songId]) acc[t.songId] = { completed: 0, total: 0 };
@@ -918,6 +972,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30">
       <AppHeader
+        activeNav={activeTab === 'files' ? 'library' : 'home'}
         actionSlot={
           <Button
             onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
@@ -930,43 +985,17 @@ export default function Dashboard() {
 
       <main className="max-w-5xl mx-auto px-6 py-12">
 
-        {/* Personalized greeting */}
-        <div className="mb-6">
-          <h1 className="text-3xl font-heading font-black tracking-tight text-white">
-            {(() => {
-              const h = new Date().getHours();
-              const name = capitalize(user?.username ?? '');
-              if (h >= 5 && h < 12) return `Good morning, ${name}. Let's make something.`;
-              if (h >= 12 && h < 17) return `Good afternoon, ${name}. The band's waiting.`;
-              if (h >= 17 && h < 21) return `Good evening, ${name}. Let's get loud.`;
-              return `Hey ${name}. Those riffs aren't going to record themselves.`;
-            })()}
-          </h1>
-        </div>
-
-        {/* Tab switcher */}
-        <div className="flex items-center gap-1 mb-8 bg-white/[0.04] rounded-lg p-1 w-fit border border-white/5">
-          <button
-            onClick={() => setLocation('/')}
-            className={cn(
-              'px-4 py-1.5 rounded-md text-xs font-bold transition-all',
-              activeTab === 'dashboard' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
-            )}
-          >
-            Dashboard
-          </button>
-          <button
-            onClick={() => setLocation(`/?tab=files&filter=${filesFilter}`)}
-            className={cn(
-              'px-4 py-1.5 rounded-md text-xs font-bold transition-all',
-              activeTab === 'files' ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
-            )}
-          >
-            Files
-          </button>
-        </div>
-
         {activeTab === 'dashboard' && (
+        <>
+        {/* Personalized greeting */}
+        <div className="mb-4">
+          <h1 className="text-2xl font-heading font-black tracking-tight text-white">
+            {greetingMain}
+          </h1>
+          <p className={cn('text-sm mt-1', statusSublineNode ? 'text-white/70' : 'text-muted-foreground')}>
+            {statusSublineNode ?? greetingFlavor}
+          </p>
+        </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
           {/* Left column — Songs + Tasks */}
@@ -1250,6 +1279,7 @@ export default function Dashboard() {
           </div>
 
         </div>
+        </>
         )}
 
         {/* ── Files tab ──────────────────────────────────────────────────────── */}

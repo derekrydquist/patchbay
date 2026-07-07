@@ -5,7 +5,7 @@ import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DndContext } from '@dnd-kit/core';
 import {
-  ArrowLeft, ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
+  ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
   CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { AppHeader } from '@/components/AppHeader';
@@ -1086,14 +1086,6 @@ export default function SongHome() {
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30 flex flex-col">
       <AppHeader
         className="shrink-0"
-        preLogoSlot={
-          <button
-            onClick={() => setLocation('/')}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-white/50 hover:text-white hover:bg-white/5 transition-colors"
-          >
-            <ArrowLeft size={16} />
-          </button>
-        }
         postLogoSlot={song?.name && (
           <>
             <span className="text-white/20">/</span>
@@ -1125,13 +1117,13 @@ export default function SongHome() {
                 setLocation(`/songs/${songId}${qs ? `?${qs}` : ''}`);
               }}
               className={cn(
-                'px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-widest transition-all',
+                'px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-widest transition-all cursor-pointer',
                 activeTab === tab
                   ? 'bg-primary text-black'
                   : 'text-white/40 hover:text-white/70'
               )}
             >
-              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Files' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
+              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Song Files' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
             </button>
           ))}
         </div>
