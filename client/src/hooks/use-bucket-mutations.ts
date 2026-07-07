@@ -107,29 +107,6 @@ export function useRestoreTrack(
   });
 }
 
-export function useDeleteSection(
-  songId: string,
-  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
-) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async ({ sectionName }: { sectionName: string }) => {
-      const res = await fetch(`/api/songs/${songId}/sections/${encodeURIComponent(sectionName)}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed' }));
-        throw new Error(err.message);
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      opts?.onSuccess?.();
-    },
-    onError: (err: Error) => opts?.onError?.(err.message),
-  });
-}
-
 export function useHideIdea(
   songId: string,
   trackId: string | undefined,
