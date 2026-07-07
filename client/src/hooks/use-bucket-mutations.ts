@@ -130,6 +130,26 @@ export function useDeleteSection(
   });
 }
 
+export function useHideIdea(
+  songId: string,
+  trackId: string | undefined,
+  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ideaId: string) =>
+      fetch(`/api/ideas/${ideaId}`, { method: 'PATCH' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.();
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
 export function useRestoreSection(
   trackId: string | undefined,
   songId: string,

@@ -41,7 +41,9 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow } from '@/components/daw/Clip';
-import { UploadModal } from '@/components/daw/MediaBucket';
+import { UploadModal } from '@/components/daw/UploadModal';
+import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
+import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import { useAddInstrument, useAddSection } from '@/hooks/use-bucket-mutations';
 import { AppHeader } from '@/components/AppHeader';
@@ -306,6 +308,8 @@ export default function Dashboard() {
   const [newSectionName, setNewSectionName] = useState('');
   const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
+  const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
+  const [addSectionError, setAddSectionError] = useState<string | null>(null);
   const [isAddPartOpen, setIsAddPartOpen] = useState(false);
   const pendingInstrumentIdRef = useRef<string | null>(null);
   const pendingSectionNameRef = useRef<string | null>(null);
@@ -608,7 +612,7 @@ export default function Dashboard() {
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
     },
-    onError: (msg) => toast({ variant: 'destructive', title: 'Failed to add instrument', description: msg }),
+    onError: (msg) => setAddInstrumentError(msg),
   });
 
   const addSectionSongMutation = useAddSection(selectedFile?.id, fileBucket, {
@@ -617,7 +621,7 @@ export default function Dashboard() {
       setIsAddSectionOpen(false);
       setNewSectionName('');
     },
-    onError: (msg) => toast({ variant: 'destructive', title: 'Failed to add section', description: msg }),
+    onError: (msg) => setAddSectionError(msg),
   });
 
   const closeAddToSongModal = () => {
@@ -2106,65 +2110,31 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* Add Instrument Modal */}
-      <Dialog open={isAddInstrumentOpen} onOpenChange={open => { if (!open) { setIsAddInstrumentOpen(false); setNewInstrumentName(''); } }}>
-        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
-              Add Instrument
-            </DialogTitle>
-          </DialogHeader>
-          <form onSubmit={e => { e.preventDefault(); if (newInstrumentName.trim()) addInstrumentSongMutation.mutate(newInstrumentName.trim()); }} className="space-y-4 pt-2">
-            <div className="space-y-2">
-              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Instrument Name</Label>
-              <Input
-                autoFocus
-                placeholder="e.g. Keys"
-                value={newInstrumentName}
-                onChange={e => setNewInstrumentName(e.target.value)}
-                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50"
-              />
-              <p className="text-[11px] text-muted-foreground">This instrument will be added across all sections.</p>
-            </div>
-            <DialogFooter className="pt-2">
-              <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddInstrumentOpen(false); setNewInstrumentName(''); }}>Cancel</Button>
-              <Button type="submit" disabled={!newInstrumentName.trim() || addInstrumentSongMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
-                {addInstrumentSongMutation.isPending ? 'Adding…' : 'Add Instrument'}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <AddInstrumentModal
+        open={isAddInstrumentOpen}
+        onOpenChange={(open) => {
+          setIsAddInstrumentOpen(open);
+          if (!open) { setNewInstrumentName(''); setAddInstrumentError(null); }
+        }}
+        value={newInstrumentName}
+        onChange={setNewInstrumentName}
+        onSubmit={() => { setAddInstrumentError(null); addInstrumentSongMutation.mutate(newInstrumentName.trim()); }}
+        isPending={addInstrumentSongMutation.isPending}
+        error={addInstrumentError}
+      />
 
-      {/* Add Section Modal */}
-      <Dialog open={isAddSectionOpen} onOpenChange={open => { if (!open) { setIsAddSectionOpen(false); setNewSectionName(''); } }}>
-        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
-              Add Section
-            </DialogTitle>
-          </DialogHeader>
-          <form onSubmit={e => { e.preventDefault(); if (newSectionName.trim()) addSectionSongMutation.mutate(newSectionName.trim()); }} className="space-y-4 pt-2">
-            <div className="space-y-2">
-              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section Name</Label>
-              <Input
-                autoFocus
-                placeholder="e.g. Pre-Chorus"
-                value={newSectionName}
-                onChange={e => setNewSectionName(e.target.value)}
-                className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50"
-              />
-              <p className="text-[11px] text-muted-foreground">This section will be added to all instrument tracks simultaneously.</p>
-            </div>
-            <DialogFooter className="pt-2">
-              <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddSectionOpen(false); setNewSectionName(''); }}>Cancel</Button>
-              <Button type="submit" disabled={!newSectionName.trim() || addSectionSongMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
-                {addSectionSongMutation.isPending ? 'Adding…' : 'Add Section'}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <AddSectionModal
+        open={isAddSectionOpen}
+        onOpenChange={(open) => {
+          setIsAddSectionOpen(open);
+          if (!open) { setNewSectionName(''); setAddSectionError(null); }
+        }}
+        value={newSectionName}
+        onChange={setNewSectionName}
+        onSubmit={() => { setAddSectionError(null); addSectionSongMutation.mutate(newSectionName.trim()); }}
+        isPending={addSectionSongMutation.isPending}
+        error={addSectionError}
+      />
 
       {/* Add Part Modal */}
       <Dialog open={isAddPartOpen} onOpenChange={open => { if (!open) { setIsAddPartOpen(false); setNewPartName(''); } }}>

@@ -1,76 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { nanoid } from 'nanoid';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type Clip } from '@/lib/daw-data';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import {
   useAddInstrument, useAddSection,
   useDeleteTrack, useRestoreTrack,
-  useDeleteSection, useRestoreSection,
+  useHideIdea, useRestoreSection,
 } from '@/hooks/use-bucket-mutations';
 import { BucketClip } from './Clip';
+import { UploadModal } from './UploadModal';
+import { AddInstrumentModal } from './modals/AddInstrumentModal';
+import { AddSectionModal } from './modals/AddSectionModal';
 import {
-  ChevronRight, Folder, Music, Library, Search,
-  Upload, FileAudio, X, Plus, Loader2, AlertCircle,
+  ChevronRight, Folder, Library, Search,
+  Upload, Plus, Loader2, AlertCircle,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger,
-} from '@/components/ui/dialog';
-import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem,
 } from '@/components/ui/context-menu';
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-
-// ─── API helpers ──────────────────────────────────────────────────────────────
-
-async function uploadFile(
-  file: File,
-  instrument: string,
-  section: string,
-  ideaId: string,
-): Promise<{ url: string; duration: number; format: string; originalFileName: string; sampleRate: string; bitDepth: string; channels: string; uploadedDate: string; uploadedBy: string }> {
-  const form = new FormData();
-  form.append('file', file);
-  form.append('instrument', instrument);
-  form.append('section', section);
-  form.append('ideaId', ideaId);
-  const res = await fetch('/api/upload', { method: 'POST', body: form });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: 'Upload failed' }));
-    throw new Error(err.message ?? 'Upload failed');
-  }
-  return res.json();
-}
-
-async function createClip(ideaId: string, payload: {
-  id: string;
-  name: string;
-  type: string;
-  color: string;
-  duration: number;
-  src: string;
-  sectionName: string;
-  isFinal: boolean;
-  metadata: Record<string, unknown>;
-}): Promise<ApiClip> {
-  const res = await fetch(`/api/ideas/${ideaId}/clips`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...payload, ideaId }),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ message: 'Failed to save clip' }));
-    throw new Error(err.message ?? 'Failed to save clip');
-  }
-  return res.json();
-}
 
 // ─── Convert ApiClip → daw-data Clip (for BucketClip component) ──────────────
 
@@ -87,219 +39,6 @@ function toClip(apiClip: ApiClip): Clip {
     sectionName: apiClip.sectionName ?? undefined,
     metadata: apiClip.metadata as unknown as Clip['metadata'],
   };
-}
-
-// ─── UploadModal ──────────────────────────────────────────────────────────────
-
-interface UploadModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  songId: string;
-  defaultIdeaId?: string;
-  defaultInstrumentName?: string;
-  defaultSectionName?: string;
-  initialFiles?: File[];
-  songType?: 'song' | 'idea';
-  onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
-}
-
-export function UploadModal({
-  open, onOpenChange, songId,
-  defaultIdeaId, defaultInstrumentName, defaultSectionName,
-  initialFiles, songType = 'song', onUploadSuccess,
-}: UploadModalProps) {
-  const queryClient = useQueryClient();
-  const [uploadFiles, setUploadFiles] = useState<{ name: string; size: string; file: File }[]>([]);
-  const [uploadDestination, setUploadDestination] = useState(defaultIdeaId ?? '');
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const { data: tracks = [] } = useQuery<ApiTrack[]>({
-    queryKey: bucketKeys.bucket(songId),
-    queryFn: () => fetchBucket(songId),
-    enabled: open,
-  });
-
-  useEffect(() => {
-    if (open) {
-      setUploadDestination(defaultIdeaId ?? '');
-      setUploadError(null);
-      if (initialFiles?.length) {
-        setUploadFiles(initialFiles.map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f })));
-      }
-    } else {
-      setUploadFiles([]);
-      setUploadDestination('');
-      setUploadError(null);
-    }
-  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files)
-      .filter(f => f.type.startsWith('audio/'))
-      .map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
-    setUploadFiles(prev => [...prev, ...files]);
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
-    const files = Array.from(e.target.files).map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
-    setUploadFiles(prev => [...prev, ...files]);
-    e.target.value = '';
-  };
-
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      const destId = uploadDestination;
-      if (!destId || uploadFiles.length === 0) return;
-      setUploadError(null);
-      let destTrack: ApiTrack | null = null;
-      let destIdea: ApiIdea | null = null;
-      for (const t of tracks) {
-        const idea = t.ideas.find(i => i.id === destId);
-        if (idea) { destTrack = t; destIdea = idea; break; }
-      }
-      if (!destTrack || !destIdea) throw new Error('Destination not found');
-      const usingDefault = defaultIdeaId && uploadDestination === defaultIdeaId;
-      const instrumentForUpload = (usingDefault && defaultInstrumentName) ? defaultInstrumentName : destTrack.name;
-      const sectionForUpload = (usingDefault && defaultSectionName) ? defaultSectionName : destIdea.sectionName;
-      for (const { file } of uploadFiles) {
-        const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } =
-          await uploadFile(file, instrumentForUpload, sectionForUpload, destIdea.id);
-        const versionNum = destIdea.clips.length + 1;
-        const clipName = songType === 'idea'
-          ? (originalFileName || file.name)
-          : `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
-        await createClip(destIdea.id, {
-          id: nanoid(),
-          name: clipName,
-          type: destTrack.type === 'vocal' ? 'vocal' : 'audio',
-          color: destTrack.color ?? 'hsl(var(--primary))',
-          duration, src: url, sectionName: destIdea.sectionName, isFinal: false,
-          metadata: {
-            format, originalFileName, uploadedBy, uploadedDate, sampleRate, bitDepth,
-            channels: (channels as 'Mono' | 'Stereo' | '5.1') || 'Stereo',
-            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
-          },
-        });
-        destIdea = { ...destIdea, clips: [...destIdea.clips, {} as ApiClip] };
-      }
-      return { destTrackId: destTrack.id, destIdeaId: destId };
-    },
-    onSuccess: (result) => {
-      if (!result) return;
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      onOpenChange(false);
-      setUploadFiles([]);
-      setUploadDestination('');
-      onUploadSuccess?.(result);
-    },
-    onError: (err: Error) => setUploadError(err.message),
-  });
-
-  const isPrefilled = !!defaultIdeaId;
-
-  return (
-    <Dialog open={open} onOpenChange={open => {
-      onOpenChange(open);
-      if (!open) { setUploadFiles([]); setUploadDestination(defaultIdeaId ?? ''); setUploadError(null); }
-    }}>
-      <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-xl p-0 overflow-hidden">
-        <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
-          <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
-          <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
-        </div>
-        <div className="p-6 space-y-6">
-          {/* Destination — show static label for idea uploads; full dropdown for song uploads */}
-          {songType === 'idea' ? (
-            defaultInstrumentName && (
-              <div className="space-y-1.5">
-                <label className="text-[10px] uppercase font-bold text-muted-foreground">Uploading to</label>
-                <p className="text-xs text-white/80 font-medium px-3 py-2 bg-white/[0.04] border border-white/[0.06] rounded-md">
-                  {defaultInstrumentName}{defaultSectionName ? ` → ${defaultSectionName}` : ''}
-                </p>
-              </div>
-            )
-          ) : (
-            <div className="space-y-1.5">
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Destination Section</label>
-              <Select value={uploadDestination} onValueChange={setUploadDestination}>
-                <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9">
-                  <SelectValue placeholder="Select Destination" />
-                </SelectTrigger>
-                <SelectContent className="bg-popover border-border max-h-64 overflow-y-auto">
-                  {tracks.flatMap(track =>
-                    track.ideas.map(idea => (
-                      <SelectItem key={idea.id} value={idea.id} className="text-xs">
-                        {track.name} → {idea.sectionName}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          <div
-            onDragOver={e => e.preventDefault()}
-            onDrop={handleFileDrop}
-            onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-white/10 rounded-xl p-10 flex flex-col items-center justify-center gap-4 hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer group"
-          >
-            <input type="file" ref={fileInputRef} className="hidden" multiple accept="audio/*" onChange={handleFileSelect} />
-            <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <Upload size={24} className="text-primary" />
-            </div>
-            <div className="text-center">
-              <p className="text-sm font-bold text-white">Click or drag audio files here</p>
-              <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
-            </div>
-          </div>
-          {uploadFiles.length > 0 && (
-            <div className="space-y-3">
-              <h4 className="text-[10px] uppercase font-bold text-muted-foreground">
-                Pending Uploads ({uploadFiles.length})
-              </h4>
-              <div className="max-h-48 overflow-y-auto space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10">
-                {uploadFiles.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between p-3 bg-white/5 border border-white/5 rounded-lg">
-                    <div className="flex items-center gap-3">
-                      <FileAudio size={16} className="text-primary" />
-                      <div className="flex flex-col">
-                        <span className="text-xs font-medium text-white">{f.name}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono">{f.size}</span>
-                      </div>
-                    </div>
-                    <Button variant="ghost" size="icon" className="h-6 w-6"
-                      onClick={() => setUploadFiles(prev => prev.filter((_, idx) => idx !== i))}>
-                      <X size={14} />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-              <div className="pt-4 border-t border-white/5 flex justify-end">
-                <Button
-                  className="h-9 uppercase tracking-widest text-[10px] font-bold"
-                  onClick={() => uploadMutation.mutate()}
-                  disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending}
-                >
-                  {uploadMutation.isPending
-                    ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>
-                    : 'Confirm Ingestion'}
-                </Button>
-              </div>
-              {uploadError && (
-                <div className="flex items-center gap-2 text-[10px] text-red-400 pt-1">
-                  <AlertCircle size={12} /> {uploadError}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -327,12 +66,11 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
-  const [selectedHiddenIdeaId, setSelectedHiddenIdeaId] = useState('');
-  const [selectedHiddenTrackId, setSelectedHiddenTrackId] = useState('');
   const [isVersionsDragOver, setIsVersionsDragOver] = useState(false);
   const sessionRestored = useRef(false);
   const tracksRef = useRef<ApiTrack[]>([]);
   const selectedTrackRef = useRef<HTMLButtonElement | null>(null);
+  const selectedIdeaRef = useRef<HTMLButtonElement | null>(null);
   const [location] = useLocation();
 
   // ── Fetch bucket from API ────────────────────────────────────────────────────
@@ -482,6 +220,10 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     selectedTrackRef.current?.scrollIntoView({ block: 'nearest' });
   }, [selectedTrack?.id]);
 
+  useEffect(() => {
+    selectedIdeaRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selectedIdea?.id]);
+
   // ── Bucket mutations (add/delete/restore instrument and section) ─────────────
 
   const addInstrumentMutation = useAddInstrument(songId, {
@@ -497,7 +239,20 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   });
 
   const addSectionMutation = useAddSection(songId, tracks, {
-    onCreated: () => { setIsAddSectionOpen(false); setNewSectionName(''); },
+    onCreated: (sectionName) => {
+      setIsAddSectionOpen(false);
+      setNewSectionName('');
+      if (selectedTrack) {
+        queryClient.fetchQuery<ApiTrack[]>({
+          queryKey: bucketKeys.bucket(songId),
+          queryFn: () => fetchBucket(songId),
+        }).then(fresh => {
+          const track = fresh.find(t => t.id === selectedTrack.id);
+          const newIdea = track?.ideas.find(i => i.sectionName === sectionName);
+          if (newIdea) setSelectedIdea(newIdea);
+        }).catch(err => console.error('Failed to auto-select new section:', err));
+      }
+    },
     onError: (msg) => setAddSectionError(msg),
   });
 
@@ -507,16 +262,16 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   });
 
   const restoreTrackMutation = useRestoreTrack(songId, {
-    onSuccess: () => { setSelectedHiddenTrackId(''); setIsAddInstrumentOpen(false); },
+    onSuccess: () => { setIsAddInstrumentOpen(false); },
   });
 
-  const deleteSectionMutation = useDeleteSection(songId, {
+  const hideIdeaMutation = useHideIdea(songId, selectedTrack?.id, {
     onSuccess: () => setSelectedIdea(null),
-    onError: (msg) => console.error('[removeSection] error:', msg),
+    onError: (msg) => console.error('[hideIdea] error:', msg),
   });
 
   const restoreSectionMutation = useRestoreSection(selectedTrack?.id, songId, {
-    onSuccess: () => { setSelectedHiddenIdeaId(''); setIsAddSectionOpen(false); },
+    onSuccess: () => { setIsAddSectionOpen(false); },
   });
 
   // ── File input helpers ───────────────────────────────────────────────────────
@@ -550,7 +305,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     : [];
 
   const filteredVersions = selectedIdea
-    ? selectedIdea.clips.filter(clip => {
+    ? selectedIdea.clips.filter((clip: ApiClip) => {
         if (!searchQuery) return true;
         const q = searchQuery.toLowerCase();
         return (
@@ -601,90 +356,12 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         <div className="w-1/4 flex flex-col">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Instruments</span>
-            <Dialog open={isAddInstrumentOpen} onOpenChange={(open) => {
-              setIsAddInstrumentOpen(open);
-              if (!open) { setNewInstrumentName(''); setAddInstrumentError(null); }
-            }}>
-              <DialogTrigger asChild>
-                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
-                  <Plus size={12} />
-                </button>
-              </DialogTrigger>
-              <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
-                <DialogHeader>
-                  <DialogTitle className="text-sm uppercase tracking-widest font-heading">Add Instrument</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 pt-2">
-                  <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Instrument Name</label>
-                    <Input
-                      placeholder="e.g. Keys"
-                      value={newInstrumentName}
-                      onChange={(e) => setNewInstrumentName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && newInstrumentName.trim()) {
-                          setAddInstrumentError(null);
-                          addInstrumentMutation.mutate(newInstrumentName.trim());
-                        }
-                      }}
-                      className="bg-black/40 border-white/10 text-xs h-9"
-                      autoFocus
-                    />
-                    <p className="text-[9px] text-muted-foreground">
-                      All default sections will be created automatically.
-                    </p>
-                  </div>
-                  {addInstrumentError && (
-                    <div className="flex items-center gap-2 text-[10px] text-red-400">
-                      <AlertCircle size={12} /> {addInstrumentError}
-                    </div>
-                  )}
-                  {hiddenTracks.length > 0 && (
-                    <div className="space-y-2 pt-2 border-t border-white/10">
-                      <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed instrument</label>
-                      <div className="flex gap-2">
-                        <Select value={selectedHiddenTrackId} onValueChange={setSelectedHiddenTrackId}>
-                          <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9 flex-1">
-                            <SelectValue placeholder="Select instrument…" />
-                          </SelectTrigger>
-                          <SelectContent className="bg-popover border-border max-h-48 overflow-y-auto">
-                            {hiddenTracks.map(track => (
-                              <SelectItem key={track.id} value={track.id} className="text-xs">
-                                {track.name}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="uppercase tracking-widest text-[10px] font-bold shrink-0"
-                          onClick={() => selectedHiddenTrackId && restoreTrackMutation.mutate(selectedHiddenTrackId)}
-                          disabled={!selectedHiddenTrackId || restoreTrackMutation.isPending}
-                        >
-                          {restoreTrackMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Restore'}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                  <div className="flex justify-end gap-2 pt-2">
-                    <Button variant="ghost" size="sm" onClick={() => setIsAddInstrumentOpen(false)}>
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      className="uppercase tracking-widest text-[10px] font-bold"
-                      onClick={() => { if (newInstrumentName.trim()) { setAddInstrumentError(null); addInstrumentMutation.mutate(newInstrumentName.trim()); } }}
-                      disabled={!newInstrumentName.trim() || addInstrumentMutation.isPending}
-                    >
-                      {addInstrumentMutation.isPending
-                        ? <><Loader2 size={12} className="mr-1 animate-spin" /> Adding…</>
-                        : 'Add Instrument'}
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
+            <button
+              className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5"
+              onClick={() => setIsAddInstrumentOpen(true)}
+            >
+              <Plus size={12} />
+            </button>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
@@ -756,90 +433,12 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         <div className="w-1/4 flex flex-col bg-black/10">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Sections</span>
-            <Dialog open={isAddSectionOpen} onOpenChange={(open) => {
-              setIsAddSectionOpen(open);
-              if (!open) { setNewSectionName(''); setAddSectionError(null); }
-            }}>
-              <DialogTrigger asChild>
-                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
-                  <Plus size={12} />
-                </button>
-              </DialogTrigger>
-              <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
-                <DialogHeader>
-                  <DialogTitle className="text-sm uppercase tracking-widest font-heading">Add Section</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 pt-2">
-                  <div className="space-y-2">
-                    <label className="text-[10px] uppercase font-bold text-muted-foreground">Section Name</label>
-                    <Input
-                      placeholder="e.g. Pre-Chorus"
-                      value={newSectionName}
-                      onChange={(e) => setNewSectionName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && newSectionName.trim()) {
-                          setAddSectionError(null);
-                          addSectionMutation.mutate(newSectionName.trim());
-                        }
-                      }}
-                      className="bg-black/40 border-white/10 text-xs h-9"
-                      autoFocus
-                    />
-                    <p className="text-[9px] text-muted-foreground">
-                      This section will be added to all instrument tracks simultaneously.
-                    </p>
-                  </div>
-                  {addSectionError && (
-                    <div className="flex items-center gap-2 text-[10px] text-red-400">
-                      <AlertCircle size={12} /> {addSectionError}
-                    </div>
-                  )}
-                  {hiddenIdeas.length > 0 && (
-                    <div className="space-y-2 pt-2 border-t border-white/10">
-                      <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed section</label>
-                      <div className="flex gap-2">
-                        <Select value={selectedHiddenIdeaId} onValueChange={setSelectedHiddenIdeaId}>
-                          <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9 flex-1">
-                            <SelectValue placeholder="Select section…" />
-                          </SelectTrigger>
-                          <SelectContent className="bg-popover border-border max-h-48 overflow-y-auto">
-                            {hiddenIdeas.map(idea => (
-                              <SelectItem key={idea.id} value={idea.id} className="text-xs">
-                                {idea.sectionName}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="uppercase tracking-widest text-[10px] font-bold shrink-0"
-                          onClick={() => selectedHiddenIdeaId && restoreSectionMutation.mutate(selectedHiddenIdeaId)}
-                          disabled={!selectedHiddenIdeaId || restoreSectionMutation.isPending}
-                        >
-                          {restoreSectionMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : 'Restore'}
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                  <div className="flex justify-end gap-2 pt-2">
-                    <Button variant="ghost" size="sm" onClick={() => setIsAddSectionOpen(false)}>
-                      Cancel
-                    </Button>
-                    <Button
-                      size="sm"
-                      className="uppercase tracking-widest text-[10px] font-bold"
-                      onClick={() => { if (newSectionName.trim()) { setAddSectionError(null); addSectionMutation.mutate(newSectionName.trim()); } }}
-                      disabled={!newSectionName.trim() || addSectionMutation.isPending}
-                    >
-                      {addSectionMutation.isPending
-                        ? <><Loader2 size={12} className="mr-1 animate-spin" /> Adding…</>
-                        : 'Add Section'}
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
+            <button
+              className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5"
+              onClick={() => setIsAddSectionOpen(true)}
+            >
+              <Plus size={12} />
+            </button>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
@@ -849,6 +448,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                   <ContextMenu key={idea.id}>
                     <ContextMenuTrigger asChild>
                       <button
+                        ref={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
                         onClick={() => setSelectedIdea(idea)}
                         onDragOver={(e) => {
                           e.preventDefault();
@@ -880,7 +480,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                     <ContextMenuContent className="bg-popover border-border">
                       <ContextMenuItem
                         className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-                        onClick={() => deleteSectionMutation.mutate({ sectionName: idea.sectionName })}
+                        onClick={() => hideIdeaMutation.mutate(idea.id)}
                       >
                         Remove Section
                       </ContextMenuItem>
@@ -983,6 +583,38 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
             }
           });
         }}
+      />
+
+      <AddInstrumentModal
+        open={isAddInstrumentOpen}
+        onOpenChange={(open) => {
+          setIsAddInstrumentOpen(open);
+          if (!open) { setNewInstrumentName(''); setAddInstrumentError(null); }
+        }}
+        value={newInstrumentName}
+        onChange={setNewInstrumentName}
+        onSubmit={() => { setAddInstrumentError(null); addInstrumentMutation.mutate(newInstrumentName.trim()); }}
+        isPending={addInstrumentMutation.isPending}
+        error={addInstrumentError}
+        hiddenTracks={hiddenTracks}
+        onRestoreTrack={(id) => restoreTrackMutation.mutate(id)}
+        isRestoring={restoreTrackMutation.isPending}
+      />
+
+      <AddSectionModal
+        open={isAddSectionOpen}
+        onOpenChange={(open) => {
+          setIsAddSectionOpen(open);
+          if (!open) { setNewSectionName(''); setAddSectionError(null); }
+        }}
+        value={newSectionName}
+        onChange={setNewSectionName}
+        onSubmit={() => { setAddSectionError(null); addSectionMutation.mutate(newSectionName.trim()); }}
+        isPending={addSectionMutation.isPending}
+        error={addSectionError}
+        hiddenSections={hiddenIdeas}
+        onRestoreSection={(id) => restoreSectionMutation.mutate(id)}
+        isRestoring={restoreSectionMutation.isPending}
       />
     </div>
   );
