@@ -356,7 +356,6 @@ export function Timeline({ songId }: { songId: string }) {
   }, [tracks]);
 
   const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0);
   const [playheadPositionState, setPlayheadPositionState] = useState(256);
   const playheadRef = React.useRef(256);
   const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
@@ -1234,7 +1233,6 @@ export function Timeline({ songId }: { songId: string }) {
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
-          key={refreshKey}
           songId={songId}
           onAddToTimeline={(clip) => {
             const targetTrack =
@@ -1245,7 +1243,6 @@ export function Timeline({ songId }: { songId: string }) {
             const sectionName = clipIdeaName;
             insertClipInSection(targetTrack.id, sectionName, { ...clip, sectionName });
           }}
-          onInstrumentAdded={() => setRefreshKey((v) => v + 1)}
         />
 
         <div

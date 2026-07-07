@@ -307,12 +307,11 @@ export function UploadModal({
 interface MediaBucketProps {
   songId: string;
   onAddToTimeline?: (clip: Clip) => void;
-  onInstrumentAdded?: () => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: MediaBucketProps) {
+export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const queryClient = useQueryClient();
 
   const [selectedTrack, setSelectedTrack] = useState<ApiTrack | null>(null);
@@ -333,6 +332,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
   const [isVersionsDragOver, setIsVersionsDragOver] = useState(false);
   const sessionRestored = useRef(false);
   const tracksRef = useRef<ApiTrack[]>([]);
+  const selectedTrackRef = useRef<HTMLButtonElement | null>(null);
   const [location] = useLocation();
 
   // ── Fetch bucket from API ────────────────────────────────────────────────────
@@ -478,6 +478,10 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     }
   }, [location, tracks]);
 
+  useEffect(() => {
+    selectedTrackRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selectedTrack?.id]);
+
   // ── Bucket mutations (add/delete/restore instrument and section) ─────────────
 
   const addInstrumentMutation = useAddInstrument(songId, {
@@ -487,8 +491,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
       queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
         const track = fresh.find(t => t.id === newTrack.id);
         if (track) { setSelectedTrack(track); setSelectedIdea(null); }
-      });
-      onInstrumentAdded?.();
+      }).catch(err => console.error('Failed to auto-select new instrument:', err));
     },
     onError: (msg) => setAddInstrumentError(msg),
   });
@@ -714,6 +717,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                     <ContextMenu key={track.id}>
                       <ContextMenuTrigger asChild>
                         <button
+                          ref={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
                           onClick={() => { setSelectedTrack(track); setSelectedIdea(null); }}
                           className={cn(
                             "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
