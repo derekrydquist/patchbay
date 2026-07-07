@@ -4,6 +4,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { nanoid } from 'nanoid';
 import { type Clip } from '@/lib/daw-data';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
+import {
+  useAddInstrument, useAddSection,
+  useDeleteTrack, useRestoreTrack,
+  useDeleteSection, useRestoreSection,
+} from '@/hooks/use-bucket-mutations';
 import { BucketClip } from './Clip';
 import {
   ChevronRight, Folder, Music, Library, Search,
@@ -473,140 +478,42 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
     }
   }, [location, tracks]);
 
-  // ── Add section mutation — creates the idea on every track simultaneously ────
+  // ── Bucket mutations (add/delete/restore instrument and section) ─────────────
 
-  const addSectionMutation = useMutation({
-    mutationFn: async (sectionName: string) => {
-      setAddSectionError(null);
-      await Promise.all(
-        tracks.map((track, i) =>
-          fetch(`/api/tracks/${track.id}/ideas`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: `${track.name} ${sectionName}`,
-              sectionName,
-              sortOrder: track.ideas.length + i,
-            }),
-          }).then(async (res) => {
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ message: 'Failed to create section' }));
-              throw new Error(err.message ?? 'Failed to create section');
-            }
-            return res.json();
-          })
-        )
-      );
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setIsAddSectionOpen(false);
-      setNewSectionName('');
-    },
-    onError: (err: Error) => {
-      setAddSectionError(err.message);
-    },
-  });
-
-  // ── Add instrument mutation ──────────────────────────────────────────────────
-
-  const addInstrumentMutation = useMutation({
-    mutationFn: async (name: string) => {
-      setAddInstrumentError(null);
-      const res = await fetch(`/api/songs/${songId}/tracks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed to create instrument' }));
-        throw new Error(err.message ?? 'Failed to create instrument');
-      }
-      return res.json() as Promise<ApiTrack>;
-    },
-    onSuccess: (newTrack) => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
+  const addInstrumentMutation = useAddInstrument(songId, {
+    onCreated: (newTrack) => {
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
-      // Auto-select the new instrument after refetch
       queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
         const track = fresh.find(t => t.id === newTrack.id);
         if (track) { setSelectedTrack(track); setSelectedIdea(null); }
       });
       onInstrumentAdded?.();
     },
-    onError: (err: Error) => {
-      setAddInstrumentError(err.message);
-    },
+    onError: (msg) => setAddInstrumentError(msg),
   });
 
-  // ── Delete track mutation ────────────────────────────────────────────────────
-
-  const deleteTrackMutation = useMutation({
-    mutationFn: async (trackId: string) => {
-      const res = await fetch(`/api/tracks/${trackId}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed' }));
-        throw new Error(err.message);
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setSelectedTrack(null);
-      setSelectedIdea(null);
-    },
-    onError: (err: Error) => {
-      console.error('[removeInstrument] error:', err.message);
-    },
+  const addSectionMutation = useAddSection(songId, tracks, {
+    onCreated: () => { setIsAddSectionOpen(false); setNewSectionName(''); },
+    onError: (msg) => setAddSectionError(msg),
   });
 
-  const restoreTrackMutation = useMutation({
-    mutationFn: (trackId: string) =>
-      fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      setSelectedHiddenTrackId('');
-      setIsAddInstrumentOpen(false);
-    },
+  const deleteTrackMutation = useDeleteTrack(songId, {
+    onSuccess: () => { setSelectedTrack(null); setSelectedIdea(null); },
+    onError: (msg) => console.error('[removeInstrument] error:', msg),
   });
 
-  // ── Delete section mutation ──────────────────────────────────────────────────
-
-  const deleteSectionMutation = useMutation({
-    mutationFn: async ({ sectionName }: { sectionName: string }) => {
-      const res = await fetch(`/api/songs/${songId}/sections/${encodeURIComponent(sectionName)}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed' }));
-        throw new Error(err.message);
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-      setSelectedIdea(null);
-    },
-    onError: (err: Error) => {
-      console.error('[removeSection] error:', err.message);
-    },
+  const restoreTrackMutation = useRestoreTrack(songId, {
+    onSuccess: () => { setSelectedHiddenTrackId(''); setIsAddInstrumentOpen(false); },
   });
 
-  const restoreSectionMutation = useMutation({
-    mutationFn: (ideaId: string) =>
-      fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id) });
-      setSelectedHiddenIdeaId('');
-      setIsAddSectionOpen(false);
-    },
+  const deleteSectionMutation = useDeleteSection(songId, {
+    onSuccess: () => setSelectedIdea(null),
+    onError: (msg) => console.error('[removeSection] error:', msg),
+  });
+
+  const restoreSectionMutation = useRestoreSection(selectedTrack?.id, songId, {
+    onSuccess: () => { setSelectedHiddenIdeaId(''); setIsAddSectionOpen(false); },
   });
 
   // ── File input helpers ───────────────────────────────────────────────────────
@@ -713,6 +620,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                       onChange={(e) => setNewInstrumentName(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && newInstrumentName.trim()) {
+                          setAddInstrumentError(null);
                           addInstrumentMutation.mutate(newInstrumentName.trim());
                         }
                       }}
@@ -763,7 +671,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                     <Button
                       size="sm"
                       className="uppercase tracking-widest text-[10px] font-bold"
-                      onClick={() => newInstrumentName.trim() && addInstrumentMutation.mutate(newInstrumentName.trim())}
+                      onClick={() => { if (newInstrumentName.trim()) { setAddInstrumentError(null); addInstrumentMutation.mutate(newInstrumentName.trim()); } }}
                       disabled={!newInstrumentName.trim() || addInstrumentMutation.isPending}
                     >
                       {addInstrumentMutation.isPending
@@ -866,6 +774,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                       onChange={(e) => setNewSectionName(e.target.value)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && newSectionName.trim()) {
+                          setAddSectionError(null);
                           addSectionMutation.mutate(newSectionName.trim());
                         }
                       }}
@@ -916,7 +825,7 @@ export function MediaBucket({ songId, onAddToTimeline, onInstrumentAdded }: Medi
                     <Button
                       size="sm"
                       className="uppercase tracking-widest text-[10px] font-bold"
-                      onClick={() => newSectionName.trim() && addSectionMutation.mutate(newSectionName.trim())}
+                      onClick={() => { if (newSectionName.trim()) { setAddSectionError(null); addSectionMutation.mutate(newSectionName.trim()); } }}
                       disabled={!newSectionName.trim() || addSectionMutation.isPending}
                     >
                       {addSectionMutation.isPending

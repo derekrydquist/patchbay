@@ -42,8 +42,8 @@ import {
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow } from '@/components/daw/Clip';
 import { UploadModal } from '@/components/daw/MediaBucket';
-import { Clip as DawClip } from '@/lib/daw-data';
-import { type ApiClip, type ApiIdea, type ApiTrack, type AddedToSong, fetchBucket, bucketKeys } from '@/lib/bucket-api';
+import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
+import { useAddInstrument, useAddSection } from '@/hooks/use-bucket-mutations';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
@@ -602,48 +602,22 @@ export default function Dashboard() {
     },
   });
 
-  const addInstrumentSongMutation = useMutation({
-    mutationFn: async (name: string) => {
-      const res = await fetch(`/api/songs/${selectedFile!.id}/tracks`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-      if (!res.ok) throw new Error('Failed to create instrument');
-      return res.json();
-    },
-    onSuccess: (newTrack) => {
+  const addInstrumentSongMutation = useAddInstrument(selectedFile?.id, {
+    onCreated: (newTrack) => {
       pendingInstrumentIdRef.current = newTrack.id;
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddInstrumentOpen(false);
       setNewInstrumentName('');
     },
+    onError: (msg) => toast({ variant: 'destructive', title: 'Failed to add instrument', description: msg }),
   });
 
-  const addSectionSongMutation = useMutation({
-    mutationFn: async (sectionName: string) => {
-      await Promise.all(
-        fileBucket.map((track, i) =>
-          fetch(`/api/tracks/${track.id}/ideas`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: `${track.name} ${sectionName}`,
-              sectionName,
-              sortOrder: track.ideas.length + i,
-            }),
-          })
-        )
-      );
-    },
-    onSuccess: (_, sectionName) => {
+  const addSectionSongMutation = useAddSection(selectedFile?.id, fileBucket, {
+    onCreated: (sectionName) => {
       pendingSectionNameRef.current = sectionName;
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
     },
+    onError: (msg) => toast({ variant: 'destructive', title: 'Failed to add section', description: msg }),
   });
 
   const closeAddToSongModal = () => {
