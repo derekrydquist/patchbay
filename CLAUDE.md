@@ -78,14 +78,19 @@ patchbay/
 │       │   │   ├── Track.tsx           # A single instrument row in the timeline
 │       │   │   ├── Clip.tsx            # An audio clip (in bucket or on timeline)
 │       │   │   ├── MediaBucket.tsx     # File browser / upload panel (left side of Workspace)
+│       │   │   ├── UploadModal.tsx     # Shared upload dialog — used by MediaBucket and Dashboard
 │       │   │   ├── Transport.tsx       # Play/pause/BPM/loop controls (top bar of Workspace)
 │       │   │   ├── ProductionTracker.tsx  # Kanban task board for song progress
 │       │   │   ├── ExportDialog.tsx    # Export song dialog
 │       │   │   ├── Ruler.tsx           # Timeline time ruler
-│       │   │   └── DawScrollbar.tsx    # Custom scrollbar for timeline
+│       │   │   ├── DawScrollbar.tsx    # Custom scrollbar for timeline
+│       │   │   └── modals/             # Controlled presentational modals (error/pending state in parent)
+│       │   │       ├── AddInstrumentModal.tsx
+│       │   │       └── AddSectionModal.tsx
 │       │   └── ui/             # shadcn/ui component library — DO NOT manually edit
 │       ├── hooks/
-│       │   └── use-mobile.tsx
+│       │   ├── use-mobile.tsx
+│       │   └── use-bucket-mutations.ts  # Shared TanStack mutations for bucket operations (add/hide instrument, add/hide section, restore)
 │       └── lib/
 │           ├── daw-data.ts     # ALL mock data + TypeScript types — this is the data model
 │           ├── queryClient.ts  # TanStack Query configuration
@@ -628,7 +633,7 @@ DELETE /api/review-comments/:id            — deletes all child replies first (
 
 The upload pipeline is fully implemented. Here's how it works end-to-end:
 
-1. **Client** (`UploadModal` in `MediaBucket.tsx`) — `POST /api/upload` as multipart with fields: `file`, `instrument`, `section`, `ideaId`. On success, immediately fires `POST /api/ideas/:ideaId/clips` to persist the clip record to the DB.
+1. **Client** (`UploadModal` in `client/src/components/daw/UploadModal.tsx`) — `POST /api/upload` as multipart with fields: `file`, `instrument`, `section`, `ideaId`. On success, immediately fires `POST /api/ideas/:ideaId/clips` to persist the clip record to the DB.
 2. **Server** (`server/routes.ts`) — multer uses memory storage (50MB limit, audio/* filter). The handler:
    - Counts existing clips for the idea to assign the next version number
    - Writes the buffer to `uploads/{instrument}_{section}_v{n}.{ext}`
@@ -648,7 +653,7 @@ Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for 
 
 ## UploadModal Architecture
 
-`UploadModal` is an exported component from `MediaBucket.tsx` — the single upload dialog used everywhere in the app.
+`UploadModal` lives in `client/src/components/daw/UploadModal.tsx` — the single upload dialog used everywhere in the app. It is imported by both `MediaBucket.tsx` and `Dashboard.tsx`.
 
 ```tsx
 interface UploadModalProps {
@@ -797,7 +802,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Query keys: always use `bucketKeys` from `client/src/lib/bucket-api.ts`** — never raw `['bucket', ...]` literals. This prevents drift when the key shape changes.
 - **Bucket mutations live in `client/src/hooks/use-bucket-mutations.ts`** — surface-specific post-success behavior (auto-select, navigation, pending refs) goes in `onCreated` callbacks at the call site, not inside the hooks themselves.
 - **Never force-remount a component via a `key` bump to refresh data** — invalidate the right query key instead. A `key` bump destroys all local state and races against any async callbacks that fire after the unmount.
-- **Shared creation modals live in `client/src/components/daw/modals/`** — `AddInstrumentModal` and `AddSectionModal` are controlled presentational components; error state and mutation pending state come from the parent.
+- **Shared creation modals live in `client/src/components/daw/modals/`** — `AddInstrumentModal` and `AddSectionModal` are controlled presentational components; error state and mutation pending state come from the parent. Both accept `onClearError?: () => void` — the modal calls it on every input keystroke so the parent can clear a stale error message. Always pass this prop at call sites that set an error state.
 - **Section "remove" is per-instrument soft-hide (`useHideIdea`)** — right-clicking a section in the bucket hides that idea for one instrument only (sets `active = false` on the `ideas` row) and is fully restorable. A song-wide section-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists and `useDeleteSection` was removed from the hook file as unused; do not re-add it without a product decision on whether full section deletion belongs in the UI.
 
 ---
@@ -977,7 +982,13 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 ### Media Bucket — "Add Section"
 
-Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that opens a Dialog. Submitting fires `POST /api/tracks/:trackId/ideas` for **all five tracks simultaneously** via `Promise.all`, then invalidates the bucket query. This ensures every instrument always has a slot for every section.
+Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that opens `AddSectionModal` (from `client/src/components/daw/modals/AddSectionModal.tsx`). Submitting calls `useAddSection` (from `use-bucket-mutations.ts`), which fires `POST /api/tracks/:trackId/ideas` for **all tracks simultaneously** via `Promise.all`, then invalidates the bucket query. This ensures every instrument always has a slot for every section.
+
+**Duplicate-name validation (client-side):** Both `AddSectionModal` and `AddInstrumentModal` onSubmit handlers perform a pre-check against the current bucket data before mutating. For sections: `tracks.some(t => t.ideas.some(i => i.sectionName.trim().toLowerCase() === name.toLowerCase()))`. For instruments: `tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())`. If a duplicate is found, `setAddSectionError` / `setAddInstrumentError` is called and the mutation is not fired. The error clears automatically on the next keystroke via `onClearError`. This is a courtesy UX guard — a server-side 409 is the authoritative guard and should be added as a follow-up. The same pattern applies on the Dashboard Files tab surface (`fileBucket` instead of `tracks`).
+
+**Auto-select + scroll after creation:** `addSectionMutation.onCreated` fetches the fresh bucket via `queryClient.fetchQuery`, finds the selected track's new idea by `sectionName === <created name>`, and calls `setSelectedIdea`. A `selectedIdeaRef` + `useEffect([selectedIdea?.id])` then scrolls the idea row button into view — parity with the instrument-add pattern.
+
+**Right-click "Remove from This Instrument"** hides the idea for that one instrument only (`useHideIdea` → `PATCH /api/ideas/:ideaId` → `active = false`). This is per-instrument, not song-wide. The "Add Section" restore dropdown shows only ideas hidden via this path (`GET /api/tracks/:trackId/hidden-ideas` returns `active = false` rows). A song-wide hard-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists on the server but is not wired to any UI action — do not add a UI affordance for it without a product discussion.
 
 **User-added sections always appear at the bottom of the sections list.** This is enforced at every layer:
 - The mutation sends `sortOrder: track.ideas.length + i`, which is always higher than all existing idea sortOrders for that track
