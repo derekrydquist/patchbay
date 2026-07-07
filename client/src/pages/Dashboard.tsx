@@ -2118,7 +2118,16 @@ export default function Dashboard() {
         }}
         value={newInstrumentName}
         onChange={setNewInstrumentName}
-        onSubmit={() => { setAddInstrumentError(null); addInstrumentSongMutation.mutate(newInstrumentName.trim()); }}
+        onClearError={() => setAddInstrumentError(null)}
+        onSubmit={() => {
+          const name = newInstrumentName.trim();
+          if (fileBucket.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) {
+            setAddInstrumentError('An instrument with this name already exists');
+            return;
+          }
+          setAddInstrumentError(null);
+          addInstrumentSongMutation.mutate(name);
+        }}
         isPending={addInstrumentSongMutation.isPending}
         error={addInstrumentError}
       />
@@ -2131,7 +2140,16 @@ export default function Dashboard() {
         }}
         value={newSectionName}
         onChange={setNewSectionName}
-        onSubmit={() => { setAddSectionError(null); addSectionSongMutation.mutate(newSectionName.trim()); }}
+        onClearError={() => setAddSectionError(null)}
+        onSubmit={() => {
+          const name = newSectionName.trim();
+          if (fileBucket.some(t => t.ideas.some(i => i.sectionName.trim().toLowerCase() === name.toLowerCase()))) {
+            setAddSectionError('A section with this name already exists');
+            return;
+          }
+          setAddSectionError(null);
+          addSectionSongMutation.mutate(name);
+        }}
         isPending={addSectionSongMutation.isPending}
         error={addSectionError}
       />

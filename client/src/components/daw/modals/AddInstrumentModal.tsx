@@ -17,6 +17,7 @@ interface AddInstrumentModalProps {
   onSubmit: () => void;
   isPending: boolean;
   error?: string | null;
+  onClearError?: () => void;
   title?: string;
   helperText?: string;
   placeholder?: string;
@@ -28,7 +29,7 @@ interface AddInstrumentModalProps {
 export function AddInstrumentModal({
   open, onOpenChange,
   value, onChange, onSubmit,
-  isPending, error,
+  isPending, error, onClearError,
   title = 'Add Instrument',
   helperText = 'This instrument will be added across all sections.',
   placeholder = 'e.g. Keys',
@@ -48,7 +49,7 @@ export function AddInstrumentModal({
             <Input
               placeholder={placeholder}
               value={value}
-              onChange={(e) => onChange(e.target.value)}
+              onChange={(e) => { onChange(e.target.value); onClearError?.(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && value.trim()) onSubmit();
               }}

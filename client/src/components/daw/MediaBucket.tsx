@@ -593,7 +593,16 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         }}
         value={newInstrumentName}
         onChange={setNewInstrumentName}
-        onSubmit={() => { setAddInstrumentError(null); addInstrumentMutation.mutate(newInstrumentName.trim()); }}
+        onClearError={() => setAddInstrumentError(null)}
+        onSubmit={() => {
+          const name = newInstrumentName.trim();
+          if (tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) {
+            setAddInstrumentError('An instrument with this name already exists');
+            return;
+          }
+          setAddInstrumentError(null);
+          addInstrumentMutation.mutate(name);
+        }}
         isPending={addInstrumentMutation.isPending}
         error={addInstrumentError}
         hiddenTracks={hiddenTracks}
@@ -609,7 +618,16 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         }}
         value={newSectionName}
         onChange={setNewSectionName}
-        onSubmit={() => { setAddSectionError(null); addSectionMutation.mutate(newSectionName.trim()); }}
+        onClearError={() => setAddSectionError(null)}
+        onSubmit={() => {
+          const name = newSectionName.trim();
+          if (tracks.some(t => t.ideas.some(i => i.sectionName.trim().toLowerCase() === name.toLowerCase()))) {
+            setAddSectionError('A section with this name already exists');
+            return;
+          }
+          setAddSectionError(null);
+          addSectionMutation.mutate(name);
+        }}
         isPending={addSectionMutation.isPending}
         error={addSectionError}
         hiddenSections={hiddenIdeas}

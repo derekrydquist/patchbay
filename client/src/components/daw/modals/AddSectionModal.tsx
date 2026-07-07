@@ -17,6 +17,7 @@ interface AddSectionModalProps {
   onSubmit: () => void;
   isPending: boolean;
   error?: string | null;
+  onClearError?: () => void;
   hiddenSections?: Array<{ id: string; sectionName: string }>;
   onRestoreSection?: (id: string) => void;
   isRestoring?: boolean;
@@ -25,7 +26,7 @@ interface AddSectionModalProps {
 export function AddSectionModal({
   open, onOpenChange,
   value, onChange, onSubmit,
-  isPending, error,
+  isPending, error, onClearError,
   hiddenSections, onRestoreSection, isRestoring,
 }: AddSectionModalProps) {
   const [selectedHiddenId, setSelectedHiddenId] = useState('');
@@ -42,7 +43,7 @@ export function AddSectionModal({
             <Input
               placeholder="e.g. Pre-Chorus"
               value={value}
-              onChange={(e) => onChange(e.target.value)}
+              onChange={(e) => { onChange(e.target.value); onClearError?.(); }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && value.trim()) onSubmit();
               }}
