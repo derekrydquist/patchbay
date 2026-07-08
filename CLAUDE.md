@@ -111,6 +111,68 @@ patchbay/
 
 ---
 
+## Navigation
+
+### Global nav — AppHeader
+
+`AppHeader` renders on every surface. Its left side always contains the logo, then the **Home** and **Library** nav links.
+
+- **Logo** — always routes to `/` via an internal `setLocation('/')` call. The `onLogoClick` prop has been removed; do not reintroduce it.
+- **Home** (`/?tab=dashboard`) — the activity dashboard. Nav link highlighted when `activeNav === 'home'`.
+- **Library** (`/?tab=files`) — the global file browser. Nav link highlighted when `activeNav === 'library'`.
+- Song-level surfaces (`SongHome`, `Workspace`) pass no `activeNav` prop — both links render dimmed; neither is highlighted.
+
+### Tab persistence and bare-URL resolution
+
+`Dashboard.tsx` derives `activeTab` reactively from `useSearch()` (wouter) on every render. When no `?tab=` param is present, it reads `localStorage.getItem('patchbay-last-home-tab')` as a fallback. An explicit `?tab=` param always wins — deep links are never overridden. The Home nav link always navigates to `/?tab=dashboard` (explicit param) so it reliably overrides the memory.
+
+**Do not reintroduce a mount-only redirect `useEffect`** for tab memory — the reactive `useSearch()` derivation already handles every SPA navigation case, including navigating back to `/` from a song page.
+
+### Song-level breadcrumb
+
+A `/ {song name}` element is passed via `postLogoSlot`:
+- **SongHome** — static `<span>` (you are already on the song's page)
+- **Workspace** — `<button>` that navigates to `/songs/:songId` (Song Home)
+
+### Workspace mode tabs
+
+The **Arrangement | Production** tabs live in `Workspace.tsx`'s `preActionSlot` (right side of header, before the gear icon). They are **not** in `postLogoSlot`. Do not move them into the logo/breadcrumb area.
+
+### Naming conventions
+
+| Label | Surface | Destination |
+|---|---|---|
+| **Home** | Global nav link | `/?tab=dashboard` — activity dashboard |
+| **Library** | Global nav link | `/?tab=files` — global file browser |
+| **Song Files** | SongHome tab label | `?tab=files` — song-scoped file browser |
+
+Never label anything just **"Files"** — it is ambiguous between Library and Song Files.
+
+### Header type spec — do not invent new variants
+
+Nav links and mode tabs share one font/tracking/case spec: `text-[10px] font-bold uppercase tracking-[0.2em]`
+
+**Nav link full className** (from `AppHeader.tsx`):
+```
+text-[10px] font-bold uppercase tracking-[0.2em] px-3 py-1.5 transition-colors cursor-pointer
+```
+Active: `text-primary` · Inactive: `text-white/40 hover:text-white/70`
+
+**Mode tab full className** (from `Workspace.tsx` `TabsTrigger`):
+```
+data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer
+```
+
+**Song breadcrumb base** (from `SongHome.tsx`):
+```
+text-sm font-semibold text-white/70 truncate max-w-[200px]
+```
+Workspace adds hover affordance only: `hover:text-white/90 transition-colors cursor-pointer`
+
+All interactive header elements carry `cursor-pointer`. New header elements must reuse one of these two type specs — do not introduce a third.
+
+---
+
 ## Database
 
 **We use SQLite** (not PostgreSQL). This requires no server, no cloud account, and no
@@ -317,6 +379,8 @@ After splicing, `recalcAllStarts(draft, sectionOrder)` is called inside `setTrac
 
 `clipSectionName` in `handleDragEnd` is read as `dragData?.clip?.sectionName ?? dragData?.sectionName` — the double path handles real API clips (sectionName at top level of dragData) vs. mock clips (on dragData.clip).
 
+**`onAddToTimeline` (right-click "Add to Timeline")** follows the same contract as drag-drop. `BucketClip` passes `trackId` explicitly and `clip.sectionName` is read directly on the clip object — no name-parsing or substring heuristics. `Timeline`'s handler (`handleAddToTimeline`) bails with `console.warn('[AddToTimeline] missing', ...)` when either value is absent. **Known landmine:** a clip whose `section_name` is `null` in the DB (can happen with idea-sourced clips that were never associated to a section) will silently no-op on both drag-drop and right-click add — the warn fires but no placement occurs. Do not add silent fallbacks (e.g. using `tracks[0]` or deriving sectionName from the clip name string) — they silently place clips on the wrong track.
+
 ### Stale closure rule
 
 All event handlers registered inside `useEffect(fn, [])` (e.g. `handleRemoveClip`, `handleToggleMute`) must use `setTracks(prev => ...)` and read current state from `prev`, not from the `tracks` variable in the outer closure (which is permanently `[]` in those handlers).
@@ -434,7 +498,7 @@ When implementing auth or any permission checks, always consult this table.
 
 | Feature | Status | Notes |
 |---|---|---|
-| Dashboard page | ✅ Done | Personalized time-of-day greeting at the top (`Good morning/afternoon/evening/night, {name}. …`) using `useAuth()` + current hour; "Your Songs" section label below it in the same muted uppercase style as "Upcoming Tasks" with a subtitle; song list capped at 3 most recently updated — a "Show all songs ↓" text button below the cards opens a shadcn `Popover` (overlays content, no layout shift) listing all songs with task count pill and navigation arrow; popover has a search input that filters songs by name in real time; closing the popover resets the search; **both the 3 recent cards and the popover filter to `type === 'song' \|\| !s.type` — `type='idea'` rows are excluded entirely**; `realSongs` is the filtered base array; `recentSongs = realSongs.slice(0, 3)`; `filteredSongs = realSongs.filter(by search)`; popover trigger guard uses `realSongs.length > 3`; two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); **task count pill caveat** — `taskCountsBySong` is derived from the `['all-tasks']` cache; both `complete` and `will-not-play` count as completed in `taskCountsBySong` (matching the server route); `createSong.onSuccess` must invalidate both `['songs']` and `['all-tasks']` so the pill appears immediately after song creation without a page refresh; `createSong.onSuccess` also shows a toast `"Song '{name}' created"` before navigating to the song home page; Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar |
+| Dashboard page | ✅ Done | Personalized time-of-day greeting at the top (`Good morning/afternoon/evening/night, {name}. …`) using `useAuth()` + current hour; "Your Songs" section label below it in the same muted uppercase style as "Upcoming Tasks" with a subtitle; song list capped at 3 most recently updated — a "Show all songs ↓" text button below the cards opens a shadcn `Popover` (overlays content, no layout shift) listing all songs with task count pill and navigation arrow; popover has a search input that filters songs by name in real time; closing the popover resets the search; **both the 3 recent cards and the popover filter to `type === 'song' \|\| !s.type` — `type='idea'` rows are excluded entirely**; `realSongs` is the filtered base array; `recentSongs = realSongs.slice(0, 3)`; `filteredSongs = realSongs.filter(by search)`; popover trigger guard uses `realSongs.length > 3`; two-column grid: left column (2/3) has the song list + Upcoming Tasks, right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height measured once on mount via `getBoundingClientRect()` after songs load — never updates when task list expands; stacks vertically on mobile; song cards styled as gradient banners (gold chevron, task completion pill showing X/Y tasks in gold when all done, muted otherwise); **task count pill caveat** — `taskCountsBySong` is derived from the `['all-tasks']` cache; both `complete` and `will-not-play` count as completed in `taskCountsBySong` (matching the server route); `createSong.onSuccess` must invalidate both `['songs']` and `['all-tasks']` so the pill appears immediately after song creation without a page refresh; `createSong.onSuccess` also shows a toast `"Song '{name}' created"` before navigating to the song home page; Upcoming Tasks always renders — shows "You have no upcoming tasks" empty state when none match current user; task filter is case-insensitive assignee match; cross-song task list filtered to current user sorted by due date; activity feed polls every 10s with all events in the scrollable sidebar; **greeting block** renders only when `activeTab === 'dashboard'` — a single JSX gate wraps both the heading and the subline; it never renders on the Library tab (the `<main>` element's `py-12` provides adequate top spacing); **status subline** is computed purely from queries already in flight: `overdueCount` from `activeTasks` filtered by `dueDate < today`; if none overdue, `dueSoonCount` from tasks due ≤ 7 days from now; `newFilesCount` from `file-added` activity events within the last 48h; counts are embedded as `<span className="text-primary font-semibold">` nodes in a `React.ReactNode` (not a plain string); container `<p>` uses `text-white/70` when a subline is present, `text-muted-foreground` for flavor fallback; when both clauses are zero, rotating flavor lines render instead; no new API endpoints — the subline reuses `activeTasks` and `activityEvents` already fetched for the page |
 | Dashboard Files tab | ✅ Done | Master file browser on Dashboard with **Songs / Ideas** filter toggle. **Songs mode** — 4-column browser: Songs → Instruments → Sections → Files; hover-reveal `+` on SONGS header (`group/songsheader`) opens the **New Project modal** (`createSong` mutation); hover-reveal `+` on INSTRUMENTS header opens the **Add Instrument modal** (`addInstrumentSongMutation`), auto-selects via `pendingInstrumentIdRef`; hover-reveal `+` on SECTIONS header opens the **Add Section modal** (`addSectionSongMutation` — `Promise.all` over `POST /api/tracks/:id/ideas`), auto-selects via `pendingSectionNameRef`. **Ideas mode** — 3-column browser: Ideas → Parts → Files; an "Idea" is a `songs` row with `type='idea'`; its instrument_tracks are called "Parts"; files go into the first `ideas` sub-bucket of the selected Part; hover-reveal `+` on IDEAS header opens the **New Idea modal** (`createIdea` mutation), shows a toast `"Idea '{name}' created"`, navigates to `/?tab=files&filter=ideas&ideaId={newId}`, and auto-selects the new idea via `pendingNewIdeaIdRef` (see URL restoration section below); hover-reveal `+` on PARTS header opens the **Add Part modal** (`addPartMutation` — `POST /api/songs/:id/tracks` + `POST /api/tracks/:id/ideas` with sectionName = part name). **Common**: all column header `+` buttons use the `group/Xheader` hover-reveal pattern and open a Dialog modal — there are no inline text-field inputs in the file browser columns; FILES column header has a fixed `h-8` height; FILES column Upload button and drag-and-drop both open `UploadModal` (imported from `MediaBucket.tsx`) with `defaultIdeaId`, `defaultInstrumentName`, `defaultSectionName`, and `songType` pre-filled from the current column selection — the native file picker is not used; `songType='idea'` for Ideas mode, `'song'` for Songs mode; FILES column clip rows render as **`WaveformPlayerCard`** (20px canvas, play button, gold checkmark for FINAL — no text); right-click on a clip row opens a context menu: More Info (`ClipInfoWindow`), Add Note, Mark as Final, Add to Song, and **Promote to Song** (see below); clips with `addedToSongs` entries show gold pill badges with destination song names below the waveform row; **Music2 icon in SONGS column** is filled solid (`fill="currentColor"`) when `song.hasFiles === true` (from `GET /api/songs`), outline when false; Lightbulb icon in IDEAS column is filled solid when `idea.hasFiles === true`; sort: Ideas list by `createdAt` desc, Songs list by `updatedAt` desc; `seedSong` is skipped for `type='idea'` songs so new ideas start with no instrument tracks. **`createSongSource` state** (`'header' | 'browser'`, default `'header'`) — tracks how song creation was triggered. Set to `'browser'` when the SONGS column `+` button is clicked; set to `'header'` when the AppHeader New Project button or choice modal Song card is clicked. `createSong.onSuccess` branches on this: `'browser'` stays on the Files tab and auto-selects the new song (`setSelectedFile`, `setLocation('/?tab=files&filter=songs&songId=...')`); `'header'` navigates to the song home page (`setLocation('/songs/:id')`). **Activity invalidation**: all creation mutations (`createSong`, `createIdea`, `addPartMutation`, `addInstrumentSongMutation`, `addSectionSongMutation`) call `queryClient.invalidateQueries({ queryKey: ['activity'] })` in `onSuccess`. **URL param auto-selection and navigation persistence**: column clicks write the full selection state to the URL via `setLocation` — Songs mode: `?tab=files&filter=songs&songId=X&instrumentId=Y&sectionId=Z`; Ideas mode: `?tab=files&filter=ideas&ideaId=X&partId=Y` — so refreshing the page restores all three columns. Each click handler also pre-sets `appliedSearchRef.current` to the new search string before calling `setLocation`, which prevents the URL restoration effect from re-running and resetting instrument/section on the same navigation. The restoration effect (`useEffect([songs, search])`) fires when songs are available and `search` changes. It reads `instrumentId`/`sectionId` (Songs) or `partId` (Ideas) from the URL and seeds `pendingInstrumentIdRef` / `pendingSectionIdRef` for the bucket sync effect to resolve. `hasRestoredFromUrl.current` is flipped to `true` **only when an ID was present and the match succeeded** — when there is no `ideaId`/`songId` in the params, or when the ID is present but the idea hasn't appeared in the songs list yet, the flag stays `false` so subsequent retry logic can fire. A companion `useEffect([songs])` retries idea selection from the URL when `hasRestoredFromUrl.current` is still `false` and the songs query refetches with the idea now present. `appliedSearchRef` stores the last processed search string to prevent double-firing on unchanged navigations; `pendingSectionIdRef` resolves by idea ID (distinct from `pendingSectionNameRef` which resolves by section name and is used by the Add Section mutation). **`pendingNewIdeaIdRef`** — a separate ref (`useRef<string | null>(null)`) used exclusively for the post-creation selection path. `createIdea.onSuccess` sets `pendingNewIdeaIdRef.current = newIdea.id` before calling `invalidateQueries` and `setLocation`. A dedicated `useEffect([songs])` watches for this ref: when the refetched songs list contains a `type === 'idea'` entry whose `id` matches, it calls `setSelectedFile` directly and clears the ref. This bypasses the URL restoration system entirely and avoids the race between `setLocation` and the songs refetch. The bucket sync effect (`useEffect([fileBucket])`) resolves both instrument and section in the same pass when `pendingSectionIdRef` is set alongside `pendingInstrumentIdRef` — no second fetch cycle needed. |
 | SongHome page | ✅ Done | Per-song homepage at `/songs/:songId`; three tabs: Overview / Files / Review; Overview uses a two-column grid: left column (2/3) has Resume Last Session card + Your Tasks (5-task cap + expand), right column (1/3) is a fixed-height scrollable Activity sidebar; sidebar height is measured once on mount via `getBoundingClientRect()` on the left column ref after tasks first load — never updates when the task list expands; stacks vertically on mobile; Review tab — see Review Tab section below |
 | Files tab (SongHome) | ✅ Done | Dedicated Files tab at `/songs/:songId?tab=files` — full MediaBucket file browser and upload panel; always visible; decoupled from Overview so the Overview tab contains only Resume, Tasks, and Activity; MediaBucket is wrapped in a card container (`bg-[#181C26] rounded-xl border border-white/5 overflow-hidden`, no fixed height) so it matches the surface style of the Overview cards and auto-sizes to its content height |
@@ -804,6 +868,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Never force-remount a component via a `key` bump to refresh data** — invalidate the right query key instead. A `key` bump destroys all local state and races against any async callbacks that fire after the unmount.
 - **Shared creation modals live in `client/src/components/daw/modals/`** — `AddInstrumentModal` and `AddSectionModal` are controlled presentational components; error state and mutation pending state come from the parent. Both accept `onClearError?: () => void` — the modal calls it on every input keystroke so the parent can clear a stale error message. Always pass this prop at call sites that set an error state.
 - **Section "remove" is per-instrument soft-hide (`useHideIdea`)** — right-clicking a section in the bucket hides that idea for one instrument only (sets `active = false` on the `ideas` row) and is fully restorable. A song-wide section-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists and `useDeleteSection` was removed from the hook file as unused; do not re-add it without a product decision on whether full section deletion belongs in the UI.
+- **Do not add heuristic fallbacks to `onAddToTimeline` or `handleDragEnd`** — track resolution must use the `trackId` carried in drag data / passed by `BucketClip`. Section resolution must read `clip.sectionName` directly. Previous versions used substring track-name matching with a silent `tracks[0]` fallback and derived sectionName by parsing the clip's filename — both silently misplaced clips, especially for idea-sourced uploads whose names are raw filenames. If `trackId` or `sectionName` is missing, warn loudly and bail.
 
 ---
 
@@ -1578,6 +1643,25 @@ Clicking Delete in the ••• menu sets `deleteConfirmId`. An inline confirma
 - `formatTime(secs)` — `"M:SS"` format
 - `formatReviewDate(iso)` — `"Month D, YYYY"` display format
 
+### Placement feedback (Add to Timeline) — ✅ Built
+
+Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a brief flash halo. Drag-and-drop placement is **deliberately silent** — do not add toasts or flashes to the drag path (`handleDragEnd`).
+
+**Flash halo pattern (`TimelineClip` in `Clip.tsx`):**
+An `absolute inset-0 rounded-md` overlay div is rendered as the last child inside the clip's `relative` container. It uses `transition-opacity duration-700` to fade between `opacity-100` (flash active) and `opacity-0` (idle). Key classes: `border-2 border-white/90 shadow-[0_0_12px_rgba(255,255,255,0.6)] z-20 pointer-events-none`. **Do not use `ring-*` classes on timeline clips** — `overflow-hidden` on the clip container clips inline box-shadows (rings) to a sliver on one edge.
+
+**Flash plumbing:**
+- `insertClipInSection` returns the new clip's `id` (`nanoid()` generated, same value POSTed to the server)
+- `flashClipId: string | null` state lives in `Timeline`; a `flashTimerRef` clears it after 1800ms
+- Threaded as props: `Timeline (flashClipId)` → `TimelineTrack (flashClipId?)` → `SectionCell (flashClipId?)` → `TimelineClip (isFlash = flashClipId === clip.id)`
+- A `useEffect([isFlash])` in `TimelineClip` calls `clipContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })` when `isFlash` becomes true; `combinedRef` satisfies both dnd-kit's `setNodeRef` and the local `clipContainerRef`
+
+**Toast style convention for placement/creation toasts:**
+Gold-bordered card: `className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]'`. Title: small-caps gold text with a lucide icon (`text-[11px] font-bold uppercase tracking-[0.2em] text-primary`). Description key values: `text-white font-semibold`; separator: `text-white/40`. The Add-to-Song toast in Dashboard predates this treatment — align it when next touched.
+
+**`useToast` / `ToasterToast` type fix (`client/src/hooks/use-toast.ts`):**
+`ToasterToast` uses `Omit<ToastProps, 'title'>` (not bare `ToastProps &`) to prevent the HTML `title?: string` attribute from collapsing the `title?: React.ReactNode` field to `string` via TypeScript intersection.
+
 ---
 
 ## Version Control
@@ -1611,3 +1695,9 @@ These are things that need a decision before being built:
 
 4. ~~**Song sections as user-defined vs enum:**~~ **Resolved.** Sections are stored as a JSON
    array of strings (`text` column with `mode: "json"`) on the `songs` table. Fully flexible.
+
+---
+
+## Known Issues
+
+- **Playhead escapes the instrument panel boundary on sideways scroll** — when the timeline is scrolled horizontally, the playhead can drift left of the 256px track-header zone into the instrument panel. Observed 2026-07-07; root cause undiagnosed. The playhead DOM element is positioned as a sibling of the scrollable `timelineRef` container (not inside it), and its `left` value is `playheadPositionState - timelineScrollLeft`; a likely cause is a race between the `scroll` state update and the playhead position render.

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useToast } from '@/hooks/use-toast';
 import {
   AlertDialog,
   AlertDialogContent,
@@ -37,6 +38,7 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DawScrollbar } from './DawScrollbar';
 import { MediaBucket } from './MediaBucket';
+import { CheckCircle2 } from 'lucide-react';
 
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 
@@ -256,6 +258,7 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 
 export function Timeline({ songId }: { songId: string }) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${songId}/timeline`],
@@ -901,6 +904,8 @@ export function Timeline({ songId }: { songId: string }) {
 
       return recalced;
     });
+
+    return newId;
   };
 
   const handleDragMove = (event: DragMoveEvent) => {
@@ -1160,6 +1165,12 @@ export function Timeline({ songId }: { songId: string }) {
 
   const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [clearDialogState, setClearDialogState] = useState<'none' | 'checking' | 'simple' | 'enhanced'>('none');
+  const [flashClipId, setFlashClipId] = useState<string | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => { if (flashTimerRef.current) clearTimeout(flashTimerRef.current); };
+  }, []);
 
   // Dismiss context menu on click-outside or Escape.
   useEffect(() => {
@@ -1240,7 +1251,25 @@ export function Timeline({ songId }: { songId: string }) {
               console.warn('[AddToTimeline] missing', { trackId, sectionName: clip.sectionName });
               return;
             }
-            insertClipInSection(targetTrack.id, clip.sectionName, clip);
+            const newClipId = insertClipInSection(targetTrack.id, clip.sectionName, clip);
+            toast({
+              className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]',
+              title: (
+                <span className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.2em] text-primary">
+                  <CheckCircle2 size={14} /> Added to timeline
+                </span>
+              ),
+              description: (
+                <span className="text-sm text-white/80">
+                  <span className="text-white font-semibold">{targetTrack.name}</span>
+                  <span className="text-white/40"> · </span>
+                  <span className="text-white font-semibold">{clip.sectionName}</span>
+                </span>
+              ),
+            });
+            if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+            setFlashClipId(newClipId);
+            flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
           }}
         />
 
@@ -1391,6 +1420,7 @@ export function Timeline({ songId }: { songId: string }) {
                     }
                     onDeleteTrack={handleDeleteTrack}
                     songId={songId}
+                    flashClipId={flashClipId}
                   />
                 );
               })}

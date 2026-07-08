@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
@@ -67,6 +67,7 @@ interface ClipProps {
   trackId?: string;
   songId?: string;
   instanceCount?: number;
+  isFlash?: boolean;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -772,7 +773,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1 }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1, isFlash = false }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -797,6 +798,13 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
   const drawRef = useRef<(() => void) | null>(null);
+  const clipContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
+  useEffect(() => {
+    if (!isFlash || !clipContainerRef.current) return;
+    clipContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+  }, [isFlash]);
 
   // Always keep drawRef current so ResizeObserver and trim effects get fresh values
   drawRef.current = () => {
@@ -1072,6 +1080,11 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
 
+  const combinedRef = useCallback((node: HTMLDivElement | null) => {
+    clipContainerRef.current = node;
+    setNodeRef(node);
+  }, [setNodeRef]);
+
   const style = {
     transform: CSS.Translate.toString(transform),
   };
@@ -1155,7 +1168,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
-            ref={setNodeRef}
+            ref={combinedRef}
             style={positionStyle}
             {...listeners}
             {...attributes}
@@ -1298,6 +1311,16 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 </>
               );
             })()}
+
+            {/* Flash halo — outside overflow-hidden's clip path so border is fully visible */}
+            {!isOverlay && (
+              <div
+                className={cn(
+                  'pointer-events-none absolute inset-0 rounded-md border-2 border-white/90 shadow-[0_0_12px_rgba(255,255,255,0.6)] transition-opacity duration-700 z-20',
+                  isFlash ? 'opacity-100' : 'opacity-0'
+                )}
+              />
+            )}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">
@@ -1533,7 +1556,7 @@ interface BucketClipProps {
   clip: Clip;
   trackId?: string;
   songId?: string;
-  onAddToTimeline?: (clip: Clip) => void;
+  onAddToTimeline?: (clip: Clip, trackId?: string) => void;
   siblingClips?: Clip[];
   autoOpenInfo?: boolean;
 }
@@ -1668,7 +1691,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
             <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
             {isFinal ? "Unmark Final" : "Mark as Final"}
           </ContextMenuItem>
-          <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddToTimeline?.(clip); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+          <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddToTimeline?.(clip, trackId); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Plus size={14} className="text-primary" /> Add to Timeline
           </ContextMenuItem>
           <Separator className="my-1 bg-border/50" />

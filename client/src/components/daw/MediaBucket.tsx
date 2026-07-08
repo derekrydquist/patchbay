@@ -45,7 +45,7 @@ function toClip(apiClip: ApiClip): Clip {
 
 interface MediaBucketProps {
   songId: string;
-  onAddToTimeline?: (clip: Clip) => void;
+  onAddToTimeline?: (clip: Clip, trackId?: string) => void;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
