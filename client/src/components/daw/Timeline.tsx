@@ -930,7 +930,7 @@ export function Timeline({ songId }: { songId: string }) {
       const gapIndex = parseInt(overId.slice(5), 10);
       const clipSectionName = dragData?.clip?.sectionName ?? dragData?.sectionName;
 
-      if (!clipSectionName) return;
+      if (!clipSectionName) { return; }
 
       if (activeType === 'bucket-clip') {
         // Match by trackId (real API clips) or fall back to MOCK_SONG name lookup (mock clips).
@@ -943,14 +943,14 @@ export function Timeline({ songId }: { songId: string }) {
               );
               return !sourceInstrument || sourceInstrument.name === t.name;
             });
-        if (!targetTrack) return;
+        if (!targetTrack) { return; }
         insertClipInSection(targetTrack.id, clipSectionName, { ...clip, sectionName: clipSectionName }, gapIndex);
       } else {
         // Timeline clip: reinsert at gapIndex within the section's clip array.
         const sourceTrackId = dragData?.trackId;
-        if (!sourceTrackId) return;
+        if (!sourceTrackId) { return; }
         const sourceTrack = tracks.find((t) => t.id === sourceTrackId);
-        if (!sourceTrack) return;
+        if (!sourceTrack) { return; }
 
         const sectionClips = sourceTrack.clips.filter((c) => c.sectionName === clipSectionName);
         const otherClips = sourceTrack.clips.filter((c) => c.sectionName !== clipSectionName);
@@ -1234,14 +1234,13 @@ export function Timeline({ songId }: { songId: string }) {
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
           songId={songId}
-          onAddToTimeline={(clip) => {
-            const targetTrack =
-              tracks.find((t) => clip.name.toLowerCase().includes(t.name.toLowerCase())) || tracks[0];
-            if (!targetTrack) return;
-            const clipIdeaName =
-              clip.name.replace(targetTrack.name + ' ', '').split(' V')[0] || '';
-            const sectionName = clipIdeaName;
-            insertClipInSection(targetTrack.id, sectionName, { ...clip, sectionName });
+          onAddToTimeline={(clip, trackId) => {
+            const targetTrack = tracks.find((t) => t.id === trackId);
+            if (!targetTrack || !clip.sectionName) {
+              console.warn('[AddToTimeline] missing', { trackId, sectionName: clip.sectionName });
+              return;
+            }
+            insertClipInSection(targetTrack.id, clip.sectionName, clip);
           }}
         />
 
