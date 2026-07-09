@@ -928,7 +928,12 @@ Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.t
 - `masterVolumeRef` — `number`, initialized to `0.8` (matching the Transport slider's default of 80). Updated by a `useEffect` listening for `update-master-volume` events (`e.detail.volume / 100`). The listener also immediately applies the new volume to all currently-playing elements in `customAudioRefs`. The rAF loop multiplies per-track volume by this ref: `audio.volume = (track.volume / 100) * masterVolumeRef.current`.
 
 **Playhead position model:**
-`playheadPositionState` (and `playheadRef`) store the playhead in **content-space pixels**: `256 + timeInSeconds * zoom`. The playhead DOM element is rendered *outside* the scrollable `timelineRef` container (it is a sibling of it, both inside the `position: relative` outer timeline div). Because of this, the rendered `left` must subtract the scroll offset: `left: ${playheadPositionState - timelineScrollLeft}px`. A `useEffect(fn, [])` registers a passive `scroll` listener on `timelineRef` to keep `timelineScrollLeft` state in sync — this triggers a re-render when the user scrolls while paused (during playback, `setPlayheadPositionState` fires every frame anyway). `handlePlayheadPointerDown` correctly adds `timelineRef.current.scrollLeft` when converting pointer clientX to content-space position. Do not position the playhead element *inside* the scrollable content — it would scroll away with the content.
+`playheadPositionState` (and `playheadRef`) store the playhead in **content-space pixels**: `256 + timeInSeconds * zoom`. The playhead has two DOM elements, both inside the scroller content root — no scroll-offset math anywhere:
+
+- **Line** — `position: absolute; left: playheadPositionState; top: 0; bottom: 0` at z-40. Scrolls natively with content; zero compositor lag.
+- **Flag** (draggable handle + triangle) — `position: absolute; left: playheadPositionState` inside the sticky flag band (z-35). Sticks vertically with the band; `handlePlayheadPointerDown` computes `clientX - rect.left + scrollLeft` to get content coordinates on pointermove.
+
+See **Timeline playhead & occlusion** section below for the full z-map and WebKit sticky rules.
 
 **Animation loop:**
 The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
@@ -1700,4 +1705,28 @@ These are things that need a decision before being built:
 
 ## Known Issues
 
-- **Playhead escapes the instrument panel boundary on sideways scroll** — when the timeline is scrolled horizontally, the playhead can drift left of the 256px track-header zone into the instrument panel. Observed 2026-07-07; root cause undiagnosed. The playhead DOM element is positioned as a sibling of the scrollable `timelineRef` container (not inside it), and its `left` value is `playheadPositionState - timelineScrollLeft`; a likely cause is a race between the `scroll` state update and the playhead position render.
+None currently tracked.
+
+---
+
+## Timeline playhead & occlusion — hard-won rules (do not relearn these)
+
+- Playhead line lives INSIDE the scroller content at left = playheadPositionState (content
+  coordinates). Never position it with scrollLeft math or toggle it from scroll events: Safari
+  throttles scroll events during momentum/rubber-band (sparse deltas, negative scrollLeft) while
+  the compositor moves content every frame — JS cannot keep up, by construction.
+- The draggable flag is a separate element inside the sticky flag band (band z-35 so the flag,
+  which overflows the 6px band, paints over the z-30 ruler). Line and flag both read
+  playheadPositionState.
+- WEBKIT LAW: position:sticky creates a stacking context even at z-index auto. Occluders must BE
+  the sticky element (z on the leaf, plain non-sticky/z-auto/transform-free ancestors up to the
+  scroll content root) — never a child of a sticky band root. Band spacers are content-root
+  siblings overlaying their bands via negative margins.
+- Z-map (leaves only; all containers z-auto): panel spacers/cells 50 > playhead line 40 >
+  flag band 35 > ruler & section bands 30 (fully opaque) > resize strip 25.
+- The top-edge pane-resize strip must stay BELOW the flag band and the flag opts into pointer
+  events (band is pointer-events-none, flag pointer-events-auto) — the strip intercepted all
+  scrub input for multiple debugging rounds before DevTools inspection caught it.
+- Debugging discipline proven repeatedly: if a fix produces IDENTICAL symptoms, the causal model
+  is wrong — stop patching; instrument (console logs) or inspect the live DOM (DevTools element
+  picker). Source-reading cannot see browser-specific behavior or hit-testing.
