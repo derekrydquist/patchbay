@@ -41,6 +41,7 @@ import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
 
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
+const TRACK_PANEL_WIDTH = 256;
 
 type ApiTrack = {
   id: string;
@@ -361,7 +362,6 @@ export function Timeline({ songId }: { songId: string }) {
   const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
   const [playheadPositionState, setPlayheadPositionState] = useState(256);
   const playheadRef = React.useRef(256);
-  const [timelineScrollLeft, setTimelineScrollLeft] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
@@ -651,13 +651,6 @@ export function Timeline({ songId }: { songId: string }) {
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
   }, [isPlaying, tracks, bpm, isLooping, sectionLayout, zoom, setPlayheadPosition]);
 
-  useEffect(() => {
-    const el = timelineRef.current;
-    if (!el) return;
-    const onScroll = () => setTimelineScrollLeft(el.scrollLeft);
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
-  }, []);
 
   useEffect(() => {
     const handleToggleMute = (e: any) => {
@@ -1279,22 +1272,48 @@ export function Timeline({ songId }: { songId: string }) {
         >
           <div
             ref={resizeRef}
-            className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-50"
+            className="absolute top-0 left-0 right-0 h-1.5 cursor-ns-resize z-[25]"
             onPointerDown={handleResizePointerDown}
           />
+          {/* Rubber-band backing — sits at z-30 (below playhead z-40) and fills the left column.
+              Its only job is providing an opaque background during Safari elastic overscroll when
+              the scroller content shifts and briefly exposes the viewport gap above the ruler.
+              It is NOT an occluder: sticky-left elements inside the scroller (z-50) own that role. */}
+          <div className="absolute top-0 bottom-0 left-0 w-64 bg-card z-30 pointer-events-none" />
           <div
-            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] mt-1.5"
+            className="flex-1 overflow-y-auto overflow-x-auto relative [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
             ref={timelineRef}
           >
             <div
-              className="pb-32 relative"
+              className="relative"
               style={{
                 width: `${Math.max(endOfTimeline + 15, 0) * zoom + 256}px`,
-                minWidth: '100%',
+                minWidth: `${TRACK_PANEL_WIDTH + 100 * zoom}px`,
               }}
               onContextMenu={handleTimelineContextMenu}
             >
+              {/* Flag-band: thin sticky strip that holds the draggable playhead handle.
+                  The flag overflows this 6px band downward — that is intentional.
+                  z-50 cover is provided by the content-root sibling spacer below. */}
+              <div className="h-1.5 sticky top-0 z-[35] relative bg-card pointer-events-none">
+                <div
+                  className="absolute top-0 z-10 flex flex-col items-center cursor-grab active:cursor-grabbing pointer-events-auto before:absolute before:-inset-2 before:content-['']"
+                  style={{ left: `${playheadPositionState}px`, transform: 'translateX(-50%)' }}
+                  onPointerDown={handlePlayheadPointerDown}
+                >
+                  <div className="w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center">
+                    <div className="w-[1px] h-[8px] bg-black/50" />
+                  </div>
+                  <div className="w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary" />
+                </div>
+              </div>
+              {/* Flag-band spacer — content-root sibling, no sticky ancestor, z-50 holds globally.
+                  Negative margin overlaps the flag-band without adding vertical space. */}
+              <div className="-mt-1.5 sticky left-0 top-0 z-50 w-64 h-1.5 bg-card pointer-events-none" />
+
               <Ruler onSeek={handleRulerSeek} zoom={zoom} />
+              {/* Ruler spacer — same pattern: content-root sibling, overlaps the 32px ruler. */}
+              <div className="-mt-8 sticky left-0 top-[6px] z-50 w-64 h-8 bg-card pointer-events-none" />
 
               {/* Gap zones — rendered at clip boundaries within the active drag's section.
                   One zone before the first clip and one after each clip (N clips → N+1 zones). */}
@@ -1310,8 +1329,9 @@ export function Timeline({ songId }: { songId: string }) {
                 onDragEnd={handleSectionDragEnd}
                 onDragCancel={handleSectionDragEnd}
               >
-                <div className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-8 z-10">
-                  <div className="w-64 shrink-0 bg-card border-r border-border sticky left-0 z-20" />
+                <div className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-[38px] z-30">
+                  {/* Layout placeholder — z-50 cover provided by content-root sibling spacer below */}
+                  <div className="w-64 shrink-0 bg-card border-r border-border h-full" />
                   <div className="flex relative">
                     {sectionLayout.map((sec) => (
                       <DraggableSectionHeader
@@ -1369,6 +1389,8 @@ export function Timeline({ songId }: { songId: string }) {
                   })()}
                 </DragOverlay>
               </DndContext>
+              {/* Section-band spacer — content-root sibling, overlaps the 24px section band. */}
+              <div className="-mt-6 sticky left-0 top-[38px] z-50 w-64 h-6 bg-card pointer-events-none" />
 
               {tracks.map((track) => {
                 const invalidSectionsForTrack = new Set<string>();
@@ -1425,21 +1447,23 @@ export function Timeline({ songId }: { songId: string }) {
                 );
               })}
 
+              {/* Playhead line — inside the scroller so it moves natively with content (zero lag).
+                  Starts below all sticky header bands (6px flag + 32px ruler + 24px section = 62px).
+                  left is in content coordinates; no scrollLeft math needed. */}
+              <div
+                className="absolute bottom-0 w-[1px] z-40 pointer-events-none bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)]"
+                style={{ left: `${playheadPositionState}px`, top: 0, transform: 'translateX(-50%)' }}
+              />
+
+              {/* Bottom spacer: replaces pb-32 — sticky-left panel (z-50) covers the playhead
+                  line in the empty zone below the last track row. */}
+              <div className="h-32 pointer-events-none">
+                <div className="w-64 h-full bg-card sticky left-0 z-50" />
+              </div>
+
             </div>
           </div>
 
-          {/* Global Playhead */}
-          <div
-            className="absolute top-0 bottom-0 w-[16px] z-50 flex justify-center cursor-ew-resize group"
-            style={{ left: `${playheadPositionState - timelineScrollLeft}px`, transform: 'translateX(-50%)' }}
-            onPointerDown={handlePlayheadPointerDown}
-          >
-            <div className="w-[1px] h-full bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)] group-hover:w-[2px] transition-all" />
-            <div className="absolute top-0 w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center pointer-events-none">
-              <div className="w-[1px] h-[8px] bg-black/50" />
-            </div>
-            <div className="absolute top-[14px] w-0 h-0 border-l-[6.5px] border-l-transparent border-r-[6.5px] border-r-transparent border-t-[6px] border-t-primary pointer-events-none" />
-          </div>
 
           <DawScrollbar
             timelineRef={timelineRef}

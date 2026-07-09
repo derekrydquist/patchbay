@@ -102,7 +102,7 @@ export function TimelineTrack({
   const isInvalidTarget = isDragging && isInvalidDrop;
 
   return (
-    <div className="relative flex w-full h-16 border-b border-border bg-card/20 group">
+    <div className="relative flex w-full h-16 bg-card/20 group">
       {/* Gold border on the valid drop target — explicit inline positioning for scrollable container reliability */}
       {isValidTarget && (
         <div
@@ -136,7 +136,7 @@ export function TimelineTrack({
       {/* Track Header */}
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className="w-64 shrink-0 bg-card border-r border-border px-3 flex items-center gap-3 sticky left-0 z-20">
+      <div className="w-64 shrink-0 bg-card border-r border-b border-border px-3 flex items-center gap-3 sticky left-0 z-50">
         <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
 
         <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
@@ -210,7 +210,7 @@ export function TimelineTrack({
       {/* Section cells — full row is the droppable target */}
       <div
         ref={setNodeRef}
-        className="flex h-full bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]"
+        className="flex h-full border-b border-border bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]"
         style={{ backgroundSize: `${zoom / 4}px 100%` }}
       >
         {sections.map((section) => {

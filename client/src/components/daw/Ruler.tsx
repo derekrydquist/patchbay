@@ -10,9 +10,9 @@ export function Ruler({ onSeek, zoom = 80 }: { onSeek?: (pos: number) => void, z
   };
 
   return (
-    <div className="h-8 border-b border-border bg-card/50 flex items-end sticky top-0 z-30 select-none">
-       {/* Top-left placeholder for Track Headers */}
-       <div className="w-64 shrink-0 bg-card border-r border-border h-full sticky left-0 z-40" />
+    <div className="h-8 border-b border-border bg-card flex items-end sticky top-1.5 z-30 select-none">
+       {/* Layout placeholder — z-50 cover provided by content-root sibling spacer in Timeline */}
+       <div className="w-64 shrink-0 bg-card border-r border-border h-full" />
        
        <div 
          className="flex-1 relative h-full cursor-text"
