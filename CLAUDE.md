@@ -1749,6 +1749,19 @@ None currently tracked.
   the Songs browser.
 - shadcn TooltipContent gotcha: overriding bg without setting text color leaves text-primary-foreground
   (near-black in this theme) — always set text color when restyling tooltips dark.
+- Album membership has two doors by design: song-side right-click (encounter intent, single) and
+  album-side picker via tracklist `+` / empty state (curation intent, batch). The picker adds only —
+  ordering stays in the tracklist (Move Up/Down, future drag).
+- Album song picker: `isAlbumSongPickerOpen` state; opened by Tracklist column header `+` (hover-reveal,
+  enabled only when album is selected) and by the empty-tracklist "+ Add songs" button. Shows all
+  `type === 'song'` entries; already-in-album rows are checked + disabled + "already added" label.
+  POSTs each selected song sequentially in list order (append semantics), then invalidates
+  `['albums']`, `['album-songs', albumId]`, `['album-memberships']` once and shows a gold toast.
+- Album selection is URL-state (`albumId` param), same pattern as `songId` in the Songs browser —
+  refresh and deep links restore selection. Uses a separate `appliedAlbumSearchRef` (not the shared
+  `appliedSearchRef`) so it isn't pre-empted by the `[songs, search]` effect. Any future Library
+  browser must join this convention. Deselection is natural: navigating to any other filter drops the
+  `albumId` param from the URL.
 
 ## Creation chooser pattern
 

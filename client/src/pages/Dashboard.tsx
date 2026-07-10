@@ -334,6 +334,7 @@ export default function Dashboard() {
   const pendingSectionNameRef = useRef<string | null>(null);
   const pendingSectionIdRef = useRef<string | null>(null);
   const appliedSearchRef = useRef<string | null>(null);
+  const appliedAlbumSearchRef = useRef<string | null>(null);
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
 
@@ -345,6 +346,10 @@ export default function Dashboard() {
   const [renameAlbumName, setRenameAlbumName] = useState('');
   const [renameAlbumError, setRenameAlbumError] = useState<string | null>(null);
   const [deleteAlbumId, setDeleteAlbumId] = useState<string | null>(null);
+  const [isAlbumSongPickerOpen, setIsAlbumSongPickerOpen] = useState(false);
+  const [albumSongPickerSearch, setAlbumSongPickerSearch] = useState('');
+  const [albumSongPickerSelected, setAlbumSongPickerSelected] = useState<Set<string>>(new Set());
+  const [albumSongPickerAdding, setAlbumSongPickerAdding] = useState(false);
 
   const [showAllTasks, setShowAllTasks] = useState(false);
   const [songSearch, setSongSearch] = useState('');
@@ -517,6 +522,20 @@ export default function Dashboard() {
     setSelectedSection(null);
     pendingNewIdeaIdRef.current = null;
   }, [songs]);
+
+  // Album URL-state restoration — mirrors the songs/ideas pattern with a separate ref so it
+  // isn't pre-empted by the [songs, search] effect setting appliedSearchRef for all file tabs.
+  useEffect(() => {
+    if (!albumList.length || appliedAlbumSearchRef.current === search) return;
+    const params = new URLSearchParams(search);
+    if (params.get('tab') !== 'files' || params.get('filter') !== 'albums') return;
+    appliedAlbumSearchRef.current = search;
+    const albumId = params.get('albumId');
+    if (albumId) {
+      const album = albumList.find(a => a.id === albumId);
+      setSelectedAlbum(album ?? null);
+    }
+  }, [albumList, search]);
 
   // Persist the active tab to localStorage whenever it changes.
   useEffect(() => {
@@ -1010,7 +1029,9 @@ export default function Dashboard() {
       setNewAlbumName('');
       setAddAlbumError(null);
       setSelectedAlbum({ ...album, songCount: 0 });
-      setLocation('/?tab=files&filter=albums');
+      const s = `tab=files&filter=albums&albumId=${album.id}`;
+      appliedAlbumSearchRef.current = s;
+      setLocation(`/?${s}`);
     },
     onError: (err) => setAddAlbumError((err as Error).message),
   });
@@ -1110,6 +1131,40 @@ export default function Dashboard() {
     const dup = albumList.some(a => a.id !== selectedAlbum.id && a.name.toLowerCase() === name.toLowerCase());
     if (dup) { setRenameAlbumError('An album with that name already exists.'); return; }
     renameAlbumMutation.mutate({ id: selectedAlbum.id, name });
+  };
+
+  const openAlbumSongPicker = () => {
+    setAlbumSongPickerSearch('');
+    setAlbumSongPickerSelected(new Set());
+    setIsAlbumSongPickerOpen(true);
+  };
+
+  const handleAddSongsToAlbum = async () => {
+    if (!selectedAlbum || albumSongPickerSelected.size === 0) return;
+    setAlbumSongPickerAdding(true);
+    const pickerSongs = songs.filter(s => s.type === 'song' || !s.type);
+    const toAdd = pickerSongs.filter(s => albumSongPickerSelected.has(s.id));
+    for (const song of toAdd) {
+      await fetch(`/api/albums/${selectedAlbum.id}/songs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ songId: song.id }),
+      });
+    }
+    queryClient.invalidateQueries({ queryKey: ['albums'] });
+    queryClient.invalidateQueries({ queryKey: ['album-songs', selectedAlbum.id] });
+    queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+    const count = albumSongPickerSelected.size;
+    const albumName = selectedAlbum.name;
+    setAlbumSongPickerAdding(false);
+    setIsAlbumSongPickerOpen(false);
+    toast({
+      className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]',
+      title: `Added to ${albumName}`,
+      description: count === 1
+        ? <span className="text-white font-semibold">{toAdd[0].name}</span>
+        : <span><span className="text-white font-semibold">{count}</span><span className="text-white/70"> songs added</span></span>,
+    });
   };
 
   const openProjectModal = () => {
@@ -2038,7 +2093,12 @@ export default function Dashboard() {
                     <ContextMenu key={album.id}>
                       <ContextMenuTrigger asChild>
                         <button
-                          onClick={() => setSelectedAlbum(album)}
+                          onClick={() => {
+                            const s = `tab=files&filter=albums&albumId=${album.id}`;
+                            appliedAlbumSearchRef.current = s;
+                            setSelectedAlbum(album);
+                            setLocation(`/?${s}`);
+                          }}
                           className={cn(
                             'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                             selectedAlbum?.id === album.id
@@ -2075,14 +2135,30 @@ export default function Dashboard() {
 
               {/* Column 2 — Tracklist */}
               <div className="flex-1 flex flex-col bg-black/10">
-                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/tracklistheader">
                   <span>Tracklist</span>
+                  {selectedAlbum && (
+                    <button
+                      onClick={openAlbumSongPicker}
+                      className="opacity-0 group-hover/tracklistheader:opacity-100 hover:text-primary transition-all p-0.5"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedAlbum ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-4 uppercase tracking-widest leading-relaxed">Select an album</p>
                   ) : albumSongList.length === 0 ? (
-                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-4 uppercase tracking-widest leading-relaxed">No songs in this album yet — right-click a song in the Songs browser to add it</p>
+                    <div className="flex flex-col items-center justify-center h-full py-10 px-4 gap-3">
+                      <Button
+                        onClick={openAlbumSongPicker}
+                        className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
+                      >
+                        <Plus size={14} /> Add songs
+                      </Button>
+                      <p className="text-[10px] text-muted-foreground/40 italic text-center uppercase tracking-widest leading-relaxed">or right-click any song in the Songs browser</p>
+                    </div>
                   ) : albumSongList.map((song, idx) => (
                     <ContextMenu key={song.id}>
                       <ContextMenuTrigger asChild>
@@ -2385,6 +2461,92 @@ export default function Dashboard() {
               </div>
             </button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Album Song Picker */}
+      <Dialog open={isAlbumSongPickerOpen} onOpenChange={open => {
+        if (!open) { setIsAlbumSongPickerOpen(false); setAlbumSongPickerSearch(''); setAlbumSongPickerSelected(new Set()); }
+      }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add songs to {selectedAlbum?.name}
+            </DialogTitle>
+          </DialogHeader>
+          <Input
+            autoFocus
+            placeholder="Search songs…"
+            value={albumSongPickerSearch}
+            onChange={e => setAlbumSongPickerSearch(e.target.value)}
+            className="bg-black/40 border-white/10 text-sm h-9 focus-visible:ring-primary/50"
+          />
+          <div className="max-h-80 overflow-y-auto space-y-0.5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+              {(() => {
+                const pickerSongs = songs.filter(s => s.type === 'song' || !s.type);
+                const albumSongIds = new Set(albumSongList.map(s => s.id));
+                const filtered = pickerSongs.filter(s =>
+                  s.name.toLowerCase().includes(albumSongPickerSearch.toLowerCase())
+                );
+                if (filtered.length === 0) {
+                  return <p className="text-xs text-muted-foreground text-center py-6">No songs match</p>;
+                }
+                return filtered.map(song => {
+                  const alreadyIn = albumSongIds.has(song.id);
+                  const checked = alreadyIn || albumSongPickerSelected.has(song.id);
+                  return (
+                    <button
+                      key={song.id}
+                      disabled={alreadyIn}
+                      onClick={() => {
+                        if (alreadyIn) return;
+                        setAlbumSongPickerSelected(prev => {
+                          const next = new Set(prev);
+                          if (next.has(song.id)) next.delete(song.id); else next.add(song.id);
+                          return next;
+                        });
+                      }}
+                      className={cn(
+                        'w-full flex items-center gap-3 px-2 py-2 rounded text-xs text-left transition-colors',
+                        alreadyIn ? 'opacity-50 cursor-default' : 'hover:bg-white/5 cursor-pointer'
+                      )}
+                    >
+                      <div className={cn(
+                        'w-4 h-4 shrink-0 rounded border flex items-center justify-center transition-colors',
+                        checked ? 'bg-primary border-primary' : 'border-white/20 bg-transparent'
+                      )}>
+                        {checked && <Check size={10} className="text-black" strokeWidth={3} />}
+                      </div>
+                      <span className={cn('flex-1 truncate font-medium', alreadyIn ? 'text-muted-foreground' : 'text-white')}>
+                        {song.name}
+                      </span>
+                      {alreadyIn && <span className="text-[10px] text-muted-foreground/50 italic shrink-0">already added</span>}
+                    </button>
+                  );
+                });
+              })()}
+          </div>
+          <DialogFooter className="pt-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={() => setIsAlbumSongPickerOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleAddSongsToAlbum}
+              disabled={albumSongPickerSelected.size === 0 || albumSongPickerAdding}
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+            >
+              {albumSongPickerAdding
+                ? 'Adding…'
+                : albumSongPickerSelected.size === 0
+                  ? 'Add songs'
+                  : `Add ${albumSongPickerSelected.size} song${albumSongPickerSelected.size === 1 ? '' : 's'}`}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
