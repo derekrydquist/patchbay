@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, count, and, isNull } from "drizzle-orm";
+import { eq, asc, desc, inArray, count, and, isNull, max } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -14,10 +14,11 @@ import {
   type ClipComment, type InsertClipComment,
   type SongReview, type InsertSongReview,
   type SongReviewComment, type InsertSongReviewComment,
+  type Album,
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
-  activityLog, globalSettings,
+  activityLog, globalSettings, albums, albumSongs,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -181,6 +182,17 @@ export interface IStorage {
   updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined>;
   deleteReviewComment(id: string): Promise<void>;
 
+  // Albums
+  getAlbums(): Promise<AlbumWithCount[]>;
+  createAlbum(name: string): Promise<Album>;
+  renameAlbum(id: string, name: string): Promise<Album | undefined>;
+  deleteAlbum(id: string): Promise<void>;
+  getAlbumSongs(albumId: string): Promise<Song[]>;
+  addSongToAlbum(albumId: string, songId: string): Promise<{ added: boolean }>;
+  removeSongFromAlbum(albumId: string, songId: string): Promise<void>;
+  moveAlbumSong(albumId: string, songId: string, direction: 'up' | 'down'): Promise<void>;
+  getAllAlbumMemberships(): Promise<AlbumMembership[]>;
+
   // Settings
   getSettings(): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }>;
   updateSettings(data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void>;
@@ -192,6 +204,8 @@ export type ReviewCommentWithReplies = SongReviewComment & {
 
 export type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
 export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
+export type AlbumWithCount = Album & { songCount: number };
+export type AlbumMembership = { albumId: string; albumName: string; songId: string };
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
@@ -1149,6 +1163,93 @@ export class SQLiteStorage implements IStorage {
     // Delete replies first (no cascade FK since parentId has no .references())
     db.delete(songReviewComments).where(eq(songReviewComments.parentId, id)).run();
     db.delete(songReviewComments).where(eq(songReviewComments.id, id)).run();
+  }
+
+  // ── Albums ─────────────────────────────────────────────────────────────────
+
+  async getAlbums(): Promise<AlbumWithCount[]> {
+    const allAlbums = db.select().from(albums).orderBy(asc(albums.createdAt)).all();
+    const counts = db
+      .select({ albumId: albumSongs.albumId, total: count() })
+      .from(albumSongs)
+      .groupBy(albumSongs.albumId)
+      .all();
+    const countMap = new Map(counts.map(r => [r.albumId, r.total]));
+    return allAlbums.map(a => ({ ...a, songCount: countMap.get(a.id) ?? 0 }));
+  }
+
+  async createAlbum(name: string): Promise<Album> {
+    const album: Album = { id: randomUUID(), name, createdAt: new Date().toISOString() };
+    db.insert(albums).values(album).run();
+    return album;
+  }
+
+  async renameAlbum(id: string, name: string): Promise<Album | undefined> {
+    const existing = db.select().from(albums).where(eq(albums.id, id)).get();
+    if (!existing) return undefined;
+    db.update(albums).set({ name }).where(eq(albums.id, id)).run();
+    return db.select().from(albums).where(eq(albums.id, id)).get();
+  }
+
+  async deleteAlbum(id: string): Promise<void> {
+    db.delete(albums).where(eq(albums.id, id)).run();
+  }
+
+  async getAlbumSongs(albumId: string): Promise<Song[]> {
+    const rows = db
+      .select({ song: songs, sortOrder: albumSongs.sortOrder })
+      .from(albumSongs)
+      .innerJoin(songs, eq(albumSongs.songId, songs.id))
+      .where(eq(albumSongs.albumId, albumId))
+      .orderBy(asc(albumSongs.sortOrder))
+      .all();
+    return rows.map(r => r.song);
+  }
+
+  async addSongToAlbum(albumId: string, songId: string): Promise<{ added: boolean }> {
+    const existing = db.select().from(albumSongs)
+      .where(and(eq(albumSongs.albumId, albumId), eq(albumSongs.songId, songId)))
+      .get();
+    if (existing) return { added: false };
+    const maxRow = db
+      .select({ maxOrder: max(albumSongs.sortOrder) })
+      .from(albumSongs)
+      .where(eq(albumSongs.albumId, albumId))
+      .get();
+    const nextOrder = (maxRow?.maxOrder ?? -1) + 1;
+    db.insert(albumSongs).values({ albumId, songId, sortOrder: nextOrder }).run();
+    return { added: true };
+  }
+
+  async removeSongFromAlbum(albumId: string, songId: string): Promise<void> {
+    db.delete(albumSongs)
+      .where(and(eq(albumSongs.albumId, albumId), eq(albumSongs.songId, songId)))
+      .run();
+  }
+
+  async moveAlbumSong(albumId: string, songId: string, direction: 'up' | 'down'): Promise<void> {
+    const rows = db.select().from(albumSongs)
+      .where(eq(albumSongs.albumId, albumId))
+      .orderBy(asc(albumSongs.sortOrder))
+      .all();
+    const idx = rows.findIndex(r => r.songId === songId);
+    if (idx === -1) return;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= rows.length) return;
+    const curr = rows[idx];
+    const swap = rows[swapIdx];
+    db.update(albumSongs).set({ sortOrder: swap.sortOrder })
+      .where(and(eq(albumSongs.albumId, albumId), eq(albumSongs.songId, curr.songId))).run();
+    db.update(albumSongs).set({ sortOrder: curr.sortOrder })
+      .where(and(eq(albumSongs.albumId, albumId), eq(albumSongs.songId, swap.songId))).run();
+  }
+
+  async getAllAlbumMemberships(): Promise<AlbumMembership[]> {
+    return db
+      .select({ albumId: albumSongs.albumId, albumName: albums.name, songId: albumSongs.songId })
+      .from(albumSongs)
+      .innerJoin(albums, eq(albumSongs.albumId, albums.id))
+      .all();
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────

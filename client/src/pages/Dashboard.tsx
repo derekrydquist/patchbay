@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { cn } from '@/lib/utils';
 import {
@@ -38,8 +38,12 @@ import {
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ClipInfoWindow } from '@/components/daw/Clip';
 import { UploadModal } from '@/components/daw/UploadModal';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
@@ -63,6 +67,19 @@ interface Song {
   createdAt: string;
   updatedAt: string;
   hasFiles?: boolean;
+}
+
+interface AlbumWithCount {
+  id: string;
+  name: string;
+  createdAt: string;
+  songCount: number;
+}
+
+interface AlbumMembership {
+  albumId: string;
+  albumName: string;
+  songId: string;
 }
 
 interface Task {
@@ -282,7 +299,7 @@ export default function Dashboard() {
   const activeTab: 'dashboard' | 'files' = tabParam === 'files' ? 'files'
     : tabParam === 'dashboard' ? 'dashboard'
     : (localStorage.getItem('patchbay-last-home-tab') === 'files' ? 'files' : 'dashboard');
-  const filesFilter: 'songs' | 'ideas' = filterParam === 'ideas' ? 'ideas' : 'songs';
+  const filesFilter: 'songs' | 'ideas' | 'albums' = filterParam === 'ideas' ? 'ideas' : filterParam === 'albums' ? 'albums' : 'songs';
   const [filesSort, setFilesSort] = useState<'recent' | 'name-asc' | 'name-desc'>('recent');
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrack | null>(null);
@@ -320,6 +337,15 @@ export default function Dashboard() {
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
 
+  const [selectedAlbum, setSelectedAlbum] = useState<AlbumWithCount | null>(null);
+  const [isAddAlbumOpen, setIsAddAlbumOpen] = useState(false);
+  const [newAlbumName, setNewAlbumName] = useState('');
+  const [addAlbumError, setAddAlbumError] = useState<string | null>(null);
+  const [isRenameAlbumOpen, setIsRenameAlbumOpen] = useState(false);
+  const [renameAlbumName, setRenameAlbumName] = useState('');
+  const [renameAlbumError, setRenameAlbumError] = useState<string | null>(null);
+  const [deleteAlbumId, setDeleteAlbumId] = useState<string | null>(null);
+
   const [showAllTasks, setShowAllTasks] = useState(false);
   const [songSearch, setSongSearch] = useState('');
   const [activityHeight, setActivityHeight] = useState<number | null>(null);
@@ -344,6 +370,24 @@ export default function Dashboard() {
     queryKey: bucketKeys.bucket(destSongId),
     queryFn: () => fetchBucket(destSongId),
     enabled: !!destSongId && !!addToSongClip,
+  });
+
+  const { data: albumList = [] } = useQuery<AlbumWithCount[]>({
+    queryKey: ['albums'],
+    queryFn: () => fetch('/api/albums').then(r => r.json()),
+    enabled: activeTab === 'files',
+  });
+
+  const { data: albumSongList = [] } = useQuery<Song[]>({
+    queryKey: ['album-songs', selectedAlbum?.id],
+    queryFn: () => fetch(`/api/albums/${selectedAlbum!.id}/songs`).then(r => r.json()),
+    enabled: !!selectedAlbum && filesFilter === 'albums',
+  });
+
+  const { data: memberships = [] } = useQuery<AlbumMembership[]>({
+    queryKey: ['album-memberships'],
+    queryFn: () => fetch('/api/album-memberships').then(r => r.json()),
+    enabled: activeTab === 'files',
   });
 
   // Sync selectedInstrument/selectedSection from fresh bucket data; also handles
@@ -949,6 +993,124 @@ export default function Dashboard() {
     }
   };
 
+  // Album mutations
+  const createAlbumMutation = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await fetch('/api/albums', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error('Failed to create album');
+      return res.json() as Promise<AlbumWithCount>;
+    },
+    onSuccess: (album) => {
+      queryClient.invalidateQueries({ queryKey: ['albums'] });
+      setIsAddAlbumOpen(false);
+      setNewAlbumName('');
+      setAddAlbumError(null);
+      setSelectedAlbum({ ...album, songCount: 0 });
+    },
+    onError: (err) => setAddAlbumError((err as Error).message),
+  });
+
+  const renameAlbumMutation = useMutation({
+    mutationFn: async ({ id, name }: { id: string; name: string }) => {
+      const res = await fetch(`/api/albums/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) throw new Error('Failed to rename album');
+      return res.json();
+    },
+    onSuccess: (updated) => {
+      queryClient.invalidateQueries({ queryKey: ['albums'] });
+      setSelectedAlbum(prev => prev?.id === updated.id ? { ...prev, ...updated } : prev);
+      setIsRenameAlbumOpen(false);
+      setRenameAlbumName('');
+      setRenameAlbumError(null);
+    },
+    onError: (err) => setRenameAlbumError((err as Error).message),
+  });
+
+  const deleteAlbumMutation = useMutation({
+    mutationFn: async (id: string) => {
+      await fetch(`/api/albums/${id}`, { method: 'DELETE' });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['albums'] });
+      queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+      setDeleteAlbumId(null);
+      setSelectedAlbum(null);
+    },
+  });
+
+  const addSongToAlbumMutation = useMutation({
+    mutationFn: async ({ albumId, songId }: { albumId: string; songId: string }) => {
+      const res = await fetch(`/api/albums/${albumId}/songs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ songId }),
+      });
+      if (!res.ok) throw new Error('Failed to add to album');
+      return res.json() as Promise<{ added: boolean }>;
+    },
+    onSuccess: (result, { albumId }) => {
+      queryClient.invalidateQueries({ queryKey: ['albums'] });
+      queryClient.invalidateQueries({ queryKey: ['album-songs', albumId] });
+      queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+      return result;
+    },
+  });
+
+  const removeSongFromAlbumMutation = useMutation({
+    mutationFn: async ({ albumId, songId }: { albumId: string; songId: string }) => {
+      await fetch(`/api/albums/${albumId}/songs/${songId}`, { method: 'DELETE' });
+    },
+    onSuccess: (_data, { albumId }) => {
+      queryClient.invalidateQueries({ queryKey: ['albums'] });
+      queryClient.invalidateQueries({ queryKey: ['album-songs', albumId] });
+      queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+    },
+  });
+
+  const moveAlbumSongMutation = useMutation({
+    mutationFn: async ({ albumId, songId, direction }: { albumId: string; songId: string; direction: 'up' | 'down' }) => {
+      await fetch(`/api/albums/${albumId}/songs/${songId}/move`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction }),
+      });
+    },
+    onSuccess: (_data, { albumId }) => {
+      queryClient.invalidateQueries({ queryKey: ['album-songs', albumId] });
+    },
+  });
+
+  // songId → album names[] map for the membership indicator
+  const membershipMap = memberships.reduce<Record<string, string[]>>((acc, m) => {
+    if (!acc[m.songId]) acc[m.songId] = [];
+    acc[m.songId].push(m.albumName);
+    return acc;
+  }, {});
+
+  const handleCreateAlbum = () => {
+    const name = newAlbumName.trim();
+    if (!name) return;
+    const dup = albumList.some(a => a.name.toLowerCase() === name.toLowerCase());
+    if (dup) { setAddAlbumError('An album with that name already exists.'); return; }
+    createAlbumMutation.mutate(name);
+  };
+
+  const handleRenameAlbum = () => {
+    const name = renameAlbumName.trim();
+    if (!name || !selectedAlbum) return;
+    const dup = albumList.some(a => a.id !== selectedAlbum.id && a.name.toLowerCase() === name.toLowerCase());
+    if (dup) { setRenameAlbumError('An album with that name already exists.'); return; }
+    renameAlbumMutation.mutate({ id: selectedAlbum.id, name });
+  };
+
   const openProjectModal = () => {
     setNewName('');
     setNewBpm(String(settings?.defaultBpm ?? 120));
@@ -1288,39 +1450,41 @@ export default function Dashboard() {
             {/* Controls row — filter buttons + sort dropdown */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-1 bg-white/[0.04] rounded-lg p-1 border border-white/5">
-                {(['songs', 'ideas'] as const).map(f => (
+                {(['songs', 'ideas', 'albums'] as const).map(f => (
                   <button
                     key={f}
-                    onClick={() => { setLocation(`/?tab=files&filter=${f}`); setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null); }}
+                    onClick={() => { setLocation(`/?tab=files&filter=${f}`); setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null); setSelectedAlbum(null); }}
                     className={cn(
                       'px-3 py-1.5 rounded-md text-xs font-bold transition-all',
                       filesFilter === f ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/70'
                     )}
                   >
-                    {f === 'songs' ? 'Songs' : 'Ideas'}
+                    {f === 'songs' ? 'Songs' : f === 'ideas' ? 'Ideas' : 'Albums'}
                   </button>
                 ))}
               </div>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button className="flex items-center gap-1.5 text-xs text-white/50 hover:text-white transition-colors px-3 py-1.5 rounded-md border border-white/8 bg-white/[0.02] hover:bg-white/[0.04]">
-                    <ArrowUpDown size={11} />
-                    {filesSort === 'recent' ? 'Recent' : filesSort === 'name-asc' ? 'Name A–Z' : 'Name Z–A'}
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="bg-[#0c0c0e] border-white/10 min-w-[130px]">
-                  {(['recent', 'name-asc', 'name-desc'] as const).map(s => (
-                    <DropdownMenuItem
-                      key={s}
-                      onClick={() => setFilesSort(s)}
-                      className="text-xs flex items-center justify-between cursor-pointer"
-                    >
-                      {s === 'recent' ? 'Recent' : s === 'name-asc' ? 'Name A–Z' : 'Name Z–A'}
-                      {filesSort === s && <Check size={12} className="text-primary ml-3" />}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
+              {filesFilter !== 'albums' && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button className="flex items-center gap-1.5 text-xs text-white/50 hover:text-white transition-colors px-3 py-1.5 rounded-md border border-white/8 bg-white/[0.02] hover:bg-white/[0.04]">
+                      <ArrowUpDown size={11} />
+                      {filesSort === 'recent' ? 'Recent' : filesSort === 'name-asc' ? 'Name A–Z' : 'Name Z–A'}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="bg-[#0c0c0e] border-white/10 min-w-[130px]">
+                    {(['recent', 'name-asc', 'name-desc'] as const).map(s => (
+                      <DropdownMenuItem
+                        key={s}
+                        onClick={() => setFilesSort(s)}
+                        className="text-xs flex items-center justify-between cursor-pointer"
+                      >
+                        {s === 'recent' ? 'Recent' : s === 'name-asc' ? 'Name A–Z' : 'Name Z–A'}
+                        {filesSort === s && <Check size={12} className="text-primary ml-3" />}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
             </div>
 
             {/* Browser — conditional by mode */}
@@ -1343,29 +1507,90 @@ export default function Dashboard() {
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No items</p>
                   ) : filteredFiles.map(item => {
                     const isIdea = item.type === 'idea';
+                    const albumNames = membershipMap[item.id] ?? [];
                     return (
-                      <button
-                        key={item.id}
-                        onClick={() => {
-                          setSelectedFile(item); setSelectedInstrument(null); setSelectedSection(null);
-                          const s = `tab=files&filter=songs&songId=${item.id}`;
-                          appliedSearchRef.current = s; setLocation(`/?${s}`);
-                        }}
-                        className={cn(
-                          'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
-                          selectedFile?.id === item.id
-                            ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-                            : 'text-muted-foreground hover:bg-white/5 hover:text-white'
-                        )}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          {isIdea
-                            ? <Lightbulb size={13} className="shrink-0" />
-                            : <Music2 size={13} className="shrink-0" fill={item.hasFiles ? 'currentColor' : 'none'} />}
-                          <span className="font-bold tracking-tight truncate">{item.name}</span>
-                        </div>
-                        <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
-                      </button>
+                      <ContextMenu key={item.id}>
+                        <ContextMenuTrigger asChild>
+                          <button
+                            onClick={() => {
+                              setSelectedFile(item); setSelectedInstrument(null); setSelectedSection(null);
+                              const s = `tab=files&filter=songs&songId=${item.id}`;
+                              appliedSearchRef.current = s; setLocation(`/?${s}`);
+                            }}
+                            className={cn(
+                              'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
+                              selectedFile?.id === item.id
+                                ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+                                : 'text-muted-foreground hover:bg-white/5 hover:text-white'
+                            )}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              {isIdea
+                                ? <Lightbulb size={13} className="shrink-0" />
+                                : <Music2 size={13} className="shrink-0" fill={item.hasFiles ? 'currentColor' : 'none'} />}
+                              <span className="font-bold tracking-tight truncate">{item.name}</span>
+                              {albumNames.length > 0 && (
+                                <TooltipProvider delayDuration={300}>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span><Disc size={11} className="shrink-0 text-white/30" /></span>
+                                    </TooltipTrigger>
+                                    <TooltipContent className="bg-[#0c0c0e] border-white/10 text-xs p-2 space-y-0.5 text-white/80">
+                                      {albumNames.map(n => <div key={n}>{n}</div>)}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              )}
+                            </div>
+                            <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
+                          </button>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+                          {albumList.length === 0 ? (
+                            <ContextMenuItem disabled className="text-xs text-white/30 italic">No albums yet</ContextMenuItem>
+                          ) : (
+                            <ContextMenuSub>
+                              <ContextMenuSubTrigger className="text-xs cursor-pointer flex items-center gap-2">
+                                <Disc size={13} /> Add to Album
+                              </ContextMenuSubTrigger>
+                              <ContextMenuSubContent className="bg-[#0c0c0e] border-white/10 min-w-[140px]">
+                                {albumList.map(album => (
+                                  <ContextMenuItem
+                                    key={album.id}
+                                    className="text-xs cursor-pointer"
+                                    onClick={() => {
+                                      addSongToAlbumMutation.mutate(
+                                        { albumId: album.id, songId: item.id },
+                                        {
+                                          onSuccess: (result) => {
+                                            if (!result.added) {
+                                              toast({ description: `Already in ${album.name}` });
+                                            } else {
+                                              toast({
+                                                className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]',
+                                                title: 'Added to album',
+                                                description: (
+                                                  <span>
+                                                    <span className="text-white font-semibold">{item.name}</span>
+                                                    <span className="text-white/40"> → </span>
+                                                    <span className="text-white font-semibold">{album.name}</span>
+                                                  </span>
+                                                ),
+                                              });
+                                            }
+                                          },
+                                        }
+                                      );
+                                    }}
+                                  >
+                                    {album.name}
+                                  </ContextMenuItem>
+                                ))}
+                              </ContextMenuSubContent>
+                            </ContextMenuSub>
+                          )}
+                        </ContextMenuContent>
+                      </ContextMenu>
                     );
                   })}
                 </div>
@@ -1569,7 +1794,7 @@ export default function Dashboard() {
               </div>
 
             </div>
-            ) : (
+            ) : filesFilter === 'ideas' ? (
             /* Ideas — 3-column browser */
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
@@ -1774,6 +1999,114 @@ export default function Dashboard() {
                       </>
                     );
                   })()}
+                </div>
+              </div>
+
+            </div>
+            ) : (
+            /* Albums — 2-column browser */
+            <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px]">
+
+              {/* Column 1 — Albums list */}
+              <div className="w-56 shrink-0 border-r border-white/5 flex flex-col">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/albumsheader">
+                  <span>Albums</span>
+                  <button
+                    onClick={() => { setNewAlbumName(''); setAddAlbumError(null); setIsAddAlbumOpen(true); }}
+                    className="opacity-0 group-hover/albumsheader:opacity-100 hover:text-primary transition-all p-0.5"
+                  >
+                    <Plus size={12} />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {albumList.length === 0 ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No albums yet — create one</p>
+                  ) : albumList.map(album => (
+                    <ContextMenu key={album.id}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          onClick={() => setSelectedAlbum(album)}
+                          className={cn(
+                            'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
+                            selectedAlbum?.id === album.id
+                              ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+                              : 'text-muted-foreground hover:bg-white/5 hover:text-white'
+                          )}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <Disc size={13} className="shrink-0" />
+                            <span className="font-bold tracking-tight truncate">{album.name}</span>
+                          </div>
+                          <span className="text-[10px] text-white/30 shrink-0 ml-1">{album.songCount}</span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[150px] shadow-xl">
+                        <ContextMenuItem
+                          className="text-xs cursor-pointer flex items-center gap-2"
+                          onClick={() => { setRenameAlbumName(album.name); setRenameAlbumError(null); setSelectedAlbum(album); setIsRenameAlbumOpen(true); }}
+                        >
+                          <Pencil size={13} /> Rename
+                        </ContextMenuItem>
+                        <ContextMenuSeparator className="bg-white/5" />
+                        <ContextMenuItem
+                          className="text-xs cursor-pointer text-red-400 focus:text-red-400 flex items-center gap-2"
+                          onClick={() => setDeleteAlbumId(album.id)}
+                        >
+                          <Trash2 size={13} /> Delete Album
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  ))}
+                </div>
+              </div>
+
+              {/* Column 2 — Tracklist */}
+              <div className="flex-1 flex flex-col bg-black/10">
+                <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
+                  <span>Tracklist</span>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                  {!selectedAlbum ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-4 uppercase tracking-widest leading-relaxed">Select an album</p>
+                  ) : albumSongList.length === 0 ? (
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-4 uppercase tracking-widest leading-relaxed">No songs in this album yet — right-click a song in the Songs browser to add it</p>
+                  ) : albumSongList.map((song, idx) => (
+                    <ContextMenu key={song.id}>
+                      <ContextMenuTrigger asChild>
+                        <button
+                          onClick={() => setLocation(`/?tab=files&filter=songs&songId=${song.id}`)}
+                          className="w-full flex items-center gap-2 p-2 rounded text-xs text-muted-foreground hover:bg-white/5 hover:text-white transition-all"
+                        >
+                          <span className="text-[10px] text-white/25 w-4 shrink-0 text-right">{idx + 1}.</span>
+                          <Music2 size={12} className="shrink-0" />
+                          <span className="font-medium truncate">{song.name}</span>
+                        </button>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[150px] shadow-xl">
+                        <ContextMenuItem
+                          className="text-xs cursor-pointer flex items-center gap-2"
+                          disabled={idx === 0}
+                          onClick={() => moveAlbumSongMutation.mutate({ albumId: selectedAlbum.id, songId: song.id, direction: 'up' })}
+                        >
+                          <ArrowUp size={13} /> Move Up
+                        </ContextMenuItem>
+                        <ContextMenuItem
+                          className="text-xs cursor-pointer flex items-center gap-2"
+                          disabled={idx === albumSongList.length - 1}
+                          onClick={() => moveAlbumSongMutation.mutate({ albumId: selectedAlbum.id, songId: song.id, direction: 'down' })}
+                        >
+                          <ArrowDown size={13} /> Move Down
+                        </ContextMenuItem>
+                        <ContextMenuSeparator className="bg-white/5" />
+                        <ContextMenuItem
+                          className="text-xs cursor-pointer text-white/60"
+                          onClick={() => removeSongFromAlbumMutation.mutate({ albumId: selectedAlbum.id, songId: song.id })}
+                        >
+                          Remove from Album
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  ))}
                 </div>
               </div>
 
@@ -2228,6 +2561,104 @@ export default function Dashboard() {
               onClick={() => songToDelete && deleteSong.mutate(songToDelete.id)}
             >
               {deleteSong.isPending ? 'Deleting…' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Add Album modal */}
+      <Dialog open={isAddAlbumOpen} onOpenChange={open => { if (!open) { setIsAddAlbumOpen(false); setNewAlbumName(''); setAddAlbumError(null); } }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-widest font-heading">New Album</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Album Name</label>
+              <Input
+                placeholder="e.g. Studio Sessions"
+                value={newAlbumName}
+                onChange={e => { setNewAlbumName(e.target.value); setAddAlbumError(null); }}
+                onKeyDown={e => { if (e.key === 'Enter' && newAlbumName.trim()) handleCreateAlbum(); }}
+                className="bg-black/40 border-white/10 text-xs h-9"
+                autoFocus
+              />
+            </div>
+            {addAlbumError && (
+              <div className="flex items-center gap-2 text-[10px] text-red-400">
+                <X size={12} /> {addAlbumError}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" size="sm" onClick={() => setIsAddAlbumOpen(false)}>Cancel</Button>
+              <Button
+                size="sm"
+                className="uppercase tracking-widest text-[10px] font-bold"
+                onClick={handleCreateAlbum}
+                disabled={!newAlbumName.trim() || createAlbumMutation.isPending}
+              >
+                {createAlbumMutation.isPending ? 'Creating…' : 'New Album'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Rename Album modal */}
+      <Dialog open={isRenameAlbumOpen} onOpenChange={open => { if (!open) { setIsRenameAlbumOpen(false); setRenameAlbumName(''); setRenameAlbumError(null); } }}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-widest font-heading">Rename Album</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Album Name</label>
+              <Input
+                value={renameAlbumName}
+                onChange={e => { setRenameAlbumName(e.target.value); setRenameAlbumError(null); }}
+                onKeyDown={e => { if (e.key === 'Enter' && renameAlbumName.trim()) handleRenameAlbum(); }}
+                className="bg-black/40 border-white/10 text-xs h-9"
+                autoFocus
+              />
+            </div>
+            {renameAlbumError && (
+              <div className="flex items-center gap-2 text-[10px] text-red-400">
+                <X size={12} /> {renameAlbumError}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" size="sm" onClick={() => setIsRenameAlbumOpen(false)}>Cancel</Button>
+              <Button
+                size="sm"
+                className="uppercase tracking-widest text-[10px] font-bold"
+                onClick={handleRenameAlbum}
+                disabled={!renameAlbumName.trim() || renameAlbumMutation.isPending}
+              >
+                {renameAlbumMutation.isPending ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Album confirm */}
+      <AlertDialog open={!!deleteAlbumId} onOpenChange={open => { if (!open) setDeleteAlbumId(null); }}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-sm font-bold text-white">
+              Delete "{albumList.find(a => a.id === deleteAlbumId)?.name}"?
+            </AlertDialogTitle>
+            <AlertDialogDescription className="text-xs text-muted-foreground">
+              The album will be deleted. Songs themselves are not deleted.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="border-white/10 hover:bg-white/5 text-xs">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
+              onClick={() => deleteAlbumId && deleteAlbumMutation.mutate(deleteAlbumId)}
+            >
+              {deleteAlbumMutation.isPending ? 'Deleting…' : 'Delete Album'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

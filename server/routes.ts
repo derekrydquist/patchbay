@@ -1216,5 +1216,60 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  // ─── Albums ─────────────────────────────────────────────────────────────────
+
+  app.get("/api/albums", async (_req, res) => {
+    res.json(await storage.getAlbums());
+  });
+
+  app.post("/api/albums", async (req, res) => {
+    const { name } = req.body as { name?: string };
+    if (!name?.trim()) return res.status(400).json({ message: "Album name is required." });
+    const album = await storage.createAlbum(name.trim());
+    return res.status(201).json(album);
+  });
+
+  app.patch("/api/albums/:id", async (req, res) => {
+    const { name } = req.body as { name?: string };
+    if (!name?.trim()) return res.status(400).json({ message: "Album name is required." });
+    const album = await storage.renameAlbum(req.params.id, name.trim());
+    if (!album) return res.status(404).json({ message: "Album not found." });
+    return res.json(album);
+  });
+
+  app.delete("/api/albums/:id", async (req, res) => {
+    await storage.deleteAlbum(req.params.id);
+    res.status(204).send();
+  });
+
+  app.get("/api/albums/:id/songs", async (req, res) => {
+    res.json(await storage.getAlbumSongs(req.params.id));
+  });
+
+  app.post("/api/albums/:id/songs", async (req, res) => {
+    const { songId } = req.body as { songId?: string };
+    if (!songId) return res.status(400).json({ message: "songId is required." });
+    const result = await storage.addSongToAlbum(req.params.id, songId);
+    return res.status(201).json(result);
+  });
+
+  app.delete("/api/albums/:id/songs/:songId", async (req, res) => {
+    await storage.removeSongFromAlbum(req.params.id, req.params.songId);
+    res.status(204).send();
+  });
+
+  app.patch("/api/albums/:id/songs/:songId/move", async (req, res) => {
+    const { direction } = req.body as { direction?: string };
+    if (direction !== 'up' && direction !== 'down') {
+      return res.status(400).json({ message: "direction must be 'up' or 'down'." });
+    }
+    await storage.moveAlbumSong(req.params.id, req.params.songId, direction);
+    return res.json({ ok: true });
+  });
+
+  app.get("/api/album-memberships", async (_req, res) => {
+    res.json(await storage.getAllAlbumMemberships());
+  });
+
   return httpServer;
 }

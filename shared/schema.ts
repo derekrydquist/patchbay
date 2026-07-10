@@ -256,6 +256,28 @@ export const activityLog = sqliteTable("activity_log", {
 export type InsertActivityLog = typeof activityLog.$inferInsert;
 export type ActivityLogEntry = typeof activityLog.$inferSelect;
 
+// ─── Albums ───────────────────────────────────────────────────────────────────
+
+export const albums = sqliteTable("albums", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const albumSongs = sqliteTable("album_songs", {
+  albumId: text("album_id").notNull().references(() => albums.id, { onDelete: "cascade" }),
+  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  sortOrder: integer("sort_order").notNull().default(0),
+});
+
+export const insertAlbumSchema = createInsertSchema(albums).omit({ id: true, createdAt: true });
+export type InsertAlbum = z.infer<typeof insertAlbumSchema>;
+export type Album = typeof albums.$inferSelect;
+
+export const insertAlbumSongSchema = createInsertSchema(albumSongs);
+export type InsertAlbumSong = z.infer<typeof insertAlbumSongSchema>;
+export type AlbumSong = typeof albumSongs.$inferSelect;
+
 // ─── Global Settings ──────────────────────────────────────────────────────────
 
 export const globalSettings = sqliteTable("global_settings", {
