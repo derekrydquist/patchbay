@@ -1741,22 +1741,38 @@ None currently tracked.
   picker). Source-reading cannot see browser-specific behavior or hit-testing.
 
 ## Albums
-- Albums are non-exclusive ordered containers (album_songs join, sortOrder). They are NOT lifecycle
-  status — never use membership to mean "in demo phase"; that's a future songs.status field.
+- Albums are non-exclusive ordered containers. They are NOT lifecycle status — never use membership
+  to mean "in demo phase"; that's a future songs.status field.
 - No type field on albums by design: hardcore bands ship EPs named "demo 2026" — the name carries meaning.
-- Song rows show a Disc icon + tooltip only; full membership display/editing is reserved for the
-  per-song settings modal (item 12). Tracklist row click routes to Song Home (routing surface), not
-  the Songs browser.
+- **Schema:** `albums` (id, name, createdAt — no type, no status). `album_songs` join (albumId, songId,
+  sortOrder). Cascade: deleting an album deletes its `album_songs` rows but NEVER deletes songs.
+  The `songs` table is untouched by album operations.
+- **Endpoints:**
+  `GET/POST /api/albums` · `PATCH/DELETE /api/albums/:id` · `GET/POST /api/albums/:id/songs` ·
+  `DELETE /api/albums/:id/songs/:songId` · `PATCH /api/albums/:id/songs/:songId/move` (body: `{ direction: 'up' | 'down' }`) ·
+  `GET /api/album-memberships` (flat rows; client builds `songId → albumNames[]` map).
+- **Query keys:** `['albums']` (list) · `['album-songs', albumId]` (tracklist) · `['album-memberships']`
+  (membership map). All three are invalidated by every membership mutation (add, remove, move).
+- **Ordering:** server assigns `sortOrder = max(existing) + 1` on add (append); Move Up/Down swaps
+  the two adjacent rows' `sortOrder` values. Song picker appends in songs-list order. Future:
+  drag-reorder replaces Move Up/Down.
+- **Duplicate album names:** rejected client-side case-insensitively in `handleCreateAlbum` /
+  `handleRenameAlbum`; the API itself allows them (consistent with sections/instruments convention).
+- **UI surface** (all in `Dashboard.tsx`): Library filter pill (`filter=albums`), two-column browser
+  (albums column + numbered tracklist), Add Album modal (shared-modal conventions), song picker
+  (header `+` / empty-state button — see picker bullet below), Add to Album context submenu on song
+  rows in the Songs browser. Tracklist rows click → Song Home. Song rows show a Disc icon + tooltip
+  membership indicator only; full membership editing is in the album browser, not the song row.
 - shadcn TooltipContent gotcha: overriding bg without setting text color leaves text-primary-foreground
   (near-black in this theme) — always set text color when restyling tooltips dark.
 - Album membership has two doors by design: song-side right-click (encounter intent, single) and
   album-side picker via tracklist `+` / empty state (curation intent, batch). The picker adds only —
-  ordering stays in the tracklist (Move Up/Down, future drag).
+  ordering stays in the tracklist.
 - Album song picker: `isAlbumSongPickerOpen` state; opened by Tracklist column header `+` (hover-reveal,
   enabled only when album is selected) and by the empty-tracklist "+ Add songs" button. Shows all
   `type === 'song'` entries; already-in-album rows are checked + disabled + "already added" label.
-  POSTs each selected song sequentially in list order (append semantics), then invalidates
-  `['albums']`, `['album-songs', albumId]`, `['album-memberships']` once and shows a gold toast.
+  POSTs each selected song sequentially in list order (append semantics), then invalidates the three
+  query keys once and shows a gold toast.
 - Album selection is URL-state (`albumId` param), same pattern as `songId` in the Songs browser —
   refresh and deep links restore selection. Uses a separate `appliedAlbumSearchRef` (not the shared
   `appliedSearchRef`) so it isn't pre-empted by the `[songs, search]` effect. Any future Library
