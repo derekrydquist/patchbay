@@ -171,6 +171,15 @@ Workspace adds hover affordance only: `hover:text-white/90 transition-colors cur
 
 All interactive header elements carry `cursor-pointer`. New header elements must reuse one of these two type specs — do not introduce a third.
 
+### Home and Library page headers — sibling pair
+
+The Home tab (`activeTab === 'dashboard'`) and Library tab (`activeTab === 'files'`) both open with an identical type block and spacing: a `mb-4` wrapper, an `<h1>` (`text-2xl font-heading font-black tracking-tight text-white`), and a `<p>` subline (`text-sm mt-1 text-white/70`).
+
+- **Home** renders the personalized greeting + status/flavor line
+- **Library** renders `"Library"` + live counts (`N Songs · N Ideas · N Albums`)
+
+They are a matched pair. Restyling one requires restyling the other — change them together.
+
 ---
 
 ## Database
