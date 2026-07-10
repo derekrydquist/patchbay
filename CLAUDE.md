@@ -1749,3 +1749,15 @@ None currently tracked.
   the Songs browser.
 - shadcn TooltipContent gotcha: overriding bg without setting text color leaves text-primary-foreground
   (near-black in this theme) — always set text color when restyling tooltips dark.
+
+## Creation chooser pattern
+
+- Header creation button is **"+ Create New"** (not "New Project") — opens the chooser dialog titled
+  **"Create new…"** with Song / Idea / Album cards. Button + dialog title form a sentence.
+- New creatable types get a card in this chooser — do not add a separate button to the header.
+- **Deliberate-choice pattern is intentional (taxonomy protection):** do not replace the chooser with
+  a default-action split button. The three entity types (Song / Idea / Album) are distinct enough
+  that defaulting to one would train users to misfile content.
+- Album card: closes the chooser and opens the existing `isAddAlbumOpen` / Add Album modal.
+  `createAlbumMutation.onSuccess` navigates to `/?tab=files&filter=albums` and sets `selectedAlbum`
+  so the new album is highlighted in the Albums browser immediately on arrival.

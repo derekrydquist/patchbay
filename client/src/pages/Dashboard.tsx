@@ -1010,6 +1010,7 @@ export default function Dashboard() {
       setNewAlbumName('');
       setAddAlbumError(null);
       setSelectedAlbum({ ...album, songCount: 0 });
+      setLocation('/?tab=files&filter=albums');
     },
     onError: (err) => setAddAlbumError((err as Error).message),
   });
@@ -1140,7 +1141,7 @@ export default function Dashboard() {
             onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
             className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
           >
-            <Plus size={14} /> New Project
+            <Plus size={14} /> Create New
           </Button>
         }
       />
@@ -1182,7 +1183,7 @@ export default function Dashboard() {
                     onClick={() => setIsChoiceOpen(true)}
                     className="h-9 px-5 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
                   >
-                    <Plus size={14} /> New Project
+                    <Plus size={14} /> Create New
                   </Button>
                 </div>
               )}
@@ -1447,6 +1448,18 @@ export default function Dashboard() {
         {/* ── Files tab ──────────────────────────────────────────────────────── */}
         {activeTab === 'files' && (
           <div>
+            {/* Library header */}
+            <div className="mb-4">
+              <h1 className="text-2xl font-heading font-black tracking-tight text-white">Library</h1>
+              <p className="text-sm mt-1 text-white/70">
+                {(() => {
+                  const sc = songs.filter(s => s.type === 'song' || !s.type).length;
+                  const ic = songs.filter(s => s.type === 'idea').length;
+                  const ac = albumList.length;
+                  return `${sc} ${sc === 1 ? 'Song' : 'Songs'} · ${ic} ${ic === 1 ? 'Idea' : 'Ideas'} · ${ac} ${ac === 1 ? 'Album' : 'Albums'}`;
+                })()}
+              </p>
+            </div>
             {/* Controls row — filter buttons + sort dropdown */}
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-1 bg-white/[0.04] rounded-lg p-1 border border-white/5">
@@ -2326,15 +2339,15 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Choice Modal — Song vs Idea */}
+      {/* Choice Modal — Song / Idea / Album */}
       <Dialog open={isChoiceOpen} onOpenChange={setIsChoiceOpen}>
-        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
-              What would you like to create?
+              Create new…
             </DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-4 pt-2 pb-1">
+          <div className="grid grid-cols-3 gap-4 pt-2 pb-1">
             <button
               onClick={() => { setIsChoiceOpen(false); setCreateSongSource('header'); openProjectModal(); }}
               className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 text-left hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
@@ -2357,6 +2370,18 @@ export default function Dashboard() {
               <div>
                 <p className="text-sm font-bold text-white text-center mb-1">Idea</p>
                 <p className="text-[11px] text-muted-foreground text-center leading-snug">A free-form bucket to capture loose ideas and inspiration</p>
+              </div>
+            </button>
+            <button
+              onClick={() => { setIsChoiceOpen(false); setIsAddAlbumOpen(true); }}
+              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 text-left hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
+            >
+              <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
+                <Disc size={20} className="text-primary/70" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-white text-center mb-1">Album</p>
+                <p className="text-[11px] text-muted-foreground text-center leading-snug">An ordered collection of songs — an album, EP, or demo</p>
               </div>
             </button>
           </div>
