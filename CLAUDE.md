@@ -1730,3 +1730,13 @@ None currently tracked.
 - Debugging discipline proven repeatedly: if a fix produces IDENTICAL symptoms, the causal model
   is wrong — stop patching; instrument (console logs) or inspect the live DOM (DevTools element
   picker). Source-reading cannot see browser-specific behavior or hit-testing.
+
+## Albums
+- Albums are non-exclusive ordered containers (album_songs join, sortOrder). They are NOT lifecycle
+  status — never use membership to mean "in demo phase"; that's a future songs.status field.
+- No type field on albums by design: hardcore bands ship EPs named "demo 2026" — the name carries meaning.
+- Song rows show a Disc icon + tooltip only; full membership display/editing is reserved for the
+  per-song settings modal (item 12). Tracklist row click routes to Song Home (routing surface), not
+  the Songs browser.
+- shadcn TooltipContent gotcha: overriding bg without setting text color leaves text-primary-foreground
+  (near-black in this theme) — always set text color when restyling tooltips dark.
