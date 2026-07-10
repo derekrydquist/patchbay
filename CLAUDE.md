@@ -433,6 +433,40 @@ SESSION_SECRET=replace-this-with-a-long-random-string
 
 ---
 
+## Deployment (Railway)
+
+### Required env vars
+
+| Var | Dev default | Production requirement |
+|---|---|---|
+| `SESSION_SECRET` | — | **Required** — server throws at startup if missing. Generate: `openssl rand -hex 32` |
+| `DATABASE_URL` | `./patchbay.db` | Must point at a Railway persistent volume (e.g. `/data/patchbay.db`). Omitting it prints a loud warning and data is lost on redeploy. |
+| `UPLOADS_DIR` | `./uploads` | Must point at the same persistent volume (e.g. `/data/uploads`). Omitting it prints a loud warning and audio files are lost on redeploy. |
+| `PORT` | `3001` | Provided automatically by Railway — do not set manually. |
+
+Both `DATABASE_URL` and `UPLOADS_DIR` should resolve to paths on the same mounted volume so the database file and audio files survive deploys together.
+
+### Schema bootstrap
+
+`npm start` runs a `prestart` hook (`drizzle-kit push --force`) before starting the server. This means a fresh database is fully provisioned on every boot with no manual steps. It is idempotent — rerunning on an existing database is safe.
+
+### Session persistence
+
+Sessions are stored in the `sessions` table of the same SQLite file as the rest of the app data (managed by `server/session-store.ts`, a zero-dependency `BetterSqlite3Store`). Sessions survive server restarts as long as `DATABASE_URL` points at the persistent volume. Expired rows are pruned every 15 minutes.
+
+### `__dirname` in the production bundle
+
+The esbuild build outputs a single CJS bundle at `dist/index.cjs`. In a Node.js CJS module, `__dirname` is **injected at runtime** by Node as the absolute directory of the bundle file (`dist/`). This means `path.resolve(__dirname, "public")` correctly resolves to `dist/public` regardless of CWD — it is not undefined and does not need an esbuild `define` shim. Do not re-flag this as a blocker.
+
+### Build and start
+
+```bash
+npm run build   # Vite client → dist/public/, esbuild server → dist/index.cjs
+npm start       # prestart: drizzle-kit push --force, then: node dist/index.cjs
+```
+
+---
+
 ## Running the App
 
 ```bash

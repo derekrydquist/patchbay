@@ -41,7 +41,9 @@ const updateSongBody = insertSongSchema.partial();
 
 // ─── Multer setup ─────────────────────────────────────────────────────────────
 
-const UPLOADS_DIR = path.resolve("uploads");
+const UPLOADS_DIR = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.resolve("uploads");
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 const multerStorage = multer.memoryStorage(); // buffer in memory so music-metadata can read it

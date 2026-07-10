@@ -1,10 +1,13 @@
 import path from "path";
+import fs from "fs";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
+import { sqlite } from "./db";
+import { BetterSqlite3Store } from "./session-store";
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,17 +34,50 @@ app.use(
 
 app.use(express.urlencoded({ extended: false }));
 
+// #3 — session secret
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret && process.env.NODE_ENV === "production") {
+  throw new Error(
+    "SESSION_SECRET env var must be set in production. " +
+      "Generate one with: openssl rand -hex 32",
+  );
+}
+
+// #7 — Railway (and most PaaS) terminate TLS at a load balancer; without
+// trust proxy, Express sees http and refuses to set secure cookies.
+app.set("trust proxy", 1);
+
+// #6 — SQLite-backed session store; sessions survive restarts and live on
+// the same persistent volume as the database.
 app.use(
   session({
-    secret: "patchbay-secret",
+    store: new BetterSqlite3Store(sqlite),
+    secret: sessionSecret ?? "patchbay-dev-secret",
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
+    cookie: {
+      // #7 — only send over HTTPS in production (Railway proxy sets this)
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    },
   }),
 );
 
+// #5 — uploads directory; resolve once from env, mkdir on boot
+if (!process.env.UPLOADS_DIR && process.env.NODE_ENV === "production") {
+  console.warn(
+    "[PatchBay] WARNING: production is using the default ./uploads on local disk — " +
+      "data will NOT survive redeploys. Set UPLOADS_DIR to a persistent volume path.",
+  );
+}
+const uploadsDir = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.resolve("uploads");
+fs.mkdirSync(uploadsDir, { recursive: true });
+
 // Serve uploaded audio files so <audio> tags can fetch them
-app.use("/uploads", express.static(path.resolve("uploads")));
+app.use("/uploads", express.static(uploadsDir));
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -107,11 +143,8 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || "5000", 10);
+  // #8 — default to 3001 for local dev parity; Railway provides PORT at runtime.
+  const port = parseInt(process.env.PORT || "3001", 10);
   httpServer.listen(port, () => {
     log(`serving on port ${port}`);
   });
