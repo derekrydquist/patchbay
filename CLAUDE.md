@@ -1824,3 +1824,62 @@ None currently tracked.
 - Album card: closes the chooser and opens the existing `isAddAlbumOpen` / Add Album modal.
   `createAlbumMutation.onSuccess` navigates to `/?tab=files&filter=albums` and sets `selectedAlbum`
   so the new album is highlighted in the Albums browser immediately on arrival.
+
+## Bands (multi-tenancy)
+
+PatchBay is multi-tenant: each band sees only its own songs, albums, and ideas. The tenancy model
+is intentionally server-side and session-bound — the `bandId` a user sees is the one stored in
+the `users` table, resolved at login and cached in the session. It is never read from client input
+or URL parameters.
+
+### Tenancy rule — same class as `isFinal`
+
+> **The band a session belongs to is always resolved server-side from `req.session.bandId` (set
+> at login) or from `users.bandId` (lazy-populated by `enrichSessionBand` for pre-existing
+> sessions). Never use a bandId from the request body or URL params for scoping queries.**
+
+Violating this rule lets a user scope queries to a band they don't belong to, exactly as setting
+`isFinal` outside the three established entry points silently desyncs the bucket/timeline/tasks.
+
+### Schema
+
+- `bands` table: `id text pk, name text not-null, createdAt text not-null`
+- `users.bandId` — nullable text, no FK (user belongs to one band; null = pre-backfill)
+- `songs.bandId` — nullable text, FK → `bands.id`
+- `albums.bandId` — nullable text, FK → `bands.id`
+- `activityLog.bandId` — nullable text, no FK (songId is already a bare text column here)
+
+All `bandId` columns are **currently nullable** — Phase 2 (query scoping) and Phase 3 (UI) will
+harden them. Do not add `NOT NULL` constraints until Phase 3 data validation is complete.
+
+### Startup backfill (`storage.backfillBands()`)
+
+Called at startup after `seedUsers()`. Idempotent: first run creates the default band and stamps
+all null `bandId` rows; every subsequent run logs a no-op message and exits immediately.
+
+The default band name is **"The Zenith Passage"** (hard-coded in `backfillBands()`).
+
+### Session plumbing (`server/routes.ts`)
+
+- **`enrichSessionBand` middleware** — registered globally before all routes. If `req.session.userId`
+  is set but `req.session.bandId` is not (pre-existing sessions), resolves `bandId` from the
+  `users` table and caches it in the session. Never rejects — silently skips if not logged in.
+- **Login** (`POST /api/auth/login`) — stores `req.session.bandId = user.bandId` alongside
+  `req.session.userId` when the user has a `bandId`. A one-time verification log line is emitted;
+  remove it once Phase 2 is shipped.
+- **`requireBand` helper** (exported from `routes.ts`) — ready for Phase 2. Reads
+  `req.session.bandId`, attaches it to `req.bandId`, returns 403 if absent. Apply to individual
+  route handlers when scoping begins.
+
+### Storage additions
+
+`IStorage` + `SQLiteStorage` gained three methods:
+- `getBands(): Promise<Band[]>` — list all bands
+- `createBand(name: string): Promise<Band>` — create a new band
+- `getUsersByBand(bandId: string): Promise<User[]>` — list members of a band
+
+### What is NOT done yet
+
+- **Phase 2 — Query scoping:** no route filters by `bandId` yet. A user can still see all songs
+  in the DB. This is intentional for Phase 1.
+- **Phase 3 — UI:** no band-switcher, no invite flow, no per-band settings.

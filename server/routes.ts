@@ -1,7 +1,13 @@
 import path from "path";
 import fs from "fs";
 import { randomUUID } from "crypto";
-import type { Express, Request } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
+
+declare module "express" {
+  interface Request {
+    bandId?: string;
+  }
+}
 import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
@@ -75,10 +81,35 @@ function buildFilename(
   return `${inst}_${sec}_v${versionNum}${ext}`;
 }
 
+// ─── Band session enrichment ──────────────────────────────────────────────────
+// Runs before all routes. If a logged-in session lacks bandId (e.g. sessions
+// created before the bands migration), resolves it from the users table and
+// caches it in the session. Never rejects — simply skips if not logged in.
+async function enrichSessionBand(req: Request, _res: Response, next: NextFunction) {
+  if (req.session.userId && !req.session.bandId) {
+    const user = await storage.getUser(req.session.userId);
+    if (user?.bandId) {
+      req.session.bandId = user.bandId;
+    }
+  }
+  next();
+}
+
+// requireBand — apply to individual routes in Phase 2 to enforce band scoping.
+// Reads the bandId already cached in the session and exposes it as req.bandId.
+export function requireBand(req: Request, res: Response, next: NextFunction) {
+  const bandId = req.session.bandId;
+  if (!bandId) return res.status(403).json({ message: "Band not resolved for session." });
+  req.bandId = bandId;
+  next();
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+
+  app.use(enrichSessionBand);
 
   // ─── Users ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +135,8 @@ export async function registerRoutes(
       return res.status(401).json({ message: "Invalid username or password." });
     }
     req.session.userId = user.id;
+    if (user.bandId) req.session.bandId = user.bandId;
+    console.log(`[auth] login: userId=${user.id} bandId=${user.bandId ?? 'none'}`); // TODO: remove after Phase 1 verification
     const { password: _pw, ...safeUser } = user;
     return res.json(safeUser);
   });

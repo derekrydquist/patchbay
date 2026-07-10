@@ -2,12 +2,25 @@ import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// ─── Bands ────────────────────────────────────────────────────────────────────
+
+export const bands = sqliteTable("bands", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertBandSchema = createInsertSchema(bands).omit({ id: true, createdAt: true });
+export type InsertBand = z.infer<typeof insertBandSchema>;
+export type Band = typeof bands.$inferSelect;
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
+  bandId: text("band_id"),
 });
 
 export const insertUserSchema = createInsertSchema(users).pick({
@@ -28,6 +41,7 @@ export const songs = sqliteTable("songs", {
   type: text("type", { enum: ["song", "idea"] }).notNull().default("song"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+  bandId: text("band_id").references(() => bands.id),
 });
 
 export const insertSongSchema = createInsertSchema(songs, {
@@ -251,6 +265,7 @@ export const activityLog = sqliteTable("activity_log", {
   sectionName: text("section_name"),
   reviewId: text("review_id"),
   commentId: text("comment_id"),
+  bandId: text("band_id"),
 });
 
 export type InsertActivityLog = typeof activityLog.$inferInsert;
@@ -262,6 +277,7 @@ export const albums = sqliteTable("albums", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   createdAt: text("created_at").notNull(),
+  bandId: text("band_id").references(() => bands.id),
 });
 
 export const albumSongs = sqliteTable("album_songs", {

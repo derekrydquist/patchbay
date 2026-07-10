@@ -21,6 +21,7 @@ declare module "http" {
 declare module "express-session" {
   interface SessionData {
     userId: string;
+    bandId: string;
   }
 }
 
@@ -118,6 +119,7 @@ app.use((req, res, next) => {
 
 (async () => {
   await storage.seedUsers();
+  await storage.backfillBands();
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {

@@ -15,10 +15,11 @@ import {
   type SongReview, type InsertSongReview,
   type SongReviewComment, type InsertSongReviewComment,
   type Album,
+  type Band,
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
-  activityLog, globalSettings, albums, albumSongs,
+  activityLog, globalSettings, albums, albumSongs, bands,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -53,6 +54,7 @@ const DEFAULT_SONG: Song = {
   type: "song",
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
+  bandId: null,
 };
 
 const DEFAULT_TRACKS: (typeof instrumentTracks.$inferInsert)[] = [
@@ -182,6 +184,12 @@ export interface IStorage {
   updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined>;
   deleteReviewComment(id: string): Promise<void>;
 
+  // Bands
+  getBands(): Promise<Band[]>;
+  createBand(name: string): Promise<Band>;
+  getUsersByBand(bandId: string): Promise<User[]>;
+  backfillBands(): Promise<void>;
+
   // Albums
   getAlbums(): Promise<AlbumWithCount[]>;
   createAlbum(name: string): Promise<Album>;
@@ -226,7 +234,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
-    const user: User = { ...insertUser, id: randomUUID() };
+    const user: User = { bandId: null, ...insertUser, id: randomUUID() };
     db.insert(users).values(user).run();
     return user;
   }
@@ -292,7 +300,7 @@ export class SQLiteStorage implements IStorage {
 
   async createSong(data: InsertSong): Promise<Song> {
     const now = new Date().toISOString();
-    const song: Song = { bpm: null, type: "song", ...data, id: randomUUID(), createdAt: now, updatedAt: now };
+    const song: Song = { bpm: null, type: "song", bandId: null, ...data, id: randomUUID(), createdAt: now, updatedAt: now };
     db.insert(songs).values(song).run();
     return song;
   }
@@ -1179,7 +1187,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   async createAlbum(name: string): Promise<Album> {
-    const album: Album = { id: randomUUID(), name, createdAt: new Date().toISOString() };
+    const album: Album = { id: randomUUID(), name, createdAt: new Date().toISOString(), bandId: null };
     db.insert(albums).values(album).run();
     return album;
   }
@@ -1250,6 +1258,63 @@ export class SQLiteStorage implements IStorage {
       .from(albumSongs)
       .innerJoin(albums, eq(albumSongs.albumId, albums.id))
       .all();
+  }
+
+  // ── Bands ──────────────────────────────────────────────────────────────────
+
+  async getBands(): Promise<Band[]> {
+    return db.select().from(bands).all();
+  }
+
+  async createBand(name: string): Promise<Band> {
+    const band: Band = { id: randomUUID(), name, createdAt: new Date().toISOString() };
+    db.insert(bands).values(band).run();
+    return band;
+  }
+
+  async getUsersByBand(bandId: string): Promise<User[]> {
+    return db.select().from(users).where(eq(users.bandId, bandId)).all();
+  }
+
+  async backfillBands(): Promise<void> {
+    const DEFAULT_BAND_NAME = "The Zenith Passage";
+
+    let band = db.select().from(bands).where(eq(bands.name, DEFAULT_BAND_NAME)).get();
+    if (!band) {
+      band = { id: randomUUID(), name: DEFAULT_BAND_NAME, createdAt: new Date().toISOString() };
+      db.insert(bands).values(band).run();
+      console.log(`[bands] Created default band "${DEFAULT_BAND_NAME}" (${band.id})`);
+    }
+
+    const bandId = band.id;
+
+    const userCount = db
+      .update(users).set({ bandId })
+      .where(isNull(users.bandId))
+      .run().changes;
+    if (userCount > 0) console.log(`[bands] Backfilled bandId on ${userCount} user(s)`);
+
+    const songCount = db
+      .update(songs).set({ bandId })
+      .where(isNull(songs.bandId))
+      .run().changes;
+    if (songCount > 0) console.log(`[bands] Backfilled bandId on ${songCount} song(s)`);
+
+    const albumCount = db
+      .update(albums).set({ bandId })
+      .where(isNull(albums.bandId))
+      .run().changes;
+    if (albumCount > 0) console.log(`[bands] Backfilled bandId on ${albumCount} album(s)`);
+
+    const logCount = db
+      .update(activityLog).set({ bandId })
+      .where(isNull(activityLog.bandId))
+      .run().changes;
+    if (logCount > 0) console.log(`[bands] Backfilled bandId on ${logCount} activity_log row(s)`);
+
+    if (userCount === 0 && songCount === 0 && albumCount === 0 && logCount === 0) {
+      console.log(`[bands] Backfill is a no-op — all rows already have bandId`);
+    }
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
