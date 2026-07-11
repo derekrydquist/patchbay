@@ -428,7 +428,7 @@ export function AppHeader({ preLogoSlot, activeNav, postLogoSlot, actionSlot, pr
               <Input
                 type="number"
                 min={40}
-                max={300}
+                max={999}
                 value={draftBpm}
                 onChange={e => setDraftBpm(e.target.value)}
                 className="bg-black/40 border-white/10 text-sm focus-visible:ring-primary/50 w-32"

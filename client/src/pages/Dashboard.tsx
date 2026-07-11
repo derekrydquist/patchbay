@@ -606,6 +606,9 @@ export default function Dashboard() {
     return acc;
   }, {});
 
+  const realSongs = songs.filter(s => s.type === 'song' || !s.type);
+  const isNewBand = !isLoading && realSongs.length === 0 && activityEvents.length === 0;
+
   const filteredFiles = songs
     .filter(s => filesFilter === 'songs' ? (s.type === 'song' || !s.type) : s.type === 'idea')
     .sort((a, b) => {
@@ -1214,6 +1217,29 @@ export default function Dashboard() {
             {statusSublineNode ?? greetingFlavor}
           </p>
         </div>
+
+        {isNewBand ? (
+          /* Onboarding — no songs, no activity yet */
+          <div className="flex justify-center mt-16">
+            <div className="text-center max-w-sm">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 flex items-center justify-center mb-6 mx-auto">
+                <Music2 size={28} className="text-primary/60" />
+              </div>
+              <h2 className="text-xl font-heading font-black tracking-tight text-white mb-2">
+                Create something new
+              </h2>
+              <p className="text-sm text-muted-foreground mb-8">
+                Songs, ideas, and everything your band makes lives here.
+              </p>
+              <Button
+                onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
+                className="h-10 px-6 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2 mx-auto"
+              >
+                <Plus size={14} /> Create New
+              </Button>
+            </div>
+          </div>
+        ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
           {/* Left column — Songs + Tasks */}
@@ -1222,29 +1248,24 @@ export default function Dashboard() {
             {/* Song list */}
             <div>
               <h2 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-1">Your Songs</h2>
-              <p className="text-sm text-muted-foreground mb-4">Select a project to open its workspace.</p>
+              {realSongs.length > 0 && <p className="text-sm text-muted-foreground mb-4">Select a project to open its workspace.</p>}
               {isLoading && (
                 <div className="text-sm text-muted-foreground">Loading…</div>
               )}
 
-              {!isLoading && songs.length === 0 && (
-                <div className="flex flex-col items-center justify-center py-24 text-center">
-                  <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/20 flex items-center justify-center mb-4">
-                    <Music2 size={28} className="text-primary/60" />
-                  </div>
-                  <p className="text-sm font-bold text-white/60 mb-2">No songs yet</p>
-                  <p className="text-xs text-muted-foreground mb-6">Create your first project to get started.</p>
+              {!isLoading && realSongs.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-16 text-center">
+                  <p className="text-sm text-white/40 mb-4">No songs yet.</p>
                   <Button
-                    onClick={() => setIsChoiceOpen(true)}
-                    className="h-9 px-5 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
+                    onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
+                    className="h-10 px-6 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
                   >
                     <Plus size={14} /> Create New
                   </Button>
                 </div>
               )}
 
-              {!isLoading && songs.length > 0 && (() => {
-                const realSongs = songs.filter(s => s.type === 'song' || !s.type);
+              {!isLoading && realSongs.length > 0 && (() => {
                 const recentSongs = realSongs.slice(0, 3);
                 const renderCard = (song: Song) => (
                   <div
@@ -1386,7 +1407,7 @@ export default function Dashboard() {
               </div>
               {activeTasks.length === 0 ? (
                 <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
-                  <p className="text-xs text-muted-foreground">You have no upcoming tasks.</p>
+                  <p className="text-xs text-muted-foreground">Tasks assigned to you appear here.</p>
                 </div>
               ) : (
                 <>
@@ -1455,7 +1476,9 @@ export default function Dashboard() {
             <h2 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Activity</h2>
             {activityEvents.length === 0 ? (
               <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
-                <p className="text-xs text-muted-foreground">No activity yet.</p>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Activity from {user?.bandName ?? 'your band'} shows up here — uploads, comments, and task updates.
+                </p>
               </div>
             ) : (
               <div
@@ -1497,6 +1520,7 @@ export default function Dashboard() {
           </div>
 
         </div>
+        )} {/* end isNewBand ternary */}
         </>
         )}
 
@@ -1572,7 +1596,7 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 ? (
-                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No items</p>
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No songs yet — create one</p>
                   ) : filteredFiles.map(item => {
                     const isIdea = item.type === 'idea';
                     const albumNames = membershipMap[item.id] ?? [];
@@ -1879,7 +1903,7 @@ export default function Dashboard() {
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 ? (
-                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest">No ideas yet</p>
+                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No ideas yet — create one</p>
                   ) : filteredFiles.map(idea => (
                     <button
                       key={idea.id}
@@ -2618,7 +2642,7 @@ export default function Dashboard() {
                 <Input
                   type="number"
                   min={40}
-                  max={300}
+                  max={999}
                   placeholder="120"
                   value={newBpm}
                   onChange={e => setNewBpm(e.target.value)}

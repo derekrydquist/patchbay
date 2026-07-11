@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { queryClient } from "@/lib/queryClient";
 
 interface AuthUser {
   id: string;
@@ -39,11 +40,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error((body as { message?: string }).message ?? "Login failed.");
     }
     const data: AuthUser = await res.json();
+    queryClient.clear();
     setUser(data);
   };
 
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    queryClient.clear();
     setUser(null);
   };
 

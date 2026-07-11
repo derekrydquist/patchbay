@@ -223,7 +223,10 @@ export async function registerRoutes(
     req.session.userId = user.id;
     if (user.bandId) req.session.bandId = user.bandId;
     const { password: _pw, ...safeUser } = user;
-    return res.json(safeUser);
+    const band = user.bandId
+      ? db.select({ name: bands.name }).from(bands).where(eq(bands.id, user.bandId)).get()
+      : null;
+    return res.json({ ...safeUser, bandName: band?.name ?? null });
   });
 
   app.post("/api/auth/logout", (req, res) => {

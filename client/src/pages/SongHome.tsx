@@ -1179,7 +1179,13 @@ export default function SongHome() {
 
                 {activeTasks.length === 0 ? (
                   <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
-                    <p className="text-xs text-muted-foreground">No open tasks — everything is done or in the tracker.</p>
+                    <p className="text-xs text-muted-foreground mb-4">No open tasks — everything is done or in the tracker.</p>
+                    <button
+                      onClick={() => goToWorkspace({ tab: 'production' })}
+                      className="h-8 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs rounded flex items-center gap-1.5 mx-auto"
+                    >
+                      Go to Tracker <ArrowRight size={12} />
+                    </button>
                   </div>
                 ) : (
                   <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden divide-y divide-white/5">
