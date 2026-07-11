@@ -110,12 +110,19 @@ export function AppHeader({ preLogoSlot, activeNav, postLogoSlot, actionSlot, pr
         {/* Left side */}
         <div className="flex items-center gap-4">
           {preLogoSlot}
-          <button
-            onClick={() => setLocation('/')}
-            className="flex items-center gap-2.5 hover:opacity-80 transition-opacity cursor-pointer"
-          >
-            {logoContent}
-          </button>
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={() => setLocation('/')}
+              className="flex items-center gap-2.5 hover:opacity-80 transition-opacity cursor-pointer"
+            >
+              {logoContent}
+            </button>
+            {user?.bandName && (
+              <span className="hidden md:block text-sm font-semibold text-white/90 whitespace-nowrap">
+                {user.bandName}
+              </span>
+            )}
+          </div>
           <nav className="flex items-center gap-1">
             <button
               onClick={() => setLocation('/?tab=dashboard')}

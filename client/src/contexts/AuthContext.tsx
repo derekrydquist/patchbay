@@ -3,6 +3,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 interface AuthUser {
   id: string;
   username: string;
+  bandName?: string | null;
 }
 
 interface AuthContextValue {
