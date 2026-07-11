@@ -108,9 +108,9 @@ export interface IStorage {
   seedUsers(): Promise<void>;
 
   // Songs
-  getSongs(): Promise<Song[]>;
+  getSongs(bandId: string): Promise<Song[]>;
   getSongById(id: string): Promise<SongWithTracks | undefined>;
-  createSong(data: InsertSong): Promise<Song>;
+  createSong(data: InsertSong, bandId: string): Promise<Song>;
   updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined>;
   deleteSong(id: string): Promise<void>;
   seedSong(songId: string, instruments: string[], sections: string[]): Promise<void>;
@@ -150,11 +150,11 @@ export interface IStorage {
   deleteNonFinalTimelineClips(songId: string): Promise<void>;
 
   // Activity
-  getActivity(songId?: string): Promise<ActivityEvent[]>;
+  getActivity(bandId: string, songId?: string): Promise<ActivityEvent[]>;
   logActivity(entry: InsertActivityLog): Promise<void>;
 
   // Production Tasks
-  getAllTasks(): Promise<(ProductionTask & { songName: string })[]>;
+  getAllTasks(bandId: string): Promise<(ProductionTask & { songName: string })[]>;
   getTasksForSong(songId: string): Promise<ProductionTask[]>;
   getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
   getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined>;
@@ -191,19 +191,19 @@ export interface IStorage {
   backfillBands(): Promise<void>;
 
   // Albums
-  getAlbums(): Promise<AlbumWithCount[]>;
-  createAlbum(name: string): Promise<Album>;
+  getAlbums(bandId: string): Promise<AlbumWithCount[]>;
+  createAlbum(name: string, bandId: string): Promise<Album>;
   renameAlbum(id: string, name: string): Promise<Album | undefined>;
   deleteAlbum(id: string): Promise<void>;
   getAlbumSongs(albumId: string): Promise<Song[]>;
   addSongToAlbum(albumId: string, songId: string): Promise<{ added: boolean }>;
   removeSongFromAlbum(albumId: string, songId: string): Promise<void>;
   moveAlbumSong(albumId: string, songId: string, direction: 'up' | 'down'): Promise<void>;
-  getAllAlbumMemberships(): Promise<AlbumMembership[]>;
+  getAllAlbumMemberships(bandId: string): Promise<AlbumMembership[]>;
 
   // Settings
-  getSettings(): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }>;
-  updateSettings(data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void>;
+  getSettings(bandId: string): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }>;
+  updateSettings(bandId: string, data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void>;
 }
 
 export type ReviewCommentWithReplies = SongReviewComment & {
@@ -252,8 +252,8 @@ export class SQLiteStorage implements IStorage {
 
   // ── Songs ──────────────────────────────────────────────────────────────────
 
-  async getSongs(): Promise<Song[]> {
-    return db.select().from(songs).orderBy(desc(songs.updatedAt)).all();
+  async getSongs(bandId: string): Promise<Song[]> {
+    return db.select().from(songs).where(eq(songs.bandId, bandId)).orderBy(desc(songs.updatedAt)).all();
   }
 
   async getSongById(id: string): Promise<SongWithTracks | undefined> {
@@ -298,9 +298,9 @@ export class SQLiteStorage implements IStorage {
     };
   }
 
-  async createSong(data: InsertSong): Promise<Song> {
+  async createSong(data: InsertSong, bandId: string): Promise<Song> {
     const now = new Date().toISOString();
-    const song: Song = { bpm: null, type: "song", bandId: null, ...data, id: randomUUID(), createdAt: now, updatedAt: now };
+    const song: Song = { bpm: null, type: "song", ...data, bandId, id: randomUUID(), createdAt: now, updatedAt: now };
     db.insert(songs).values(song).run();
     return song;
   }
@@ -362,7 +362,12 @@ export class SQLiteStorage implements IStorage {
   // ── Bootstrap ──────────────────────────────────────────────────────────────
 
   async bootstrapDefaultSong(): Promise<void> {
-    db.insert(songs).values(DEFAULT_SONG).onConflictDoNothing().run();
+    const zenithBand = db.select({ id: bands.id }).from(bands).where(eq(bands.name, "The Zenith Passage")).get();
+    const bootstrapBandId = zenithBand?.id ?? null;
+    db.insert(songs).values({ ...DEFAULT_SONG, bandId: bootstrapBandId }).onConflictDoNothing().run();
+    if (bootstrapBandId) {
+      db.update(songs).set({ bandId: bootstrapBandId }).where(and(eq(songs.id, DEFAULT_SONG_ID), isNull(songs.bandId))).run();
+    }
     for (const track of DEFAULT_TRACKS) {
       const existing = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, track.id)).get();
       if (!existing) {
@@ -709,11 +714,12 @@ export class SQLiteStorage implements IStorage {
 
   // ── Production Tasks ───────────────────────────────────────────────────────
 
-  async getActivity(songId?: string): Promise<ActivityEvent[]> {
+  async getActivity(bandId: string, songId?: string): Promise<ActivityEvent[]> {
     const events: ActivityEvent[] = [];
-    const songFilter = songId ? eq(songs.id, songId) : undefined;
+    const bandCond = eq(songs.bandId, bandId);
+    const clipSongCond = songId ? and(eq(songs.id, songId), bandCond) : bandCond;
 
-    // Clips: file-added and marked-final
+    // Clips: file-added
     const clipRows = db
       .select({
         clipId: clips.id,
@@ -730,7 +736,7 @@ export class SQLiteStorage implements IStorage {
       .innerJoin(ideas, eq(clips.ideaId, ideas.id))
       .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
       .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
-      .where(songFilter)
+      .where(clipSongCond)
       .all();
 
     for (const row of clipRows) {
@@ -745,11 +751,12 @@ export class SQLiteStorage implements IStorage {
         instrument: row.trackName,
         sectionName: row.sectionName ?? undefined,
       });
-      // marked-final events are generated from task_comments (with accurate timestamps),
-      // not from clips.isFinal here — which would only have the upload timestamp.
     }
 
-    // Clip comments (top-level only — replies don't generate separate activity events)
+    // Clip comments (top-level only)
+    const clipCommentCond = songId
+      ? and(eq(songs.id, songId), bandCond, isNull(clipComments.parentId))
+      : and(bandCond, isNull(clipComments.parentId));
     const clipCommentRows = db
       .select({
         clipId: clipComments.clipId,
@@ -765,11 +772,10 @@ export class SQLiteStorage implements IStorage {
       .innerJoin(ideas, eq(clips.ideaId, ideas.id))
       .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
       .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
-      .where(songFilter ? and(songFilter, isNull(clipComments.parentId)) : isNull(clipComments.parentId))
+      .where(clipCommentCond)
       .all();
 
     for (const row of clipCommentRows) {
-      // TODO: replace with real auth user — show 'Unknown' as 'You' until auth is built
       const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
       events.push({
         type: 'clip-comment',
@@ -785,6 +791,9 @@ export class SQLiteStorage implements IStorage {
     }
 
     // Task comments (human comments + system status-change events)
+    const taskCommentCond = songId
+      ? and(eq(songs.id, songId), bandCond, isNull(taskComments.parentId))
+      : and(bandCond, isNull(taskComments.parentId));
     const taskCommentRows = db
       .select({
         author: taskComments.author,
@@ -799,7 +808,7 @@ export class SQLiteStorage implements IStorage {
       .from(taskComments)
       .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
       .innerJoin(songs, eq(productionTasks.songId, songs.id))
-      .where(songFilter ? and(songFilter, isNull(taskComments.parentId)) : isNull(taskComments.parentId))
+      .where(taskCommentCond)
       .all();
 
     for (const row of taskCommentRows) {
@@ -817,7 +826,6 @@ export class SQLiteStorage implements IStorage {
           sectionName: row.sectionName,
         });
       } else if (row.text.startsWith('Clip marked as final:')) {
-        // Extract clip name from text: 'Clip marked as final: "Guitar 2 Verse 1 V2"'
         const clipName = row.text.slice('Clip marked as final: '.length).replace(/^"|"$/g, '');
         const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
         events.push({
@@ -875,11 +883,8 @@ export class SQLiteStorage implements IStorage {
           sectionName: row.sectionName,
         });
       } else if (row.author === 'System') {
-        // Other system comments (assignee changes, due date changes, clip unmarked) —
-        // not surfaced in the activity feed
         continue;
       } else if (!row.text.startsWith('Clip unmarked as final')) {
-        // Human task comment — 'Unknown' means current user before auth is built
         const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
         events.push({
           type: 'task-comment',
@@ -896,7 +901,7 @@ export class SQLiteStorage implements IStorage {
     }
 
     // Reviews: review-shared
-    const reviewFilter = songId ? eq(songReviews.songId, songId) : undefined;
+    const reviewCond = songId ? and(eq(songReviews.songId, songId), bandCond) : bandCond;
     const reviewRows = db
       .select({
         reviewId: songReviews.id,
@@ -908,7 +913,7 @@ export class SQLiteStorage implements IStorage {
       })
       .from(songReviews)
       .innerJoin(songs, eq(songReviews.songId, songs.id))
-      .where(reviewFilter)
+      .where(reviewCond)
       .all();
 
     for (const row of reviewRows) {
@@ -922,8 +927,8 @@ export class SQLiteStorage implements IStorage {
       });
     }
 
-    // Activity log: song-structure events (section-added, section-deleted, track-added)
-    const logFilter = songId ? eq(activityLog.songId, songId) : undefined;
+    // Activity log: song-structure events
+    const logCond = songId ? and(eq(activityLog.songId, songId), bandCond) : bandCond;
     const logRows = db
       .select({
         type: activityLog.type,
@@ -938,7 +943,7 @@ export class SQLiteStorage implements IStorage {
       })
       .from(activityLog)
       .innerJoin(songs, eq(activityLog.songId, songs.id))
-      .where(logFilter)
+      .where(logCond)
       .all();
 
     for (const row of logRows) {
@@ -959,14 +964,18 @@ export class SQLiteStorage implements IStorage {
   }
 
   async logActivity(entry: InsertActivityLog): Promise<void> {
+    if (!entry.bandId && entry.songId) {
+      const song = db.select({ bandId: songs.bandId }).from(songs).where(eq(songs.id, entry.songId)).get();
+      entry = { ...entry, bandId: song?.bandId ?? null };
+    }
     db.insert(activityLog).values(entry).run();
   }
 
-  async getAllTasks(): Promise<(ProductionTask & { songName: string })[]> {
+  async getAllTasks(bandId: string): Promise<(ProductionTask & { songName: string })[]> {
     const rows = db
       .select({ task: productionTasks, songName: songs.name })
       .from(productionTasks)
-      .innerJoin(songs, eq(productionTasks.songId, songs.id))
+      .innerJoin(songs, and(eq(productionTasks.songId, songs.id), eq(songs.bandId, bandId)))
       .all();
     return rows.map(r => ({ ...r.task, songName: r.songName }));
   }
@@ -1175,19 +1184,22 @@ export class SQLiteStorage implements IStorage {
 
   // ── Albums ─────────────────────────────────────────────────────────────────
 
-  async getAlbums(): Promise<AlbumWithCount[]> {
-    const allAlbums = db.select().from(albums).orderBy(asc(albums.createdAt)).all();
+  async getAlbums(bandId: string): Promise<AlbumWithCount[]> {
+    const allAlbums = db.select().from(albums).where(eq(albums.bandId, bandId)).orderBy(asc(albums.createdAt)).all();
+    if (!allAlbums.length) return [];
+    const albumIds = allAlbums.map(a => a.id);
     const counts = db
       .select({ albumId: albumSongs.albumId, total: count() })
       .from(albumSongs)
+      .where(inArray(albumSongs.albumId, albumIds))
       .groupBy(albumSongs.albumId)
       .all();
     const countMap = new Map(counts.map(r => [r.albumId, r.total]));
     return allAlbums.map(a => ({ ...a, songCount: countMap.get(a.id) ?? 0 }));
   }
 
-  async createAlbum(name: string): Promise<Album> {
-    const album: Album = { id: randomUUID(), name, createdAt: new Date().toISOString(), bandId: null };
+  async createAlbum(name: string, bandId: string): Promise<Album> {
+    const album: Album = { id: randomUUID(), name, createdAt: new Date().toISOString(), bandId };
     db.insert(albums).values(album).run();
     return album;
   }
@@ -1252,11 +1264,11 @@ export class SQLiteStorage implements IStorage {
       .where(and(eq(albumSongs.albumId, albumId), eq(albumSongs.songId, swap.songId))).run();
   }
 
-  async getAllAlbumMemberships(): Promise<AlbumMembership[]> {
+  async getAllAlbumMemberships(bandId: string): Promise<AlbumMembership[]> {
     return db
       .select({ albumId: albumSongs.albumId, albumName: albums.name, songId: albumSongs.songId })
       .from(albumSongs)
-      .innerJoin(albums, eq(albumSongs.albumId, albums.id))
+      .innerJoin(albums, and(eq(albumSongs.albumId, albums.id), eq(albums.bandId, bandId)))
       .all();
   }
 
@@ -1312,6 +1324,17 @@ export class SQLiteStorage implements IStorage {
       .run().changes;
     if (logCount > 0) console.log(`[bands] Backfilled bandId on ${logCount} activity_log row(s)`);
 
+    // Migrate the legacy 'global' settings row to be keyed by this band's id
+    const globalRow = db.select().from(globalSettings).where(eq(globalSettings.id, 'global')).get();
+    if (globalRow) {
+      const zenithRow = db.select().from(globalSettings).where(eq(globalSettings.id, bandId)).get();
+      if (!zenithRow) {
+        db.insert(globalSettings).values({ ...globalRow, id: bandId }).run();
+        console.log(`[bands] Migrated global settings row to bandId ${bandId}`);
+      }
+      db.delete(globalSettings).where(eq(globalSettings.id, 'global')).run();
+    }
+
     if (userCount === 0 && songCount === 0 && albumCount === 0 && logCount === 0) {
       console.log(`[bands] Backfill is a no-op — all rows already have bandId`);
     }
@@ -1319,11 +1342,11 @@ export class SQLiteStorage implements IStorage {
 
   // ── Settings ───────────────────────────────────────────────────────────────
 
-  async getSettings(): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }> {
-    const row = db.select().from(globalSettings).where(eq(globalSettings.id, 'global')).get();
+  async getSettings(bandId: string): Promise<{ defaultInstruments: string[]; defaultSections: string[]; defaultBpm: number }> {
+    const row = db.select().from(globalSettings).where(eq(globalSettings.id, bandId)).get();
     if (!row) {
       db.insert(globalSettings).values({
-        id: 'global',
+        id: bandId,
         defaultInstruments: DEFAULT_INSTRUMENTS,
         defaultSections: DEFAULT_SECTIONS,
         defaultBpm: 120,
@@ -1333,11 +1356,15 @@ export class SQLiteStorage implements IStorage {
     return { defaultInstruments: row.defaultInstruments, defaultSections: row.defaultSections, defaultBpm: row.defaultBpm };
   }
 
-  async updateSettings(data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void> {
-    const current = await this.getSettings();
+  async updateSettings(bandId: string, data: { defaultInstruments?: string[]; defaultSections?: string[]; defaultBpm?: number }): Promise<void> {
+    const current = await this.getSettings(bandId);
+    const safe: Record<string, unknown> = {};
+    if (data.defaultInstruments !== undefined) safe.defaultInstruments = data.defaultInstruments;
+    if (data.defaultSections !== undefined) safe.defaultSections = data.defaultSections;
+    if (data.defaultBpm !== undefined) safe.defaultBpm = data.defaultBpm;
     db.insert(globalSettings)
-      .values({ id: 'global', ...current, ...data })
-      .onConflictDoUpdate({ target: globalSettings.id, set: data })
+      .values({ id: bandId, ...current, ...safe })
+      .onConflictDoUpdate({ target: globalSettings.id, set: safe })
       .run();
   }
 }

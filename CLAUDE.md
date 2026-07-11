@@ -912,6 +912,9 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Shared creation modals live in `client/src/components/daw/modals/`** — `AddInstrumentModal` and `AddSectionModal` are controlled presentational components; error state and mutation pending state come from the parent. Both accept `onClearError?: () => void` — the modal calls it on every input keystroke so the parent can clear a stale error message. Always pass this prop at call sites that set an error state.
 - **Section "remove" is per-instrument soft-hide (`useHideIdea`)** — right-clicking a section in the bucket hides that idea for one instrument only (sets `active = false` on the `ideas` row) and is fully restorable. A song-wide section-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists and `useDeleteSection` was removed from the hook file as unused; do not re-add it without a product decision on whether full section deletion belongs in the UI.
 - **Do not add heuristic fallbacks to `onAddToTimeline` or `handleDragEnd`** — track resolution must use the `trackId` carried in drag data / passed by `BucketClip`. Section resolution must read `clip.sectionName` directly. Previous versions used substring track-name matching with a silent `tracks[0]` fallback and derived sectionName by parsing the clip's filename — both silently misplaced clips, especially for idea-sourced uploads whose names are raw filenames. If `trackId` or `sectionName` is missing, warn loudly and bail.
+- **Never omit `requireBand` from an API route** — every route under `/api/` must include `requireBand` as middleware. Routes without it bypass band scoping entirely and expose all bands' data. See the Route ownership rules section under Bands (multi-tenancy).
+- **Never spread a partial/request-body object into Drizzle `.values()` or an ON CONFLICT `set:`** — build a filtered object with only the defined keys first. See the "Partial updates" rule under Bands (multi-tenancy). Drizzle safely skips `undefined` in plain `.set()` UPDATEs, but JS spread in `.values()` + conflict upsert will overwrite NOT NULL columns with `undefined` before Drizzle sees the data.
+- **When adding a route that touches two independent entity IDs, assert ownership on both** — `assertSongOwned` / `assertAlbumOwned` only cover the single ID passed in; they say nothing about any other ID in the same request body or URL. See the "Two-ID routes" rule under Bands (multi-tenancy).
 
 ---
 
@@ -1867,9 +1870,8 @@ The default band name is **"The Zenith Passage"** (hard-coded in `backfillBands(
 - **Login** (`POST /api/auth/login`) — stores `req.session.bandId = user.bandId` alongside
   `req.session.userId` when the user has a `bandId`. A one-time verification log line is emitted;
   remove it once Phase 2 is shipped.
-- **`requireBand` helper** (exported from `routes.ts`) — ready for Phase 2. Reads
-  `req.session.bandId`, attaches it to `req.bandId`, returns 403 if absent. Apply to individual
-  route handlers when scoping begins.
+- **`requireBand` middleware** (exported from `routes.ts`) — applied to every API route. Reads
+  `req.session.bandId`, attaches it to `req.bandId`, returns 403 if absent.
 
 ### Storage additions
 
@@ -1878,8 +1880,66 @@ The default band name is **"The Zenith Passage"** (hard-coded in `backfillBands(
 - `createBand(name: string): Promise<Band>` — create a new band
 - `getUsersByBand(bandId: string): Promise<User[]>` — list members of a band
 
-### What is NOT done yet
+### Phase 2 — Query scoping (complete)
 
-- **Phase 2 — Query scoping:** no route filters by `bandId` yet. A user can still see all songs
-  in the DB. This is intentional for Phase 1.
-- **Phase 3 — UI:** no band-switcher, no invite flow, no per-band settings.
+All ~50 API routes are band-scoped using `requireBand` middleware and ownership assertion helpers:
+
+- **`assertSongOwned(req, res, songId)`** — looks up `songs.bandId` and verifies it matches
+  `req.bandId`; sends 404 + returns `false` on mismatch. Accepts `string | string[]` (normalizes
+  with `Array.isArray`).
+- **`assertAlbumOwned(req, res, albumId)`** — same pattern for albums.
+- **Chain-walk helpers** — resolve the parent `songId` from a child-resource ID via a single SQL
+  join, used in routes whose URL param is a non-song entity:
+  `trackSongId`, `ideaSongId`, `clipSongId`, `timelineClipSongId`, `taskSongId`,
+  `taskCommentSongId`, `clipCommentSongId`, `reviewSongId`, `reviewCommentSongId`.
+
+Every route extracts URL params as `const id = req.params.id as string` before passing them to
+helpers or Drizzle — required because adding middleware to the handler chain widens `req.params`
+values to `string | string[]` in TypeScript.
+
+Settings are now per-band, keyed by `bandId` (previously `'global'`). `backfillBands()` migrates
+the old `'global'` row to the zenith band ID on first run.
+
+### Route ownership rules
+
+**Partial updates — never spread request bodies over current rows**
+
+Drizzle 0.45.2 skips `undefined`-valued keys in `.set()` for UPDATEs, but that protection is
+useless if a JS spread clobbers values first. `{ ...current, ...data }` overwrites real values
+with `undefined` before Drizzle ever sees the object — this nulled NOT NULL columns in
+`updateSettings` via its conflict upsert.
+
+Rule: when merging a partial payload (request body, `Partial<T>`) into an existing row for
+`.values()` or `.set()`, build a filtered object containing only defined keys first. Plain
+`.set(partialUpdates)` with no spread-merge is safe for UPDATEs (verified empirically against
+Drizzle 0.45.2). See `updateSettings` in `storage.ts` for the canonical pattern using a `safe`
+local object.
+
+**Two-ID routes — assert ownership on every independent entity ID**
+
+Any route or body carrying two independent entity IDs (e.g. `POST /api/albums/:id/songs` with
+body `songId`, or `relatedClipId` on task PATCH) must validate ownership/scope on BOTH IDs.
+Chain-walk helpers like `trackSongId → assertSongOwned` only cover the ID they start from.
+
+This was the only real security hole found in the Phase 2 audit: album routes validated the album
+but not the incoming `songId`, allowing cross-band song injection. When adding a route that
+references a second entity, resolve its song/band and assert it matches — mismatch or nonexistent
+→ 404, consistent with other ownership failures.
+
+**Comment `parentId` — same entity, not just top-level**
+
+The `parentId` guard on comment creation routes must verify three things, in order:
+
+1. The parent comment exists in the DB
+2. `parent.parentId` is null (it is itself top-level; no grandchild replies allowed)
+3. `parent.clipId / taskId / reviewId` matches the URL's entity ID — a top-level comment from a
+   *different* entity is not a valid parent
+
+Omitting check 3 silently attaches a reply to the wrong entity's comment thread. All three comment
+routes (`POST /api/clips/:clipId/comments`, `POST /api/production-tasks/:id/comments`,
+`POST /api/reviews/:reviewId/comments`) enforce all three. Use 400 for `parentId` violations
+(malformed-parent case, not an ownership violation — 404 is reserved for missing entities).
+
+### What is NOT done yet (Phase 3)
+
+- **Phase 3 — UI:** no band-switcher, no invite flow, no per-band settings screen.

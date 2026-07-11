@@ -3,9 +3,12 @@ import fs from "fs";
 import { randomUUID } from "crypto";
 import type { Express, Request, Response, NextFunction } from "express";
 
-declare module "express" {
-  interface Request {
-    bandId?: string;
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      bandId?: string;
+    }
   }
 }
 import { createServer, type Server } from "http";
@@ -34,6 +37,8 @@ import {
   songReviewComments,
   songReviews,
   activityLog,
+  bands,
+  albums,
 } from "@shared/schema";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -95,13 +100,94 @@ async function enrichSessionBand(req: Request, _res: Response, next: NextFunctio
   next();
 }
 
-// requireBand — apply to individual routes in Phase 2 to enforce band scoping.
+// requireBand — apply to individual routes to enforce band scoping.
 // Reads the bandId already cached in the session and exposes it as req.bandId.
 export function requireBand(req: Request, res: Response, next: NextFunction) {
   const bandId = req.session.bandId;
   if (!bandId) return res.status(403).json({ message: "Band not resolved for session." });
   req.bandId = bandId;
   next();
+}
+
+// ─── Ownership helpers ────────────────────────────────────────────────────────
+// Returns true if song exists and belongs to req.bandId; otherwise sends 404.
+function assertSongOwned(req: Request, res: Response, rawId: string | string[]): boolean {
+  const songId = Array.isArray(rawId) ? rawId[0] : rawId;
+  const row = db.select({ bandId: songs.bandId }).from(songs).where(eq(songs.id, songId)).get();
+  if (!row || row.bandId !== req.bandId) {
+    res.status(404).json({ message: "Not found" });
+    return false;
+  }
+  return true;
+}
+
+// Returns true if album exists and belongs to req.bandId; otherwise sends 404.
+function assertAlbumOwned(req: Request, res: Response, rawId: string | string[]): boolean {
+  const albumId = Array.isArray(rawId) ? rawId[0] : rawId;
+  const row = db.select({ bandId: albums.bandId }).from(albums).where(eq(albums.id, albumId)).get();
+  if (!row || row.bandId !== req.bandId) {
+    res.status(404).json({ message: "Not found" });
+    return false;
+  }
+  return true;
+}
+
+// Chain-walk helpers: return songId or null.
+function trackSongId(trackId: string): string | null {
+  return db.select({ songId: instrumentTracks.songId }).from(instrumentTracks)
+    .where(eq(instrumentTracks.id, trackId)).get()?.songId ?? null;
+}
+function ideaSongId(ideaId: string): string | null {
+  const row = db.select({ songId: instrumentTracks.songId })
+    .from(ideas).innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .where(eq(ideas.id, ideaId)).get();
+  return row?.songId ?? null;
+}
+function clipSongId(clipId: string): string | null {
+  const row = db.select({ songId: instrumentTracks.songId })
+    .from(clips)
+    .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+    .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .where(eq(clips.id, clipId)).get();
+  return row?.songId ?? null;
+}
+function timelineClipSongId(clipId: string): string | null {
+  const row = db.select({ songId: instrumentTracks.songId })
+    .from(timelineClips)
+    .innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
+    .where(eq(timelineClips.id, clipId)).get();
+  return row?.songId ?? null;
+}
+function taskSongId(taskId: string): string | null {
+  return db.select({ songId: productionTasks.songId }).from(productionTasks)
+    .where(eq(productionTasks.id, taskId)).get()?.songId ?? null;
+}
+function taskCommentSongId(commentId: string): string | null {
+  const row = db.select({ songId: productionTasks.songId })
+    .from(taskComments)
+    .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
+    .where(eq(taskComments.id, commentId)).get();
+  return row?.songId ?? null;
+}
+function clipCommentSongId(commentId: string): string | null {
+  const row = db.select({ songId: instrumentTracks.songId })
+    .from(clipComments)
+    .innerJoin(clips, eq(clipComments.clipId, clips.id))
+    .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+    .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .where(eq(clipComments.id, commentId)).get();
+  return row?.songId ?? null;
+}
+function reviewSongId(reviewId: string): string | null {
+  return db.select({ songId: songReviews.songId }).from(songReviews)
+    .where(eq(songReviews.id, reviewId)).get()?.songId ?? null;
+}
+function reviewCommentSongId(commentId: string): string | null {
+  const row = db.select({ songId: songReviews.songId })
+    .from(songReviewComments)
+    .innerJoin(songReviews, eq(songReviewComments.reviewId, songReviews.id))
+    .where(eq(songReviewComments.id, commentId)).get();
+  return row?.songId ?? null;
 }
 
 export async function registerRoutes(
@@ -136,7 +222,6 @@ export async function registerRoutes(
     }
     req.session.userId = user.id;
     if (user.bandId) req.session.bandId = user.bandId;
-    console.log(`[auth] login: userId=${user.id} bandId=${user.bandId ?? 'none'}`); // TODO: remove after Phase 1 verification
     const { password: _pw, ...safeUser } = user;
     return res.json(safeUser);
   });
@@ -153,41 +238,46 @@ export async function registerRoutes(
     const user = await storage.getUser(userId);
     if (!user) return res.status(401).json({ message: "Not logged in." });
     const { password: _pw, ...safeUser } = user;
-    return res.json(safeUser);
+    const band = user.bandId
+      ? db.select({ name: bands.name }).from(bands).where(eq(bands.id, user.bandId)).get()
+      : null;
+    return res.json({ ...safeUser, bandName: band?.name ?? null });
   });
 
   // ─── Settings ───────────────────────────────────────────────────────────────
 
-  app.get("/api/settings", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.get("/api/settings", requireBand, async (req, res) => {
+    const settings = await storage.getSettings(req.bandId!);
     res.json(settings);
   });
 
-  app.patch("/api/settings", async (req, res) => {
+  app.patch("/api/settings", requireBand, async (req, res) => {
     const { defaultInstruments, defaultSections, defaultBpm } = req.body;
-    await storage.updateSettings({ defaultInstruments, defaultSections, defaultBpm });
+    await storage.updateSettings(req.bandId!, { defaultInstruments, defaultSections, defaultBpm });
     res.json({ ok: true });
   });
 
   // ─── Songs ──────────────────────────────────────────────────────────────────
 
-  app.get("/api/tasks", async (_req, res) => {
-    const tasks = await storage.getAllTasks();
+  app.get("/api/tasks", requireBand, async (req, res) => {
+    const tasks = await storage.getAllTasks(req.bandId!);
     res.json(tasks);
   });
 
-  app.get("/api/activity", async (_req, res) => {
-    const events = await storage.getActivity();
+  app.get("/api/activity", requireBand, async (req, res) => {
+    const events = await storage.getActivity(req.bandId!);
     res.json(events);
   });
 
-  app.get("/api/songs/:songId/activity", async (req, res) => {
-    const events = await storage.getActivity(req.params.songId);
+  app.get("/api/songs/:songId/activity", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const events = await storage.getActivity(req.bandId!, songId);
     res.json(events);
   });
 
-  app.get("/api/songs", async (_req, res) => {
-    const result = await storage.getSongs();
+  app.get("/api/songs", requireBand, async (req, res) => {
+    const result = await storage.getSongs(req.bandId!);
     const rows = db
       .select({ songId: instrumentTracks.songId })
       .from(clips)
@@ -198,13 +288,15 @@ export async function registerRoutes(
     res.json(result.map(s => ({ ...s, hasFiles: hasFilesSet.has(s.id) })));
   });
 
-  app.get("/api/songs/:id", async (req, res) => {
-    const song = await storage.getSongById(req.params.id);
+  app.get("/api/songs/:id", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
+    const song = await storage.getSongById(id);
     if (!song) return res.status(404).json({ message: "Song not found" });
     res.json(song);
   });
 
-  app.post("/api/songs", async (req, res) => {
+  app.post("/api/songs", requireBand, async (req, res) => {
     const bodyInstruments: unknown = req.body.instruments;
     const instruments: string[] = Array.isArray(bodyInstruments)
       ? (bodyInstruments as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
@@ -220,7 +312,7 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
-    const song = await storage.createSong(parsed.data);
+    const song = await storage.createSong(parsed.data, req.bandId!);
     if (song.type !== 'idea') {
       await storage.seedSong(song.id, instruments, song.sections);
     }
@@ -241,31 +333,37 @@ export async function registerRoutes(
     res.status(201).json(song);
   });
 
-  app.delete("/api/songs/:id", async (req, res) => {
-    await storage.deleteSong(req.params.id);
+  app.delete("/api/songs/:id", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
+    await storage.deleteSong(id);
     res.status(204).end();
   });
 
-  app.patch("/api/songs/:id", async (req, res) => {
+  app.patch("/api/songs/:id", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
     const parsed = updateSongBody.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
-    const song = await storage.updateSong(req.params.id, parsed.data);
+    const song = await storage.updateSong(id, parsed.data);
     if (!song) return res.status(404).json({ message: "Song not found" });
     res.json(song);
   });
 
   // ─── Tracks ─────────────────────────────────────────────────────────────────
 
-  app.post("/api/songs/:songId/tracks", async (req, res) => {
+  app.post("/api/songs/:songId/tracks", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
     const parsed = insertInstrumentTrackSchema.safeParse({
       id: randomUUID(),
       type: "audio",
       color: "hsl(var(--chart-1))",
       sortOrder: 999,
       ...req.body,
-      songId: req.params.songId,
+      songId,
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
@@ -275,14 +373,14 @@ export async function registerRoutes(
     const trackAddedActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    const trackAddedSong = await storage.getSongById(req.params.songId);
+    const trackAddedSong = await storage.getSongById(songId);
     const trackAddedDesc = trackAddedSong?.type === 'idea'
       ? `${trackAddedActor} added a part — ${track.name}`
       : `${trackAddedActor} added an instrument — ${track.name}`;
 
     storage.logActivity({
       id: randomUUID(),
-      songId: req.params.songId,
+      songId,
       type: 'track-added',
       description: trackAddedDesc,
       timestamp: Date.now(),
@@ -292,12 +390,15 @@ export async function registerRoutes(
     res.status(201).json(track);
   });
 
-  app.delete("/api/tracks/:trackId", async (req, res) => {
-    const trackToDelete = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, req.params.trackId)).get();
+  app.delete("/api/tracks/:trackId", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    const trackToDelete = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
     const trackDeletedActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    await storage.hideTrack(req.params.trackId);
+    await storage.hideTrack(trackId);
     if (trackToDelete) {
       storage.logActivity({
         id: randomUUID(),
@@ -311,28 +412,35 @@ export async function registerRoutes(
     res.status(200).json({ ok: true });
   });
 
-  app.post("/api/tracks/:trackId/restore", async (req, res) => {
-    await storage.restoreTrack(req.params.trackId);
+  app.post("/api/tracks/:trackId/restore", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    await storage.restoreTrack(trackId);
     res.status(200).json({ ok: true });
   });
 
-  app.get("/api/songs/:songId/hidden-tracks", async (req, res) => {
-    const hidden = await storage.getHiddenTracks(req.params.songId);
+  app.get("/api/songs/:songId/hidden-tracks", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const hidden = await storage.getHiddenTracks(songId);
     res.json(hidden);
   });
 
-  app.delete("/api/songs/:songId/sections/:sectionName", async (req, res) => {
-    const decodedSection = decodeURIComponent(req.params.sectionName);
-    console.log('[route deleteSection] songId:', req.params.songId, 'sectionName:', decodedSection);
+  app.delete("/api/songs/:songId/sections/:sectionName", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const decodedSection = decodeURIComponent(req.params.sectionName as string);
+    console.log('[route deleteSection] songId:', songId, 'sectionName:', decodedSection);
     const sectionDeletedActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    const deleteSectionResult = await storage.deleteSection(req.params.songId, decodedSection);
+    const deleteSectionResult = await storage.deleteSection(songId, decodedSection);
     console.log('[route deleteSection] deleteSection returned:', deleteSectionResult);
 
     storage.logActivity({
       id: randomUUID(),
-      songId: req.params.songId,
+      songId,
       type: 'section-deleted',
       description: `${sectionDeletedActor} deleted section ${decodedSection}`,
       timestamp: Date.now(),
@@ -344,29 +452,34 @@ export async function registerRoutes(
 
   // ─── Timeline ───────────────────────────────────────────────────────────────
 
-  app.get("/api/songs/:id/timeline", async (req, res) => {
+  app.get("/api/songs/:id/timeline", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
     await storage.bootstrapDefaultSong();
     const [tracks, song] = await Promise.all([
-      storage.getTimelineTracks(req.params.id),
-      storage.getSongById(req.params.id),
+      storage.getTimelineTracks(id),
+      storage.getSongById(id),
     ]);
     res.json({ songName: song?.name ?? 'Untitled', tracks });
   });
 
-  app.post("/api/tracks/:trackId/clips", async (req, res) => {
+  app.post("/api/tracks/:trackId/clips", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
     const parsed = insertTimelineClipSchema.safeParse({
       ...req.body,
-      trackId: req.params.trackId,
+      trackId,
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
-    let clip = await storage.addTimelineClip(req.params.trackId, parsed.data);
+    let clip = await storage.addTimelineClip(trackId, parsed.data);
 
     // If there's already a final bucket clip for this track+section, mark the new timeline clip final too
     if (clip.sectionName) {
       const idea = db.select().from(ideas)
-        .where(and(eq(ideas.trackId, req.params.trackId), eq(ideas.sectionName, clip.sectionName)))
+        .where(and(eq(ideas.trackId, trackId), eq(ideas.sectionName, clip.sectionName)))
         .get();
       if (idea) {
         const finalBucketClip = db.select().from(clips)
@@ -382,7 +495,7 @@ export async function registerRoutes(
     if (clip.sectionName) {
       try {
         const addTrack = db.select().from(instrumentTracks)
-          .where(eq(instrumentTracks.id, req.params.trackId))
+          .where(eq(instrumentTracks.id, trackId))
           .get();
         if (addTrack) {
           const clipAddedActor = req.session.userId
@@ -406,15 +519,18 @@ export async function registerRoutes(
     res.status(201).json(clip);
   });
 
-  app.patch("/api/timeline-clips/:id", async (req, res) => {
+  app.patch("/api/timeline-clips/:id", requireBand, async (req, res) => {
+    const clipId = req.params.id as string;
+    const tclipSongId = timelineClipSongId(clipId);
+    if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
     const { author: commentAuthor, ...clipUpdates } = req.body;
     const timelineClipActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+    const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
     const clip = Object.keys(clipUpdates).length > 0
-      ? await storage.updateTimelineClip(req.params.id, clipUpdates)
+      ? await storage.updateTimelineClip(clipId, clipUpdates)
       : existingClip;
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
@@ -509,12 +625,15 @@ export async function registerRoutes(
     res.json(clip);
   });
 
-  app.delete("/api/timeline-clips/:id", async (req, res) => {
-    const clipToRemove = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+  app.delete("/api/timeline-clips/:id", requireBand, async (req, res) => {
+    const clipId = req.params.id as string;
+    const tclipSongId = timelineClipSongId(clipId);
+    if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
+    const clipToRemove = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     const clipRemovedActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    await storage.deleteTimelineClip(req.params.id);
+    await storage.deleteTimelineClip(clipId);
     if (clipToRemove) {
       const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clipToRemove.trackId)).get();
       if (track) {
@@ -532,17 +651,20 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
-  app.patch("/api/timeline-clips/:id/trim", async (req, res) => {
+  app.patch("/api/timeline-clips/:id/trim", requireBand, async (req, res) => {
+    const clipId = req.params.id as string;
+    const tclipSongId = timelineClipSongId(clipId);
+    if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
     const { trimStart, trimEnd } = req.body;
     if (typeof trimStart !== 'number' || (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number')) {
       return res.status(400).json({ message: "trimStart must be a number; trimEnd must be a number or null" });
     }
-    const clip = await storage.updateTimelineClip(req.params.id, { trimStart, trimEnd: trimEnd ?? null });
+    const clip = await storage.updateTimelineClip(clipId, { trimStart, trimEnd: trimEnd ?? null });
     if (!clip) return res.status(404).json({ message: "Clip not found" });
     res.json(clip);
   });
 
-  app.post("/api/timeline-clips/apply-trim-to-instances", async (req, res) => {
+  app.post("/api/timeline-clips/apply-trim-to-instances", requireBand, async (req, res) => {
     const { trackId, name, trimStart, trimEnd } = req.body;
     if (!trackId || !name || typeof trimStart !== 'number') {
       return res.status(400).json({ message: "trackId, name, and trimStart are required" });
@@ -550,6 +672,8 @@ export async function registerRoutes(
     if (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number') {
       return res.status(400).json({ message: "trimEnd must be a number or null" });
     }
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
     db.update(timelineClips)
       .set({ trimStart, trimEnd: trimEnd ?? null })
       .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
@@ -557,8 +681,11 @@ export async function registerRoutes(
     res.json({ ok: true });
   });
 
-  app.get("/api/timeline-clips/:id/replacements", async (req, res) => {
-    const clip = db.select().from(timelineClips).where(eq(timelineClips.id, req.params.id)).get();
+  app.get("/api/timeline-clips/:id/replacements", requireBand, async (req, res) => {
+    const clipId = req.params.id as string;
+    const tclipSongId = timelineClipSongId(clipId);
+    if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
+    const clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     if (!clip || !clip.sectionName) return res.json([]);
 
     const idea = db.select().from(ideas)
@@ -582,34 +709,43 @@ export async function registerRoutes(
     res.json(replacements);
   });
 
-  app.get("/api/songs/:songId/timeline-has-finals", async (req, res) => {
-    const hasFinals = await storage.timelineHasFinals(req.params.songId);
+  app.get("/api/songs/:songId/timeline-has-finals", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const hasFinals = await storage.timelineHasFinals(songId);
     res.json({ hasFinals });
   });
 
-  app.delete("/api/songs/:songId/timeline-clips/non-final", async (req, res) => {
-    await storage.deleteNonFinalTimelineClips(req.params.songId);
+  app.delete("/api/songs/:songId/timeline-clips/non-final", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    await storage.deleteNonFinalTimelineClips(songId);
     res.status(204).send();
   });
 
   // ─── Bucket ─────────────────────────────────────────────────────────────────
 
   /** GET /api/songs/:id/bucket — full bucket tree: tracks → ideas → clips */
-  app.get("/api/songs/:id/bucket", async (req, res) => {
+  app.get("/api/songs/:id/bucket", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
     await storage.bootstrapDefaultSong();
-    const bucket = await storage.getBucket(req.params.id);
+    const bucket = await storage.getBucket(id);
     res.json(bucket);
   });
 
   // ─── Ideas ──────────────────────────────────────────────────────────────────
 
   /** POST /api/tracks/:trackId/ideas — create an idea (section slot) under a track */
-  app.post("/api/tracks/:trackId/ideas", async (req, res) => {
+  app.post("/api/tracks/:trackId/ideas", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
     const parsed = insertIdeaSchema.safeParse({
       id: randomUUID(),
       sortOrder: 0,
       ...req.body,
-      trackId: req.params.trackId,
+      trackId,
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
@@ -620,7 +756,7 @@ export async function registerRoutes(
     // active track simultaneously (Promise.all), so deduplicate via a 5-second window.
     try {
       const ideaTrack = db.select().from(instrumentTracks)
-        .where(eq(instrumentTracks.id, req.params.trackId))
+        .where(eq(instrumentTracks.id, trackId))
         .get();
       if (ideaTrack) {
         const fiveSecondsAgo = Date.now() - 5000;
@@ -658,27 +794,39 @@ export async function registerRoutes(
 
   // ─── Clips (bucket versions) ─────────────────────────────────────────────────
 
-  app.patch("/api/ideas/:ideaId", async (req, res) => {
-    await storage.hideIdea(req.params.ideaId);
+  app.patch("/api/ideas/:ideaId", requireBand, async (req, res) => {
+    const ideaId = req.params.ideaId as string;
+    const songId = ideaSongId(ideaId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    await storage.hideIdea(ideaId);
     res.status(200).json({ ok: true });
   });
 
-  app.post("/api/ideas/:ideaId/restore", async (req, res) => {
-    await storage.restoreIdea(req.params.ideaId);
+  app.post("/api/ideas/:ideaId/restore", requireBand, async (req, res) => {
+    const ideaId = req.params.ideaId as string;
+    const songId = ideaSongId(ideaId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    await storage.restoreIdea(ideaId);
     res.status(200).json({ ok: true });
   });
 
-  app.get("/api/tracks/:trackId/hidden-ideas", async (req, res) => {
-    const hidden = await storage.getHiddenIdeas(req.params.trackId);
+  app.get("/api/tracks/:trackId/hidden-ideas", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    const hidden = await storage.getHiddenIdeas(trackId);
     res.json(hidden);
   });
 
-  app.patch("/api/clips/:clipId", async (req, res) => {
+  app.patch("/api/clips/:clipId", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
     const { author: commentAuthor, ...clipUpdates } = req.body;
     const bucketClipActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    const clip = await storage.updateClip(req.params.clipId, clipUpdates);
+    const clip = await storage.updateClip(clipId, clipUpdates);
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
     // Temporary debug — write incoming body + updated clip to /tmp for Add to Song verification
@@ -756,10 +904,13 @@ export async function registerRoutes(
   });
 
   /** POST /api/ideas/:ideaId/clips — attach a clip record to an idea */
-  app.post("/api/ideas/:ideaId/clips", async (req, res) => {
+  app.post("/api/ideas/:ideaId/clips", requireBand, async (req, res) => {
+    const ideaId = req.params.ideaId as string;
+    const songId = ideaSongId(ideaId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
     const parsed = insertClipSchema.safeParse({
       ...req.body,
-      ideaId: req.params.ideaId,
+      ideaId,
     });
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
@@ -770,22 +921,28 @@ export async function registerRoutes(
 
   // ─── Clip Comments ────────────────────────────────────────────────────────────
 
-  app.get("/api/clips/:clipId/comments", async (req, res) => {
-    const comments = await storage.getClipComments(req.params.clipId);
+  app.get("/api/clips/:clipId/comments", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    const comments = await storage.getClipComments(clipId);
     res.json(comments);
   });
 
-  app.post("/api/clips/:clipId/comments", async (req, res) => {
+  app.post("/api/clips/:clipId/comments", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
     const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
     if (parentId) {
       const parent = db.select().from(clipComments).where(eq(clipComments.id, parentId)).get();
-      if (!parent || parent.parentId) {
-        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      if (!parent || parent.parentId || parent.clipId !== clipId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment on this clip" });
       }
     }
     const comment = await storage.addClipComment({
       id: randomUUID(),
-      clipId: req.params.clipId,
+      clipId,
       author,
       text,
       timestamp: Date.now(),
@@ -794,14 +951,20 @@ export async function registerRoutes(
     res.status(201).json(comment);
   });
 
-  app.patch("/api/clip-comments/:id", async (req, res) => {
-    const comment = await storage.updateClipComment(req.params.id, req.body.text);
+  app.patch("/api/clip-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const songId = clipCommentSongId(commentId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    const comment = await storage.updateClipComment(commentId, req.body.text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
     res.json(comment);
   });
 
-  app.delete("/api/clip-comments/:id", async (req, res) => {
-    await storage.deleteClipComment(req.params.id);
+  app.delete("/api/clip-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const songId = clipCommentSongId(commentId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    await storage.deleteClipComment(commentId);
     res.status(204).send();
   });
 
@@ -820,6 +983,7 @@ export async function registerRoutes(
    */
   app.post(
     "/api/upload",
+    requireBand,
     upload.single("file"),
     async (req: Request, res) => {
       try {
@@ -832,6 +996,12 @@ export async function registerRoutes(
           section?: string;
           ideaId?: string;
         };
+
+        // Verify the upload destination belongs to this band
+        if (ideaId) {
+          const uploadSongId = ideaSongId(ideaId);
+          if (!uploadSongId || !assertSongOwned(req, res, uploadSongId)) return;
+        }
 
         // Count existing clips so we can assign the next version number
         const existingCount = ideaId
@@ -913,33 +1083,39 @@ export async function registerRoutes(
 
   // ─── Production Tasks ─────────────────────────────────────────────────────────
 
-  app.get("/api/songs/:songId/production-tasks", async (req, res) => {
-    const tasks = await storage.getTasksForSong(req.params.songId);
+  app.get("/api/songs/:songId/production-tasks", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const tasks = await storage.getTasksForSong(songId);
     res.json(tasks);
   });
 
-  app.get("/api/songs/:songId/task-counts", (req, res) => {
-    const song = db.select({ type: songs.type }).from(songs).where(eq(songs.id, req.params.songId)).get();
+  app.get("/api/songs/:songId/task-counts", requireBand, (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const song = db.select({ type: songs.type }).from(songs).where(eq(songs.id, songId)).get();
     if (song?.type === "idea") {
       return res.json({ completed: 0, total: 0, applicable: false });
     }
     const rows = db
       .select({ status: productionTasks.status })
       .from(productionTasks)
-      .where(eq(productionTasks.songId, req.params.songId))
+      .where(eq(productionTasks.songId, songId))
       .all();
     const total = rows.length;
     const completed = rows.filter(r => r.status === 'complete' || r.status === 'will-not-play').length;
     res.json({ completed, total, applicable: true });
   });
 
-  app.get("/api/songs/:songId/task-comment-counts", async (req, res) => {
+  app.get("/api/songs/:songId/task-comment-counts", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
     const rows = db
       .select({ taskId: taskComments.taskId, count: count() })
       .from(taskComments)
       .innerJoin(productionTasks, eq(taskComments.taskId, productionTasks.id))
       .where(and(
-        eq(productionTasks.songId, req.params.songId),
+        eq(productionTasks.songId, songId),
         ne(taskComments.author, 'System'),
         ne(taskComments.author, 'Unknown')
       ))
@@ -950,10 +1126,13 @@ export async function registerRoutes(
     res.json(result);
   });
 
-  app.patch("/api/production-tasks/:id", async (req, res) => {
+  app.patch("/api/production-tasks/:id", requireBand, async (req, res) => {
+    const taskId = req.params.id as string;
+    const songId = taskSongId(taskId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
     const { author: commentAuthor, ...taskUpdates } = req.body;
 
-    const previous = db.select().from(productionTasks).where(eq(productionTasks.id, req.params.id)).get();
+    const previous = db.select().from(productionTasks).where(eq(productionTasks.id, taskId)).get();
 
     if (taskUpdates.status === "complete") {
       if (!previous) return res.status(404).json({ message: "Task not found" });
@@ -1000,7 +1179,7 @@ export async function registerRoutes(
 
                 await storage.addTaskComment({
                   id: randomUUID(),
-                  taskId: req.params.id,
+                  taskId,
                   author: commentAuthor || "Unknown",
                   text: `Clip marked as final: "${bucketClip.name}"`,
                   timestamp: Date.now(),
@@ -1014,7 +1193,15 @@ export async function registerRoutes(
       }
     }
 
-    const task = await storage.updateTask(req.params.id, taskUpdates);
+    // Validate relatedClipId belongs to the same song (non-null only; null clears the link)
+    if ('relatedClipId' in taskUpdates && taskUpdates.relatedClipId != null) {
+      const relatedSong = clipSongId(taskUpdates.relatedClipId as string);
+      if (!relatedSong || relatedSong !== songId) {
+        return res.status(404).json({ message: "Not found" });
+      }
+    }
+
+    const task = await storage.updateTask(taskId, taskUpdates);
     if (!task) return res.status(404).json({ message: "Task not found" });
 
     const author = commentAuthor || "Unknown";
@@ -1026,7 +1213,7 @@ export async function registerRoutes(
         const actorName = sessionUser?.username ?? author;
         storage.addTaskComment({
           id: randomUUID(),
-          taskId: req.params.id,
+          taskId,
           author: actorName,
           text: label,
           timestamp: Date.now(),
@@ -1038,7 +1225,7 @@ export async function registerRoutes(
       const text = !taskUpdates.assignee ? "Assignee removed" : `Assignee set to ${taskUpdates.assignee}`;
       storage.addTaskComment({
         id: randomUUID(),
-        taskId: req.params.id,
+        taskId,
         author,
         text,
         timestamp: Date.now(),
@@ -1049,7 +1236,7 @@ export async function registerRoutes(
       const text = !taskUpdates.dueDate ? "Due date removed" : `Due date set to ${taskUpdates.dueDate}`;
       storage.addTaskComment({
         id: randomUUID(),
-        taskId: req.params.id,
+        taskId,
         author,
         text,
         timestamp: Date.now(),
@@ -1077,7 +1264,7 @@ export async function registerRoutes(
           console.log('[addTaskComment isFinal=false] text:', unmarkText);
           await storage.addTaskComment({
             id: randomUUID(),
-            taskId: req.params.id,
+            taskId,
             author,
             text: unmarkText,
             timestamp: Date.now(),
@@ -1091,22 +1278,28 @@ export async function registerRoutes(
     res.json(task);
   });
 
-  app.get("/api/production-tasks/:id/comments", async (req, res) => {
-    const comments = await storage.getTaskComments(req.params.id);
+  app.get("/api/production-tasks/:id/comments", requireBand, async (req, res) => {
+    const tId = req.params.id as string;
+    const sId = taskSongId(tId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    const comments = await storage.getTaskComments(tId);
     res.json(comments);
   });
 
-  app.post("/api/production-tasks/:id/comments", async (req, res) => {
+  app.post("/api/production-tasks/:id/comments", requireBand, async (req, res) => {
+    const tId = req.params.id as string;
+    const sId = taskSongId(tId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
     const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
     if (parentId) {
       const parent = db.select().from(taskComments).where(eq(taskComments.id, parentId)).get();
-      if (!parent || parent.parentId) {
-        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      if (!parent || parent.parentId || parent.taskId !== tId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment on this task" });
       }
     }
     const comment = await storage.addTaskComment({
       id: randomUUID(),
-      taskId: req.params.id,
+      taskId: tId,
       author,
       text,
       timestamp: Date.now(),
@@ -1115,14 +1308,20 @@ export async function registerRoutes(
     res.status(201).json(comment);
   });
 
-  app.patch("/api/task-comments/:id", async (req, res) => {
-    const comment = await storage.updateTaskComment(req.params.id, req.body.text);
+  app.patch("/api/task-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const sId = taskCommentSongId(commentId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    const comment = await storage.updateTaskComment(commentId, req.body.text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
     res.json(comment);
   });
 
-  app.delete("/api/task-comments/:id", async (req, res) => {
-    await storage.deleteTaskComment(req.params.id);
+  app.delete("/api/task-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const sId = taskCommentSongId(commentId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    await storage.deleteTaskComment(commentId);
     res.status(204).send();
   });
 
@@ -1131,12 +1330,16 @@ export async function registerRoutes(
   const REVIEWS_DIR = path.join(UPLOADS_DIR, "reviews");
   if (!fs.existsSync(REVIEWS_DIR)) fs.mkdirSync(REVIEWS_DIR, { recursive: true });
 
-  app.get("/api/songs/:songId/reviews", async (req, res) => {
-    const reviews = await storage.getReviewsForSong(req.params.songId);
+  app.get("/api/songs/:songId/reviews", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const reviews = await storage.getReviewsForSong(songId);
     res.json(reviews);
   });
 
-  app.post("/api/songs/:songId/reviews", upload.single("file"), async (req: Request, res) => {
+  app.post("/api/songs/:songId/reviews", requireBand, upload.single("file"), async (req: Request, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
     try {
       if (!req.file) return res.status(400).json({ message: "No file provided" });
       const name = String(req.body.name || "").trim();
@@ -1145,13 +1348,13 @@ export async function registerRoutes(
       if (!name || !format) return res.status(400).json({ message: "name and format are required" });
 
       const ext = format === "mp3" ? "mp3" : "wav";
-      const filename = `review_${req.params.songId}_${Date.now()}.${ext}`;
+      const filename = `review_${songId}_${Date.now()}.${ext}`;
       const destPath = path.join(REVIEWS_DIR, filename);
       fs.writeFileSync(destPath, req.file.buffer);
 
       const review = await storage.createReview({
         id: randomUUID(),
-        songId: String(req.params.songId),
+        songId,
         name,
         src: `/uploads/reviews/${filename}`,
         format,
@@ -1167,17 +1370,26 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/reviews/:reviewId", async (req, res) => {
-    await storage.deleteReview(req.params.reviewId);
+  app.delete("/api/reviews/:reviewId", requireBand, async (req, res) => {
+    const reviewId = req.params.reviewId as string;
+    const sId = reviewSongId(reviewId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    await storage.deleteReview(reviewId);
     res.status(204).send();
   });
 
-  app.get("/api/reviews/:reviewId/comments", async (req, res) => {
-    const comments = await storage.getReviewComments(req.params.reviewId);
+  app.get("/api/reviews/:reviewId/comments", requireBand, async (req, res) => {
+    const reviewId = req.params.reviewId as string;
+    const sId = reviewSongId(reviewId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    const comments = await storage.getReviewComments(reviewId);
     res.json(comments);
   });
 
-  app.post("/api/reviews/:reviewId/comments", async (req, res) => {
+  app.post("/api/reviews/:reviewId/comments", requireBand, async (req, res) => {
+    const reviewId = req.params.reviewId as string;
+    const sId = reviewSongId(reviewId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
     const { author, text, timestamp, parentId } = req.body as {
       author: string; text: string; timestamp: number; parentId?: string;
     };
@@ -1185,7 +1397,7 @@ export async function registerRoutes(
       return res.status(400).json({ message: "author, text, and timestamp are required" });
     }
 
-    const review = db.select().from(songReviews).where(eq(songReviews.id, req.params.reviewId)).get();
+    const review = db.select().from(songReviews).where(eq(songReviews.id, reviewId)).get();
     if (!review) return res.status(404).json({ message: "Review not found" });
 
     let parentAuthor: string | undefined;
@@ -1193,15 +1405,15 @@ export async function registerRoutes(
       const parent = db.select().from(songReviewComments)
         .where(eq(songReviewComments.id, parentId))
         .get();
-      if (!parent || parent.parentId) {
-        return res.status(400).json({ message: "parentId must reference a top-level comment" });
+      if (!parent || parent.parentId || parent.reviewId !== reviewId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment on this review" });
       }
       parentAuthor = parent.author;
     }
 
     const comment = await storage.addReviewComment({
       id: randomUUID(),
-      reviewId: req.params.reviewId,
+      reviewId,
       author,
       text,
       timestamp,
@@ -1215,7 +1427,7 @@ export async function registerRoutes(
         type: 'review-reply',
         description: `${author} replied to ${parentAuthor}'s comment on ${review.name}`,
         timestamp: Date.now(),
-        reviewId: req.params.reviewId,
+        reviewId,
         commentId: comment.id,
       }).catch(console.error);
     } else {
@@ -1225,7 +1437,7 @@ export async function registerRoutes(
         type: 'review-comment',
         description: `${author} commented on ${review.name}`,
         timestamp: Date.now(),
-        reviewId: req.params.reviewId,
+        reviewId,
         commentId: comment.id,
       }).catch(console.error);
     }
@@ -1233,7 +1445,10 @@ export async function registerRoutes(
     res.status(201).json(comment);
   });
 
-  app.patch("/api/review-comments/:id", async (req, res) => {
+  app.patch("/api/review-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const sId = reviewCommentSongId(commentId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
     const { text, resolved } = req.body as { text?: string; resolved?: boolean };
     const updates: { text?: string; resolved?: boolean; editedAt?: string } = {};
     if (text !== undefined) {
@@ -1241,69 +1456,89 @@ export async function registerRoutes(
       updates.editedAt = new Date().toISOString();
     }
     if (resolved !== undefined) updates.resolved = resolved;
-    const comment = await storage.updateReviewComment(req.params.id, updates);
+    const comment = await storage.updateReviewComment(commentId, updates);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
     res.json(comment);
   });
 
-  app.delete("/api/review-comments/:id", async (req, res) => {
-    await storage.deleteReviewComment(req.params.id);
+  app.delete("/api/review-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const sId = reviewCommentSongId(commentId);
+    if (!sId || !assertSongOwned(req, res, sId)) return;
+    await storage.deleteReviewComment(commentId);
     res.status(204).send();
   });
 
   // ─── Albums ─────────────────────────────────────────────────────────────────
 
-  app.get("/api/albums", async (_req, res) => {
-    res.json(await storage.getAlbums());
+  app.get("/api/albums", requireBand, async (req, res) => {
+    res.json(await storage.getAlbums(req.bandId!));
   });
 
-  app.post("/api/albums", async (req, res) => {
+  app.post("/api/albums", requireBand, async (req, res) => {
     const { name } = req.body as { name?: string };
     if (!name?.trim()) return res.status(400).json({ message: "Album name is required." });
-    const album = await storage.createAlbum(name.trim());
+    const album = await storage.createAlbum(name.trim(), req.bandId!);
     return res.status(201).json(album);
   });
 
-  app.patch("/api/albums/:id", async (req, res) => {
+  app.patch("/api/albums/:id", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
     const { name } = req.body as { name?: string };
     if (!name?.trim()) return res.status(400).json({ message: "Album name is required." });
-    const album = await storage.renameAlbum(req.params.id, name.trim());
+    const album = await storage.renameAlbum(albumId, name.trim());
     if (!album) return res.status(404).json({ message: "Album not found." });
     return res.json(album);
   });
 
-  app.delete("/api/albums/:id", async (req, res) => {
-    await storage.deleteAlbum(req.params.id);
+  app.delete("/api/albums/:id", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
+    await storage.deleteAlbum(albumId);
     res.status(204).send();
   });
 
-  app.get("/api/albums/:id/songs", async (req, res) => {
-    res.json(await storage.getAlbumSongs(req.params.id));
+  app.get("/api/albums/:id/songs", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
+    res.json(await storage.getAlbumSongs(albumId));
   });
 
-  app.post("/api/albums/:id/songs", async (req, res) => {
+  app.post("/api/albums/:id/songs", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
     const { songId } = req.body as { songId?: string };
     if (!songId) return res.status(400).json({ message: "songId is required." });
-    const result = await storage.addSongToAlbum(req.params.id, songId);
+    if (!assertSongOwned(req, res, songId)) return;
+    const result = await storage.addSongToAlbum(albumId, songId);
     return res.status(201).json(result);
   });
 
-  app.delete("/api/albums/:id/songs/:songId", async (req, res) => {
-    await storage.removeSongFromAlbum(req.params.id, req.params.songId);
+  app.delete("/api/albums/:id/songs/:songId", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    const songId = req.params.songId as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
+    if (!assertSongOwned(req, res, songId)) return;
+    await storage.removeSongFromAlbum(albumId, songId);
     res.status(204).send();
   });
 
-  app.patch("/api/albums/:id/songs/:songId/move", async (req, res) => {
+  app.patch("/api/albums/:id/songs/:songId/move", requireBand, async (req, res) => {
+    const albumId = req.params.id as string;
+    const songId = req.params.songId as string;
+    if (!assertAlbumOwned(req, res, albumId)) return;
+    if (!assertSongOwned(req, res, songId)) return;
     const { direction } = req.body as { direction?: string };
     if (direction !== 'up' && direction !== 'down') {
       return res.status(400).json({ message: "direction must be 'up' or 'down'." });
     }
-    await storage.moveAlbumSong(req.params.id, req.params.songId, direction);
+    await storage.moveAlbumSong(albumId, songId, direction);
     return res.json({ ok: true });
   });
 
-  app.get("/api/album-memberships", async (_req, res) => {
-    res.json(await storage.getAllAlbumMemberships());
+  app.get("/api/album-memberships", requireBand, async (req, res) => {
+    res.json(await storage.getAllAlbumMemberships(req.bandId!));
   });
 
   return httpServer;
