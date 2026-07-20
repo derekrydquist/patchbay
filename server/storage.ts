@@ -1338,6 +1338,22 @@ export class SQLiteStorage implements IStorage {
     if (userCount === 0 && songCount === 0 && albumCount === 0 && logCount === 0) {
       console.log(`[bands] Backfill is a no-op — all rows already have bandId`);
     }
+
+    // Seed Band B + zed (demo fixture)
+    const BAND_B_NAME = "Band B";
+    let bandB = db.select().from(bands).where(eq(bands.name, BAND_B_NAME)).get();
+    if (!bandB) {
+      bandB = { id: randomUUID(), name: BAND_B_NAME, createdAt: new Date().toISOString() };
+      db.insert(bands).values(bandB).run();
+      console.log(`[bands] Created band "${BAND_B_NAME}" (${bandB.id})`);
+    }
+
+    const existingZed = db.select().from(users).where(eq(users.username, "zed")).get();
+    if (!existingZed) {
+      const hashed = await bcrypt.hash("password", 10);
+      db.insert(users).values({ id: randomUUID(), username: "zed", password: hashed, bandId: bandB.id }).run();
+      console.log(`[bands] Created user "zed" in band "${BAND_B_NAME}"`);
+    }
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────

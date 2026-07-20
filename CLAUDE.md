@@ -559,7 +559,7 @@ When implementing auth or any permission checks, always consult this table.
 | Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Files` / `Review`) synced to URL: `?tab=files` or `?tab=review`; Overview omits the param for a clean URL. `activeTab` is derived from `useSearch()` (wouter) on every render — `tabParam === 'review' \|\| tabParam === 'files'` or falls back to `'overview'`. `autoReviewId` and `autoCommentId` are also derived from `useSearch()`. The tab button only calls `setLocation`; no separate `setActiveTab` state exists. |
 | Export Dialog | ✅ Done | Fully functional; renders timeline via `OfflineAudioContext` (44100Hz stereo); trim-aware — uses `source.start(when, trimStartSecs, trimDuration)` so only the trimmed region renders; WAV export uses inline PCM encoder (RIFF header + interleaved int16 samples); MP3 export uses `@breezystack/lamejs` (ESM-compatible fork); Normalize Audio scales all samples to 0 dBFS before encoding; Export Stems renders each track in isolation and bundles as a zip via `JSZip`; file save uses `showSaveFilePicker` in Chrome/Edge with anchor-download fallback for Safari/Firefox; `AbortError` (user cancelled picker) handled cleanly with no fallback; filename convention: `song_title_MMDDYYYY.format` (slugified, no special chars); stems zip: `song_title_MMDDYYYY_stems.zip`; per-stem files: `song_title_MMDDYYYY_instrument_name.format`; `GET /api/songs/:id/timeline` now returns `{ songName, tracks }` (Timeline.tsx queryFn extracts `tracks` with an Array.isArray guard for backward compat); `Transport` accepts `songId` prop threaded from `Workspace`; fetches `/api/songs/:id` in parallel with the timeline to obtain the canonical `sections` array, then calls `recalcStartsForExport(tracks, sectionOrder)` — a module-level helper mirroring `computeSectionLayout`/`recalcAllStarts` from `Timeline.tsx` — and replaces each clip's DB `start` with the recomputed value before rendering; this is necessary because DB `start` values can be stale relative to live section geometry (e.g. after a trim change), and using them directly causes clips from different sections to overlap in the rendered output |
 | Project Settings | ✅ Done | Gear menu → Project Settings modal; editable default BPM, instruments, and sections stored in `global_settings` table; inline tag editors with add/remove pills; Restore Defaults resets draft to factory values without auto-saving; New Project modal pre-populates from saved settings on open via `openProjectModal()` |
-| User auth / login | ✅ Done | Session-based auth with express-session + bcrypt; POST /api/auth/login, POST /api/auth/logout, GET /api/auth/me; six seeded users (jordan/alex/jamie/sam/taylor/riley, all with password "password"); AuthContext + useAuth() hook; RequireAuth route guard in App.tsx; /login page; real user wired into all author fields throughout client and server; role-based permissions not yet enforced |
+| User auth / login | ✅ Done | Session-based auth with express-session + bcrypt; POST /api/auth/login, POST /api/auth/logout, GET /api/auth/me; seven seeded users across two bands — six on The Zenith Passage (jordan/alex/jamie/sam/taylor/riley) and zed on Band B, all with password "password"; AuthContext + useAuth() hook; RequireAuth route guard in App.tsx; /login page; real user wired into all author fields throughout client and server; role-based permissions not yet enforced |
 | Real API endpoints | ✅ Done | Songs CRUD, timeline CRUD, bucket/ideas/clips CRUD, file upload, cross-song tasks, activity feed — all built |
 | Database schema | ✅ Built | All tables created via `db:push` |
 | Audio hover preview (Media Bucket) | ❌ Removed | Hover-to-play was removed from `BucketClip`. Playback is now explicit — click the play button on the `WaveformPlayerCard` card. No hover audio anywhere in the bucket. |
@@ -804,7 +804,7 @@ app.use(session({
 }));
 ```
 
-`storage.seedUsers()` is called at startup. It inserts six users (jordan, alex, jamie, sam, taylor, riley — all lowercase, all with password "password") using `INSERT OR IGNORE` semantics — safe to call on every boot.
+`storage.seedUsers()` is called at startup. It inserts the six core users (jordan, alex, jamie, sam, taylor, riley — all lowercase, all with password "password") using `INSERT OR IGNORE` semantics — safe to call on every boot. `storage.backfillBands()`, which runs immediately after, also seeds "Band B" and its demo user "zed" (password "password") using the same existence-check pattern — no manual `band-admin.ts` step required.
 
 ### Auth routes (`server/routes.ts`)
 
@@ -852,6 +852,8 @@ This split keeps workspace-level actions (shared settings, collaborator access) 
 
 ### Seeded users
 
+**The Zenith Passage** (default band — seeded by `seedUsers()` + `backfillBands()`):
+
 | Username | Password |
 |---|---|
 | jordan | password |
@@ -861,7 +863,13 @@ This split keeps workspace-level actions (shared settings, collaborator access) 
 | taylor | password |
 | riley | password |
 
-These are development fixtures. All usernames are lowercase. Passwords are bcrypt-hashed at cost 10 and are never returned by any API route.
+**Band B** (demo fixture — seeded by `backfillBands()`):
+
+| Username | Password |
+|---|---|
+| zed | password |
+
+Both bands and all seven users are seeded automatically on every server boot — no manual `band-admin.ts` step required. All usernames are lowercase. Passwords are bcrypt-hashed at cost 10 and are never returned by any API route.
 
 ### Author fields throughout the app
 
@@ -1739,7 +1747,7 @@ These are things that need a decision before being built:
    the internet? Options: local disk (simple, free, not scalable), AWS S3, Cloudflare R2.
    Start with local disk; plan to abstract behind a storage interface.
 
-2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Six seeded users exist (jordan/alex/jamie/sam/taylor/riley). Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
+2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Seven seeded users exist across two bands: six on The Zenith Passage (jordan/alex/jamie/sam/taylor/riley) and zed on Band B. Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
 
 3. **Real-time vs async:** The spec calls for async collaboration to start. WebSockets (`ws`)
    is installed. Leave real-time for a future milestone.
