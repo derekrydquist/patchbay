@@ -517,6 +517,21 @@ export async function registerRoutes(
       } catch (err) {
         console.error("[timeline clip add] failed to log activity:", err);
       }
+
+      // Advance task from "todo" → "in-progress" when a clip is placed on the timeline
+      try {
+        const timelineTrack = db.select().from(instrumentTracks)
+          .where(eq(instrumentTracks.id, trackId))
+          .get();
+        if (timelineTrack) {
+          const task = await storage.getTaskByInstrumentSection(timelineTrack.songId, timelineTrack.name, clip.sectionName);
+          if (task?.status === "todo") {
+            await storage.updateTask(task.id, { status: "in-progress" });
+          }
+        }
+      } catch (err) {
+        console.error("[timeline clip add] failed to advance task status:", err);
+      }
     }
 
     res.status(201).json(clip);
@@ -919,6 +934,23 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const clip = await storage.createClip(parsed.data);
+
+    // Advance task from "todo" → "in-progress" when the first clip lands in the bucket
+    try {
+      const idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
+      if (idea?.sectionName && idea.trackId) {
+        const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
+        if (track) {
+          const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
+          if (task?.status === "todo") {
+            await storage.updateTask(task.id, { status: "in-progress" });
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[ideas/:ideaId/clips] failed to advance task status:", err);
+    }
+
     res.status(201).json(clip);
   });
 

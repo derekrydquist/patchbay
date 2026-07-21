@@ -881,7 +881,10 @@ export function Timeline({ songId }: { songId: string }) {
           trimStart: 0, trimEnd: null,
         }),
       })
-        .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
+        .then(() => Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['activity'] }),
+          queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] }),
+        ]))
         .catch((err) => console.error('Failed to persist timeline clip:', err));
 
       targetTrack.clips.forEach((old) => {
