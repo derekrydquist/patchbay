@@ -1246,36 +1246,36 @@ export async function registerRoutes(
       if (label) {
         const sessionUser = req.session.userId ? await storage.getUser(req.session.userId) : null;
         const actorName = sessionUser?.username ?? author;
-        storage.addTaskComment({
+        await storage.addTaskComment({
           id: randomUUID(),
           taskId,
           author: actorName,
           text: label,
           timestamp: Date.now(),
-        }).catch(console.error);
+        });
       }
     }
 
     if (previous && 'assignee' in taskUpdates && taskUpdates.assignee !== previous.assignee) {
       const text = !taskUpdates.assignee ? "Assignee removed" : `Assignee set to ${taskUpdates.assignee}`;
-      storage.addTaskComment({
+      await storage.addTaskComment({
         id: randomUUID(),
         taskId,
         author,
         text,
         timestamp: Date.now(),
-      }).catch(console.error);
+      });
     }
 
     if (previous && 'dueDate' in taskUpdates && taskUpdates.dueDate !== previous.dueDate) {
       const text = !taskUpdates.dueDate ? "Due date removed" : `Due date set to ${taskUpdates.dueDate}`;
-      storage.addTaskComment({
+      await storage.addTaskComment({
         id: randomUUID(),
         taskId,
         author,
         text,
         timestamp: Date.now(),
-      }).catch(console.error);
+      });
     }
 
     if (taskUpdates.status && taskUpdates.status !== "complete" && previous?.status === "complete") {
