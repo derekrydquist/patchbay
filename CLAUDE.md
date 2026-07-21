@@ -553,7 +553,7 @@ When implementing auth or any permission checks, always consult this table.
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist; VERSIONS column shows compact `WaveformPlayerCard` rows (32px canvas, play button, colored left border, gold checkmark for FINAL); right-click clip → More Info / Add Note / Mark as Final / Add to Timeline / Download / **Remove** (soft-delete via `PATCH /api/clips/:clipId { active: false }`); `getBucket` filters `active = true` clips; **UploadModal** (exported from `MediaBucket.tsx`) is the single shared upload dialog used in both MediaBucket and Dashboard — see UploadModal architecture section below |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume` events; no audio logic of its own; dummy CDN audio system removed |
-| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with one-level threading (Reply link, N replies toggle, indented replies, inline reply input — same pattern as ClipInfoWindow); thread stays open after posting and scrolls new reply into view; author display uses "You" for logged-in user; section labeled "COMMENTS"; @ mention dropdowns portaled to `document.body` via `createPortal`; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links); **visual layout** — outer container is `bg-[#09090b]` dark page background; header sits outside the card against that dark background; grid is wrapped in a `rounded-xl border border-white/5 bg-[#181C26]` card that floats inside a `p-6` padded scroll area; column and section header labels use `text-xs font-bold uppercase tracking-widest text-muted-foreground`; status indicators render as `rounded-full` pill badges with soft tinted backgrounds (`bg-primary/15`, `bg-blue-400/10`, `bg-red-950/40`, `bg-white/[0.06]`) rather than bare text |
+| Production Tracker (Kanban) | ✅ Done | Fully wired to real API; fetches tasks from `/api/songs/:id/production-tasks`; tasks bootstrapped alongside ideas using deterministic IDs `task-{trackId}-{sectionIndex}`; task detail modal with status/assignee/due-date editing (optimistic updates), comment thread with one-level threading (Reply link, N replies toggle, indented replies, inline reply input — same pattern as ClipInfoWindow); thread stays open after posting and scrolls new reply into view; author display uses "You" for logged-in user; section labeled "COMMENTS"; @ mention dropdowns portaled to `document.body` via `createPortal`; bidirectional sync with clip isFinal state; complete cells show final clip name; automatic system comments on status changes; "complete" status is gated — requires a timeline clip or final bucket clip to exist; 400 response shown as destructive toast; cells show human comment count badge from `GET /api/songs/:songId/task-comment-counts`; modal has a gold "Done" button in the footer to close; "Saved" flash indicator appears next to the updated field label for 1500ms after a successful PATCH (driven by `patchTask.onSuccess` inspecting `variables`); "Will Not Play" uses `Ban` icon and `text-red-400/70` with a dark red cell background (`bg-red-950/30`) and inset border glow; auto-opens task modal when `?taskId=` is in the URL (used by activity feed deep links); **visual layout** — outer container is `bg-[#09090b]` dark page background; header sits outside the card against that dark background; grid is wrapped in a `rounded-xl border border-white/5 bg-[#181C26]` card that floats inside a `p-6` padded scroll area; column and section header labels use `text-xs font-bold uppercase tracking-widest text-muted-foreground`; status indicators render as `rounded-full` pill badges with soft tinted backgrounds (`bg-primary/15`, `bg-blue-400/10`, `bg-red-950/40`, `bg-white/[0.06]`) rather than bare text; **task bootstrap for new instruments** — `createTrack` in `server/storage.ts` creates one `productionTask` row per `DEFAULT_SECTION` in the same loop where it creates ideas (previously this was missing — newly-added instruments on existing songs had non-interactable tracker cells because no task row existed to look up, matching the bug fixed in this session); `useAddInstrument`'s `onSuccess` in `client/src/hooks/use-bucket-mutations.ts` invalidates `['production-tasks', songId]` alongside its existing bucket/activity invalidations so the tracker grid reflects the new instrument's tasks immediately without a manual refresh; **clip addition → in-progress** — `POST /api/ideas/:ideaId/clips` and `POST /api/tracks/:trackId/clips` both advance the linked task from `todo` to `in-progress` after clip creation; status is never downgraded (no-op if already `in-progress`, `complete`, or `will-not-play`); both client-side mutations invalidate `['production-tasks', songId]` on success; see "Clip addition → task in-progress" section below for full details |
 | Activity feed | ✅ Done | Shown on Dashboard (cross-song) and SongHome (per-song); aggregates events from two sources — existing tables (clips, clip_comments, task_comments, song_reviews) and the dedicated `activity_log` table; polls every 10s via `refetchInterval`; `queryClient.invalidateQueries({ queryKey: ['activity'] })` is called in every mutation's `onSuccess` so the feed refreshes immediately on any action; see Activity Feed architecture section below. |
 | Tab URL persistence (Workspace) | ✅ Done | Active tab (`Arrangement` / `Production`) is synced to `?tab=arrangement` or `?tab=production` in the URL. Page refresh restores the correct tab. Implemented in `Workspace.tsx` via wouter's `useLocation`. |
 | Tab URL persistence (SongHome) | ✅ Done | Active tab (`Overview` / `Files` / `Review`) synced to URL: `?tab=files` or `?tab=review`; Overview omits the param for a clean URL. `activeTab` is derived from `useSearch()` (wouter) on every render — `tabParam === 'review' \|\| tabParam === 'files'` or falls back to `'overview'`. `autoReviewId` and `autoCommentId` are also derived from `useSearch()`. The tab button only calls `setLocation`; no separate `setActiveTab` state exists. |
@@ -631,7 +631,10 @@ GET    /api/songs/:id/timeline           — get instrument tracks with their pl
                                            auto-bootstraps the default song + tracks if missing
 POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body: InsertTimelineClip;
                                            auto-sets isFinal: true if a final bucket clip already
-                                           exists for this track+section
+                                           exists for this track+section; advances the linked
+                                           production task from todo to in-progress if its current
+                                           status is todo (no-op otherwise); wrapped in try/catch
+                                           so a missing task never blocks clip creation
 PATCH  /api/timeline-clips/:id           — update a placed clip (start position, etc.); also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
@@ -673,7 +676,12 @@ PATCH  /api/ideas/:ideaId               — hide an idea (active=false); also de
                                            for that track+section
 POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
 GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
-POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea
+POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea; also advances
+                                           the linked production task from todo to in-progress
+                                           via getTaskByInstrumentSection (no-op if already
+                                           in-progress, complete, or will-not-play); wrapped
+                                           in try/catch so a missing task never blocks the
+                                           clip create
 PATCH  /api/clips/:clipId               — partial update of a bucket clip; when isFinal: true,
                                            clears isFinal on all sibling bucket clips (same ideaId),
                                            marks ALL same-name timeline clips on the track as final,
@@ -1233,7 +1241,7 @@ All three PATCH routes accept an optional `author` field in `req.body`. It is de
 
 **Change comment logging (manual)**
 
-`PATCH /api/production-tasks/:id` always fetches the pre-update task (unconditional PK lookup) so it can diff every field. After `updateTask()` succeeds, three independent fire-and-forget comment blocks run:
+`PATCH /api/production-tasks/:id` always fetches the pre-update task (unconditional PK lookup) so it can diff every field. After `updateTask()` succeeds, three `await`ed `addTaskComment` calls run in sequence — one per changed field. All three complete before `res.json(task)` sends the response. This eliminates a race where the client's `onSettled` refetch of `['task-comments', task.id]` could arrive before the comment write completed — most visible on the "complete" transition specifically, because the `await storage.getUser()` call in the status block gives the event loop more time to yield before the DB write, widening the window for that particular transition. Errors propagate via Express 5's async error handling to the global handler in `server/index.ts` — there are no `.catch(console.error)` suppressors on these calls.
 
 - **Status** — if `req.body.status` differs from previous: `"Status changed to To Do"` / `"Status changed to In Progress"` / `"Status changed to Complete"` / `"Status changed to Will Not Play"`
 - **Assignee** — if `'assignee' in req.body` and value differs from previous: `"Assignee set to {name}"` or `"Assignee removed"`
@@ -1270,6 +1278,19 @@ The guard runs **before** `updateTask()` is called, so a rejected request makes 
 `ProductionTracker` subscribes to this key via a `useQuery` that fetches `/api/songs/${SONG_ID}/bucket` and derives a `finalClipsMap: Record<"${instrument}__${sectionName}", clipName>`. Complete cells in the grid show the actual final clip name from this map (falling back to `task.title`). The key is invalidated by both `BucketClip.handleToggleFinal` and `CellModal.patchTask.onSettled`, causing the grid to update instantly.
 
 `patchTask.onSettled` in `CellModal` invalidates: `['production-tasks', SONG_ID]`, `['task-comments', task.id]`, `['final-clips', 'patchbay-default']`, `['bucket', 'patchbay-default']`, and `['/api/songs/patchbay-default/timeline']` (so the timeline checkmark updates within the next poll cycle).
+
+### Clip addition → task in-progress
+
+Adding any clip — whether via bucket upload (`POST /api/ideas/:ideaId/clips`) or timeline placement (`POST /api/tracks/:trackId/clips`) — automatically advances the linked production task from `todo` to `in-progress`. Both routes call `storage.getTaskByInstrumentSection(instrument, sectionName, songId)` after the clip is created. If the task's current status is `"todo"`, they call `storage.updateTask(task.id, { status: "in-progress" })`. The transition is strictly one-directional — status is never downgraded:
+
+| Current status | Result |
+|---|---|
+| `todo` | advanced to `in-progress` |
+| `in-progress` / `complete` / `will-not-play` | no-op |
+
+Both routes wrap this logic in a `try/catch` so a task-lookup failure (e.g. no task row exists for this instrument+section) never blocks clip creation. Both client-side mutations invalidate `['production-tasks', songId]` in their `onSuccess` handler so the tracker reflects the new status immediately.
+
+This is distinct from the `isFinal ↔ task status` bidirectional sync: clip addition advances `todo → in-progress` (one-way); marking a clip final advances `in-progress → complete` (bidirectional — unmarking reverts to `in-progress`).
 
 ### Clip session notes (More Info panel) — ✅ Built
 
@@ -1759,7 +1780,7 @@ These are things that need a decision before being built:
 
 ## Known Issues
 
-None currently tracked.
+- **Production Tracker grid is not horizontally scrollable** — when a song has more instruments than fit in the visible viewport width, there is no way to scroll left/right to see the remaining columns without manually zooming the browser out. The grid container does not have `overflow-x: auto` or equivalent. Not yet investigated.
 
 ---
 
