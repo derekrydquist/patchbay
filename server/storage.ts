@@ -490,7 +490,7 @@ export class SQLiteStorage implements IStorage {
   async createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack> {
     db.insert(instrumentTracks).values(data).run();
     const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, data.id)).get()!;
-    // Create one idea per default section so the new instrument is immediately usable
+    // Create one idea and one production task per default section
     for (let i = 0; i < DEFAULT_SECTIONS.length; i++) {
       await this.createIdea({
         id: randomUUID(),
@@ -499,6 +499,16 @@ export class SQLiteStorage implements IStorage {
         sectionName: DEFAULT_SECTIONS[i],
         sortOrder: i,
       });
+      db.insert(productionTasks).values({
+        id: `task-${track.id}-${i}`,
+        songId: track.songId,
+        title: `${track.name} – ${DEFAULT_SECTIONS[i]}`,
+        instrument: track.name,
+        sectionName: DEFAULT_SECTIONS[i],
+        status: "todo",
+        priority: "medium",
+        assignee: "",
+      }).run();
     }
     return track;
   }

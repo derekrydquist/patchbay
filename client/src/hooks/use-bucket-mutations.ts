@@ -22,6 +22,7 @@ export function useAddInstrument(
     onSuccess: (track) => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       opts?.onCreated?.(track);
     },
