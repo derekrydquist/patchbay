@@ -788,6 +788,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const trimStartRef = useRef(trimStart);
   const trimEndRef = useRef(trimEnd);
   const [isHovered, setIsHovered] = useState(false);
+  const [trimEdge, setTrimEdge] = useState<'left' | 'right' | null>(null);
   const [isTrimDragging, setIsTrimDragging] = useState(false);
   const [hasDecodedBuffer, setHasDecodedBuffer] = useState(false);
   const [detectedTrim, setDetectedTrim] = useState<{ trimStart: number; trimEnd: number } | null>(null);
@@ -1079,6 +1080,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
+  const dndOnPointerDown = listeners?.onPointerDown as unknown as React.PointerEventHandler<HTMLDivElement> | undefined;
+  const { onPointerDown: _dndPD, ...restListeners } = listeners ?? {};
 
   const combinedRef = useCallback((node: HTMLDivElement | null) => {
     clipContainerRef.current = node;
@@ -1097,6 +1100,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     position: 'absolute',
     zIndex: 1,
     ...(isTrimDragging ? {} : style),
+    ...(trimEdge !== null || isTrimDragging ? { cursor: 'ew-resize' } : {}),
   };
 
   const handleMarkFinal = async () => {
@@ -1170,10 +1174,29 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           <div
             ref={combinedRef}
             style={positionStyle}
-            {...listeners}
+            {...restListeners}
             {...attributes}
+            onPointerDown={(e) => {
+              if (!isOverlay) {
+                const rect = clipContainerRef.current?.getBoundingClientRect();
+                if (rect) {
+                  const x = e.clientX - rect.left;
+                  if (x <= 8) { handleLeftTrimDrag(e); return; }
+                  if (x >= rect.width - 8) { handleRightTrimDrag(e); return; }
+                }
+              }
+              dndOnPointerDown?.(e);
+            }}
             onMouseEnter={() => setIsHovered(true)}
-            onMouseLeave={() => setIsHovered(false)}
+            onMouseLeave={() => { setIsHovered(false); setTrimEdge(null); }}
+            onMouseMove={(e) => {
+              if (isOverlay || isTrimDragging) return;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              if (x <= 8) { setTrimEdge('left'); }
+              else if (x >= rect.width - 8) { setTrimEdge('right'); }
+              else { setTrimEdge(null); }
+            }}
             className={cn(
               "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none",
               isOverlay && "shadow-2xl scale-105 opacity-90",
@@ -1204,43 +1227,6 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               }}
             />
 
-            {/* Left trim handle — at the left edge of the (already-trimmed) clip */}
-            {!isOverlay && (
-              <div
-                onPointerDown={handleLeftTrimDrag}
-                className="absolute z-20 transition-opacity"
-                style={{
-                  top: 0,
-                  left: 0,
-                  width: 8,
-                  height: '100%',
-                  opacity: isHovered ? 1 : 0,
-                  pointerEvents: isHovered ? 'auto' : 'none',
-                  cursor: 'ew-resize',
-                  background: 'rgba(212,175,55,0.9)',
-                  borderRadius: '2px',
-                }}
-              />
-            )}
-
-            {/* Right trim handle — at the right edge of the (already-trimmed) clip */}
-            {!isOverlay && (
-              <div
-                onPointerDown={handleRightTrimDrag}
-                className="absolute z-20 transition-opacity"
-                style={{
-                  top: 0,
-                  right: 0,
-                  width: 8,
-                  height: '100%',
-                  opacity: isHovered ? 1 : 0,
-                  pointerEvents: isHovered ? 'auto' : 'none',
-                  cursor: 'ew-resize',
-                  background: 'rgba(212,175,55,0.9)',
-                  borderRadius: '2px',
-                }}
-              />
-            )}
 
             <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between pointer-events-none">
               <div className="flex items-center gap-1 truncate">
@@ -1319,6 +1305,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                   'pointer-events-none absolute inset-0 rounded-md border-2 border-white/90 shadow-[0_0_12px_rgba(255,255,255,0.6)] transition-opacity duration-700 z-20',
                   isFlash ? 'opacity-100' : 'opacity-0'
                 )}
+              />
+            )}
+
+            {/* Hover glow — gold inset box-shadow; separate child div so it composites above the color fill */}
+            {isHovered && !isOverlay && (
+              <div
+                className="pointer-events-none absolute inset-0 z-20"
+                style={{ boxShadow: 'inset 0 0 0 2px rgba(212,175,55,0.9), inset 0 0 14px rgba(212,175,55,0.35)' }}
               />
             )}
           </div>
