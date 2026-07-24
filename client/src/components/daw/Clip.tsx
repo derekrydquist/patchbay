@@ -857,6 +857,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   // TODO: implement waveform caching (Option A) if performance becomes an issue
   // Fetch and decode audio — only re-runs when src changes; buffer is cached in decodedBufferRef
   useEffect(() => {
+    // TEMP DEBUG - remove after investigation
+    console.log('[TEMP] decoding audio for waveform, clip:', clip.id, 'src:', clip.src, 'isOverlay:', isOverlay);
     if (!clip.src || isOverlay) return;
 
     let cancelled = false;

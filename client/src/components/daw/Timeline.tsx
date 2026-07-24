@@ -259,6 +259,9 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 }
 
 export function Timeline({ songId }: { songId: string }) {
+  // TEMP DEBUG - remove after investigation
+  console.log('[TEMP] Timeline component function body executing', Date.now());
+
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -427,9 +430,13 @@ export function Timeline({ songId }: { songId: string }) {
   }, [activeDragData, tracks, sectionLayout, zoom]);
 
   useEffect(() => {
+    // TEMP DEBUG - remove after investigation
+    console.log('[TEMP] audio pre-create effect running, tracks count:', tracks?.length);
     tracks.forEach((track) => {
       track.clips.forEach((clip) => {
         if (clip.src && !customAudioRefs.current[clip.id]) {
+          // TEMP DEBUG - remove after investigation
+          console.log('[TEMP] creating audio element for clip:', clip.id, clip.src);
           const audio = new Audio(clip.src);
           audio.preload = 'auto';
           customAudioRefs.current[clip.id] = audio;
