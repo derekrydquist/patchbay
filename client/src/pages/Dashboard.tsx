@@ -621,16 +621,11 @@ export default function Dashboard() {
     });
 
   const createSong = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (vars: { name: string; bpm: number | null; sections: string[]; instruments: string[] }) => {
       const res = await fetch('/api/songs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newName.trim(),
-          bpm: newBpm ? parseInt(newBpm, 10) : null,
-          sections: newSections.length > 0 ? newSections : (settings?.defaultSections ?? DEFAULT_SECTIONS),
-          instruments: newInstruments.length > 0 ? newInstruments : (settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS),
-        }),
+        body: JSON.stringify(vars),
       });
       if (!res.ok) throw new Error('Failed to create song');
       return res.json() as Promise<Song>;
@@ -1187,7 +1182,12 @@ export default function Dashboard() {
   const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newName.trim()) return;
-    createSong.mutate();
+    createSong.mutate({
+      name: newName.trim(),
+      bpm: newBpm ? parseInt(newBpm, 10) : null,
+      sections: newSections.length > 0 ? newSections : (settings?.defaultSections ?? DEFAULT_SECTIONS),
+      instruments: newInstruments.length > 0 ? newInstruments : (settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS),
+    });
   };
 
   return (
