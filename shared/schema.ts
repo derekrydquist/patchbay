@@ -60,6 +60,7 @@ export const instrumentTracks = sqliteTable("instrument_tracks", {
   color: text("color"),
   sortOrder: integer("sort_order").notNull().default(0),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
+  volume: integer("volume").notNull().default(100),
 });
 
 export const insertInstrumentTrackSchema = createInsertSchema(instrumentTracks);

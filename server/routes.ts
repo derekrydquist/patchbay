@@ -423,6 +423,20 @@ export async function registerRoutes(
     res.status(200).json({ ok: true });
   });
 
+  app.patch("/api/tracks/:trackId", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    const { volume } = req.body as { volume?: unknown };
+    if (volume === undefined) return res.status(400).json({ message: "No updates provided" });
+    if (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0 || volume > 100) {
+      return res.status(400).json({ message: "volume must be a number between 0 and 100" });
+    }
+    const track = await storage.updateTrack(trackId, { volume: Math.round(volume) });
+    if (!track) return res.status(404).json({ message: "Track not found" });
+    res.json(track);
+  });
+
   app.get("/api/songs/:songId/hidden-tracks", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;

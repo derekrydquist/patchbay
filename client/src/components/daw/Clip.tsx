@@ -1187,6 +1187,11 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               }
               dndOnPointerDown?.(e);
             }}
+            onClick={() => {
+              if (!isOverlay) {
+                window.dispatchEvent(new CustomEvent('timeline-clip-selected', { detail: { clipId: clip.id, trackId } }));
+              }
+            }}
             onMouseEnter={() => setIsHovered(true)}
             onMouseLeave={() => { setIsHovered(false); setTrimEdge(null); }}
             onMouseMove={(e) => {

@@ -50,6 +50,7 @@ type ApiTrack = {
   color: string | null;
   sortOrder: number;
   songId: string;
+  volume: number;
   timelineClips: {
     id: string;
     name: string;
@@ -149,7 +150,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
     id: t.id,
     name: t.name,
     type: t.type as Track['type'],
-    volume: 80,
+    volume: t.volume ?? 100,
     pan: 0,
     muted: false,
     solo: false,
@@ -300,7 +301,7 @@ export function Timeline({ songId }: { songId: string }) {
   }, [apiTracks]);
 
   // Merge track additions, removals, and clip changes after initial load.
-  // Preserves local mute/solo/volume state for existing tracks.
+  // Trusts server for volume; preserves local mute/solo state for existing tracks.
   useEffect(() => {
     if (!apiTracks || !tracksInitialized.current) return;
     setTracks(prev => {
@@ -329,7 +330,7 @@ export function Timeline({ songId }: { songId: string }) {
             trimEnd: te,
           };
         });
-        return { ...track, clips: freshClips };
+        return { ...track, clips: freshClips, volume: apiTrack.volume ?? 100 };
       });
 
       const newTracks = apiTracks
@@ -338,7 +339,7 @@ export function Timeline({ songId }: { songId: string }) {
           id: t.id,
           name: t.name,
           type: t.type as Track['type'],
-          volume: 80,
+          volume: t.volume ?? 100,
           pan: 0,
           muted: false,
           solo: false,
@@ -377,9 +378,14 @@ export function Timeline({ songId }: { songId: string }) {
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
   const [zoom, setZoom] = useState(80);
   const [isLooping, setIsLooping] = useState(false);
+  const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
+  const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
 
   const animationRef = React.useRef<number | null>(null);
   const lastTimeRef = React.useRef<number | null>(null);
+  const volumePatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const uiRestored = React.useRef(false);
+  const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
@@ -505,6 +511,93 @@ export function Timeline({ songId }: { songId: string }) {
     window.addEventListener('song-updated', handleSongUpdated);
     return () => window.removeEventListener('song-updated', handleSongUpdated);
   }, []);
+
+  // One-shot restore: reads all localStorage keys and seeds local state.
+  // Must be declared BEFORE the mute/solo persist effect so it runs first
+  // on the same [tracks, songId] dependency cycle.
+  useEffect(() => {
+    if (uiRestored.current) return;
+    if (tracks.length === 0) return;
+
+    // Set to true BEFORE any state updates so the persist effects below
+    // see true when they fire in the same commit cycle.
+    uiRestored.current = true;
+
+    // Mute / solo
+    try {
+      const mutedJson = localStorage.getItem(`patchbay-track-muted-${songId}`);
+      const soloJson = localStorage.getItem(`patchbay-track-solo-${songId}`);
+      if (mutedJson || soloJson) {
+        const mutedMap: Record<string, boolean> = mutedJson ? JSON.parse(mutedJson) : {};
+        const soloMap: Record<string, boolean> = soloJson ? JSON.parse(soloJson) : {};
+        setTracks((prev) =>
+          prev.map((t) => ({
+            ...t,
+            muted: mutedMap[t.id] ?? t.muted,
+            solo: soloMap[t.id] ?? t.solo,
+          }))
+        );
+      }
+    } catch {}
+
+    // Zoom
+    const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
+    if (savedZoom) {
+      const z = Number(savedZoom);
+      if (z >= 20 && z <= 400) setZoom(z);
+    }
+
+    // Scroll — deferred one frame so the content has rendered at the new zoom
+    const savedScroll = localStorage.getItem(`patchbay-scroll-${songId}`);
+    if (savedScroll) {
+      const s = Number(savedScroll);
+      requestAnimationFrame(() => {
+        if (timelineRef.current) timelineRef.current.scrollLeft = s;
+      });
+    }
+
+    // Selection
+    const savedTrackId = localStorage.getItem(`patchbay-selected-timeline-track-${songId}`);
+    const savedClipId = localStorage.getItem(`patchbay-selected-timeline-clip-${songId}`);
+    if (savedTrackId) setSelectedTimelineTrackId(savedTrackId);
+    if (savedClipId) setSelectedTimelineClipId(savedClipId);
+  }, [tracks, songId]);
+
+  // Mute / solo persist — guarded by uiRestored so initial render doesn't overwrite saved values.
+  useEffect(() => {
+    if (!uiRestored.current) return;
+    const mutedMap: Record<string, boolean> = {};
+    const soloMap: Record<string, boolean> = {};
+    tracks.forEach((t) => {
+      mutedMap[t.id] = t.muted;
+      soloMap[t.id] = t.solo;
+    });
+    localStorage.setItem(`patchbay-track-muted-${songId}`, JSON.stringify(mutedMap));
+    localStorage.setItem(`patchbay-track-solo-${songId}`, JSON.stringify(soloMap));
+  }, [tracks, songId]);
+
+  // Zoom persist — guarded by uiRestored so the initial useState(80) doesn't overwrite a saved value.
+  useEffect(() => {
+    if (!uiRestored.current) return;
+    localStorage.setItem(`patchbay-zoom-${songId}`, String(zoom));
+  }, [zoom, songId]);
+
+  // Scroll persist — DOM listener so we don't need to lift scrollLeft into React state.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+      scrollSaveTimer.current = setTimeout(() => {
+        localStorage.setItem(`patchbay-scroll-${songId}`, String(el.scrollLeft));
+      }, 200);
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      el.removeEventListener('scroll', handleScroll);
+      if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
+    };
+  }, [songId]);
 
   const checkAudioMuteState = React.useCallback(
     (pos: number) => {
@@ -668,9 +761,18 @@ export function Timeline({ songId }: { songId: string }) {
       });
     };
     const handleUpdateVolume = (e: any) => {
+      const { trackId, volume } = e.detail as { trackId: string; volume: number };
       setTracks((prev) =>
-        prev.map((t) => (t.id === e.detail.trackId ? { ...t, volume: e.detail.volume } : t))
+        prev.map((t) => (t.id === trackId ? { ...t, volume } : t))
       );
+      clearTimeout(volumePatchTimers.current[trackId]);
+      volumePatchTimers.current[trackId] = setTimeout(() => {
+        fetch(`/api/tracks/${trackId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ volume }),
+        }).catch((err) => console.error('Failed to persist track volume:', err));
+      }, 500);
     };
     const handleReplaceClip = (e: any) => {
       const { oldClipId, newClip } = e.detail;
@@ -724,17 +826,36 @@ export function Timeline({ songId }: { songId: string }) {
       });
     };
 
+    const handleTrackSelected = (e: any) => {
+      const { trackId } = e.detail;
+      setSelectedTimelineTrackId(trackId);
+      setSelectedTimelineClipId(null);
+      localStorage.setItem(`patchbay-selected-timeline-track-${songId}`, trackId);
+      localStorage.removeItem(`patchbay-selected-timeline-clip-${songId}`);
+    };
+    const handleClipSelected = (e: any) => {
+      const { clipId, trackId: tid } = e.detail;
+      setSelectedTimelineClipId(clipId);
+      setSelectedTimelineTrackId(tid ?? null);
+      localStorage.setItem(`patchbay-selected-timeline-clip-${songId}`, clipId);
+      if (tid) localStorage.setItem(`patchbay-selected-timeline-track-${songId}`, tid);
+    };
+
     window.addEventListener('toggle-track-mute', handleToggleMute);
     window.addEventListener('toggle-track-solo', handleToggleSolo);
     window.addEventListener('update-track-volume', handleUpdateVolume);
     window.addEventListener('replace-clip', handleReplaceClip);
     window.addEventListener('remove-clip', handleRemoveClip);
+    window.addEventListener('timeline-track-selected', handleTrackSelected);
+    window.addEventListener('timeline-clip-selected', handleClipSelected);
     return () => {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
       window.removeEventListener('update-track-volume', handleUpdateVolume);
       window.removeEventListener('replace-clip', handleReplaceClip);
       window.removeEventListener('remove-clip', handleRemoveClip);
+      window.removeEventListener('timeline-track-selected', handleTrackSelected);
+      window.removeEventListener('timeline-clip-selected', handleClipSelected);
     };
   }, []);
 

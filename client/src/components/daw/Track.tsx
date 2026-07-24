@@ -136,7 +136,12 @@ export function TimelineTrack({
       {/* Track Header */}
       <ContextMenu>
       <ContextMenuTrigger asChild>
-      <div className="w-64 shrink-0 bg-card border-r border-b border-border px-3 flex items-center gap-3 sticky left-0 z-50">
+      <div
+        className="w-64 shrink-0 bg-card border-r border-b border-border px-3 flex items-center gap-3 sticky left-0 z-50"
+        onClick={() =>
+          window.dispatchEvent(new CustomEvent('timeline-track-selected', { detail: { trackId: track.id } }))
+        }
+      >
         <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
 
         <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">

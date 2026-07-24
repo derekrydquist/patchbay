@@ -1,14 +1,30 @@
 import React from 'react';
 import { Play, Square, SkipBack, SkipForward, Repeat, Volume2 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
-import { MOCK_SONG } from '@/lib/daw-data';
 import { ExportDialog } from './ExportDialog';
 
 export function Transport({ songId = 'patchbay-default' }: { songId?: string }) {
-  const [bpm, setBpm] = React.useState(MOCK_SONG.bpm || 120);
-  const [bpmInput, setBpmInput] = React.useState(String(bpm));
+  const { data: songData } = useQuery<{ bpm?: number | null }>({
+    queryKey: ['song', songId],
+    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
+  });
+
+  const [bpm, setBpm] = React.useState<number | null>(null);
+  const [bpmInput, setBpmInput] = React.useState('');
+  const bpmInitialized = React.useRef(false);
+
+  React.useEffect(() => {
+    if (!bpmInitialized.current && songData != null) {
+      bpmInitialized.current = true;
+      if (songData.bpm != null) {
+        setBpm(songData.bpm);
+        setBpmInput(String(songData.bpm));
+      }
+    }
+  }, [songData]);
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isLooping, setIsLooping] = React.useState(false);
   const [currentTime, setCurrentTime] = React.useState(0);
@@ -25,7 +41,7 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
   const commitBpm = () => {
     let newBpm = parseInt(bpmInput);
     if (isNaN(newBpm)) {
-      setBpmInput(String(bpm));
+      setBpmInput(bpm !== null ? String(bpm) : '');
       return;
     }
     if (newBpm < 20) newBpm = 20;
@@ -33,6 +49,11 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
     setBpm(newBpm);
     setBpmInput(String(newBpm));
     window.dispatchEvent(new CustomEvent('update-bpm', { detail: { bpm: newBpm } }));
+    fetch(`/api/songs/${songId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bpm: newBpm }),
+    }).catch((err) => console.error('Failed to persist BPM:', err));
   };
 
   const handleBpmKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -114,7 +135,8 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
             onChange={(e) => setBpmInput(e.target.value)}
             onBlur={commitBpm}
             onKeyDown={handleBpmKeyDown}
-            className="text-xl font-mono text-foreground bg-transparent border-none outline-none w-16 p-0 hover:bg-white/5 focus:bg-white/10 rounded transition-colors text-center"
+            disabled={songData == null}
+            className="text-xl font-mono text-foreground bg-transparent border-none outline-none w-16 p-0 hover:bg-white/5 focus:bg-white/10 rounded transition-colors text-center disabled:opacity-40 disabled:cursor-default"
           />
         </div>
         <div className="flex flex-col">
