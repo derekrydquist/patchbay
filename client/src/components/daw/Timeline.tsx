@@ -489,6 +489,19 @@ export function Timeline({ songId }: { songId: string }) {
     }
   }, [isPlaying]);
 
+  // Stop all audio on unmount so navigating away (back button, nav links, etc.) doesn't
+  // leave audio playing. Refs are read at unmount time so this always sees current values.
+  useEffect(() => {
+    return () => {
+      Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
+      pendingPlayRef.current.clear();
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close();
+        audioCtxRef.current = null;
+      }
+    };
+  }, []);
+
   useEffect(() => {
     const handleBpmUpdated = (e: any) => setBpm(e.detail.bpm);
     window.addEventListener('update-bpm', handleBpmUpdated);
