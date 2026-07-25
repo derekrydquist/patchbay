@@ -1173,7 +1173,7 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 
 ### Timeline — session persistence
 
-`Timeline.tsx` uses the same one-shot localStorage pattern as MediaBucket for all client-only UI state. A `uiRestored` ref (initialized `false`) guards a restore `useEffect([tracks, songId])` that fires once when tracks first become non-empty. The ref is set to `true` at the top of the restore body (before any state updates) so the persist effects in the same render cycle already see it as true. The persist effects check `if (!uiRestored.current) return` to avoid writing the initial React defaults before the restore runs.
+`Timeline.tsx` uses localStorage for all client-only UI state. A `uiRestored` ref (initialized `false`) guards the full restore path — a one-shot `useLayoutEffect([tracks, songId])` that fires when tracks first become non-empty. The ref is set to `true` at the top of the restore body (before any state updates) so the persist effects in the same render cycle already see it as true. The persist effects check `if (!uiRestored.current) return` to avoid writing the initial React defaults before the restore runs.
 
 **Keys (all scoped per songId):**
 
@@ -1183,16 +1183,21 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 | `patchbay-track-solo-${songId}` | JSON `Record<trackId, boolean>` | Per-track solo state |
 | `patchbay-zoom-${songId}` | number string | Pixels-per-second zoom level |
 | `patchbay-scroll-${songId}` | number string | `scrollLeft` of the timeline scroller (debounced 200ms via DOM listener) |
+| `patchbay-playhead-${songId}` | number string | Playhead position as **time in seconds** (not pixels — pixel position is zoom-dependent; converted to pixels on restore using the already-restored zoom value) |
 | `patchbay-selected-timeline-track-${songId}` | string | ID of the last clicked track header |
 | `patchbay-selected-timeline-clip-${songId}` | string | ID of the last clicked timeline clip |
 
-**Restore ordering:** The restore effect is declared before the muted/solo persist effect in the component body. React runs effects in declaration order, so when `tracks` first becomes non-empty the restore runs first and sets `uiRestored.current = true`. The persist effect fires second with the ref already true but with pre-restore `tracks` (the queued `setTracks` hasn't resolved yet) — this writes a transient value that gets immediately overwritten when the next render fires with the restored state. The net result is correct.
+**Restore ordering:** `zoom` and `playheadPositionState` are restored via **lazy `useState` initializers** (`useState(() => localStorage.getItem(...))`), not via the `useLayoutEffect` restore. This means the correct values are the initial values — they exist before the first render, so no wrong value is ever painted by construction. The `useLayoutEffect` restore still re-sets them when tracks arrive (idempotent; React bails out of the state update if the value hasn't changed). Mute/solo, scroll, and selection ARE still handled by the `useLayoutEffect` restore because they depend on tracks being loaded (mute/solo need track IDs; scroll uses `requestAnimationFrame` to wait for the content to render at the restored zoom width). The restore is declared before the muted/solo persist effect so it runs first in the same effect-flush cycle.
+
+**`patchbay-playhead` persist** — the persist effect fires on `playheadPositionState`, `isPlaying`, `songId`, and `zoom` changes, but is gated on `isPlaying === false`: when audio is playing the effect clears any pending write and returns immediately (no write attempted, not just debounced). A 200ms debounce on writes matches the scroll persist pattern. This means refreshing the page mid-playback intentionally falls back to the last paused or scrubbed position, not the live position — this is expected behavior, not a bug.
+
+**Lazy-init as the preferred pattern for first-paint state** — a `useEffect` or even `useLayoutEffect` that corrects state after mount still means the component's first render used the wrong default. With React Query's cache, `apiTracks` can be immediately available but `tracks` (separate `useState`) always starts empty, so the first render always happens with the default values before the restore logic runs. Any state that must be visually correct on the very first paint should be lazy-initialized directly from its persisted source, not corrected by a post-mount effect. The BPM input flash was worked around with a `disabled` gate — lazy init is the cleaner, more general solution. Apply it whenever this bug class (flash-default-then-jump) appears for other persisted values.
 
 **Scroll restore** is deferred via `requestAnimationFrame` so the content has rendered at the restored zoom level before `scrollLeft` is set — otherwise the scroller may not be wide enough to reach the saved position.
 
 **Source of truth summary:**
 - **DB-backed (shared across the band):** `songs.bpm`, `instrument_tracks.volume`
-- **localStorage-backed (per-browser, not shared):** mute, solo, zoom, scroll, selected track, selected clip
+- **localStorage-backed (per-browser, not shared):** mute, solo, zoom, scroll, playhead position, selected track, selected clip
 
 **Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
 
@@ -1806,6 +1811,7 @@ These are things that need a decision before being built:
 
 - **Production Tracker grid is not horizontally scrollable** — when a song has more instruments than fit in the visible viewport width, there is no way to scroll left/right to see the remaining columns without manually zooming the browser out. The grid container does not have `overflow-x: auto` or equivalent. Not yet investigated.
 - **Timeline selection state has no visual indicator yet** — `selectedTimelineTrackId` and `selectedTimelineClipId` are wired up, persisted to localStorage, and restored on mount. They are not dead code — they are intended to be consumed by future Timeline keyboard shortcuts (delete selected clip, nudge, navigate between clips, etc.). No visual highlight on the selected track/clip has been added yet.
+- **Small stutter on pressing play** — pre-existing; cause not yet investigated. Unrelated to the session-state persistence work.
 
 ---
 

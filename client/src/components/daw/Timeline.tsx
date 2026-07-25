@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
@@ -365,8 +365,19 @@ export function Timeline({ songId }: { songId: string }) {
   }, [tracks]);
 
   const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
-  const [playheadPositionState, setPlayheadPositionState] = useState(256);
-  const playheadRef = React.useRef(256);
+  const [playheadPositionState, setPlayheadPositionState] = useState(() => {
+    const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
+    const z = savedZoom ? Number(savedZoom) : 80;
+    const effectiveZoom = (z >= 20 && z <= 400) ? z : 80;
+    const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
+    if (savedPlayhead) {
+      const t = Number(savedPlayhead);
+      if (t >= 0 && isFinite(t)) return 256 + t * effectiveZoom;
+    }
+    return 256;
+  });
+  // Initialize ref to match the lazy-initialized state so they're in sync from the first render.
+  const playheadRef = React.useRef(playheadPositionState);
   const [isPlaying, setIsPlaying] = useState(false);
 
   const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
@@ -380,7 +391,11 @@ export function Timeline({ songId }: { songId: string }) {
 
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
-  const [zoom, setZoom] = useState(80);
+  const [zoom, setZoom] = useState(() => {
+    const saved = localStorage.getItem(`patchbay-zoom-${songId}`);
+    if (saved) { const z = Number(saved); if (z >= 20 && z <= 400) return z; }
+    return 80;
+  });
   const [isLooping, setIsLooping] = useState(false);
   const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
@@ -390,6 +405,7 @@ export function Timeline({ songId }: { songId: string }) {
   const volumePatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const uiRestored = React.useRef(false);
   const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playheadSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
@@ -534,7 +550,9 @@ export function Timeline({ songId }: { songId: string }) {
   // One-shot restore: reads all localStorage keys and seeds local state.
   // Must be declared BEFORE the mute/solo persist effect so it runs first
   // on the same [tracks, songId] dependency cycle.
-  useEffect(() => {
+  // useLayoutEffect (not useEffect) so state is committed before the browser paints —
+  // prevents the flash of default playhead/zoom before restored values appear.
+  useLayoutEffect(() => {
     if (uiRestored.current) return;
     if (tracks.length === 0) return;
 
@@ -561,9 +579,10 @@ export function Timeline({ songId }: { songId: string }) {
 
     // Zoom
     const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
+    let effectiveZoom = zoom; // used below for playhead pixel conversion
     if (savedZoom) {
       const z = Number(savedZoom);
-      if (z >= 20 && z <= 400) setZoom(z);
+      if (z >= 20 && z <= 400) { setZoom(z); effectiveZoom = z; }
     }
 
     // Scroll — deferred one frame so the content has rendered at the new zoom
@@ -573,6 +592,13 @@ export function Timeline({ songId }: { songId: string }) {
       requestAnimationFrame(() => {
         if (timelineRef.current) timelineRef.current.scrollLeft = s;
       });
+    }
+
+    // Playhead — stored as time in seconds so it's zoom-independent; convert back to pixels
+    const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
+    if (savedPlayhead) {
+      const t = Number(savedPlayhead);
+      if (t >= 0 && isFinite(t)) setPlayheadPosition(256 + t * effectiveZoom);
     }
 
     // Selection
@@ -600,6 +626,23 @@ export function Timeline({ songId }: { songId: string }) {
     if (!uiRestored.current) return;
     localStorage.setItem(`patchbay-zoom-${songId}`, String(zoom));
   }, [zoom, songId]);
+
+  // Playhead persist — stores time in seconds (not pixels) so zoom changes don't corrupt the value.
+  // Debounced 200ms. During playback, clears any pending write and returns early so the rAF loop
+  // doesn't cause 60 localStorage writes per second; the final position is captured when isPlaying
+  // transitions to false.
+  useEffect(() => {
+    if (!uiRestored.current) return;
+    if (isPlaying) {
+      if (playheadSaveTimer.current) clearTimeout(playheadSaveTimer.current);
+      return;
+    }
+    if (playheadSaveTimer.current) clearTimeout(playheadSaveTimer.current);
+    playheadSaveTimer.current = setTimeout(() => {
+      const t = Math.max(0, (playheadPositionState - 256) / zoom);
+      localStorage.setItem(`patchbay-playhead-${songId}`, String(t));
+    }, 200);
+  }, [playheadPositionState, isPlaying, songId, zoom]);
 
   // Scroll persist — DOM listener so we don't need to lift scrollLeft into React state.
   useEffect(() => {
