@@ -15,7 +15,7 @@ import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte, like, inArray } from "drizzle-orm";
 import { db } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS } from "./storage";
 import {
@@ -196,6 +196,59 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   app.use(enrichSessionBand);
+
+  // TEMP DEBUG ROUTE - remove after investigation
+  app.get("/api/debug/song-check", async (req, res) => {
+    const nameParam = (req.query.name as string | undefined)?.trim();
+    if (!nameParam) {
+      return res.status(400).json({ message: "Missing 'name' query parameter." });
+    }
+
+    // LIKE is case-insensitive in SQLite for ASCII characters
+    const matched = db.select().from(songs).where(like(songs.name, `%${nameParam}%`)).all();
+
+    if (matched.length === 0) {
+      const allSongs = db.select({ id: songs.id, name: songs.name, type: songs.type }).from(songs).all();
+      return res.json({
+        found: false,
+        searchedFor: nameParam,
+        message: `No song matched "${nameParam}"`,
+        allSongsInDb: allSongs,
+      });
+    }
+
+    const results = matched.map(song => {
+      const trackRows = db.select({ id: instrumentTracks.id }).from(instrumentTracks)
+        .where(eq(instrumentTracks.songId, song.id)).all();
+      const trackIds = trackRows.map(t => t.id);
+
+      const timelineClipCount = trackIds.length > 0
+        ? (db.select({ c: count() }).from(timelineClips).where(inArray(timelineClips.trackId, trackIds)).get()?.c ?? 0)
+        : 0;
+
+      const ideaRows = trackIds.length > 0
+        ? db.select({ id: ideas.id }).from(ideas).where(inArray(ideas.trackId, trackIds)).all()
+        : [];
+      const ideaIds = ideaRows.map(i => i.id);
+
+      const bucketClipCount = ideaIds.length > 0
+        ? (db.select({ c: count() }).from(clips).where(inArray(clips.ideaId, ideaIds)).get()?.c ?? 0)
+        : 0;
+
+      return {
+        id: song.id,
+        name: song.name,
+        type: song.type,
+        bandId: song.bandId,
+        createdAt: song.createdAt,
+        trackCount: trackIds.length,
+        timelineClipCount,
+        bucketClipCount,
+      };
+    });
+
+    return res.json({ found: true, searchedFor: nameParam, matchCount: results.length, matches: results });
+  });
 
   // ─── Users ──────────────────────────────────────────────────────────────────
 
