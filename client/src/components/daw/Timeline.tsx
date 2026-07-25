@@ -300,6 +300,10 @@ export function Timeline({ songId }: { songId: string }) {
       setTracks(converted);
       setSectionOrder(initialSectionOrder);
       tracksInitialized.current = true;
+      const durationMs = Math.round(performance.now() - mountTimeRef.current);
+      if (durationMs > 2000) {
+        console.warn('[SLOW LOAD]', { durationMs, songId, timestamp: new Date().toISOString() });
+      }
     }
   }, [apiTracks]);
 
@@ -394,6 +398,8 @@ export function Timeline({ songId }: { songId: string }) {
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
+  // Captured at first render; compared against when tracks first arrive to detect slow loads.
+  const mountTimeRef = useRef(performance.now());
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
