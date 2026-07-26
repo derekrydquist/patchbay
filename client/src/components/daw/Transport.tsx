@@ -38,6 +38,12 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
     return () => window.removeEventListener('update-bpm', handleUpdateBpm);
   }, []);
 
+  React.useEffect(() => {
+    const handlePlaybackEnded = () => setIsPlaying(false);
+    window.addEventListener('playback-ended', handlePlaybackEnded);
+    return () => window.removeEventListener('playback-ended', handlePlaybackEnded);
+  }, []);
+
   const commitBpm = () => {
     let newBpm = parseInt(bpmInput);
     if (isNaN(newBpm)) {

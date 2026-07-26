@@ -751,6 +751,24 @@ export function Timeline({ songId }: { songId: string }) {
           const delta = time - lastTimeRef.current;
           const pixelDelta = (delta / 1000) * zoom;
 
+          // Auto-stop: re-derive end of timeline each frame so live clip/section edits during
+          // playback are reflected without waiting for the useEffect to re-run.
+          const frameLayout = computeSectionLayout(tracks, sectionOrder);
+          const timelineEndPx = frameLayout.length > 0
+            ? 256 + (frameLayout[frameLayout.length - 1].start + frameLayout[frameLayout.length - 1].duration) * zoom
+            : 256;
+          if (playheadRef.current + pixelDelta >= timelineEndPx) {
+            setPlayheadPosition(timelineEndPx);
+            Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
+            pendingPlayRef.current.clear();
+            audioCtxRef.current?.close();
+            audioCtxRef.current = null;
+            setIsPlaying(false);
+            window.dispatchEvent(new CustomEvent('playback-ended'));
+            lastTimeRef.current = time;
+            return;
+          }
+
           // Advance playhead — pure position computation + audio scheduling only, no scroll side effects.
           setPlayheadPosition((prev) => {
             const newPos = prev + pixelDelta;

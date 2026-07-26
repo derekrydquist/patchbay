@@ -1023,6 +1023,17 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
 - Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadPosition` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
 
+**Auto-stop at end of timeline:**
+Each frame, `animate` re-derives `timelineEndPx` fresh from `computeSectionLayout(tracks, sectionOrder)`: `256 + (lastSection.start + lastSection.duration) * zoom`. Zero sections → `timelineEndPx = 256` (time 0). This is intentionally re-derived every frame, not cached at play-start, so edits to tracks/sections mid-playback are respected.
+
+If the playhead's pixel position reaches or passes `timelineEndPx` on a given frame: the playhead is clamped to exactly `timelineEndPx` (frames advance in discrete jumps, so the raw computed position will usually overshoot slightly before the check catches it), the existing manual stop sequence is invoked (pause all audios, clear `pendingPlayRef`, close + null `audioCtxRef`, `isPlaying` → `false`), and the rest of that frame's per-clip play/pause logic is skipped.
+
+**Do not:** compute `timelineEndPx` once and reuse it across the play session — always re-derive per frame. Do not write a second/parallel stop implementation — this must call into the same stop path manual pause uses.
+
+**Transport button sync (`playback-ended` event):** Transport.tsx and Timeline.tsx hold independent `isPlaying` state with no shared props or context. Transport dispatches `toggle-play` on button/spacebar (one-way, Transport → Timeline). Because auto-stop originates in Timeline.tsx (not via a `toggle-play` dispatch), a second one-way event was added: Timeline's auto-stop block dispatches `playback-ended` immediately after its own `setIsPlaying(false)`; Transport listens for it and calls its own local `setIsPlaying(false)` to un-stick the button.
+
+**Do not:** have Transport dispatch `playback-ended`, or have Timeline listen for it — this must stay strictly one-way (Timeline → Transport) to avoid a dispatch loop. The manual pause/stop path (originating from Transport's own `toggle-play`) does not dispatch `playback-ended` — only the auto-stop block does, since Transport already knows its own state in the manual case.
+
 **Auto-scroll during playback — edge-riding:**
 
 Two approaches were tried and rejected before the current model was built:
