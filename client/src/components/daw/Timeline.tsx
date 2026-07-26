@@ -258,6 +258,7 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
   );
 }
 
+
 export function Timeline({ songId }: { songId: string }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -402,10 +403,16 @@ export function Timeline({ songId }: { songId: string }) {
 
   const animationRef = React.useRef<number | null>(null);
   const lastTimeRef = React.useRef<number | null>(null);
+  // Last scrollLeft value edge-riding itself wrote — used to detect manual scroll.
+  const lastAutoScrollRef = React.useRef<number | null>(null);
+  // Whether edge-riding is currently engaged. Disengaged by any manual scroll;
+  // re-engaged only when the playhead is visible in the viewport again.
+  const isFollowingRef = React.useRef<boolean>(true);
   const volumePatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const uiRestored = React.useRef(false);
   const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const playheadSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
@@ -721,15 +728,32 @@ export function Timeline({ songId }: { songId: string }) {
 
   useEffect(() => {
     if (isPlaying) {
+      // On fresh play: if the playhead is not currently visible, snap it to the center of the
+      // viewport (50%). This is distinct from the edge-riding boundary (88%) — the snap gives
+      // comfortable context on both sides; edge-riding only kicks in once the playhead reaches 88%.
+      // Seed both tracking refs so the first rAF frame doesn't misread the snap as a manual scroll.
+      const elOnPlay = timelineRef.current;
+      if (elOnPlay) {
+        const pos = playheadRef.current;
+        const sl = elOnPlay.scrollLeft;
+        const cw = elOnPlay.clientWidth;
+        if (pos < sl || pos > sl + cw) {
+          elOnPlay.scrollLeft = Math.max(0, Math.min(pos - cw * 0.5, elOnPlay.scrollWidth - cw));
+        }
+        lastAutoScrollRef.current = elOnPlay.scrollLeft;
+        isFollowingRef.current = true;
+      }
+
       if (!lastTimeRef.current) lastTimeRef.current = performance.now();
 
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
-          const pixelsPerSecond = zoom;
+          const pixelDelta = (delta / 1000) * zoom;
 
+          // Advance playhead — pure position computation + audio scheduling only, no scroll side effects.
           setPlayheadPosition((prev) => {
-            const newPos = prev + (delta / 1000) * pixelsPerSecond;
+            const newPos = prev + pixelDelta;
             const prevTime = (prev - 256) / zoom;
             const playheadTime = (newPos - 256) / zoom;
 
@@ -789,9 +813,50 @@ export function Timeline({ songId }: { songId: string }) {
                 }
               }
             }
+
             window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadTime } }));
             return newPos;
           });
+
+          // Edge-riding scroll: runs once per frame, after setPlayheadPosition has updated playheadRef.
+          //
+          // Two-state model:
+          //   ENGAGED (isFollowingRef = true): auto-scroll is active. Any manual scroll (detected
+          //     via el.scrollLeft diverging from lastAutoScrollRef by >1px) immediately disengages.
+          //   DISENGAGED (isFollowingRef = false): el.scrollLeft is never touched. Re-engagement
+          //     requires only that the playhead is currently visible in the viewport.
+          //
+          // Once engaged, the 88% boundary gates whether to actually write scrollLeft — but
+          // visibility alone is what controls the engaged/disengaged state.
+          const el = timelineRef.current;
+          if (el) {
+            const pos = playheadRef.current; // fresh: setPlayheadPosition syncs this synchronously
+            const cw = el.clientWidth;
+            const sl = el.scrollLeft;
+
+            if (isFollowingRef.current) {
+              // Detect manual scroll: el.scrollLeft moved without us writing it.
+              const lastAuto = lastAutoScrollRef.current;
+              if (lastAuto !== null && Math.abs(sl - lastAuto) > 1) {
+                isFollowingRef.current = false;
+                // Fall through to re-engagement check below (same frame).
+              }
+            }
+
+            if (!isFollowingRef.current) {
+              // Re-engage as soon as the playhead is visible anywhere in the viewport.
+              if (pos >= sl && pos <= sl + cw) {
+                isFollowingRef.current = true;
+                lastAutoScrollRef.current = sl; // baseline for next frame's manual-scroll detection
+              }
+            }
+
+            if (isFollowingRef.current && pos >= sl + cw * 0.88) {
+              const newScrollLeft = Math.max(0, Math.min(pos - cw * 0.88, el.scrollWidth - cw));
+              el.scrollLeft = newScrollLeft;
+              lastAutoScrollRef.current = newScrollLeft;
+            }
+          }
         }
         lastTimeRef.current = time;
         animationRef.current = requestAnimationFrame(animate);

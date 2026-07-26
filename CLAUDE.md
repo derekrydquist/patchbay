@@ -1021,6 +1021,34 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Create a new `AudioContext` per clip or per play call — one persistent `audioCtxRef` per play session is correct.
 - Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
 - Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
+- Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadPosition` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
+
+**Auto-scroll during playback — edge-riding:**
+
+Two approaches were tried and rejected before the current model was built:
+- **Page-turning** (scroll by one viewport width when the playhead hits the right edge): caused a stale-closure tween bug where the tween start position was captured from an already-outdated ref, producing overshoot. Discarded.
+- **Naive continuous centering** (keep playhead at 50% every frame): fights any manual scroll attempt the way Premiere Pro's scroll-follows-playhead does, which users find disorienting. Discarded.
+
+The current model is **edge-riding**: once the playhead enters the last 12% of the viewport ("edge zone"), `scrollLeft` is derived each frame directly from the playhead's authoritative float position — `scrollLeft = playheadRef.current − cw * 0.88`, clamped to `[0, scrollWidth − clientWidth]`. This keeps the playhead pinned at the 88% boundary with zero drift.
+
+**Why direct derivation, not accumulation (`scrollLeft += pixelDelta`):**
+Accumulating `scrollLeft` independently from `playheadRef.current` drifts apart over time. `el.scrollLeft` is a DOM property quantized to integer CSS pixels on 1× displays (or 0.5px on Retina). At zoom = 80 and 60fps, `pixelDelta ≈ 1.333px/frame` — `scrollLeft` accumulates at ~1px/frame while `playheadRef.current` (pure IEEE 754 float) advances at 1.333px/frame, producing ~20px/second rightward drift. Direct derivation from the same float source each frame eliminates this entirely — there is no running total to accumulate error in.
+
+**Engagement state — `isFollowingRef` (boolean):**
+Edge-riding engagement is tracked explicitly as a boolean ref, not recomputed from the boundary formula each frame. Earlier: `pos >= el.scrollLeft + cw * 0.88` was recomputed every frame to decide whether to write `scrollLeft`. This cannot distinguish "playhead approaching the edge" from "playhead already far off-screen" (both satisfy the inequality), so any manual backward scroll instantly re-triggered a snap back to the boundary — the user's scroll was silently cancelled every frame.
+
+**Manual scroll handling (symmetric, either direction):**
+Each rAF frame, `el.scrollLeft` is compared against `lastAutoScrollRef.current` (the value edge-riding last wrote). If they diverge by more than 1px (browser rounding tolerance), something other than edge-riding moved the viewport — `isFollowingRef` is set to `false` immediately. While disengaged, `el.scrollLeft` is never touched and the 88% boundary is never evaluated, regardless of how far off-screen the playhead drifts or for how long.
+
+**Re-engagement — visibility-gated, not boundary-gated:**
+Edge-riding re-engages only when the playhead is visible within the current viewport: `el.scrollLeft <= playheadRef.current <= el.scrollLeft + clientWidth`. This is a pure visibility check. Once true, `isFollowingRef` is set back to `true` and `lastAutoScrollRef` is seeded with the current `el.scrollLeft` as the new baseline. The 88% condition is then evaluated normally — if the playhead is visible but not yet in the edge zone, no scroll happens yet; edge-riding only activates once it crosses the boundary. This gives the user an unlimited "look ahead" or "look behind" window with a clean, natural re-entry.
+
+**On fresh play press:**
+If the playhead is not currently visible, a one-time snap centers it at 50% of the viewport (`scrollLeft = pos − cw * 0.5`). This is deliberately different from the 88% edge-riding boundary — landing at 88% caused edge-riding to trigger almost immediately after the snap, which felt abrupt. 50% gives a normal viewing beat before edge-riding begins. After the snap, `lastAutoScrollRef` and `isFollowingRef` are both seeded so the first rAF frame doesn't misread the snap itself as a manual scroll.
+
+**Key refs added for edge-riding:**
+- `lastAutoScrollRef` — `number | null`. The `scrollLeft` value edge-riding last wrote. Used exclusively for manual-scroll detection. Does not accumulate — it is set to the exact derived value on each write, never incremented.
+- `isFollowingRef` — `boolean`. Whether edge-riding is currently engaged. Set to `true` on play start; `false` on manual scroll detection; `true` again when visibility is restored.
 
 ### Non-destructive clip trim — ✅ Built
 
