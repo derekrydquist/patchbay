@@ -127,6 +127,39 @@
     scrollbar-width: none;  /* Firefox */
 }
 
+/* Hide horizontal native scrollbar only — vertical axis gets a styled scrollbar.
+   Use on elements that have a custom JS horizontal thumb but want a visible
+   native vertical scrollbar (e.g. ProductionTracker card). */
+.scrollbar-hide-x::-webkit-scrollbar:horizontal {
+  display: none;
+}
+.scrollbar-hide-x::-webkit-scrollbar {
+  width: 6px;   /* vertical scrollbar width */
+}
+.scrollbar-hide-x::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 9999px;
+}
+.scrollbar-hide-x::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.25);
+  border-radius: 9999px;
+}
+.scrollbar-hide-x:hover::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.55);
+}
+.scrollbar-hide-x::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 175, 55, 0.85);
+}
+/* Firefox: thin + gold on vertical; horizontal native bar is hidden by the
+   JS thumb's overflow-x-auto + scrollbar-hide-x combo doing no-op on Firefox
+   (Firefox ignores ::-webkit-* entirely, but the horizontal JS thumb still
+   works because we don't rely on CSS to hide it there — the JS thumb sits
+   on top and the native bar is invisible under macOS overlay-scroll mode). */
+.scrollbar-hide-x {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(212, 175, 55, 0.25) transparent;
+}
+
 /* Gold scrollbar for Chrome/Firefox (Safari uses JS fallback) */
 .scrollbar-gold::-webkit-scrollbar {
   width: 6px;

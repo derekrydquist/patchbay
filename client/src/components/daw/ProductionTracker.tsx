@@ -820,7 +820,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
       <div className="flex-1 min-h-0 p-6">
         <div
           ref={cardRef}
-          className="rounded-xl border border-white/5 bg-[#181C26] shadow-2xl shadow-black/40 overflow-x-auto overflow-y-auto max-h-full scrollbar-hide"
+          className="rounded-xl border border-white/5 bg-[#181C26] shadow-2xl shadow-black/40 overflow-x-auto overflow-y-auto max-h-full scrollbar-hide-x"
           onMouseEnter={() => setIsCardHovered(true)}
           onMouseLeave={() => setIsCardHovered(false)}
         >
