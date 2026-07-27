@@ -126,3 +126,27 @@
     -ms-overflow-style: none;  /* IE and Edge */
     scrollbar-width: none;  /* Firefox */
 }
+
+/* Gold scrollbar for Chrome/Firefox (Safari uses JS fallback) */
+.scrollbar-gold::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-gold::-webkit-scrollbar-track {
+  background: transparent;
+  border-radius: 9999px;
+}
+.scrollbar-gold::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.25);
+  border-radius: 9999px;
+}
+.scrollbar-gold:hover::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.55);
+}
+.scrollbar-gold::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 175, 55, 0.85);
+}
+.scrollbar-gold {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(212, 175, 55, 0.25) transparent;
+}

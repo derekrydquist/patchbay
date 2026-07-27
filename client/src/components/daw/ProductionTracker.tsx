@@ -721,6 +721,85 @@ export function ProductionTracker({ songId }: { songId: string }) {
     return tasks.find(t => t.instrument === trackName && t.sectionName === section) ?? null;
   }
 
+  // ── Custom gold scrollbar (all browsers — CSS-only scrollbars are unreliable
+  //    on macOS overlay-scrollbar mode in both Safari and Chrome) ─────────────
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [thumbWidth, setThumbWidth] = useState(0);
+  const [thumbLeft, setThumbLeft] = useState(0);
+  const [thumbVisible, setThumbVisible] = useState(false);
+  const [isCardHovered, setIsCardHovered] = useState(false);
+  const [isThumbDragging, setIsThumbDragging] = useState(false);
+  const scrollbarRafRef = useRef(0);
+  const isThumbDraggingRef = useRef(false);
+  const thumbWidthRef = useRef(0);
+  const dragStartXRef = useRef(0);
+  const dragStartScrollRef = useRef(0);
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+
+    function updateThumb() {
+      if (!el) return;
+      if (el.scrollWidth <= el.clientWidth) { setThumbVisible(false); return; }
+      const ratio = el.clientWidth / el.scrollWidth;
+      const w = el.clientWidth * ratio;
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      const left = maxScroll > 0 ? (el.scrollLeft / maxScroll) * (el.clientWidth - w) : 0;
+      thumbWidthRef.current = w;
+      setThumbWidth(w);
+      setThumbLeft(left);
+      setThumbVisible(true);
+    }
+
+    function onScroll() {
+      cancelAnimationFrame(scrollbarRafRef.current);
+      scrollbarRafRef.current = requestAnimationFrame(updateThumb);
+    }
+
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(scrollbarRafRef.current);
+      scrollbarRafRef.current = requestAnimationFrame(updateThumb);
+    });
+
+    el.addEventListener('scroll', onScroll, { passive: true });
+    ro.observe(el);
+    updateThumb();
+
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      ro.disconnect();
+      cancelAnimationFrame(scrollbarRafRef.current);
+    };
+  }, []);
+
+  function handleThumbMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    isThumbDraggingRef.current = true;
+    setIsThumbDragging(true);
+    dragStartXRef.current = e.clientX;
+    dragStartScrollRef.current = cardRef.current?.scrollLeft ?? 0;
+
+    function onMouseMove(ev: MouseEvent) {
+      if (!isThumbDraggingRef.current || !cardRef.current) return;
+      const el = cardRef.current;
+      const dx = ev.clientX - dragStartXRef.current;
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      const trackW = el.clientWidth - thumbWidthRef.current;
+      el.scrollLeft = dragStartScrollRef.current + (trackW > 0 ? dx * maxScroll / trackW : 0);
+    }
+
+    function onMouseUp() {
+      isThumbDraggingRef.current = false;
+      setIsThumbDragging(false);
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+    }
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
+
   return (
     <div className="h-full flex flex-col bg-[#09090b] text-foreground overflow-hidden">
 
@@ -738,18 +817,26 @@ export function ProductionTracker({ songId }: { songId: string }) {
       </div>
 
       {/* ── Grid ── */}
-      <div className="flex-1 overflow-auto p-6">
-        <div className="min-w-[1100px] rounded-xl border border-white/5 bg-[#181C26] shadow-2xl shadow-black/40 overflow-hidden">
+      <div className="flex-1 min-h-0 p-6">
+        <div
+          ref={cardRef}
+          className="rounded-xl border border-white/5 bg-[#181C26] shadow-2xl shadow-black/40 overflow-x-auto overflow-y-auto max-h-full scrollbar-hide"
+          onMouseEnter={() => setIsCardHovered(true)}
+          onMouseLeave={() => setIsCardHovered(false)}
+        >
           <div
             className="grid"
-            style={{ gridTemplateColumns: `220px repeat(${bucket.length}, minmax(150px, 1fr))` }}
+            style={{
+              gridTemplateColumns: `220px repeat(${bucket.length}, minmax(150px, 1fr))`,
+              minWidth: `${220 + bucket.length * 200}px`,
+            }}
           >
             {/* Column headers */}
-            <div className="sticky left-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center">
+            <div className="sticky left-0 top-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center">
               <span className="text-[10px] uppercase tracking-widest text-primary/70 font-bold">{song?.name ?? 'Song Sections'}</span>
             </div>
             {bucket.map((track) => (
-              <div key={track.id} className="border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
+              <div key={track.id} className="sticky top-0 z-10 border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
                 <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate">{track.name}</div>
               </div>
             ))}
@@ -832,6 +919,31 @@ export function ProductionTracker({ songId }: { songId: string }) {
               </React.Fragment>
             ))}
           </div>
+
+          {/* Custom gold scrollbar — JS-driven in all browsers */}
+          {thumbVisible && (
+            <div
+              className="sticky bottom-0 left-0 w-full pointer-events-none"
+              style={{ height: 6, zIndex: 30 }}
+            >
+              <div
+                className="absolute top-0 h-full rounded-full pointer-events-auto"
+                style={{
+                  width: thumbWidth,
+                  left: thumbLeft,
+                  opacity: 1,
+                  backgroundColor: isThumbDragging
+                    ? 'rgba(212,175,55,0.85)'
+                    : isCardHovered
+                      ? 'rgba(212,175,55,0.55)'
+                      : 'rgba(212,175,55,0.25)',
+                  cursor: isThumbDragging ? 'grabbing' : 'grab',
+                  transition: isThumbDragging ? 'none' : 'background-color 0.2s',
+                }}
+                onMouseDown={handleThumbMouseDown}
+              />
+            </div>
+          )}
         </div>
       </div>
 
