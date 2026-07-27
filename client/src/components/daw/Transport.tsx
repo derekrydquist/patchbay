@@ -26,7 +26,7 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
     }
   }, [songData]);
   const [isPlaying, setIsPlaying] = React.useState(false);
-  const [isLooping, setIsLooping] = React.useState(false);
+  const [isLooping, setIsLooping] = React.useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
   const [currentTime, setCurrentTime] = React.useState(0);
 
   React.useEffect(() => {
@@ -43,6 +43,16 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
     window.addEventListener('playback-ended', handlePlaybackEnded);
     return () => window.removeEventListener('playback-ended', handlePlaybackEnded);
   }, []);
+
+  React.useEffect(() => {
+    const handleLoopForceDisabled = () => setIsLooping(false);
+    window.addEventListener('loop-force-disabled', handleLoopForceDisabled);
+    return () => window.removeEventListener('loop-force-disabled', handleLoopForceDisabled);
+  }, []);
+
+  React.useEffect(() => {
+    localStorage.setItem(`patchbay-loop-${songId}`, String(isLooping));
+  }, [isLooping, songId]);
 
   const commitBpm = () => {
     let newBpm = parseInt(bpmInput);

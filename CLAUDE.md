@@ -1034,6 +1034,39 @@ If the playhead's pixel position reaches or passes `timelineEndPx` on a given fr
 
 **Do not:** have Transport dispatch `playback-ended`, or have Timeline listen for it — this must stay strictly one-way (Timeline → Transport) to avoid a dispatch loop. The manual pause/stop path (originating from Transport's own `toggle-play`) does not dispatch `playback-ended` — only the auto-stop block does, since Transport already knows its own state in the manual case.
 
+**Section-loop visual indicator — ✅ Built**
+
+Previously, the only signal that looping was active was audible repetition. A gold header highlight now shows which section is being looped.
+
+**`loopedSectionName` — derived, never stored from the rAF loop:**
+```ts
+const loopedSectionName = React.useMemo(() => {
+  if (!isLooping) return null;
+  const playheadTime = (playheadPositionState - 256) / zoom;
+  return sectionLayout.find(
+    (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+  )?.name ?? null;
+}, [isLooping, playheadPositionState, sectionLayout, zoom]);
+```
+Recomputed on every render from render-time state — deliberately not gated on `isPlaying` — so the indicator stays correct while paused. There is no separate "pinned" loop section; the derivation is always live from the current playhead position.
+
+**Disable-on-reposition (generalized watcher):**
+A `useEffect` watching `[playheadPositionState, isLooping, sectionLayout, zoom]` compares the current derived section against the previous one via `prevLoopedSectionRef`. If `isLooping` is true, the previous section was non-null (guards against mount), and the section changes, `isLooping` is set to `false`. This works correctly because the loop's own boundary-reset always keeps the playhead inside the same section during normal looping — an observed section change during `isLooping` can only mean the user repositioned the playhead manually (flag drag, ruler click, or any other input method). No per-input-method special-casing is needed.
+
+**Cross-component sync:**
+`isLooping` is tracked independently in both `Transport.tsx` and `Timeline.tsx`. `toggle-loop` flows Transport → Timeline only. When Timeline's watcher auto-disables loop, it dispatches `loop-force-disabled` (no payload) and Transport listens for it to set its own `isLooping` to `false` directly — without re-dispatching `toggle-loop`, which would create an event ping-pong.
+
+**Header styling (`DraggableSectionHeader`):**
+`isLooped && 'bg-primary/10 border-b-2 border-r-2 border-primary rounded-br-md'` — a gold underline + right-edge boundary line (same 2px weight, matching `border-primary`, meeting at a rounded corner), plus a subtle background tint. Deliberately not a solid/opaque fill — solid fills are reserved for clip track-identity color, not state indicators. The underline weight and color match the active-tab style used in AppHeader's ARRANGEMENT/PRODUCTION tabs.
+
+**Out of scope for this version:** no retargeting to a new section when the playhead moves — loop simply disables on reposition. No toast/notification on auto-disable. Multi-section loop ranges are a separate future feature.
+
+**Last-section loop fix — gotcha:**
+Looping the final section previously failed: `animate()`'s end-of-timeline guard (`playheadRef.current + pixelDelta >= timelineEndPx`) ran before `setPlayheadPosition` was called and returned early unconditionally, stopping playback instead of resetting. The last section's end position and `timelineEndPx` are numerically identical by construction, so the guard always fired first, preventing the loop boundary-reset (which lives inside the `setPlayheadPosition` updater) from ever being reached. Fixed by gating the guard on `!isLooping` — it now only stops playback when not looping, deferring to the existing loop boundary-reset when looping is active. **Any future changes to end-of-timeline handling must preserve this `!isLooping` check.**
+
+**`isLooping` persistence:**
+`isLooping` is persisted per-song to localStorage under `patchbay-loop-${songId}`, following the same personal-UI-state convention as mute/solo, zoom, scroll, and playhead position. Restored via lazy `useState` initialization on mount in both `Transport.tsx` and `Timeline.tsx` — not a post-mount `useEffect` — so the button and indicator are correct on first paint (same reasoning as the BPM-flash fix documented under Timeline session persistence). `loopedSectionName` itself remains a pure derived value and is not persisted.
+
 **Auto-scroll during playback — edge-riding:**
 
 Two approaches were tried and rejected before the current model was built:
@@ -1851,6 +1884,7 @@ These are things that need a decision before being built:
 - **Production Tracker grid is not horizontally scrollable** — when a song has more instruments than fit in the visible viewport width, there is no way to scroll left/right to see the remaining columns without manually zooming the browser out. The grid container does not have `overflow-x: auto` or equivalent. Not yet investigated.
 - **Timeline selection state has no visual indicator yet** — `selectedTimelineTrackId` and `selectedTimelineClipId` are wired up, persisted to localStorage, and restored on mount. They are not dead code — they are intended to be consumed by future Timeline keyboard shortcuts (delete selected clip, nudge, navigate between clips, etc.). No visual highlight on the selected track/clip has been added yet.
 - **Small stutter on pressing play** — pre-existing; cause not yet investigated. Unrelated to the session-state persistence work.
+- **Deleting the currently-looped section correctly disables looping** — the generalized disable-on-reposition watcher catches the transition from a real section to `null` (no section) the same way it catches any other section change, so `isLooping` is set to `false` and `loop-force-disabled` is dispatched cleanly. No lingering state issue.
 
 ---
 

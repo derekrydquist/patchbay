@@ -211,7 +211,7 @@ const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppabl
 
 // Draggable section header label — used inside the section-reorder DndContext.
 // id format: sec||${sectionName}
-function DraggableSectionHeader({ name, width }: { name: string; width: number }) {
+function DraggableSectionHeader({ name, width, isLooped }: { name: string; width: number; isLooped?: boolean }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: `sec||${name}` });
   return (
     <div
@@ -220,7 +220,8 @@ function DraggableSectionHeader({ name, width }: { name: string; width: number }
       {...attributes}
       className={cn(
         'border-r border-primary/20 flex items-start pt-1 px-2 shrink-0 cursor-grab active:cursor-grabbing select-none transition-opacity',
-        isDragging && 'opacity-30'
+        isDragging && 'opacity-30',
+        isLooped && 'bg-primary/10 border-b-2 border-r-2 border-primary rounded-br-md'
       )}
       style={{ width, minWidth: width }}
     >
@@ -397,7 +398,7 @@ export function Timeline({ songId }: { songId: string }) {
     if (saved) { const z = Number(saved); if (z >= 20 && z <= 400) return z; }
     return 80;
   });
-  const [isLooping, setIsLooping] = useState(false);
+  const [isLooping, setIsLooping] = useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
   const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
 
@@ -433,6 +434,33 @@ export function Timeline({ songId }: { songId: string }) {
     const last = sectionLayout[sectionLayout.length - 1];
     return last.start + last.duration;
   }, [sectionLayout]);
+
+  // Derived: which section the playhead is currently in, when loop is active.
+  // Purely from render-time state — no rAF writes, no manual clears needed.
+  const loopedSectionName = React.useMemo(() => {
+    if (!isLooping) return null;
+    const playheadTime = (playheadPositionState - 256) / zoom;
+    return sectionLayout.find(
+      (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+    )?.name ?? null;
+  }, [isLooping, playheadPositionState, sectionLayout, zoom]);
+
+  // Disable loop whenever the playhead moves to a different section while looping, regardless of
+  // how the repositioning happened (flag drag, ruler click, section click, keyboard, etc.).
+  // The rAF loop's own boundary-reset always keeps the playhead inside the same section during
+  // normal looping, so any section change we observe here means the user repositioned it.
+  const prevLoopedSectionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const playheadTime = (playheadPositionState - 256) / zoom;
+    const rawSection = sectionLayout.find(
+      (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+    )?.name ?? null;
+    if (isLooping && prevLoopedSectionRef.current !== null && rawSection !== prevLoopedSectionRef.current) {
+      setIsLooping(false);
+      window.dispatchEvent(new CustomEvent('loop-force-disabled'));
+    }
+    prevLoopedSectionRef.current = rawSection;
+  }, [playheadPositionState, isLooping, sectionLayout, zoom]);
 
   // Clip-boundary gap zone positions for the active drag's track+section.
   // gap||0 = before first clip, gap||N = after clip N-1.
@@ -634,6 +662,12 @@ export function Timeline({ songId }: { songId: string }) {
     localStorage.setItem(`patchbay-zoom-${songId}`, String(zoom));
   }, [zoom, songId]);
 
+  // Loop persist — guarded by uiRestored, same pattern as zoom.
+  useEffect(() => {
+    if (!uiRestored.current) return;
+    localStorage.setItem(`patchbay-loop-${songId}`, String(isLooping));
+  }, [isLooping, songId]);
+
   // Playhead persist — stores time in seconds (not pixels) so zoom changes don't corrupt the value.
   // Debounced 200ms. During playback, clears any pending write and returns early so the rAF loop
   // doesn't cause 60 localStorage writes per second; the final position is captured when isPlaying
@@ -757,7 +791,7 @@ export function Timeline({ songId }: { songId: string }) {
           const timelineEndPx = frameLayout.length > 0
             ? 256 + (frameLayout[frameLayout.length - 1].start + frameLayout[frameLayout.length - 1].duration) * zoom
             : 256;
-          if (playheadRef.current + pixelDelta >= timelineEndPx) {
+          if (!isLooping && playheadRef.current + pixelDelta >= timelineEndPx) {
             setPlayheadPosition(timelineEndPx);
             Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
             pendingPlayRef.current.clear();
@@ -1607,6 +1641,7 @@ export function Timeline({ songId }: { songId: string }) {
                         key={sec.name}
                         name={sec.name}
                         width={sec.duration * zoom}
+                        isLooped={sec.name === loopedSectionName}
                       />
                     ))}
                     {/* Insertion line — appears at the nearest gap while dragging a section header */}
