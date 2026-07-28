@@ -17,7 +17,7 @@ import multer from "multer";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte } from "drizzle-orm";
 import { db } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection } from "./storage";
 import {
   insertSongSchema,
   insertInstrumentTrackSchema,
@@ -784,12 +784,30 @@ export async function registerRoutes(
     }
     const idea = await storage.createIdea(parsed.data);
 
+    // Fetch the track once — shared by task creation and activity logging below.
+    const ideaTrack = db.select().from(instrumentTracks)
+      .where(eq(instrumentTracks.id, trackId))
+      .get();
+
+    // Create the production task for this instrument + section.
+    // useAddSection fires this route in a Promise.all across all active tracks,
+    // so each call independently creates its own task row.
+    if (ideaTrack && idea.sectionName) {
+      try {
+        insertProductionTaskForSection({
+          songId: ideaTrack.songId,
+          trackId: ideaTrack.id,
+          instrument: ideaTrack.name,
+          sectionName: idea.sectionName,
+        });
+      } catch (err) {
+        console.error('[ideas] failed to create production task:', err);
+      }
+    }
+
     // Log section-added once per user action. MediaBucket fires this route for every
     // active track simultaneously (Promise.all), so deduplicate via a 5-second window.
     try {
-      const ideaTrack = db.select().from(instrumentTracks)
-        .where(eq(instrumentTracks.id, trackId))
-        .get();
       if (ideaTrack) {
         const fiveSecondsAgo = Date.now() - 5000;
         const recent = db.select().from(activityLog)

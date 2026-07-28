@@ -216,6 +216,47 @@ export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
 export type AlbumWithCount = Album & { songCount: number };
 export type AlbumMembership = { albumId: string; albumName: string; songId: string };
 
+// ─── Shared task-creation helper ─────────────────────────────────────────────
+// Single source of truth for "create the production_tasks row for a given
+// instrument × section pair." Every call site that creates ideas must call
+// this alongside the ideas insert so the invariant "every active idea has a
+// matching task" stays structurally enforced.
+//
+// sectionIndex — when provided, produces the deterministic id
+//   `task-${trackId}-${sectionIndex}` used by bootstrapDefaultSong and
+//   createTrack so those rows are stable across server restarts and can
+//   safely use onConflictDoNothing. When omitted, a random UUID is used
+//   (seedSong, the createIdea route) — appropriate for user-created entities
+//   that will never need to be upserted.
+//
+// onConflictDoNothing is always applied — safe for all callers and makes
+// the function fully idempotent regardless of ID scheme.
+export function insertProductionTaskForSection({
+  songId,
+  trackId,
+  instrument,
+  sectionName,
+  sectionIndex,
+}: {
+  songId: string;
+  trackId: string;
+  instrument: string;
+  sectionName: string;
+  sectionIndex?: number;
+}): void {
+  const id = sectionIndex !== undefined ? `task-${trackId}-${sectionIndex}` : randomUUID();
+  db.insert(productionTasks).values({
+    id,
+    songId,
+    title: `${instrument} – ${sectionName}`,
+    instrument,
+    sectionName,
+    status: "todo",
+    priority: "medium",
+    assignee: "",
+  }).onConflictDoNothing().run();
+}
+
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 export class SQLiteStorage implements IStorage {
@@ -346,16 +387,7 @@ export class SQLiteStorage implements IStorage {
           sortOrder: si,
           active: true,
         }).run();
-        db.insert(productionTasks).values({
-          id: randomUUID(),
-          songId,
-          title: `${trackName} – ${sections[si]}`,
-          instrument: trackName,
-          sectionName: sections[si],
-          status: "todo",
-          priority: "medium",
-          assignee: "",
-        }).run();
+        insertProductionTaskForSection({ songId, trackId, instrument: trackName, sectionName: sections[si] });
       }
     }
   }
@@ -390,16 +422,7 @@ export class SQLiteStorage implements IStorage {
             sectionName: section,
             sortOrder: i,
           }).onConflictDoNothing().run();
-          db.insert(productionTasks).values({
-            id: `task-${track.id}-${i}`,
-            songId: DEFAULT_SONG_ID,
-            title: `${track.name} – ${section}`,
-            instrument: track.name,
-            sectionName: section,
-            status: "todo",
-            priority: "medium",
-            assignee: "",
-          }).onConflictDoNothing().run();
+          insertProductionTaskForSection({ songId: DEFAULT_SONG_ID, trackId: track.id, instrument: track.name, sectionName: section, sectionIndex: i });
         }
       });
     }
@@ -500,16 +523,7 @@ export class SQLiteStorage implements IStorage {
         sectionName: DEFAULT_SECTIONS[i],
         sortOrder: i,
       });
-      db.insert(productionTasks).values({
-        id: `task-${track.id}-${i}`,
-        songId: track.songId,
-        title: `${track.name} – ${DEFAULT_SECTIONS[i]}`,
-        instrument: track.name,
-        sectionName: DEFAULT_SECTIONS[i],
-        status: "todo",
-        priority: "medium",
-        assignee: "",
-      }).run();
+      insertProductionTaskForSection({ songId: track.songId, trackId: track.id, instrument: track.name, sectionName: DEFAULT_SECTIONS[i], sectionIndex: i });
     }
     return track;
   }
