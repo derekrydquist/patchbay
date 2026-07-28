@@ -4,14 +4,27 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import {
-  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp,
+  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp, LayoutList,
 } from 'lucide-react';
 import { cn, capitalize } from '@/lib/utils';
-import { bucketKeys } from '@/lib/bucket-api';
+import { bucketKeys, type ApiTrack } from '@/lib/bucket-api';
+import {
+  useAddSection, useAddInstrument,
+  useDeleteTrack, useRestoreTrack, useRestoreSection,
+} from '@/hooks/use-bucket-mutations';
+import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
+import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
+import {
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import type { ProductionTask, TaskComment } from '@shared/schema';
 
 
@@ -36,10 +49,6 @@ const STATUS_CONFIG: Record<TaskStatus, StatusCfg> = {
 };
 
 type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
-
-type BucketClip = { id: string; name: string; isFinal: boolean };
-type BucketIdea = { id: string; sectionName: string; clips: BucketClip[] };
-type BucketTrack = { id: string; name: string; ideas: BucketIdea[] };
 
 function avatarColor(name: string): string {
   let h = 0;
@@ -656,11 +665,6 @@ export function ProductionTracker({ songId }: { songId: string }) {
   });
   const assignees = usersData.map(u => u.username);
 
-  const { data: song } = useQuery<{ name: string }>({
-    queryKey: ['song', songId],
-    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
-  });
-
   const { data: tasks = [] } = useQuery<ProductionTask[]>({
     queryKey: ['production-tasks', songId],
     queryFn: () => fetch(`/api/songs/${songId}/production-tasks`).then(r => r.json()),
@@ -673,12 +677,12 @@ export function ProductionTracker({ songId }: { songId: string }) {
     }
   }, [taskIdFromUrl, tasks.length]);
 
-  const { data: bucket = [] } = useQuery<BucketTrack[]>({
+  const { data: bucket = [] } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
 
-  const { data: finalClipsBucket = [] } = useQuery<BucketTrack[]>({
+  const { data: finalClipsBucket = [] } = useQuery<ApiTrack[]>({
     queryKey: ['final-clips', songId],
     queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
@@ -720,6 +724,108 @@ export function ProductionTracker({ songId }: { songId: string }) {
   function findTask(trackName: string, section: string): ProductionTask | null {
     return tasks.find(t => t.instrument === trackName && t.sectionName === section) ?? null;
   }
+
+  // ── Add/Remove Section & Instrument ───────────────────────────────────────────
+  const queryClient = useQueryClient();
+
+  const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
+  const [newSectionName, setNewSectionName] = useState('');
+  const [addSectionError, setAddSectionError] = useState<string | null>(null);
+
+  const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
+  const [newInstrumentName, setNewInstrumentName] = useState('');
+  const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
+
+  const [removeTrackId, setRemoveTrackId] = useState<string | null>(null);
+  const [isAddChoiceOpen, setIsAddChoiceOpen] = useState(false);
+
+  const firstTrackId = bucket[0]?.id;
+
+  const { data: hiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: bucketKeys.hiddenTracks(songId),
+    queryFn: () => fetch(`/api/songs/${songId}/hidden-tracks`).then(r => r.json()),
+    enabled: isAddInstrumentOpen,
+    refetchOnMount: true,
+    refetchOnWindowFocus: false,
+  });
+
+  // Uses first track as proxy for song-wide hidden sections (sections are hidden/restored together)
+  const { data: hiddenSections = [] } = useQuery<{ id: string; sectionName: string }[]>({
+    queryKey: bucketKeys.hiddenIdeas(firstTrackId),
+    queryFn: () => fetch(`/api/tracks/${firstTrackId}/hidden-ideas`).then(r => r.json()),
+    enabled: isAddSectionOpen && !!firstTrackId,
+    refetchOnMount: true,
+    refetchOnWindowFocus: false,
+  });
+
+  const addSectionMutation = useAddSection(songId, bucket, {
+    onCreated: () => {
+      setIsAddSectionOpen(false);
+      setNewSectionName('');
+      setAddSectionError(null);
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+    },
+    onError: (msg) => setAddSectionError(msg),
+  });
+
+  const addInstrumentMutation = useAddInstrument(songId, {
+    onCreated: () => {
+      setIsAddInstrumentOpen(false);
+      setNewInstrumentName('');
+      setAddInstrumentError(null);
+    },
+    onError: (msg) => setAddInstrumentError(msg),
+  });
+
+  const deleteTrackMutation = useDeleteTrack(songId, {
+    onSuccess: () => {
+      setRemoveTrackId(null);
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+    },
+  });
+
+  const restoreTrackMutation = useRestoreTrack(songId);
+  const restoreSectionMutation = useRestoreSection(firstTrackId, songId);
+
+  // Hide section song-wide: PATCH each track's matching idea active=false
+  const hideSectionMutation = useMutation({
+    mutationFn: async (sectionName: string) => {
+      const ideasToHide = bucket.flatMap(track =>
+        track.ideas.filter(idea => idea.sectionName === sectionName)
+      );
+      await Promise.all(
+        ideasToHide.map(idea => fetch(`/api/ideas/${idea.id}`, { method: 'PATCH' }))
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+    },
+  });
+
+  const handleAddSection = () => {
+    const trimmed = newSectionName.trim();
+    if (!trimmed) return;
+    if (sections.some(s => s.toLowerCase() === trimmed.toLowerCase())) {
+      setAddSectionError('A section with this name already exists');
+      return;
+    }
+    setAddSectionError(null);
+    addSectionMutation.mutate(trimmed);
+  };
+
+  const handleAddInstrument = () => {
+    const trimmed = newInstrumentName.trim();
+    if (!trimmed) return;
+    if (bucket.some(t => t.name.toLowerCase() === trimmed.toLowerCase())) {
+      setAddInstrumentError('An instrument with this name already exists');
+      return;
+    }
+    setAddInstrumentError(null);
+    addInstrumentMutation.mutate(trimmed);
+  };
 
   // ── Custom gold scrollbar (all browsers — CSS-only scrollbars are unreliable
   //    on macOS overlay-scrollbar mode in both Safari and Chrome) ─────────────
@@ -832,21 +938,58 @@ export function ProductionTracker({ songId }: { songId: string }) {
             }}
           >
             {/* Column headers */}
-            <div className="sticky left-0 top-0 z-20 bg-[#0c0c0e] border-r border-white/5 px-4 py-4 flex items-center">
-              <span className="text-[10px] uppercase tracking-widest text-primary/70 font-bold">{song?.name ?? 'Song Sections'}</span>
+            {/* bg-[#0c0c0e] must stay on the outer sticky div — keeps scrolled content from bleeding
+                through the semi-transparent bg-primary/10 on the inner pill */}
+            <div
+              className="sticky left-0 top-0 z-20 bg-[#0c0c0e] border-r border-white/5 p-2 flex items-center cursor-pointer group"
+              onClick={() => setIsAddChoiceOpen(true)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setIsAddChoiceOpen(true); }}
+              aria-label="Add section or instrument"
+            >
+              <div className="flex-1 flex items-center gap-2 bg-primary/10 border border-primary/35 rounded-md px-3 py-1.5 group-hover:bg-primary/[0.15] group-hover:border-primary/60 transition-colors">
+                <div className="w-[22px] h-[22px] rounded-md bg-primary/15 flex items-center justify-center shrink-0 group-hover:bg-primary/25 transition-colors">
+                  <Plus size={14} className="text-primary" />
+                </div>
+                <span className="text-[11px] font-medium uppercase tracking-[0.08em] text-primary">Add</span>
+              </div>
             </div>
             {bucket.map((track) => (
-              <div key={track.id} className="sticky top-0 z-10 border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
-                <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate">{track.name}</div>
-              </div>
+              <ContextMenu key={track.id}>
+                <ContextMenuTrigger asChild>
+                  <div className="sticky top-0 z-10 border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
+                    <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate">{track.name}</div>
+                  </div>
+                </ContextMenuTrigger>
+                <ContextMenuContent className="bg-popover border-border">
+                  <ContextMenuItem
+                    className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs cursor-pointer"
+                    onClick={() => setRemoveTrackId(track.id)}
+                  >
+                    Remove Instrument
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             ))}
-
             {/* Data rows */}
             {sections.map((section) => (
               <React.Fragment key={section}>
-                <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
-                  <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{section}</div>
-                </div>
+                <ContextMenu>
+                  <ContextMenuTrigger asChild>
+                    <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
+                      <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{section}</div>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="bg-popover border-border">
+                    <ContextMenuItem
+                      className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs cursor-pointer"
+                      onClick={() => hideSectionMutation.mutate(section)}
+                    >
+                      Remove Section
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
                 {bucket.map((track) => {
                   const task = findTask(track.name, section);
                   const status = (task?.status ?? 'todo') as TaskStatus;
@@ -959,6 +1102,97 @@ export function ProductionTracker({ songId }: { songId: string }) {
           assignees={assignees}
         />
       )}
+
+      <AddSectionModal
+        open={isAddSectionOpen}
+        onOpenChange={(open) => {
+          if (!open) { setNewSectionName(''); setAddSectionError(null); }
+          setIsAddSectionOpen(open);
+        }}
+        value={newSectionName}
+        onChange={setNewSectionName}
+        onSubmit={handleAddSection}
+        isPending={addSectionMutation.isPending}
+        error={addSectionError}
+        onClearError={() => setAddSectionError(null)}
+        hiddenSections={hiddenSections}
+        onRestoreSection={(id) => restoreSectionMutation.mutate(id)}
+        isRestoring={restoreSectionMutation.isPending}
+      />
+
+      <AddInstrumentModal
+        open={isAddInstrumentOpen}
+        onOpenChange={(open) => {
+          if (!open) { setNewInstrumentName(''); setAddInstrumentError(null); }
+          setIsAddInstrumentOpen(open);
+        }}
+        value={newInstrumentName}
+        onChange={setNewInstrumentName}
+        onSubmit={handleAddInstrument}
+        isPending={addInstrumentMutation.isPending}
+        error={addInstrumentError}
+        onClearError={() => setAddInstrumentError(null)}
+        hiddenTracks={hiddenTracks}
+        onRestoreTrack={(id) => restoreTrackMutation.mutate(id)}
+        isRestoring={restoreTrackMutation.isPending}
+      />
+
+      {/* ── Add Section or Instrument chooser ── */}
+      <Dialog open={isAddChoiceOpen} onOpenChange={setIsAddChoiceOpen}>
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Add to tracker…
+            </DialogTitle>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-4 pt-2 pb-1">
+            <button
+              onClick={() => { setIsAddChoiceOpen(false); setIsAddSectionOpen(true); }}
+              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
+            >
+              <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
+                <LayoutList size={20} className="text-primary/70" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-white text-center mb-1">Section</p>
+                <p className="text-[11px] text-muted-foreground text-center leading-snug">Add a new part to the song structure (e.g. Bridge, Outro)</p>
+              </div>
+            </button>
+            <button
+              onClick={() => { setIsAddChoiceOpen(false); setIsAddInstrumentOpen(true); }}
+              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
+            >
+              <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
+                <Music2 size={20} className="text-primary/70" />
+              </div>
+              <div>
+                <p className="text-sm font-bold text-white text-center mb-1">Instrument</p>
+                <p className="text-[11px] text-muted-foreground text-center leading-snug">Add a new instrument track to record and arrange</p>
+              </div>
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!removeTrackId} onOpenChange={(v) => !v && setRemoveTrackId(null)}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Instrument?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {bucket.find(t => t.id === removeTrackId)?.name} will be hidden from the production board. You can restore it via Add Instrument.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={() => removeTrackId && deleteTrackMutation.mutate(removeTrackId)}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
