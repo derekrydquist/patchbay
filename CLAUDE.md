@@ -2131,3 +2131,22 @@ routes (`POST /api/clips/:clipId/comments`, `POST /api/production-tasks/:id/comm
 - **Key architectural conflict:** `recalcAllStarts` recomputes every un-offset clip's `start` from scratch on every call. Trimming a clip triggers a recalc that immediately re-closes any gap the trim created — there is never a moment where trimmed space persists long enough to drag another clip into it. Any future free-position attempt must resolve this first: decide whether trim should stop triggering a section-wide recalc (leaving sibling `start` values untouched).
 - **Clamping gap:** the first wall-clamp implementation only checked section outer edges, not actual sibling clip positions, allowing real clip-to-clip overlap. Clamping must bound against per-drag sibling positions looked up from current track state.
 - **Investigation discipline:** this session required multiple compactions during a single "read and understand" prompt. Split future attempts into: (1) a no-changes trace prompt to confirm recalc behavior at specific file/line granularity, (2) a scoped implementation prompt referencing those findings. Avoid broad "read and understand the whole system" asks in one shot.
+
+---
+
+## Recently fixed bugs
+
+- **Production task duplication** — `insertProductionTaskForSection`'s `onConflictDoNothing()` guard was decorative (only catches identical generated IDs, which independent `randomUUID()` calls never produce). Fixed structurally by the `trackId` FK below; 21 pre-existing duplicate rows repaired.
+- **Task-to-track association was name-based, not ID-based** — `getProductionTasks` matched on `(songId, instrument name, active)`, which misattributed tasks when two tracks shared a name (e.g. one hidden, one active). Added `trackId` column to `production_tasks` with FK to `instrument_tracks`; all task creation and read paths now join on `trackId`. 1,508 rows backfilled.
+- **Instrument name uniqueness** — tracks can no longer share a name within a song, active or hidden. Full `UNIQUE(songId, name)` index (not partial); 409 checks and client-side guards updated across MediaBucket, Production Tracker, Dashboard. Error message points to the restore option when the conflicting name is hidden.
+- **Restore action left stale UI** — `useRestoreTrack` now invalidates `['production-tasks', songId]`; Production Tracker's restore modal now closes on success (previously only MediaBucket did).
+- **Instrument `sortOrder` always hardcoded to 999** — caused new instruments to render alphabetically (via a leftover partial index SQLite's planner preferred, stable-sorting ties in alphabetical order). Fixed to `MAX(sort_order) + 1` per song; 57 existing rows repaired; leftover partial index dropped. No secondary sort tiebreaker added — manual drag-to-reorder is planned and will own this.
+- **Section `sortOrder` divergence across tracks** (`track.ideas.length + i` computed independently per track) — data repaired on affected songs. Structural fix deferred to the section-add redesign below.
+
+---
+
+## On the horizon
+
+- **Section-add redesign** — replace per-track `Promise.all` section creation with a single atomic server call: shared `sortOrder` computed once (not per-track), full name-uniqueness (active + hidden, matching the instrument rule above), no tiebreaker (manual reorder for sections is planned).
+- **Per-instrument hidden sections invisible to Production Tracker** — confirmed via real data (`ideas.active=false` scoped to one track has no effect on cell rendering, since `findTask` doesn't join `ideas`). Design decision needed: dim/disable the cell vs. also gate the complete-status guard.
+- **Manual drag-to-reorder (instruments + sections)** — instrument `sortOrder` data is now clean and ready; sections will be ready once the redesign above lands.
