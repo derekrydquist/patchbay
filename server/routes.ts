@@ -15,7 +15,7 @@ import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte, max } from "drizzle-orm";
 import { db } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection } from "./storage";
 import {
@@ -360,12 +360,17 @@ export async function registerRoutes(
   app.post("/api/songs/:songId/tracks", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
+    const maxRow = db.select({ val: max(instrumentTracks.sortOrder) })
+      .from(instrumentTracks)
+      .where(eq(instrumentTracks.songId, songId))
+      .get();
+    const nextSortOrder = (maxRow?.val ?? -1) + 1;
     const parsed = insertInstrumentTrackSchema.safeParse({
       id: randomUUID(),
       type: "audio",
       color: "hsl(var(--chart-1))",
-      sortOrder: 999,
       ...req.body,
+      sortOrder: nextSortOrder,
       songId,
     });
     if (!parsed.success) {
