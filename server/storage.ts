@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, count, and, isNull, max } from "drizzle-orm";
+import { eq, asc, desc, inArray, count, and, isNull, max, min } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -514,16 +514,36 @@ export class SQLiteStorage implements IStorage {
   async createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack> {
     db.insert(instrumentTracks).values(data).run();
     const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, data.id)).get()!;
-    // Create one idea and one production task per default section
-    for (let i = 0; i < DEFAULT_SECTIONS.length; i++) {
+    // Create one idea and one production task per section that currently exists in
+    // the song — derived from active ideas on other active tracks rather than the
+    // hardcoded DEFAULT_SECTIONS list, so user-added sections are included.
+    const activeSections = db
+      .select({
+        sectionName: ideas.sectionName,
+        minOrder: min(ideas.sortOrder),
+      })
+      .from(ideas)
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .where(and(
+        eq(instrumentTracks.songId, track.songId),
+        eq(instrumentTracks.active, true),
+        eq(ideas.active, true),
+      ))
+      .groupBy(ideas.sectionName)
+      .orderBy(asc(min(ideas.sortOrder)))
+      .all();
+
+    for (let i = 0; i < activeSections.length; i++) {
+      const { sectionName } = activeSections[i];
+      if (!sectionName) continue;
       await this.createIdea({
         id: randomUUID(),
         trackId: track.id,
-        name: `${track.name} ${DEFAULT_SECTIONS[i]}`,
-        sectionName: DEFAULT_SECTIONS[i],
+        name: `${track.name} ${sectionName}`,
+        sectionName,
         sortOrder: i,
       });
-      insertProductionTaskForSection({ songId: track.songId, trackId: track.id, instrument: track.name, sectionName: DEFAULT_SECTIONS[i], sectionIndex: i });
+      insertProductionTaskForSection({ songId: track.songId, trackId: track.id, instrument: track.name, sectionName, sectionIndex: i });
     }
     return track;
   }
