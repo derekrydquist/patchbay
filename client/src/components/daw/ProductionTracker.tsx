@@ -10,7 +10,7 @@ import { cn, capitalize } from '@/lib/utils';
 import { bucketKeys, type ApiTrack } from '@/lib/bucket-api';
 import {
   useAddSection, useAddInstrument,
-  useDeleteTrack, useRestoreTrack, useRestoreSection,
+  useDeleteTrack, useRestoreTrack,
 } from '@/hooks/use-bucket-mutations';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
@@ -785,7 +785,23 @@ export function ProductionTracker({ songId }: { songId: string }) {
   });
 
   const restoreTrackMutation = useRestoreTrack(songId);
-  const restoreSectionMutation = useRestoreSection(firstTrackId, songId);
+  // Song-wide section restore: reactivates hidden ideas on all tracks and backfills
+  // ideas+tasks for instruments added while the section was hidden.
+  const restoreSectionMutation = useMutation({
+    mutationFn: async (sectionName: string) => {
+      const res = await fetch(`/api/songs/${songId}/sections/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sectionName }),
+      });
+      if (!res.ok) throw new Error('Failed to restore section');
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+    },
+  });
 
   // Hide section song-wide: PATCH each track's matching idea active=false
   const hideSectionMutation = useMutation({
@@ -1116,7 +1132,10 @@ export function ProductionTracker({ songId }: { songId: string }) {
         error={addSectionError}
         onClearError={() => setAddSectionError(null)}
         hiddenSections={hiddenSections}
-        onRestoreSection={(id) => restoreSectionMutation.mutate(id)}
+        onRestoreSection={(id) => {
+          const section = hiddenSections.find(h => h.id === id);
+          if (section) restoreSectionMutation.mutate(section.sectionName);
+        }}
         isRestoring={restoreSectionMutation.isPending}
       />
 

@@ -467,6 +467,46 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  // Song-wide section restore: reactivate hidden ideas for every active track, and
+  // backfill missing ideas+tasks for tracks added after the section was hidden.
+  app.post("/api/songs/:songId/sections/restore", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const { sectionName } = req.body as { sectionName?: string };
+    if (!sectionName) return res.status(400).json({ message: "sectionName required" });
+
+    const activeTracks = db
+      .select()
+      .from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+      .all();
+
+    for (const track of activeTracks) {
+      const existing = db
+        .select()
+        .from(ideas)
+        .where(and(eq(ideas.trackId, track.id), eq(ideas.sectionName, sectionName)))
+        .get();
+
+      if (existing) {
+        db.update(ideas).set({ active: true }).where(eq(ideas.id, existing.id)).run();
+      } else {
+        // Track was added after this section was hidden — create idea + task.
+        const { cnt } = db.select({ cnt: count() }).from(ideas).where(eq(ideas.trackId, track.id)).get() ?? { cnt: 0 };
+        await storage.createIdea({
+          id: randomUUID(),
+          trackId: track.id,
+          name: `${track.name} ${sectionName}`,
+          sectionName,
+          sortOrder: cnt,
+        });
+        insertProductionTaskForSection({ songId, trackId: track.id, instrument: track.name, sectionName });
+      }
+    }
+
+    res.status(200).json({ ok: true });
+  });
+
   // ─── Timeline ───────────────────────────────────────────────────────────────
 
   app.get("/api/songs/:id/timeline", requireBand, async (req, res) => {
