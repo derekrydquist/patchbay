@@ -248,6 +248,7 @@ export function insertProductionTaskForSection({
   db.insert(productionTasks).values({
     id,
     songId,
+    trackId,
     title: `${instrument} – ${sectionName}`,
     instrument,
     sectionName,
@@ -1026,12 +1027,25 @@ export class SQLiteStorage implements IStorage {
       .select({ task: productionTasks, songName: songs.name })
       .from(productionTasks)
       .innerJoin(songs, and(eq(productionTasks.songId, songs.id), eq(songs.bandId, bandId)))
+      .innerJoin(instrumentTracks, and(
+        eq(instrumentTracks.id, productionTasks.trackId),
+        eq(instrumentTracks.active, true),
+      ))
       .all();
     return rows.map(r => ({ ...r.task, songName: r.songName }));
   }
 
   async getTasksForSong(songId: string): Promise<ProductionTask[]> {
-    return db.select().from(productionTasks).where(eq(productionTasks.songId, songId)).all();
+    const rows = db
+      .select({ task: productionTasks })
+      .from(productionTasks)
+      .innerJoin(instrumentTracks, and(
+        eq(instrumentTracks.id, productionTasks.trackId),
+        eq(instrumentTracks.active, true),
+      ))
+      .where(eq(productionTasks.songId, songId))
+      .all();
+    return rows.map(r => r.task);
   }
 
   async getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined> {

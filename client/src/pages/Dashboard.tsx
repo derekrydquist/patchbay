@@ -721,6 +721,14 @@ export default function Dashboard() {
     },
   });
 
+  const { data: dashboardHiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: bucketKeys.hiddenTracks(selectedFile?.id),
+    queryFn: () => fetch(`/api/songs/${selectedFile!.id}/hidden-tracks`).then(r => r.json()),
+    enabled: isAddInstrumentOpen && !!selectedFile?.id,
+    refetchOnMount: true,
+    refetchOnWindowFocus: false,
+  });
+
   const addInstrumentSongMutation = useAddInstrument(selectedFile?.id, {
     onCreated: (newTrack) => {
       pendingInstrumentIdRef.current = newTrack.id;
@@ -2699,11 +2707,23 @@ export default function Dashboard() {
             setAddInstrumentError('An instrument with this name already exists');
             return;
           }
+          const hiddenMatch = dashboardHiddenTracks.find(t => t.name.trim().toLowerCase() === name.toLowerCase());
+          if (hiddenMatch) {
+            setAddInstrumentError(`An instrument named "${name}" already exists. It's currently hidden — restore it using the option below.`);
+            return;
+          }
           setAddInstrumentError(null);
           addInstrumentSongMutation.mutate(name);
         }}
         isPending={addInstrumentSongMutation.isPending}
         error={addInstrumentError}
+        hiddenTracks={dashboardHiddenTracks}
+        onRestoreTrack={(id) => fetch(`/api/tracks/${id}/restore`, { method: 'POST' }).then(() => {
+          queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
+          queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(selectedFile?.id) });
+          queryClient.invalidateQueries({ queryKey: [`/api/songs/${selectedFile?.id}/timeline`] });
+          setIsAddInstrumentOpen(false);
+        })}
       />
 
       <AddSectionModal

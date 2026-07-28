@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -61,7 +61,9 @@ export const instrumentTracks = sqliteTable("instrument_tracks", {
   sortOrder: integer("sort_order").notNull().default(0),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   volume: integer("volume").notNull().default(100),
-});
+}, (table) => ({
+  uniqueSongName: uniqueIndex("uniq_song_track_name").on(table.songId, table.name),
+}));
 
 export const insertInstrumentTrackSchema = createInsertSchema(instrumentTracks);
 export type InsertInstrumentTrack = z.infer<typeof insertInstrumentTrackSchema>;
@@ -145,6 +147,7 @@ export type ClipComment = typeof clipComments.$inferSelect;
 export const productionTasks = sqliteTable("production_tasks", {
   id: text("id").primaryKey(),
   songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  trackId: text("track_id").references(() => instrumentTracks.id, { onDelete: "set null" }),
   title: text("title").notNull(),
   instrument: text("instrument").notNull(),
   status: text("status", { enum: ["todo", "in-progress", "complete", "will-not-play"] }).notNull().default("todo"),

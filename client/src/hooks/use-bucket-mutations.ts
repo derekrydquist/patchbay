@@ -94,18 +94,25 @@ export function useDeleteTrack(
 
 export function useRestoreTrack(
   songId: string,
-  opts?: { onSuccess?: () => void }
+  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (trackId: string) =>
-      fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' }),
+    mutationFn: async (trackId: string) => {
+      const res = await fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to restore instrument' }));
+        throw new Error(err.message ?? 'Failed to restore instrument');
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       opts?.onSuccess?.();
     },
+    onError: (err: Error) => opts?.onError?.(err.message),
   });
 }
 

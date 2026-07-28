@@ -259,6 +259,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
 
   const restoreTrackMutation = useRestoreTrack(songId, {
     onSuccess: () => { setIsAddInstrumentOpen(false); },
+    onError: (msg) => setAddInstrumentError(msg),
   });
 
   const hideIdeaMutation = useHideIdea(songId, selectedTrack?.id, {
@@ -588,6 +589,11 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
           const name = newInstrumentName.trim();
           if (tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) {
             setAddInstrumentError('An instrument with this name already exists');
+            return;
+          }
+          const hiddenMatch = hiddenTracks.find(t => t.name.trim().toLowerCase() === name.toLowerCase());
+          if (hiddenMatch) {
+            setAddInstrumentError(`An instrument named "${name}" already exists. It's currently hidden — restore it using the option below.`);
             return;
           }
           setAddInstrumentError(null);

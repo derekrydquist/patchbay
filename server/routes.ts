@@ -371,6 +371,17 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
+    const existingAny = db.select().from(instrumentTracks)
+      .where(and(
+        eq(instrumentTracks.songId, songId),
+        eq(instrumentTracks.name, parsed.data.name),
+      )).get();
+    if (existingAny) {
+      const hint = existingAny.active
+        ? `An instrument named "${parsed.data.name}" already exists in this song.`
+        : `An instrument named "${parsed.data.name}" already exists. It's currently hidden — you can restore it from the Add Instrument dialog's restore option.`;
+      return res.status(409).json({ message: hint });
+    }
     const track = await storage.createTrack(parsed.data);
 
     const trackAddedActor = req.session.userId
@@ -419,6 +430,8 @@ export async function registerRoutes(
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    const trackToRestore = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
+    if (!trackToRestore) return res.status(404).json({ message: "Track not found" });
     await storage.restoreTrack(trackId);
     res.status(200).json({ ok: true });
   });
@@ -1207,6 +1220,10 @@ export async function registerRoutes(
     const rows = db
       .select({ status: productionTasks.status })
       .from(productionTasks)
+      .innerJoin(instrumentTracks, and(
+        eq(instrumentTracks.id, productionTasks.trackId),
+        eq(instrumentTracks.active, true),
+      ))
       .where(eq(productionTasks.songId, songId))
       .all();
     const total = rows.length;

@@ -784,7 +784,10 @@ export function ProductionTracker({ songId }: { songId: string }) {
     },
   });
 
-  const restoreTrackMutation = useRestoreTrack(songId);
+  const restoreTrackMutation = useRestoreTrack(songId, {
+    onSuccess: () => { setIsAddInstrumentOpen(false); setNewInstrumentName(''); setAddInstrumentError(null); },
+    onError: (msg) => setAddInstrumentError(msg),
+  });
   // Song-wide section restore: reactivates hidden ideas on all tracks and backfills
   // ideas+tasks for instruments added while the section was hidden.
   const restoreSectionMutation = useMutation({
@@ -837,6 +840,11 @@ export function ProductionTracker({ songId }: { songId: string }) {
     if (!trimmed) return;
     if (bucket.some(t => t.name.toLowerCase() === trimmed.toLowerCase())) {
       setAddInstrumentError('An instrument with this name already exists');
+      return;
+    }
+    const hiddenMatch = hiddenTracks.find(t => t.name.toLowerCase() === trimmed.toLowerCase());
+    if (hiddenMatch) {
+      setAddInstrumentError(`An instrument named "${trimmed}" already exists. It's currently hidden — restore it using the option below.`);
       return;
     }
     setAddInstrumentError(null);
