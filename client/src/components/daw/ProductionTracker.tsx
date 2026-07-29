@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/contexts/AuthContext';
 import {
-  CheckCircle2, Circle, Clock, Ban, Music2, Plus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp, LayoutList,
+  CheckCircle2, Circle, Clock, Ban, Music2, Plus, Minus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp, LayoutList,
 } from 'lucide-react';
 import { cn, capitalize } from '@/lib/utils';
 import { bucketKeys, type ApiTrack } from '@/lib/bucket-api';
@@ -657,6 +657,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const taskIdFromUrl = new URLSearchParams(window.location.search).get('taskId');
   const { user } = useAuth();
+  const { toast } = useToast();
   const currentUser = user?.username ?? 'Unknown';
 
   const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
@@ -737,6 +738,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
 
   const [removeTrackId, setRemoveTrackId] = useState<string | null>(null);
+  const [removeSectionName, setRemoveSectionName] = useState<string | null>(null);
   const [isAddChoiceOpen, setIsAddChoiceOpen] = useState(false);
 
   const firstTrackId = bucket[0]?.id;
@@ -815,15 +817,26 @@ export function ProductionTracker({ songId }: { songId: string }) {
       const ideasToHide = bucket.flatMap(track =>
         track.ideas.filter(idea => idea.sectionName === sectionName)
       );
-      await Promise.all(
+      const results = await Promise.all(
         ideasToHide.map(idea => fetch(`/api/ideas/${idea.id}`, { method: 'PATCH' }))
       );
+      const failed = results.filter(r => !r.ok);
+      if (failed.length > 0) {
+        throw new Error(`Failed to remove section (${failed.length} of ${results.length} requests failed)`);
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: 'Failed to remove section',
+        description: err.message,
+        variant: 'destructive',
+      });
     },
   });
 
@@ -1004,7 +1017,17 @@ export function ProductionTracker({ songId }: { songId: string }) {
               <React.Fragment key={section}>
                 <ContextMenu>
                   <ContextMenuTrigger asChild>
-                    <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center text-center">
+                    <div className="sticky left-0 z-10 bg-[#0b0b0d] border-r border-t border-white/5 px-4 py-4 flex items-center justify-center gap-2 text-center group/section">
+                      <button
+                        className="opacity-0 group-hover/section:opacity-100 transition-opacity shrink-0 cursor-pointer"
+                        onClick={(e) => { e.stopPropagation(); setRemoveSectionName(section); }}
+                        onContextMenu={(e) => e.stopPropagation()}
+                        aria-label={`Remove section ${section}`}
+                      >
+                        <div className="w-[22px] h-[22px] rounded-md bg-red-500/15 hover:bg-red-500/25 flex items-center justify-center transition-colors">
+                          <Minus size={14} className="text-red-500" />
+                        </div>
+                      </button>
                       <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{section}</div>
                     </div>
                   </ContextMenuTrigger>
@@ -1217,6 +1240,26 @@ export function ProductionTracker({ songId }: { songId: string }) {
             <AlertDialogAction
               className="bg-red-600 hover:bg-red-700 text-white"
               onClick={() => removeTrackId && deleteTrackMutation.mutate(removeTrackId)}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!removeSectionName} onOpenChange={(v) => !v && setRemoveSectionName(null)}>
+        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Section?</AlertDialogTitle>
+            <AlertDialogDescription>
+              <span className="font-semibold text-white">{removeSectionName}</span> will be hidden across all instruments. You can restore it via Add Section.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={() => removeSectionName && hideSectionMutation.mutate(removeSectionName)}
             >
               Remove
             </AlertDialogAction>

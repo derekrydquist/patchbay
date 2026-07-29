@@ -1187,20 +1187,17 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 ### Media Bucket — "Add Section"
 
-Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that opens `AddSectionModal` (from `client/src/components/daw/modals/AddSectionModal.tsx`). Submitting calls `useAddSection` (from `use-bucket-mutations.ts`), which fires `POST /api/tracks/:trackId/ideas` for **all tracks simultaneously** via `Promise.all`, then invalidates the bucket query. This ensures every instrument always has a slot for every section.
+Hovering over the Sections header in `MediaBucket.tsx` reveals a `+` button that opens `AddSectionModal` (from `client/src/components/daw/modals/AddSectionModal.tsx`). Submitting calls `useAddSection` (from `use-bucket-mutations.ts`).
 
-**Duplicate-name validation (client-side):** Both `AddSectionModal` and `AddInstrumentModal` onSubmit handlers perform a pre-check against the current bucket data before mutating. For sections: `tracks.some(t => t.ideas.some(i => i.sectionName.trim().toLowerCase() === name.toLowerCase()))`. For instruments: `tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())`. If a duplicate is found, `setAddSectionError` / `setAddInstrumentError` is called and the mutation is not fired. The error clears automatically on the next keystroke via `onClearError`. This is a courtesy UX guard — a server-side 409 is the authoritative guard and should be added as a follow-up. The same pattern applies on the Dashboard Files tab surface (`fileBucket` instead of `tracks`).
+**Add Section** — `useAddSection(songId, bucket)` → `POST /api/songs/:songId/sections`, a single atomic server-side call that creates one idea row per active track in a transaction. Server computes `sortOrder` once, shared across all tracks (not per-track). Section names must be unique per song, active or hidden, no exceptions — enforced by a `UNIQUE(track_id, section_name)` index on `ideas` (schema.ts) plus a server-side pre-check. Duplicate attempts return 409, distinguishing an active conflict ("already exists") from a hidden conflict ("exists but hidden — restore it"), mirroring the instrument-duplicate pattern. Restore goes through the song-wide `POST /api/songs/:songId/sections/restore` endpoint on both MediaBucket and Production Tracker.
+
+**`AddInstrumentModal` duplicate-name guard (client-side):** `AddInstrumentModal`'s onSubmit handler performs a pre-check against the current bucket data before mutating: `tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())`. If a duplicate is found, `setAddInstrumentError` is called and the mutation is not fired. The error clears automatically on the next keystroke via `onClearError`. The same pattern applies on the Dashboard Files tab surface (`fileBucket` instead of `tracks`). Section uniqueness is now enforced server-side (409) — `AddSectionModal` no longer performs a client-side pre-check.
 
 **Auto-select + scroll after creation:** `addSectionMutation.onCreated` fetches the fresh bucket via `queryClient.fetchQuery`, finds the selected track's new idea by `sectionName === <created name>`, and calls `setSelectedIdea`. A `selectedIdeaRef` + `useEffect([selectedIdea?.id])` then scrolls the idea row button into view — parity with the instrument-add pattern.
 
-**Right-click "Remove from This Instrument"** hides the idea for that one instrument only (`useHideIdea` → `PATCH /api/ideas/:ideaId` → `active = false`). This is per-instrument, not song-wide. The "Add Section" restore dropdown shows only ideas hidden via this path (`GET /api/tracks/:trackId/hidden-ideas` returns `active = false` rows). A song-wide hard-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists on the server but is not wired to any UI action — do not add a UI affordance for it without a product discussion.
+**Right-click "Remove from This Instrument"** hides the idea for that one instrument only (`useHideIdea` → `PATCH /api/ideas/:ideaId` → `active = false`). This is per-instrument, not song-wide. A song-wide hard-delete endpoint (`DELETE /api/songs/:songId/sections/:sectionName`) exists on the server but is not wired to any UI action — do not add a UI affordance for it without a product discussion.
 
-**User-added sections always appear at the bottom of the sections list.** This is enforced at every layer:
-- The mutation sends `sortOrder: track.ideas.length + i`, which is always higher than all existing idea sortOrders for that track
-- `getBucket` in `storage.ts` orders ideas by `asc(ideas.sortOrder)` before returning them
-- MediaBucket renders ideas in the order the API returns them — no client-side re-sort
-
-Do not change this to alphabetical or insertion-point ordering without discussion. Append-to-bottom is the intentional UX.
+**User-added sections always appear at the bottom of the sections list.** `getBucket` in `storage.ts` orders ideas by `asc(ideas.sortOrder)` before returning them; MediaBucket renders in that order — no client-side re-sort. Do not change this to alphabetical or insertion-point ordering without discussion. Append-to-bottom is the intentional UX.
 
 ### Media Bucket — hidden-tracks query invalidation
 
@@ -1940,7 +1937,7 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 
 **Entry point — corner cell:** A single always-visible `+ Add` button in the sticky corner cell opens a "Create New…"-style chooser modal (two cards: Section · Instrument). Selecting a card closes the chooser and opens the existing `AddSectionModal` or `AddInstrumentModal` — no new mutation logic, only new trigger UI. Corner cell: outer sticky div keeps `bg-[#0c0c0e]` (opaque, prevents scroll-content bleed through the semi-transparent inner pill); inner pill carries `bg-primary/10 + border-primary/35 + rounded-md`, stepping up on hover. Full cell is the click target; no `transform`/`filter` on the sticky element so Safari stacking-context rules remain intact.
 
-**Add Section** — `useAddSection(songId, bucket)` → `Promise.all POST /api/tracks/:trackId/ideas` across all tracks. Duplicate-name guard (client-side, case-insensitive). Hidden-section restore dropdown uses the first track as a proxy for the song-wide hidden state. Invalidates `['production-tasks', songId]` so new rows appear immediately.
+**Add Section** — `useAddSection(songId, bucket)` → `POST /api/songs/:songId/sections`, a single atomic server-side call that creates one idea row per active track in a transaction. Server computes `sortOrder` once, shared across all tracks (not per-track). Section names must be unique per song, active or hidden, no exceptions — enforced by a `UNIQUE(track_id, section_name)` index on `ideas` (schema.ts) plus a server-side pre-check. Duplicate attempts return 409, distinguishing an active conflict ("already exists") from a hidden conflict ("exists but hidden — restore it"), mirroring the instrument-duplicate pattern. Restore goes through the song-wide `POST /api/songs/:songId/sections/restore` endpoint on both MediaBucket and Production Tracker.
 
 **Add Instrument** — `useAddInstrument(songId)` → `POST /api/songs/:songId/tracks`. Duplicate-name guard + hidden-track restore dropdown. Already invalidates `['production-tasks', songId]` (this invalidation was added to the hook in an earlier session).
 
@@ -2141,12 +2138,14 @@ routes (`POST /api/clips/:clipId/comments`, `POST /api/production-tasks/:id/comm
 - **Instrument name uniqueness** — tracks can no longer share a name within a song, active or hidden. Full `UNIQUE(songId, name)` index (not partial); 409 checks and client-side guards updated across MediaBucket, Production Tracker, Dashboard. Error message points to the restore option when the conflicting name is hidden.
 - **Restore action left stale UI** — `useRestoreTrack` now invalidates `['production-tasks', songId]`; Production Tracker's restore modal now closes on success (previously only MediaBucket did).
 - **Instrument `sortOrder` always hardcoded to 999** — caused new instruments to render alphabetically (via a leftover partial index SQLite's planner preferred, stable-sorting ties in alphabetical order). Fixed to `MAX(sort_order) + 1` per song; 57 existing rows repaired; leftover partial index dropped. No secondary sort tiebreaker added — manual drag-to-reorder is planned and will own this.
-- **Section `sortOrder` divergence across tracks** (`track.ideas.length + i` computed independently per track) — data repaired on affected songs. Structural fix deferred to the section-add redesign below.
+- **Section `sortOrder` divergence across tracks** — fixed structurally by the section-add redesign below. Section creation is now a single atomic server-side operation (`POST /api/songs/:songId/sections`) that computes `sortOrder` once (`MAX(existing) + 1`) and shares it across all tracks, replacing the old per-track `Promise.all` flow. No secondary sort tiebreaker (manual drag-to-reorder is planned and will own this).
+- **Section restore modal not closing** — Production Tracker's `restoreSectionMutation.onSuccess` was missing the modal-close state resets (`setIsAddSectionOpen(false)`, etc.) that the instrument-restore counterpart already had. Fixed to match.
 
 ---
 
 ## On the horizon
 
-- **Section-add redesign** — replace per-track `Promise.all` section creation with a single atomic server call: shared `sortOrder` computed once (not per-track), full name-uniqueness (active + hidden, matching the instrument rule above), no tiebreaker (manual reorder for sections is planned).
 - **Per-instrument hidden sections invisible to Production Tracker** — confirmed via real data (`ideas.active=false` scoped to one track has no effect on cell rendering, since `findTask` doesn't join `ideas`). Design decision needed: dim/disable the cell vs. also gate the complete-status guard.
-- **Manual drag-to-reorder (instruments + sections)** — instrument `sortOrder` data is now clean and ready; sections will be ready once the redesign above lands.
+- **Manual drag-to-reorder (instruments + sections)** — instrument `sortOrder` data is now clean and ready; sections `sortOrder` is now clean too (fixed by section-add redesign).
+- **Production Tracker's song-wide `hideSectionMutation` has no error handling** — sends bare `fetch()` PATCH calls with no `res.ok` check; a failed request silently drops with no error toast. Fix: match `useHideIdea`'s error-handling pattern.
+- **Section row-label right-click trigger has no visual affordance** — Production Tracker's sticky left column section labels are right-clickable ("Remove Section") but there's no hover indicator, unlike instrument column headers' hover-reveal `+`. Consider a tooltip or hover-reveal `···` button.
