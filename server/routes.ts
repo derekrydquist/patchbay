@@ -15,8 +15,8 @@ import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte, max } from "drizzle-orm";
-import { db } from "./db";
+import { eq, and, ne, count, asc, gte, max, inArray } from "drizzle-orm";
+import { db, sqlite } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection } from "./storage";
 import {
   insertSongSchema,
@@ -460,6 +460,93 @@ export async function registerRoutes(
     if (!assertSongOwned(req, res, songId)) return;
     const hidden = await storage.getHiddenTracks(songId);
     res.json(hidden);
+  });
+
+  // Atomic song-wide section creation: inserts one ideas row per active track in a
+  // single transaction, sortOrder computed once, full name-uniqueness check (active or hidden).
+  app.post("/api/songs/:songId/sections", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const { sectionName } = req.body as { sectionName?: string };
+    if (!sectionName?.trim()) return res.status(400).json({ message: "sectionName required" });
+    const name = sectionName.trim();
+
+    // 1. All active tracks for this song.
+    const activeTracks = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+      .all();
+    if (!activeTracks.length) return res.status(400).json({ message: "No active tracks found for this song." });
+
+    // 2. Uniqueness check — active OR hidden — across every active track.
+    const trackIds = activeTracks.map(t => t.id);
+    const existingIdeas = db.select().from(ideas).where(inArray(ideas.trackId, trackIds)).all();
+    const existingIdea = existingIdeas.find(
+      i => i.sectionName.toLowerCase() === name.toLowerCase()
+    );
+    if (existingIdea) {
+      const hint = existingIdea.active
+        ? `A section named "${name}" already exists in this song.`
+        : `A section named "${name}" already exists. It's currently hidden — you can restore it from the Add Section dialog's restore option.`;
+      return res.status(409).json({ message: hint });
+    }
+
+    // 3. Shared sortOrder: MAX across all ideas on these tracks + 1.
+    const maxOrderRow = db.select({ val: max(ideas.sortOrder) })
+      .from(ideas)
+      .where(inArray(ideas.trackId, trackIds))
+      .get();
+    const nextSortOrder = (maxOrderRow?.val ?? -1) + 1;
+
+    // 4. Insert one ideas row per track in a single transaction (UNIQUE index is the final backstop).
+    const insertTxn = sqlite.transaction((): typeof ideas.$inferSelect[] => {
+      const created: typeof ideas.$inferSelect[] = [];
+      for (const track of activeTracks) {
+        const id = randomUUID();
+        db.insert(ideas).values({
+          id,
+          trackId: track.id,
+          name: `${track.name} ${name}`,
+          sectionName: name,
+          sortOrder: nextSortOrder,
+          active: true,
+        }).run();
+        created.push(db.select().from(ideas).where(eq(ideas.id, id)).get()!);
+      }
+      return created;
+    });
+
+    let createdIdeas: typeof ideas.$inferSelect[];
+    try {
+      createdIdeas = insertTxn();
+    } catch (err: any) {
+      if (err?.message?.includes('UNIQUE constraint failed')) {
+        return res.status(409).json({ message: `A section named "${name}" already exists in this song.` });
+      }
+      throw err;
+    }
+
+    // 5. Production tasks — outside the transaction (uses onConflictDoNothing).
+    for (const track of activeTracks) {
+      insertProductionTaskForSection({ songId, trackId: track.id, instrument: track.name, sectionName: name });
+    }
+
+    // 6. Activity log (no dedup needed — single endpoint call per user action).
+    const sectionAddedSong = await storage.getSongById(songId);
+    if (sectionAddedSong?.type !== 'idea') {
+      const actor = req.session.userId
+        ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+        : 'Someone';
+      storage.logActivity({
+        id: randomUUID(),
+        songId,
+        type: 'section-added',
+        description: `${actor} added section ${name}`,
+        timestamp: Date.now(),
+        sectionName: name,
+      }).catch(console.error);
+    }
+
+    res.status(201).json({ sectionName: name, ideas: createdIdeas });
   });
 
   app.delete("/api/songs/:songId/sections/:sectionName", requireBand, async (req, res) => {

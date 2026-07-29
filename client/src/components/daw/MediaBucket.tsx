@@ -6,7 +6,7 @@ import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } fr
 import {
   useAddInstrument, useAddSection,
   useDeleteTrack, useRestoreTrack,
-  useHideIdea, useRestoreSection,
+  useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
 import { BucketClip } from './Clip';
 import { UploadModal } from './UploadModal';
@@ -267,7 +267,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     onError: (msg) => console.error('[hideIdea] error:', msg),
   });
 
-  const restoreSectionMutation = useRestoreSection(selectedTrack?.id, songId, {
+  const restoreSectionMutation = useRestoreSectionSongWide(songId, {
     onSuccess: () => { setIsAddSectionOpen(false); },
   });
 
@@ -627,7 +627,10 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         isPending={addSectionMutation.isPending}
         error={addSectionError}
         hiddenSections={hiddenIdeas}
-        onRestoreSection={(id) => restoreSectionMutation.mutate(id)}
+        onRestoreSection={(id) => {
+            const section = hiddenIdeas.find(h => h.id === id);
+            if (section) restoreSectionMutation.mutate(section.sectionName);
+          }}
         isRestoring={restoreSectionMutation.isPending}
       />
     </div>

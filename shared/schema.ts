@@ -78,7 +78,9 @@ export const ideas = sqliteTable("ideas", {
   sectionName: text("section_name").notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
-});
+}, (table) => ({
+  uniqTrackSection: uniqueIndex("uniq_track_section").on(table.trackId, table.sectionName),
+}));
 
 export const insertIdeaSchema = createInsertSchema(ideas);
 export type InsertIdea = z.infer<typeof insertIdeaSchema>;

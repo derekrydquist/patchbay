@@ -803,6 +803,9 @@ export function ProductionTracker({ songId }: { songId: string }) {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      setIsAddSectionOpen(false);
+      setNewSectionName('');
+      setAddSectionError(null);
     },
   });
 

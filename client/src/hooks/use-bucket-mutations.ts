@@ -32,37 +32,55 @@ export function useAddInstrument(
 
 export function useAddSection(
   songId: string | undefined,
-  tracks: ApiTrack[],
+  _tracks: ApiTrack[],
   opts?: { onCreated?: (sectionName: string) => void; onError?: (message: string) => void }
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (sectionName: string) => {
-      await Promise.all(
-        tracks.map((track, i) =>
-          fetch(`/api/tracks/${track.id}/ideas`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              name: `${track.name} ${sectionName}`,
-              sectionName,
-              sortOrder: track.ideas.length + i,
-            }),
-          }).then(async (res) => {
-            if (!res.ok) {
-              const err = await res.json().catch(() => ({ message: 'Failed to create section' }));
-              throw new Error(err.message ?? 'Failed to create section');
-            }
-            return res.json();
-          })
-        )
-      );
+      const res = await fetch(`/api/songs/${songId}/sections`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sectionName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to create section' }));
+        throw new Error(err.message ?? 'Failed to create section');
+      }
+      return res.json() as Promise<{ sectionName: string }>;
     },
-    onSuccess: (_, sectionName) => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      opts?.onCreated?.(sectionName);
+      opts?.onCreated?.(data.sectionName);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+export function useRestoreSectionSongWide(
+  songId: string,
+  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (sectionName: string) => {
+      const res = await fetch(`/api/songs/${songId}/sections/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sectionName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to restore section' }));
+        throw new Error(err.message ?? 'Failed to restore section');
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),
   });
