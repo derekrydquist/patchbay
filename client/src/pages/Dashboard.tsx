@@ -119,6 +119,9 @@ function activityUrl(event: ActivityEvent): string {
   if (event.type === 'status-change' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
+  if (event.type === 'task-status-change') {
+    return `${base}?tab=production`;
+  }
   if (event.type === 'task-comment' && event.source === 'task' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }

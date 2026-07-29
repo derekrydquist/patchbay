@@ -989,7 +989,10 @@ export function Timeline({ songId }: { songId: string }) {
         const finalTrack = recalced.find((t) => t.id === track.id)!;
 
         fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' })
-          .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
+          .then(() => Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['activity'] }),
+            queryClient.invalidateQueries({ queryKey: ['songs'] }),
+          ]))
           .catch((err) => console.error('Failed to delete timeline clip:', err));
         track.clips.filter((c) => c.id !== clipId).forEach((old) => {
           const updated = finalTrack.clips.find((c) => c.id === old.id);
@@ -1184,6 +1187,7 @@ export function Timeline({ songId }: { songId: string }) {
         .then(() => Promise.all([
           queryClient.invalidateQueries({ queryKey: ['activity'] }),
           queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] }),
+          queryClient.invalidateQueries({ queryKey: ['songs'] }),
         ]))
         .catch((err) => console.error('Failed to persist timeline clip:', err));
 
@@ -1414,6 +1418,8 @@ export function Timeline({ songId }: { songId: string }) {
     setTracks(prev => prev.filter(t => t.id !== trackId));
     queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
     queryClient.invalidateQueries({ queryKey: ['hidden-tracks', songId] });
+    queryClient.invalidateQueries({ queryKey: ['activity'] });
+    queryClient.invalidateQueries({ queryKey: ['songs'] });
   };
 
   const handleRulerSeek = (pos: number) => {

@@ -272,6 +272,7 @@ export const activityLog = sqliteTable("activity_log", {
   reviewId: text("review_id"),
   commentId: text("comment_id"),
   bandId: text("band_id"),
+  author: text("author"),
 });
 
 export type InsertActivityLog = typeof activityLog.$inferInsert;

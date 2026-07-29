@@ -280,7 +280,10 @@ export async function registerRoutes(
   });
 
   app.get("/api/songs", requireBand, async (req, res) => {
-    const result = await storage.getSongs(req.bandId!);
+    const sessionUser = req.session.userId ? await storage.getUser(req.session.userId) : null;
+    const result = sessionUser
+      ? await storage.getSongsWithLastActive(req.bandId!, sessionUser.username)
+      : await storage.getSongs(req.bandId!);
     const rows = db
       .select({ songId: instrumentTracks.songId })
       .from(clips)
@@ -331,6 +334,7 @@ export async function registerRoutes(
         ? `${songCreatedActor} created a new idea — ${song.name}`
         : `${songCreatedActor} created a new song — ${song.name}`,
       timestamp: Date.now(),
+      author: songCreatedActor,
     }).catch(console.error);
 
     res.status(201).json(song);
@@ -404,6 +408,7 @@ export async function registerRoutes(
       description: trackAddedDesc,
       timestamp: Date.now(),
       instrument: track.name,
+      author: trackAddedActor,
     }).catch(console.error);
 
     res.status(201).json(track);
@@ -426,6 +431,7 @@ export async function registerRoutes(
         description: `${trackDeletedActor} deleted an instrument — ${trackToDelete.name}`,
         timestamp: Date.now(),
         instrument: trackToDelete.name,
+        author: trackDeletedActor,
       }).catch(console.error);
     }
     res.status(200).json({ ok: true });
@@ -543,6 +549,7 @@ export async function registerRoutes(
         description: `${actor} added section ${name}`,
         timestamp: Date.now(),
         sectionName: name,
+        author: actor,
       }).catch(console.error);
     }
 
@@ -567,6 +574,7 @@ export async function registerRoutes(
       description: `${sectionDeletedActor} deleted section ${decodedSection}`,
       timestamp: Date.now(),
       sectionName: decodedSection,
+      author: sectionDeletedActor,
     }).catch(console.error);
 
     res.status(204).send();
@@ -671,6 +679,7 @@ export async function registerRoutes(
             timestamp: Date.now(),
             instrument: addTrack.name,
             sectionName: clip.sectionName,
+            author: clipAddedActor,
           }).catch(console.error);
         }
       } catch (err) {
@@ -756,6 +765,16 @@ export async function registerRoutes(
                 text: `Clip marked as final: "${clip.name}"`,
                 timestamp: Date.now(),
               });
+              storage.logActivity({
+                id: randomUUID(),
+                songId: track.songId,
+                type: 'marked-final',
+                description: `${timelineClipActor} marked ${clip.name} as final`,
+                timestamp: Date.now(),
+                instrument: track.name,
+                sectionName: clip.sectionName ?? undefined,
+                author: timelineClipActor,
+              }).catch(console.error);
             } else if (isFinal === false && task.status === "complete") {
               await storage.updateTask(task.id, { status: "in-progress" });
               storage.logActivity({
@@ -766,6 +785,7 @@ export async function registerRoutes(
                 timestamp: Date.now(),
                 instrument: track.name,
                 sectionName: clip.sectionName ?? undefined,
+                author: timelineClipActor,
               }).catch(console.error);
             }
           }
@@ -792,6 +812,7 @@ export async function registerRoutes(
             timestamp: Date.now(),
             instrument: replaceTrack.name,
             sectionName: clip.sectionName,
+            author: timelineClipActor,
           }).catch(console.error);
         }
       } catch (err) {
@@ -822,6 +843,7 @@ export async function registerRoutes(
           timestamp: Date.now(),
           instrument: track.name,
           sectionName: clipToRemove.sectionName ?? undefined,
+          author: clipRemovedActor,
         }).catch(console.error);
       }
     }
@@ -976,6 +998,7 @@ export async function registerRoutes(
               description: `${sectionAddedActor} added section ${idea.sectionName}`,
               timestamp: Date.now(),
               sectionName: idea.sectionName,
+              author: sectionAddedActor,
             }).catch(console.error);
           }
         }
@@ -1054,6 +1077,16 @@ export async function registerRoutes(
                   text: `Clip marked as final: "${clip.name}"`,
                   timestamp: Date.now(),
                 });
+                storage.logActivity({
+                  id: randomUUID(),
+                  songId: track.songId,
+                  type: 'marked-final',
+                  description: `${bucketClipActor} marked ${clip.name} as final`,
+                  timestamp: Date.now(),
+                  instrument: track.name,
+                  sectionName: idea.sectionName,
+                  author: bucketClipActor,
+                }).catch(console.error);
               } else if (clipUpdates.isFinal === false && task.status === "complete") {
                 await storage.updateTask(task.id, { status: "in-progress" });
                 storage.logActivity({
@@ -1064,6 +1097,7 @@ export async function registerRoutes(
                   timestamp: Date.now(),
                   instrument: track.name,
                   sectionName: idea.sectionName,
+                  author: bucketClipActor,
                 }).catch(console.error);
               }
             }
@@ -1434,6 +1468,17 @@ export async function registerRoutes(
           text: label,
           timestamp: Date.now(),
         });
+        const displayLabel = label.replace(/^Status changed to /, '');
+        storage.logActivity({
+          id: randomUUID(),
+          songId: previous.songId,
+          type: 'task-status-change',
+          description: `${actorName} changed status to ${displayLabel} — ${previous.instrument} · ${previous.sectionName}`,
+          timestamp: Date.now(),
+          instrument: previous.instrument,
+          sectionName: previous.sectionName,
+          author: actorName,
+        }).catch(console.error);
       }
     }
 
@@ -1645,6 +1690,7 @@ export async function registerRoutes(
         timestamp: Date.now(),
         reviewId,
         commentId: comment.id,
+        author,
       }).catch(console.error);
     } else {
       storage.logActivity({
@@ -1655,6 +1701,7 @@ export async function registerRoutes(
         timestamp: Date.now(),
         reviewId,
         commentId: comment.id,
+        author,
       }).catch(console.error);
     }
 

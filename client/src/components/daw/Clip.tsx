@@ -1121,6 +1121,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch {
       setIsFinal(!newIsFinal); // revert
     }
@@ -1624,6 +1625,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[markFinal] network error:', err);
       setIsFinal(!newIsFinal);

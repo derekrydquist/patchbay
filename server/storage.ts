@@ -83,7 +83,7 @@ export type BucketTrack = InstrumentTrack & {
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface ActivityEvent {
-  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline' | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted' | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply' | 'song-created' | 'idea-created';
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'task-status-change' | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline' | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted' | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply' | 'song-created' | 'idea-created';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -109,6 +109,7 @@ export interface IStorage {
 
   // Songs
   getSongs(bandId: string): Promise<Song[]>;
+  getSongsWithLastActive(bandId: string, username: string): Promise<Song[]>;
   getSongById(id: string): Promise<SongWithTracks | undefined>;
   createSong(data: InsertSong, bandId: string): Promise<Song>;
   updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined>;
@@ -297,6 +298,22 @@ export class SQLiteStorage implements IStorage {
 
   async getSongs(bandId: string): Promise<Song[]> {
     return db.select().from(songs).where(eq(songs.bandId, bandId)).orderBy(desc(songs.updatedAt)).all();
+  }
+
+  async getSongsWithLastActive(bandId: string, username: string): Promise<Song[]> {
+    const songRows = db.select().from(songs).where(eq(songs.bandId, bandId)).all();
+    const activityRows = db
+      .select({ songId: activityLog.songId, maxTs: max(activityLog.timestamp) })
+      .from(activityLog)
+      .where(and(eq(activityLog.bandId, bandId), eq(activityLog.author, username)))
+      .groupBy(activityLog.songId)
+      .all();
+    const activityMap = new Map(activityRows.map(r => [r.songId, r.maxTs ?? 0]));
+    return songRows.sort((a, b) => {
+      const tsA = activityMap.get(a.id) ?? new Date(a.createdAt).getTime();
+      const tsB = activityMap.get(b.id) ?? new Date(b.createdAt).getTime();
+      return tsB - tsA;
+    });
   }
 
   async getSongById(id: string): Promise<SongWithTracks | undefined> {
@@ -864,31 +881,11 @@ export class SQLiteStorage implements IStorage {
 
     for (const row of taskCommentRows) {
       if (row.text.startsWith('Status changed to ')) {
-        const statusLabel = row.text.replace(/^Status changed to /, '');
-        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
-        events.push({
-          type: 'status-change',
-          description: `${actor} changed status to ${statusLabel} — ${row.instrument} · ${row.sectionName}`,
-          timestamp: row.timestamp,
-          songId: row.songId,
-          songName: row.songName,
-          taskId: row.taskId,
-          instrument: row.instrument,
-          sectionName: row.sectionName,
-        });
+        // Now covered by a real activity_log row ('task-status-change') written at mutation time.
+        continue;
       } else if (row.text.startsWith('Clip marked as final:')) {
-        const clipName = row.text.slice('Clip marked as final: '.length).replace(/^"|"$/g, '');
-        const actor = (!row.author || row.author === 'System' || row.author === 'Unknown') ? 'Someone' : row.author;
-        events.push({
-          type: 'marked-final',
-          description: `${actor} marked ${clipName} as final`,
-          timestamp: row.timestamp,
-          songId: row.songId,
-          songName: row.songName,
-          taskId: row.taskId,
-          instrument: row.instrument,
-          sectionName: row.sectionName,
-        });
+        // Now covered by a real activity_log row ('marked-final') written at mutation time.
+        continue;
       } else if (row.text.startsWith('Clip unmarked as final:')) {
         const unmatchResult = row.text.match(/^Clip unmarked as final: "([^"]+)"/);
         const unmarkName = unmatchResult ? unmatchResult[1] : 'clip';

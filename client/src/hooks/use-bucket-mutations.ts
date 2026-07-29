@@ -24,6 +24,7 @@ export function useAddInstrument(
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onCreated?.(track);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -53,6 +54,7 @@ export function useAddSection(
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onCreated?.(data.sectionName);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -104,6 +106,7 @@ export function useDeleteTrack(
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),

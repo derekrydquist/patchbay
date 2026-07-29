@@ -107,6 +107,9 @@ function activityUrl(songId: string, event: ActivityEvent): string {
   if (event.type === 'status-change' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
+  if (event.type === 'task-status-change') {
+    return `${base}?tab=production`;
+  }
   if (event.type === 'task-comment' && event.source === 'task' && event.taskId) {
     return `${base}?tab=production&taskId=${event.taskId}`;
   }
@@ -539,6 +542,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       refetchComments();
       queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } finally {
       setIsSubmitting(false);
     }
@@ -559,6 +563,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       refetchComments();
       queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } finally {
       setReplySubmitting(false);
     }
