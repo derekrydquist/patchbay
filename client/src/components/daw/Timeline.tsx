@@ -950,7 +950,9 @@ export function Timeline({ songId }: { songId: string }) {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ volume }),
-        }).catch((err) => console.error('Failed to persist track volume:', err));
+        })
+          .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+          .catch((err) => console.error('Failed to persist track volume:', err));
       }, 500);
     };
     const handleReplaceClip = (e: any) => {
@@ -1094,7 +1096,9 @@ export function Timeline({ songId }: { songId: string }) {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ start: updated.start }),
-            }).catch((err) => console.error('Failed to patch clip start after section reorder:', err));
+            })
+              .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+              .catch((err) => console.error('Failed to patch clip start after section reorder:', err));
           }
         });
       });
@@ -1198,7 +1202,9 @@ export function Timeline({ songId }: { songId: string }) {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ start: updated.start }),
-          }).catch((err) => console.error('Failed to update clip start:', err));
+          })
+            .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+            .catch((err) => console.error('Failed to update clip start:', err));
         }
       });
 
@@ -1290,7 +1296,9 @@ export function Timeline({ songId }: { songId: string }) {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ start: updated.start }),
-            }).catch((err) => console.error('Failed to patch clip start after gap drop:', err));
+            })
+              .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+              .catch((err) => console.error('Failed to patch clip start after gap drop:', err));
           }
         });
       }
@@ -1402,7 +1410,9 @@ export function Timeline({ songId }: { songId: string }) {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ start: updated.start }),
-            }).catch((err) => console.error('Failed to update clip start:', err));
+            })
+              .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+              .catch((err) => console.error('Failed to update clip start:', err));
           }
         });
 
@@ -1510,7 +1520,11 @@ export function Timeline({ songId }: { songId: string }) {
 
   const handleLeaveFinalClips = () => {
     fetch(`/api/songs/${songId}/timeline-clips/non-final`, { method: 'DELETE' })
-      .then(() => queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] }))
+      .then(() => Promise.all([
+        queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] }),
+        queryClient.invalidateQueries({ queryKey: ['songs'] }),
+        queryClient.invalidateQueries({ queryKey: ['activity'] }),
+      ]))
       .catch(console.error);
     setClearDialogState('none');
   };

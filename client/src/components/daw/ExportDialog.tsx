@@ -422,6 +422,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
             toast({ title: 'Shared to Review tab' });
             queryClient.invalidateQueries({ queryKey: ['reviews', songId] });
             queryClient.invalidateQueries({ queryKey: ['activity'] });
+            queryClient.invalidateQueries({ queryKey: ['songs'] });
           }
         }
       }

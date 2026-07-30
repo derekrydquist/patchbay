@@ -82,6 +82,7 @@ export function useRestoreSectionSongWide(
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -131,6 +132,8 @@ export function useRestoreTrack(
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -151,6 +154,7 @@ export function useHideIdea(
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -169,6 +173,8 @@ export function useRestoreSection(
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
   });

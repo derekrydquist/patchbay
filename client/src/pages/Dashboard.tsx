@@ -860,6 +860,7 @@ export default function Dashboard() {
 
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
 
       const instrName = destTrack.name;
       const sectName = destIdea.sectionName;
@@ -994,6 +995,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(destSongId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
 
       const instrName = destTrack.name;
       const sectName = destIdea.sectionName;
@@ -2725,6 +2727,8 @@ export default function Dashboard() {
           queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
           queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(selectedFile?.id) });
           queryClient.invalidateQueries({ queryKey: [`/api/songs/${selectedFile?.id}/timeline`] });
+          queryClient.invalidateQueries({ queryKey: ['activity'] });
+          queryClient.invalidateQueries({ queryKey: ['songs'] });
           setIsAddInstrumentOpen(false);
         })}
       />

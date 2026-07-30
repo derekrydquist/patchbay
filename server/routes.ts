@@ -343,7 +343,20 @@ export async function registerRoutes(
   app.delete("/api/songs/:id", requireBand, async (req, res) => {
     const id = req.params.id as string;
     if (!assertSongOwned(req, res, id)) return;
+    const songToDelete = db.select().from(songs).where(eq(songs.id, id)).get();
+    const deleteSongActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     await storage.deleteSong(id);
+    if (songToDelete) {
+      storage.logActivity({
+        id: randomUUID(), songId: id,
+        type: 'song-deleted',
+        description: `${deleteSongActor} deleted song — ${songToDelete.name}`,
+        timestamp: Date.now(),
+        author: deleteSongActor,
+      }).catch(console.error);
+    }
     res.status(204).end();
   });
 
@@ -444,6 +457,18 @@ export async function registerRoutes(
     const trackToRestore = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
     if (!trackToRestore) return res.status(404).json({ message: "Track not found" });
     await storage.restoreTrack(trackId);
+    const restoreTrackActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: trackToRestore.songId,
+      type: 'track-restored',
+      description: `${restoreTrackActor} restored instrument — ${trackToRestore.name}`,
+      timestamp: Date.now(),
+      instrument: trackToRestore.name,
+      author: restoreTrackActor,
+    }).catch(console.error);
     res.status(200).json({ ok: true });
   });
 
@@ -458,6 +483,20 @@ export async function registerRoutes(
     }
     const track = await storage.updateTrack(trackId, { volume: Math.round(volume) });
     if (!track) return res.status(404).json({ message: "Track not found" });
+
+    const volumeActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: trackSongIdVal,
+      type: 'volume-changed',
+      description: `${volumeActor} changed volume on ${track.name}`,
+      timestamp: Date.now(),
+      instrument: track.name,
+      author: volumeActor,
+    }).catch(console.error);
+
     res.json(track);
   });
 
@@ -616,6 +655,19 @@ export async function registerRoutes(
         insertProductionTaskForSection({ songId, trackId: track.id, instrument: track.name, sectionName });
       }
     }
+
+    const restoreSectionActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'section-restored',
+      description: `${restoreSectionActor} restored section ${sectionName}`,
+      timestamp: Date.now(),
+      sectionName,
+      author: restoreSectionActor,
+    }).catch(console.error);
 
     res.status(200).json({ ok: true });
   });
@@ -820,6 +872,31 @@ export async function registerRoutes(
       }
     }
 
+    // Log timeline-reordered for plain start-position updates (drag reorder / section reorder).
+    // isFinal and replace branches already have their own logActivity calls above.
+    const isFinalUpdate = clipUpdates.isFinal === true || clipUpdates.isFinal === false;
+    if ('start' in clipUpdates && !isFinalUpdate && !isReplace) {
+      try {
+        const reorderTrack = db.select().from(instrumentTracks)
+          .where(eq(instrumentTracks.id, clip.trackId))
+          .get();
+        if (reorderTrack) {
+          storage.logActivity({
+            id: randomUUID(),
+            songId: reorderTrack.songId,
+            type: 'timeline-reordered',
+            description: `${timelineClipActor} reordered clips on ${reorderTrack.name}`,
+            timestamp: Date.now(),
+            instrument: reorderTrack.name,
+            sectionName: clip.sectionName ?? undefined,
+            author: timelineClipActor,
+          }).catch(console.error);
+        }
+      } catch (err) {
+        console.error("[timeline-clip reorder] failed to log activity:", err);
+      }
+    }
+
     res.json(clip);
   });
 
@@ -860,6 +937,26 @@ export async function registerRoutes(
     }
     const clip = await storage.updateTimelineClip(clipId, { trimStart, trimEnd: trimEnd ?? null });
     if (!clip) return res.status(404).json({ message: "Clip not found" });
+
+    const trimActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    const trimTrack = db.select().from(instrumentTracks)
+      .where(eq(instrumentTracks.id, clip.trackId))
+      .get();
+    if (trimTrack) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: trimTrack.songId,
+        type: 'clip-trimmed',
+        description: `${trimActor} trimmed ${clip.name} in ${trimTrack.name}`,
+        timestamp: Date.now(),
+        instrument: trimTrack.name,
+        sectionName: clip.sectionName ?? undefined,
+        author: trimActor,
+      }).catch(console.error);
+    }
+
     res.json(clip);
   });
 
@@ -877,6 +974,25 @@ export async function registerRoutes(
       .set({ trimStart, trimEnd: trimEnd ?? null })
       .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
       .run();
+
+    const applyTrimActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    const applyTrimTrack = db.select().from(instrumentTracks)
+      .where(eq(instrumentTracks.id, trackId))
+      .get();
+    if (applyTrimTrack) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: applyTrimTrack.songId,
+        type: 'clip-trimmed',
+        description: `${applyTrimActor} applied trim to all instances of ${name} in ${applyTrimTrack.name}`,
+        timestamp: Date.now(),
+        instrument: applyTrimTrack.name,
+        author: applyTrimActor,
+      }).catch(console.error);
+    }
+
     res.json({ ok: true });
   });
 
@@ -919,6 +1035,19 @@ export async function registerRoutes(
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
     await storage.deleteNonFinalTimelineClips(songId);
+
+    const nonFinalActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'timeline-cleared',
+      description: `${nonFinalActor} cleared non-final clips from the timeline`,
+      timestamp: Date.now(),
+      author: nonFinalActor,
+    }).catch(console.error);
+
     res.status(204).send();
   });
 
@@ -1016,7 +1145,24 @@ export async function registerRoutes(
     const ideaId = req.params.ideaId as string;
     const songId = ideaSongId(ideaId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
+    const hideIdeaRow = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
+    const hideIdeaTrack = hideIdeaRow
+      ? db.select().from(instrumentTracks).where(eq(instrumentTracks.id, hideIdeaRow.trackId)).get()
+      : null;
     await storage.hideIdea(ideaId);
+    const hideIdeaActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'idea-hidden',
+      description: `${hideIdeaActor} hid section ${hideIdeaRow?.sectionName ?? ideaId} from ${hideIdeaTrack?.name ?? 'a track'}`,
+      timestamp: Date.now(),
+      instrument: hideIdeaTrack?.name,
+      sectionName: hideIdeaRow?.sectionName ?? undefined,
+      author: hideIdeaActor,
+    }).catch(console.error);
     res.status(200).json({ ok: true });
   });
 
@@ -1024,7 +1170,24 @@ export async function registerRoutes(
     const ideaId = req.params.ideaId as string;
     const songId = ideaSongId(ideaId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
+    const restoreIdeaRow = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
+    const restoreIdeaTrack = restoreIdeaRow
+      ? db.select().from(instrumentTracks).where(eq(instrumentTracks.id, restoreIdeaRow.trackId)).get()
+      : null;
     await storage.restoreIdea(ideaId);
+    const restoreIdeaActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'idea-restored',
+      description: `${restoreIdeaActor} restored section ${restoreIdeaRow?.sectionName ?? ideaId} on ${restoreIdeaTrack?.name ?? 'a track'}`,
+      timestamp: Date.now(),
+      instrument: restoreIdeaTrack?.name,
+      sectionName: restoreIdeaRow?.sectionName ?? undefined,
+      author: restoreIdeaActor,
+    }).catch(console.error);
     res.status(200).json({ ok: true });
   });
 
@@ -1129,6 +1292,50 @@ export async function registerRoutes(
       }
     }
 
+    // Log clip-metadata-edited for metadata-only patches
+    if ('metadata' in clipUpdates && clipUpdates.isFinal === undefined && clipUpdates.active === undefined) {
+      try {
+        const metaIdea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();
+        const metaTrack = metaIdea
+          ? db.select().from(instrumentTracks).where(eq(instrumentTracks.id, metaIdea.trackId)).get()
+          : null;
+        storage.logActivity({
+          id: randomUUID(),
+          songId,
+          type: 'clip-metadata-edited',
+          description: `${bucketClipActor} edited metadata on ${clip.name}`,
+          timestamp: Date.now(),
+          instrument: metaTrack?.name,
+          sectionName: metaIdea?.sectionName ?? undefined,
+          author: bucketClipActor,
+        }).catch(console.error);
+      } catch (err) {
+        console.error('[clip-metadata] failed to log activity:', err);
+      }
+    }
+
+    // Log clip-removed for soft-delete (active: false)
+    if (clipUpdates.active === false) {
+      try {
+        const removeIdea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();
+        const removeTrack = removeIdea
+          ? db.select().from(instrumentTracks).where(eq(instrumentTracks.id, removeIdea.trackId)).get()
+          : null;
+        storage.logActivity({
+          id: randomUUID(),
+          songId,
+          type: 'clip-removed',
+          description: `${bucketClipActor} removed ${clip.name}`,
+          timestamp: Date.now(),
+          instrument: removeTrack?.name,
+          sectionName: removeIdea?.sectionName ?? undefined,
+          author: bucketClipActor,
+        }).catch(console.error);
+      } catch (err) {
+        console.error('[clip-remove] failed to log activity:', err);
+      }
+    }
+
     res.json(clip);
   });
 
@@ -1147,6 +1354,9 @@ export async function registerRoutes(
     const clip = await storage.createClip(parsed.data);
 
     // Advance task from "todo" → "in-progress" when the first clip lands in the bucket
+    const uploadActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     try {
       const idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
       if (idea?.sectionName && idea.trackId) {
@@ -1156,6 +1366,15 @@ export async function registerRoutes(
           if (task?.status === "todo") {
             await storage.updateTask(task.id, { status: "in-progress" });
           }
+          storage.logActivity({
+            id: randomUUID(), songId,
+            type: 'file-uploaded',
+            description: `${uploadActor} uploaded ${clip.name}`,
+            timestamp: Date.now(),
+            instrument: track.name,
+            sectionName: idea.sectionName,
+            author: uploadActor,
+          }).catch(console.error);
         }
       }
     } catch (err) {
@@ -1194,6 +1413,21 @@ export async function registerRoutes(
       timestamp: Date.now(),
       parentId: parentId ?? null,
     });
+
+    const clipCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: parentId ? 'clip-comment-reply' : 'clip-comment-added',
+      description: parentId
+        ? `${clipCommentActor} replied to a comment on a clip`
+        : `${clipCommentActor} commented on a clip`,
+      timestamp: Date.now(),
+      author: clipCommentActor,
+    }).catch(console.error);
+
     res.status(201).json(comment);
   });
 
@@ -1203,6 +1437,19 @@ export async function registerRoutes(
     if (!songId || !assertSongOwned(req, res, songId)) return;
     const comment = await storage.updateClipComment(commentId, req.body.text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
+
+    const editCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-comment-edited',
+      description: `${editCommentActor} edited a comment on a clip`,
+      timestamp: Date.now(),
+      author: editCommentActor,
+    }).catch(console.error);
+
     res.json(comment);
   });
 
@@ -1210,6 +1457,17 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const songId = clipCommentSongId(commentId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
+    const deleteCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-comment-deleted',
+      description: `${deleteCommentActor} deleted a comment on a clip`,
+      timestamp: Date.now(),
+      author: deleteCommentActor,
+    }).catch(console.error);
     await storage.deleteClipComment(commentId);
     res.status(204).send();
   });
@@ -1551,21 +1809,34 @@ export async function registerRoutes(
     const tId = req.params.id as string;
     const sId = taskSongId(tId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
-    const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
+    const { text, parentId } = req.body as { author?: string; text: string; parentId?: string };
     if (parentId) {
       const parent = db.select().from(taskComments).where(eq(taskComments.id, parentId)).get();
       if (!parent || parent.parentId || parent.taskId !== tId) {
         return res.status(400).json({ message: "parentId must reference a top-level comment on this task" });
       }
     }
+    const taskCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
     const comment = await storage.addTaskComment({
       id: randomUUID(),
       taskId: tId,
-      author,
+      author: taskCommentActor,
       text,
       timestamp: Date.now(),
       parentId: parentId ?? null,
     });
+    storage.logActivity({
+      id: randomUUID(),
+      songId: sId,
+      type: parentId ? 'task-comment-reply' : 'task-comment-added',
+      description: parentId
+        ? `${taskCommentActor} replied to a comment on a task`
+        : `${taskCommentActor} commented on a task`,
+      timestamp: Date.now(),
+      author: taskCommentActor,
+    }).catch(console.error);
     res.status(201).json(comment);
   });
 
@@ -1575,6 +1846,17 @@ export async function registerRoutes(
     if (!sId || !assertSongOwned(req, res, sId)) return;
     const comment = await storage.updateTaskComment(commentId, req.body.text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
+    const editTaskCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: sId,
+      type: 'task-comment-edited',
+      description: `${editTaskCommentActor} edited a comment on a task`,
+      timestamp: Date.now(),
+      author: editTaskCommentActor,
+    }).catch(console.error);
     res.json(comment);
   });
 
@@ -1582,6 +1864,17 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const sId = taskCommentSongId(commentId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
+    const deleteTaskCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: sId,
+      type: 'task-comment-deleted',
+      description: `${deleteTaskCommentActor} deleted a comment on a task`,
+      timestamp: Date.now(),
+      author: deleteTaskCommentActor,
+    }).catch(console.error);
     await storage.deleteTaskComment(commentId);
     res.status(204).send();
   });
@@ -1613,6 +1906,9 @@ export async function registerRoutes(
       const destPath = path.join(REVIEWS_DIR, filename);
       fs.writeFileSync(destPath, req.file.buffer);
 
+      const reviewActor = req.session.userId
+        ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
+        : 'Unknown';
       const review = await storage.createReview({
         id: randomUUID(),
         songId,
@@ -1620,10 +1916,16 @@ export async function registerRoutes(
         src: `/uploads/reviews/${filename}`,
         format,
         duration,
-        createdBy: req.session.userId
-          ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
-          : 'Unknown',
+        createdBy: reviewActor,
       });
+      storage.logActivity({
+        id: randomUUID(), songId,
+        type: 'review-shared',
+        description: `${reviewActor} shared ${name} to Review`,
+        timestamp: Date.now(),
+        reviewId: review.id,
+        author: reviewActor,
+      }).catch(console.error);
       res.status(201).json(review);
     } catch (err) {
       console.error("[review upload] error:", err);
@@ -1651,12 +1953,16 @@ export async function registerRoutes(
     const reviewId = req.params.reviewId as string;
     const sId = reviewSongId(reviewId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
-    const { author, text, timestamp, parentId } = req.body as {
-      author: string; text: string; timestamp: number; parentId?: string;
+    const { text, timestamp, parentId } = req.body as {
+      author?: string; text: string; timestamp: number; parentId?: string;
     };
-    if (!author || !text || typeof timestamp !== "number") {
-      return res.status(400).json({ message: "author, text, and timestamp are required" });
+    if (!text || typeof timestamp !== "number") {
+      return res.status(400).json({ message: "text and timestamp are required" });
     }
+
+    const reviewCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
 
     const review = db.select().from(songReviews).where(eq(songReviews.id, reviewId)).get();
     if (!review) return res.status(404).json({ message: "Review not found" });
@@ -1675,7 +1981,7 @@ export async function registerRoutes(
     const comment = await storage.addReviewComment({
       id: randomUUID(),
       reviewId,
-      author,
+      author: reviewCommentActor,
       text,
       timestamp,
       parentId: parentId ?? null,
@@ -1686,22 +1992,22 @@ export async function registerRoutes(
         id: randomUUID(),
         songId: review.songId,
         type: 'review-reply',
-        description: `${author} replied to ${parentAuthor}'s comment on ${review.name}`,
+        description: `${reviewCommentActor} replied to ${parentAuthor}'s comment on ${review.name}`,
         timestamp: Date.now(),
         reviewId,
         commentId: comment.id,
-        author,
+        author: reviewCommentActor,
       }).catch(console.error);
     } else {
       storage.logActivity({
         id: randomUUID(),
         songId: review.songId,
         type: 'review-comment',
-        description: `${author} commented on ${review.name}`,
+        description: `${reviewCommentActor} commented on ${review.name}`,
         timestamp: Date.now(),
         reviewId,
         commentId: comment.id,
-        author,
+        author: reviewCommentActor,
       }).catch(console.error);
     }
 
@@ -1721,6 +2027,26 @@ export async function registerRoutes(
     if (resolved !== undefined) updates.resolved = resolved;
     const comment = await storage.updateReviewComment(commentId, updates);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
+
+    const patchReviewCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    if (text !== undefined) {
+      storage.logActivity({
+        id: randomUUID(), songId: sId,
+        type: 'review-comment-edited',
+        description: `${patchReviewCommentActor} edited a review comment`,
+        timestamp: Date.now(), author: patchReviewCommentActor,
+      }).catch(console.error);
+    } else if (resolved !== undefined) {
+      storage.logActivity({
+        id: randomUUID(), songId: sId,
+        type: resolved ? 'review-comment-resolved' : 'review-comment-unresolved',
+        description: `${patchReviewCommentActor} ${resolved ? 'resolved' : 'unresolved'} a review comment`,
+        timestamp: Date.now(), author: patchReviewCommentActor,
+      }).catch(console.error);
+    }
+
     res.json(comment);
   });
 
@@ -1728,6 +2054,15 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const sId = reviewCommentSongId(commentId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
+    const deleteReviewCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(), songId: sId,
+      type: 'review-comment-deleted',
+      description: `${deleteReviewCommentActor} deleted a review comment`,
+      timestamp: Date.now(), author: deleteReviewCommentActor,
+    }).catch(console.error);
     await storage.deleteReviewComment(commentId);
     res.status(204).send();
   });

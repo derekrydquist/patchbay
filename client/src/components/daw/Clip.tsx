@@ -183,6 +183,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
         body: JSON.stringify({ metadata: merged }),
       });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip meta] patch failed:', err);
     }
@@ -267,6 +268,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       setNewComment("");
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] add failed:', err);
     }
@@ -282,6 +284,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       });
       setEditingId(null);
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] edit failed:', err);
     }
@@ -291,6 +294,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     try {
       await fetch(`/api/clip-comments/${id}`, { method: 'DELETE' });
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] delete failed:', err);
     }
@@ -307,6 +311,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       });
       setReplyText('');
       await queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
     } catch (err) {
       console.error('[clip comment] reply failed:', err);
@@ -918,6 +923,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       });
       if (res.ok) {
         queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+        queryClient.invalidateQueries({ queryKey: ['songs'] });
       }
     } catch (err) {
       console.error('Failed to patch trim:', err);
@@ -1071,6 +1077,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         body: JSON.stringify({ trackId, name: clip.name, trimStart, trimEnd }),
       });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('Failed to apply trim to instances:', err);
     }
@@ -1162,6 +1169,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
         queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
         queryClient.invalidateQueries({ queryKey: ['activity'] });
+        queryClient.invalidateQueries({ queryKey: ['songs'] });
       }
     } catch (err) {
       console.error('Failed to replace clip:', err);
@@ -1522,6 +1530,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                   body: JSON.stringify({ trackId, name: clip.name, trimStart: 0, trimEnd: null }),
                 });
                 queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+                queryClient.invalidateQueries({ queryKey: ['songs'] });
               } catch (err) {
                 console.error('Failed to reset trim on instances:', err);
               }
@@ -1652,6 +1661,8 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         body: JSON.stringify({ active: false }),
       });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[removeClip] error:', err);
     }

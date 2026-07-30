@@ -445,6 +445,9 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       body: JSON.stringify({ resolved: !comment.resolved }),
     });
     refetchComments();
+    queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
+    queryClient.invalidateQueries({ queryKey: ['activity'] });
+    queryClient.invalidateQueries({ queryKey: ['songs'] });
   };
 
   const startEdit = (comment: ReviewComment) => {
@@ -465,6 +468,9 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       });
       setEditingId(null);
       refetchComments();
+      queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } finally {
       setEditSubmitting(false);
     }
@@ -475,6 +481,9 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
     setDeleteConfirmId(null);
     if (expandedThreadId === commentId) setExpandedThreadId(null);
     refetchComments();
+    queryClient.invalidateQueries({ queryKey: ['activity', review.songId] });
+    queryClient.invalidateQueries({ queryKey: ['activity'] });
+    queryClient.invalidateQueries({ queryKey: ['songs'] });
   };
 
   // Main input @ mention handlers
@@ -535,7 +544,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       await fetch(`/api/reviews/${review.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: newComment.trim(), timestamp: currentTime }),
+        body: JSON.stringify({ text: newComment.trim(), timestamp: currentTime }),
       });
       setNewComment('');
       setMainMentionQuery(null);
@@ -556,7 +565,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
       await fetch(`/api/reviews/${review.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: replyText.trim(), timestamp: parentTimestamp, parentId }),
+        body: JSON.stringify({ text: replyText.trim(), timestamp: parentTimestamp, parentId }),
       });
       setReplyText('');
       setReplyMentionQuery(null);

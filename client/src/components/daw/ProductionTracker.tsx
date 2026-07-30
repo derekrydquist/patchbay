@@ -204,12 +204,13 @@ function CellModal({
       fetch(`/api/production-tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: currentUser, text }),
+        body: JSON.stringify({ text }),
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       setNewComment('');
     },
   });
@@ -223,6 +224,7 @@ function CellModal({
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       setEditingId(null);
     },
   });
@@ -231,6 +233,7 @@ function CellModal({
     mutationFn: (id: string) => fetch(`/api/task-comments/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     },
   });
 
@@ -239,11 +242,12 @@ function CellModal({
       fetch(`/api/production-tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: currentUser, text, parentId }),
+        body: JSON.stringify({ text, parentId }),
       }).then(r => r.json()),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       setReplyText('');
       setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
     },
@@ -806,6 +810,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
       setAddSectionError(null);
@@ -831,6 +836,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
     },
     onError: (err: Error) => {
       toast({
