@@ -37,6 +37,7 @@ export const songs = sqliteTable("songs", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   bpm: integer("bpm"),
+  timeSignature: text("time_signature").notNull().default("4/4"),
   sections: text("sections", { mode: "json" }).$type<string[]>().notNull(),
   type: text("type", { enum: ["song", "idea"] }).notNull().default("song"),
   createdAt: text("created_at").notNull(),
@@ -46,6 +47,7 @@ export const songs = sqliteTable("songs", {
 
 export const insertSongSchema = createInsertSchema(songs, {
   sections: z.array(z.string()),
+  timeSignature: z.string().min(1).optional(),
 }).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertSong = z.infer<typeof insertSongSchema>;
 export type Song = typeof songs.$inferSelect;

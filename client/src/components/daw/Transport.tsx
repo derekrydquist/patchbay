@@ -3,31 +3,62 @@ import { Play, Square, SkipBack, SkipForward, Repeat, Volume2 } from 'lucide-rea
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ExportDialog } from './ExportDialog';
 
+const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '2/4', '5/4'];
+
+function MetronomeIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M6 22h12l-4-17h-4L6 22z" />
+      <line x1="12" y1="7" x2="16" y2="17" />
+    </svg>
+  );
+}
+
 export function Transport({ songId = 'patchbay-default' }: { songId?: string }) {
-  const { data: songData } = useQuery<{ bpm?: number | null }>({
+  const { data: songData } = useQuery<{ bpm?: number | null; timeSignature?: string | null }>({
     queryKey: ['song', songId],
     queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
   });
 
   const [bpm, setBpm] = React.useState<number | null>(null);
   const [bpmInput, setBpmInput] = React.useState('');
-  const bpmInitialized = React.useRef(false);
+  const [timeSignature, setTimeSignature] = React.useState<string | null>(null);
+  const songDataInitialized = React.useRef(false);
 
   React.useEffect(() => {
-    if (!bpmInitialized.current && songData != null) {
-      bpmInitialized.current = true;
+    if (!songDataInitialized.current && songData != null) {
+      songDataInitialized.current = true;
       if (songData.bpm != null) {
         setBpm(songData.bpm);
         setBpmInput(String(songData.bpm));
       }
+      const ts = songData.timeSignature ?? '4/4';
+      setTimeSignature(ts);
+      window.dispatchEvent(new CustomEvent('update-time-signature', { detail: { timeSignature: ts } }));
     }
   }, [songData]);
+
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isLooping, setIsLooping] = React.useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
+  const [isMetronomeOn, setIsMetronomeOn] = React.useState(() => localStorage.getItem(`patchbay-metronome-${songId}`) === 'true');
   const [currentTime, setCurrentTime] = React.useState(0);
+
+  React.useEffect(() => {
+    localStorage.setItem(`patchbay-metronome-${songId}`, String(isMetronomeOn));
+  }, [isMetronomeOn, songId]);
 
   React.useEffect(() => {
     const handleUpdateBpm = (e: any) => {
@@ -70,6 +101,16 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ bpm: newBpm }),
     }).catch((err) => console.error('Failed to persist BPM:', err));
+  };
+
+  const commitTimeSignature = (ts: string) => {
+    setTimeSignature(ts);
+    window.dispatchEvent(new CustomEvent('update-time-signature', { detail: { timeSignature: ts } }));
+    fetch(`/api/songs/${songId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ timeSignature: ts }),
+    }).catch((err) => console.error('Failed to persist time signature:', err));
   };
 
   const handleBpmKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -156,13 +197,40 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
           />
         </div>
         <div className="flex flex-col">
-          <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Sign</span>
-          <span className="text-xl font-mono text-foreground">4/4</span>
+          <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Time Sig</span>
+          <Select
+            value={timeSignature ?? undefined}
+            onValueChange={commitTimeSignature}
+            disabled={timeSignature == null}
+          >
+            <SelectTrigger className="h-auto border-none bg-transparent p-0 shadow-none focus:ring-0 w-14 text-xl font-mono text-foreground disabled:opacity-40 disabled:cursor-default [&>svg]:hidden hover:bg-white/5 rounded transition-colors">
+              <SelectValue placeholder="—" />
+            </SelectTrigger>
+            <SelectContent>
+              {TIME_SIGNATURES.map((ts) => (
+                <SelectItem key={ts} value={ts} className="font-mono">
+                  {ts}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
       {/* Center: Controls */}
       <div className="flex items-center justify-center gap-2 w-1/3">
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn("text-muted-foreground hover:text-foreground", isMetronomeOn && "text-primary hover:text-primary/80")}
+          onClick={() => {
+            const next = !isMetronomeOn;
+            setIsMetronomeOn(next);
+            window.dispatchEvent(new CustomEvent('toggle-metronome', { detail: { enabled: next } }));
+          }}
+        >
+          <MetronomeIcon size={18} />
+        </Button>
         <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
           <SkipBack size={18} />
         </Button>

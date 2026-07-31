@@ -50,6 +50,7 @@ const DEFAULT_SONG: Song = {
   id: DEFAULT_SONG_ID,
   name: "Midnight Horizon",
   bpm: 120,
+  timeSignature: "4/4",
   sections: DEFAULT_SECTIONS,
   type: "song",
   createdAt: new Date().toISOString(),
@@ -360,7 +361,7 @@ export class SQLiteStorage implements IStorage {
 
   async createSong(data: InsertSong, bandId: string): Promise<Song> {
     const now = new Date().toISOString();
-    const song: Song = { bpm: null, type: "song", ...data, bandId, id: randomUUID(), createdAt: now, updatedAt: now };
+    const song: Song = { bpm: null, timeSignature: "4/4", type: "song", ...data, bandId, id: randomUUID(), createdAt: now, updatedAt: now };
     db.insert(songs).values(song).run();
     return song;
   }

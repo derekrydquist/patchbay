@@ -393,12 +393,14 @@ export function Timeline({ songId }: { songId: string }) {
 
   const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
+  const [timeSignature, setTimeSignature] = useState('4/4');
   const [zoom, setZoom] = useState(() => {
     const saved = localStorage.getItem(`patchbay-zoom-${songId}`);
     if (saved) { const z = Number(saved); if (z >= 20 && z <= 400) return z; }
     return 80;
   });
   const [isLooping, setIsLooping] = useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
+  const [isMetronomeOn, setIsMetronomeOn] = useState(() => localStorage.getItem(`patchbay-metronome-${songId}`) === 'true');
   const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
 
@@ -419,6 +421,8 @@ export function Timeline({ songId }: { songId: string }) {
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
   const audioCtxRef = useRef<AudioContext | null>(null);
   const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
+  const lastBeatIndexRef = useRef<number>(-1);
+  const isMetronomeOnRef = useRef(isMetronomeOn);
   // Captured at first render; compared against when tracks first arrive to detect slow loads.
   const mountTimeRef = useRef(performance.now());
 
@@ -566,6 +570,21 @@ export function Timeline({ songId }: { songId: string }) {
   }, []);
 
   useEffect(() => {
+    const handleMetronomeToggle = (e: any) => {
+      setIsMetronomeOn(e.detail.enabled);
+      isMetronomeOnRef.current = e.detail.enabled;
+    };
+    window.addEventListener('toggle-metronome', handleMetronomeToggle);
+    return () => window.removeEventListener('toggle-metronome', handleMetronomeToggle);
+  }, []);
+
+  useEffect(() => {
+    const handleTimeSignatureUpdated = (e: any) => setTimeSignature(e.detail.timeSignature);
+    window.addEventListener('update-time-signature', handleTimeSignatureUpdated);
+    return () => window.removeEventListener('update-time-signature', handleTimeSignatureUpdated);
+  }, []);
+
+  useEffect(() => {
     const handleMasterVolume = (e: any) => {
       masterVolumeRef.current = e.detail.volume / 100;
       Object.values(customAudioRefs.current).forEach((audio) => {
@@ -667,6 +686,10 @@ export function Timeline({ songId }: { songId: string }) {
     if (!uiRestored.current) return;
     localStorage.setItem(`patchbay-loop-${songId}`, String(isLooping));
   }, [isLooping, songId]);
+
+  useEffect(() => {
+    localStorage.setItem(`patchbay-metronome-${songId}`, String(isMetronomeOn));
+  }, [isMetronomeOn, songId]);
 
   // Playhead persist — stores time in seconds (not pixels) so zoom changes don't corrupt the value.
   // Debounced 200ms. During playback, clears any pending write and returns early so the rAF loop
@@ -780,6 +803,35 @@ export function Timeline({ songId }: { songId: string }) {
 
       if (!lastTimeRef.current) lastTimeRef.current = performance.now();
 
+      // Seed lastBeatIndexRef so clicks only fire at real beat boundaries.
+      // Exception: playheadTime === 0 (timeline start) seeds to -1 so beat 0's click is
+      // heard immediately. Any other position seeds to the beat we're inside, so the first
+      // click waits for the next boundary rather than firing spuriously.
+      {
+        const playheadTime = Math.max(0, (playheadRef.current - 256) / zoom);
+        const secondsPerBeat = 60 / bpm;
+        const currentBeatIndex = Math.floor(playheadTime / secondsPerBeat);
+        lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentBeatIndex;
+      }
+
+      // The metronome is a guide click and intentionally NOT scaled by masterVolumeRef
+      // so it stays audible even when the user lowers mix volume to work quietly.
+      const playMetronomeClick = (accent: boolean) => {
+        const ctx = audioCtxRef.current;
+        if (!ctx) return;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = accent ? 1000 : 800;
+        const now = ctx.currentTime;
+        gain.gain.setValueAtTime(0, now);
+        gain.gain.linearRampToValueAtTime(0.25, now + 0.005);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
+        osc.start(now);
+        osc.stop(now + 0.05);
+      };
+
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
@@ -801,6 +853,19 @@ export function Timeline({ songId }: { songId: string }) {
             window.dispatchEvent(new CustomEvent('playback-ended'));
             lastTimeRef.current = time;
             return;
+          }
+
+          // Metronome: fire a click whenever the playhead crosses into a new beat.
+          if (isMetronomeOnRef.current && bpm > 0) {
+            const newPlayheadPx = playheadRef.current + pixelDelta;
+            const playheadTimeSecs = Math.max(0, (newPlayheadPx - 256) / zoom);
+            const beatsPerMeasure = parseInt(timeSignature.split('/')[0], 10) || 4;
+            const secondsPerBeat = 60 / bpm;
+            const currentBeatIndex = Math.floor(playheadTimeSecs / secondsPerBeat);
+            if (currentBeatIndex !== lastBeatIndexRef.current) {
+              playMetronomeClick(currentBeatIndex % beatsPerMeasure === 0);
+              lastBeatIndexRef.current = currentBeatIndex;
+            }
           }
 
           // Advance playhead — pure position computation + audio scheduling only, no scroll side effects.
@@ -921,7 +986,7 @@ export function Timeline({ songId }: { songId: string }) {
       });
     }
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
-  }, [isPlaying, tracks, bpm, isLooping, sectionLayout, zoom, setPlayheadPosition]);
+  }, [isPlaying, tracks, bpm, timeSignature, isLooping, sectionLayout, zoom, setPlayheadPosition]);
 
 
   useEffect(() => {
