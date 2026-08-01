@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { nanoid } from 'nanoid';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
-import { Upload, FileAudio, X, Loader2, AlertCircle } from 'lucide-react';
+import { Upload, FileAudio, Video, X, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog, DialogContent, DialogTitle,
@@ -10,6 +10,8 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
+import { useToast } from '@/hooks/use-toast';
+import { extractAudioFromVideo } from '@/lib/extractAudioFromVideo';
 
 async function uploadFile(
   file: File,
@@ -53,6 +55,15 @@ async function createClip(ideaId: string, payload: {
   return res.json();
 }
 
+type PendingFile = {
+  name: string;
+  size: string;
+  file: File;
+  // 'extracting' while video→audio conversion is in progress; 'ready' once the
+  // file (audio original or extracted MP3) is ready to upload.
+  status: 'ready' | 'extracting';
+};
+
 export interface UploadModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -71,7 +82,8 @@ export function UploadModal({
   initialFiles, songType = 'song', onUploadSuccess,
 }: UploadModalProps) {
   const queryClient = useQueryClient();
-  const [uploadFiles, setUploadFiles] = useState<{ name: string; size: string; file: File }[]>([]);
+  const { toast } = useToast();
+  const [uploadFiles, setUploadFiles] = useState<PendingFile[]>([]);
   const [uploadDestination, setUploadDestination] = useState(defaultIdeaId ?? '');
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -82,12 +94,59 @@ export function UploadModal({
     enabled: open,
   });
 
+  // Process newly selected/dropped files. Audio files go straight to the pending
+  // list; video files are queued for client-side audio extraction first.
+  const processFiles = (rawFiles: File[]) => {
+    for (const file of rawFiles) {
+      if (file.type.startsWith('audio/')) {
+        setUploadFiles(prev => [...prev, {
+          name: file.name,
+          size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
+          file,
+          status: 'ready',
+        }]);
+      } else if (file.type.startsWith('video/')) {
+        setUploadFiles(prev => [...prev, {
+          name: file.name,
+          size: (file.size / 1024 / 1024).toFixed(2) + ' MB',
+          file,
+          status: 'extracting',
+        }]);
+
+        extractAudioFromVideo(file)
+          .then(audioFile => {
+            setUploadFiles(prev =>
+              prev.map(f =>
+                f.file === file
+                  ? {
+                      name: audioFile.name,
+                      size: (audioFile.size / 1024 / 1024).toFixed(2) + ' MB',
+                      file: audioFile,
+                      status: 'ready' as const,
+                    }
+                  : f
+              )
+            );
+          })
+          .catch(err => {
+            setUploadFiles(prev => prev.filter(f => f.file !== file));
+            toast({
+              title: 'Audio extraction failed',
+              description: `Could not extract audio from "${file.name}". ${err instanceof Error ? err.message : 'The file may be corrupt or use an unsupported codec.'}`,
+              variant: 'destructive',
+            });
+          });
+      }
+      // Non-audio, non-video files are silently ignored.
+    }
+  };
+
   useEffect(() => {
     if (open) {
       setUploadDestination(defaultIdeaId ?? '');
       setUploadError(null);
       if (initialFiles?.length) {
-        setUploadFiles(initialFiles.map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f })));
+        processFiles(initialFiles);
       }
     } else {
       setUploadFiles([]);
@@ -99,17 +158,17 @@ export function UploadModal({
   const handleFileDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files)
-      .filter(f => f.type.startsWith('audio/'))
-      .map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
-    setUploadFiles(prev => [...prev, ...files]);
+      .filter(f => f.type.startsWith('audio/') || f.type.startsWith('video/'));
+    processFiles(files);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
-    const files = Array.from(e.target.files).map(f => ({ name: f.name, size: (f.size / 1024 / 1024).toFixed(2) + ' MB', file: f }));
-    setUploadFiles(prev => [...prev, ...files]);
+    processFiles(Array.from(e.target.files));
     e.target.value = '';
   };
+
+  const hasExtracting = uploadFiles.some(f => f.status === 'extracting');
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
@@ -126,7 +185,8 @@ export function UploadModal({
       const usingDefault = defaultIdeaId && uploadDestination === defaultIdeaId;
       const instrumentForUpload = (usingDefault && defaultInstrumentName) ? defaultInstrumentName : destTrack.name;
       const sectionForUpload = (usingDefault && defaultSectionName) ? defaultSectionName : destIdea.sectionName;
-      for (const { file } of uploadFiles) {
+      for (const { file, status } of uploadFiles) {
+        if (status !== 'ready') continue;
         const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate, uploadedBy } =
           await uploadFile(file, instrumentForUpload, sectionForUpload, destIdea.id);
         const versionNum = destIdea.clips.length + 1;
@@ -207,47 +267,74 @@ export function UploadModal({
             onClick={() => fileInputRef.current?.click()}
             className="border-2 border-dashed border-white/10 rounded-xl p-10 flex flex-col items-center justify-center gap-4 hover:border-primary/40 hover:bg-primary/5 transition-all cursor-pointer group"
           >
-            <input type="file" ref={fileInputRef} className="hidden" multiple accept="audio/*" onChange={handleFileSelect} />
+            <input
+              type="file"
+              ref={fileInputRef}
+              className="hidden"
+              multiple
+              accept="audio/*,video/mp4,video/quicktime,video/webm"
+              onChange={handleFileSelect}
+            />
             <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center group-hover:scale-110 transition-transform">
               <Upload size={24} className="text-primary" />
             </div>
             <div className="text-center">
-              <p className="text-sm font-bold text-white">Click or drag audio files here</p>
-              <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, or MP3 up to 50MB</p>
+              <p className="text-sm font-bold text-white">Click or drag audio or video files here</p>
+              <p className="text-xs text-muted-foreground mt-1">WAV, AIFF, MP3, MP4, MOV, WebM up to 50MB</p>
             </div>
           </div>
           {uploadFiles.length > 0 && (
             <div className="space-y-3">
               <h4 className="text-[10px] uppercase font-bold text-muted-foreground">
-                Pending Uploads ({uploadFiles.length})
+                Pending Uploads ({uploadFiles.filter(f => f.status === 'ready').length}/{uploadFiles.length})
               </h4>
               <div className="max-h-48 overflow-y-auto space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10">
                 {uploadFiles.map((f, i) => (
                   <div key={i} className="flex items-center justify-between p-3 bg-white/5 border border-white/5 rounded-lg">
                     <div className="flex items-center gap-3">
-                      <FileAudio size={16} className="text-primary" />
+                      {f.status === 'extracting'
+                        ? <Loader2 size={16} className="text-primary animate-spin shrink-0" />
+                        : f.file.type.startsWith('video/')
+                          ? <Video size={16} className="text-primary shrink-0" />
+                          : <FileAudio size={16} className="text-primary shrink-0" />
+                      }
                       <div className="flex flex-col">
                         <span className="text-xs font-medium text-white">{f.name}</span>
-                        <span className="text-[10px] text-muted-foreground font-mono">{f.size}</span>
+                        {f.status === 'extracting'
+                          ? <span className="text-[10px] text-primary/70 font-mono">Extracting audio…</span>
+                          : <span className="text-[10px] text-muted-foreground font-mono">{f.size}</span>
+                        }
                       </div>
                     </div>
-                    <Button variant="ghost" size="icon" className="h-6 w-6"
-                      onClick={() => setUploadFiles(prev => prev.filter((_, idx) => idx !== i))}>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={f.status === 'extracting'}
+                      onClick={() => setUploadFiles(prev => prev.filter((_, idx) => idx !== i))}
+                    >
                       <X size={14} />
                     </Button>
                   </div>
                 ))}
               </div>
-              <div className="pt-4 border-t border-white/5 flex justify-end">
-                <Button
-                  className="h-9 uppercase tracking-widest text-[10px] font-bold"
-                  onClick={() => uploadMutation.mutate()}
-                  disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending}
-                >
-                  {uploadMutation.isPending
-                    ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>
-                    : 'Confirm Ingestion'}
-                </Button>
+              <div className="pt-4 border-t border-white/5 flex items-center justify-between gap-4">
+                {hasExtracting && (
+                  <p className="text-[10px] text-muted-foreground">
+                    Extracting audio from video — please wait…
+                  </p>
+                )}
+                <div className="ml-auto">
+                  <Button
+                    className="h-9 uppercase tracking-widest text-[10px] font-bold"
+                    onClick={() => uploadMutation.mutate()}
+                    disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending || hasExtracting}
+                  >
+                    {uploadMutation.isPending
+                      ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>
+                      : 'Confirm Ingestion'}
+                  </Button>
+                </div>
               </div>
               {uploadError && (
                 <div className="flex items-center gap-2 text-[10px] text-red-400 pt-1">
