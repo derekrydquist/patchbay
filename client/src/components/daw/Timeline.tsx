@@ -745,10 +745,103 @@ export function Timeline({ songId }: { songId: string }) {
     const pointerId = e.pointerId;
     flagEl.setPointerCapture(pointerId);
 
+    // Edge-scroll constants
+    const SCROLL_SPEED_PX = 300; // pixels/second of viewport scroll when zone is active
+    const ACTIVATE_PX = 48;      // pointer within this px of edge → zone ON
+    const DEACTIVATE_PX = 64;    // pointer must move this far from edge → zone OFF
+
+    type EdgeZone = 'off' | 'on-left' | 'on-right';
+    const edgeZoneRef = { current: 'off' as EdgeZone };
+    const edgeRafRef = { current: null as number | null };
+    const edgeLastTsRef = { current: null as number | null };
+    // Last known pointer viewport-X — updated by every pointermove; rAF reads it each frame
+    const el0 = timelineRef.current;
+    const pointerViewportXRef = { current: el0 ? e.clientX - el0.getBoundingClientRect().left : 0 };
+
+    const stopEdgeLoop = () => {
+      if (edgeRafRef.current !== null) {
+        cancelAnimationFrame(edgeRafRef.current);
+        edgeRafRef.current = null;
+      }
+      edgeLastTsRef.current = null;
+    };
+
+    const edgeScrollFrame = (timestamp: number) => {
+      const el = timelineRef.current;
+      if (!el || edgeZoneRef.current === 'off') {
+        stopEdgeLoop();
+        return;
+      }
+      // Seed frame: record start time, advance nothing (prevents delta spike on first real frame)
+      if (edgeLastTsRef.current === null) {
+        edgeLastTsRef.current = timestamp;
+        edgeRafRef.current = requestAnimationFrame(edgeScrollFrame);
+        return;
+      }
+      const delta = (timestamp - edgeLastTsRef.current) / 1000;
+      edgeLastTsRef.current = timestamp;
+
+      // rAF loop's ONLY job: advance scrollLeft. Time is derived below from pointer + scrollLeft.
+      const dir = edgeZoneRef.current === 'on-left' ? -1 : 1;
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      const newScrollLeft = Math.max(0, Math.min(el.scrollLeft + dir * SCROLL_SPEED_PX * delta, maxScroll));
+      el.scrollLeft = newScrollLeft;
+      lastAutoScrollRef.current = newScrollLeft; // keep playback edge-riding from misreading this
+
+      // Single authority: time always = f(pointer viewport-X, current scrollLeft)
+      const rawX = pointerViewportXRef.current + newScrollLeft;
+      const newTime = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
+      setPlayheadTime(newTime);
+      checkAudioMuteState(newTime);
+      window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: newTime } }));
+      window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
+
+      // Stop when scroll hits a boundary — zone state is unchanged (hysteresis in pointermove owns it)
+      if (newScrollLeft <= 0 || newScrollLeft >= maxScroll) {
+        stopEdgeLoop();
+        return;
+      }
+
+      edgeRafRef.current = requestAnimationFrame(edgeScrollFrame);
+    };
+
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      if (!timelineRef.current) return;
-      const rect = timelineRef.current.getBoundingClientRect();
-      const rawX = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
+      const el = timelineRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+
+      const viewportX = moveEvent.clientX - rect.left;
+      pointerViewportXRef.current = viewportX; // keep rAF loop's time derivation current
+
+      const leftDist = viewportX - 256;         // px from left track edge
+      const rightDist = el.clientWidth - viewportX; // px from right container edge
+
+      const prevZone = edgeZoneRef.current;
+
+      // Hysteresis: activate at 48px, deactivate only when >= 64px from the triggering edge
+      if (prevZone === 'off') {
+        if (leftDist < ACTIVATE_PX)       edgeZoneRef.current = 'on-left';
+        else if (rightDist < ACTIVATE_PX) edgeZoneRef.current = 'on-right';
+      } else if (prevZone === 'on-left') {
+        if (leftDist >= DEACTIVATE_PX)    edgeZoneRef.current = 'off';
+      } else {
+        if (rightDist >= DEACTIVATE_PX)   edgeZoneRef.current = 'off';
+      }
+
+      // Start loop when zone just activated
+      if (prevZone === 'off' && edgeZoneRef.current !== 'off' && edgeRafRef.current === null) {
+        edgeLastTsRef.current = null;
+        edgeRafRef.current = requestAnimationFrame(edgeScrollFrame);
+      }
+      // Stop loop when zone deactivated
+      if (edgeZoneRef.current === 'off' && edgeRafRef.current !== null) {
+        stopEdgeLoop();
+      }
+
+      // ALWAYS derive time from pointer + current scrollLeft — no "zone owns time" branch.
+      // This is the single authority. When zone is ON the rAF loop also calls this formula
+      // (using pointerViewportXRef) so both produce identical results between move events.
+      const rawX = viewportX + el.scrollLeft;
       const time = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
       setPlayheadTime(time);
       checkAudioMuteState(time);
@@ -761,6 +854,8 @@ export function Timeline({ songId }: { songId: string }) {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', cleanup);
       window.removeEventListener('pointercancel', cleanup);
+      stopEdgeLoop();
+      edgeZoneRef.current = 'off';
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -1683,7 +1778,14 @@ export function Timeline({ songId }: { songId: string }) {
               <div className="h-1.5 sticky top-0 z-[35] relative bg-card pointer-events-none">
                 <div
                   className="absolute top-0 z-10 flex flex-col items-center cursor-grab active:cursor-grabbing pointer-events-auto before:absolute before:-inset-2 before:content-['']"
-                  style={{ left: `${playheadPx}px`, transform: 'translateX(-50%)' }}
+                  style={{
+                    // Clamp left so the flag's right half is always visible at the panel boundary.
+                    // At time=0 (playheadPx=256), the full 13px flag sits just right of x=256.
+                    // The z-50 panel spacer still correctly covers the flag when the playhead
+                    // is scrolled off the left side of the visible track area.
+                    left: `${Math.max(playheadPx, TRACK_PANEL_WIDTH + 6.5)}px`,
+                    transform: 'translateX(-50%)',
+                  }}
                   onPointerDown={handlePlayheadPointerDown}
                 >
                   <div className="w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center">
