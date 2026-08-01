@@ -367,28 +367,25 @@ export function Timeline({ songId }: { songId: string }) {
   }, [tracks]);
 
   const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
-  const [playheadPositionState, setPlayheadPositionState] = useState(() => {
-    const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
-    const z = savedZoom ? Number(savedZoom) : 80;
-    const effectiveZoom = (z >= 20 && z <= 400) ? z : 80;
-    const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
-    if (savedPlayhead) {
-      const t = Number(savedPlayhead);
-      if (t >= 0 && isFinite(t)) return 256 + t * effectiveZoom;
+  const [playheadTimeSecs, setPlayheadTimeState] = useState(() => {
+    const saved = localStorage.getItem(`patchbay-playhead-${songId}`);
+    if (saved) {
+      const t = Number(saved);
+      if (t >= 0 && isFinite(t)) return t;
     }
-    return 256;
+    return 0;
   });
   // Initialize ref to match the lazy-initialized state so they're in sync from the first render.
-  const playheadRef = React.useRef(playheadPositionState);
+  const playheadRef = React.useRef(playheadTimeSecs);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  const setPlayheadPosition = React.useCallback((val: number | ((prev: number) => number)) => {
+  const setPlayheadTime = React.useCallback((val: number | ((prev: number) => number)) => {
     if (typeof val === 'function') {
       playheadRef.current = val(playheadRef.current);
     } else {
       playheadRef.current = val;
     }
-    setPlayheadPositionState(playheadRef.current);
+    setPlayheadTimeState(playheadRef.current);
   }, []);
 
   const [tracksVersion, setTracksVersion] = useState(0);
@@ -443,11 +440,10 @@ export function Timeline({ songId }: { songId: string }) {
   // Purely from render-time state — no rAF writes, no manual clears needed.
   const loopedSectionName = React.useMemo(() => {
     if (!isLooping) return null;
-    const playheadTime = (playheadPositionState - 256) / zoom;
     return sectionLayout.find(
-      (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+      (sec) => playheadTimeSecs >= sec.start && playheadTimeSecs < sec.start + sec.duration
     )?.name ?? null;
-  }, [isLooping, playheadPositionState, sectionLayout, zoom]);
+  }, [isLooping, playheadTimeSecs, sectionLayout]);
 
   // Disable loop whenever the playhead moves to a different section while looping, regardless of
   // how the repositioning happened (flag drag, ruler click, section click, keyboard, etc.).
@@ -455,16 +451,15 @@ export function Timeline({ songId }: { songId: string }) {
   // normal looping, so any section change we observe here means the user repositioned it.
   const prevLoopedSectionRef = useRef<string | null>(null);
   useEffect(() => {
-    const playheadTime = (playheadPositionState - 256) / zoom;
     const rawSection = sectionLayout.find(
-      (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+      (sec) => playheadTimeSecs >= sec.start && playheadTimeSecs < sec.start + sec.duration
     )?.name ?? null;
     if (isLooping && prevLoopedSectionRef.current !== null && rawSection !== prevLoopedSectionRef.current) {
       setIsLooping(false);
       window.dispatchEvent(new CustomEvent('loop-force-disabled'));
     }
     prevLoopedSectionRef.current = rawSection;
-  }, [playheadPositionState, isLooping, sectionLayout, zoom]);
+  }, [playheadTimeSecs, isLooping, sectionLayout]);
 
   // Clip-boundary gap zone positions for the active drag's track+section.
   // gap||0 = before first clip, gap||N = after clip N-1.
@@ -633,10 +628,9 @@ export function Timeline({ songId }: { songId: string }) {
 
     // Zoom
     const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
-    let effectiveZoom = zoom; // used below for playhead pixel conversion
     if (savedZoom) {
       const z = Number(savedZoom);
-      if (z >= 20 && z <= 400) { setZoom(z); effectiveZoom = z; }
+      if (z >= 20 && z <= 400) { setZoom(z); }
     }
 
     // Scroll — deferred one frame so the content has rendered at the new zoom
@@ -648,11 +642,11 @@ export function Timeline({ songId }: { songId: string }) {
       });
     }
 
-    // Playhead — stored as time in seconds so it's zoom-independent; convert back to pixels
+    // Playhead — stored as time in seconds; restore directly (no pixel conversion needed)
     const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
     if (savedPlayhead) {
       const t = Number(savedPlayhead);
-      if (t >= 0 && isFinite(t)) setPlayheadPosition(256 + t * effectiveZoom);
+      if (t >= 0 && isFinite(t)) setPlayheadTime(t);
     }
 
     // Selection
@@ -703,10 +697,9 @@ export function Timeline({ songId }: { songId: string }) {
     }
     if (playheadSaveTimer.current) clearTimeout(playheadSaveTimer.current);
     playheadSaveTimer.current = setTimeout(() => {
-      const t = Math.max(0, (playheadPositionState - 256) / zoom);
-      localStorage.setItem(`patchbay-playhead-${songId}`, String(t));
+      localStorage.setItem(`patchbay-playhead-${songId}`, String(playheadTimeSecs));
     }, 200);
-  }, [playheadPositionState, isPlaying, songId, zoom]);
+  }, [playheadTimeSecs, isPlaying, songId]);
 
   // Scroll persist — DOM listener so we don't need to lift scrollLeft into React state.
   useEffect(() => {
@@ -726,8 +719,7 @@ export function Timeline({ songId }: { songId: string }) {
   }, [songId]);
 
   const checkAudioMuteState = React.useCallback(
-    (pos: number) => {
-      const playheadTime = (pos - 256) / zoom;
+    (playheadTime: number) => {
       const trackMuteStates: Record<string, boolean> = {};
       for (const track of tracks) {
         if (track.muted) { trackMuteStates[track.id] = true; continue; }
@@ -742,30 +734,38 @@ export function Timeline({ songId }: { songId: string }) {
       }
       window.dispatchEvent(new CustomEvent('audio-mute-state', { detail: { trackMuteStates } }));
     },
-    [tracks, zoom]
+    [tracks]
   );
 
-  const handlePlayheadPointerDown = (e: React.PointerEvent) => {
+  const handlePlayheadPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
+
+    const flagEl = e.currentTarget;
+    const pointerId = e.pointerId;
+    flagEl.setPointerCapture(pointerId);
+
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      if (timelineRef.current) {
-        const rect = timelineRef.current.getBoundingClientRect();
-        let newPos = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
-        newPos = Math.max(256, newPos);
-        setPlayheadPosition(newPos);
-        checkAudioMuteState(newPos);
-        const time = Math.max(0, (newPos - 256) / zoom);
-        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
-        window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
-      }
+      if (!timelineRef.current) return;
+      const rect = timelineRef.current.getBoundingClientRect();
+      const rawX = moveEvent.clientX - rect.left + timelineRef.current.scrollLeft;
+      const time = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
+      setPlayheadTime(time);
+      checkAudioMuteState(time);
+      window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
+      window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
     };
-    const handlePointerUp = () => {
+
+    const cleanup = () => {
+      flagEl.releasePointerCapture(pointerId);
       window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointerup', cleanup);
+      window.removeEventListener('pointercancel', cleanup);
     };
+
     window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointerup', cleanup);
+    window.addEventListener('pointercancel', cleanup);
   };
 
   useEffect(() => {
@@ -791,7 +791,7 @@ export function Timeline({ songId }: { songId: string }) {
       // Seed both tracking refs so the first rAF frame doesn't misread the snap as a manual scroll.
       const elOnPlay = timelineRef.current;
       if (elOnPlay) {
-        const pos = playheadRef.current;
+        const pos = 256 + playheadRef.current * zoom; // derive pixel from time
         const sl = elOnPlay.scrollLeft;
         const cw = elOnPlay.clientWidth;
         if (pos < sl || pos > sl + cw) {
@@ -808,7 +808,7 @@ export function Timeline({ songId }: { songId: string }) {
       // heard immediately. Any other position seeds to the beat we're inside, so the first
       // click waits for the next boundary rather than firing spuriously.
       {
-        const playheadTime = Math.max(0, (playheadRef.current - 256) / zoom);
+        const playheadTime = Math.max(0, playheadRef.current);
         const secondsPerBeat = 60 / bpm;
         const currentBeatIndex = Math.floor(playheadTime / secondsPerBeat);
         lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentBeatIndex;
@@ -835,16 +835,16 @@ export function Timeline({ songId }: { songId: string }) {
       const animate = (time: number) => {
         if (lastTimeRef.current) {
           const delta = time - lastTimeRef.current;
-          const pixelDelta = (delta / 1000) * zoom;
+          const timeDelta = delta / 1000;
 
           // Auto-stop: re-derive end of timeline each frame so live clip/section edits during
           // playback are reflected without waiting for the useEffect to re-run.
           const frameLayout = computeSectionLayout(tracks, sectionOrder);
-          const timelineEndPx = frameLayout.length > 0
-            ? 256 + (frameLayout[frameLayout.length - 1].start + frameLayout[frameLayout.length - 1].duration) * zoom
-            : 256;
-          if (!isLooping && playheadRef.current + pixelDelta >= timelineEndPx) {
-            setPlayheadPosition(timelineEndPx);
+          const frameTimelineEnd = frameLayout.length > 0
+            ? frameLayout[frameLayout.length - 1].start + frameLayout[frameLayout.length - 1].duration
+            : 0;
+          if (!isLooping && playheadRef.current + timeDelta >= frameTimelineEnd) {
+            setPlayheadTime(frameTimelineEnd);
             Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
             pendingPlayRef.current.clear();
             audioCtxRef.current?.close();
@@ -857,11 +857,10 @@ export function Timeline({ songId }: { songId: string }) {
 
           // Metronome: fire a click whenever the playhead crosses into a new beat.
           if (isMetronomeOnRef.current && bpm > 0) {
-            const newPlayheadPx = playheadRef.current + pixelDelta;
-            const playheadTimeSecs = Math.max(0, (newPlayheadPx - 256) / zoom);
+            const newTime = Math.max(0, playheadRef.current + timeDelta);
             const beatsPerMeasure = parseInt(timeSignature.split('/')[0], 10) || 4;
             const secondsPerBeat = 60 / bpm;
-            const currentBeatIndex = Math.floor(playheadTimeSecs / secondsPerBeat);
+            const currentBeatIndex = Math.floor(newTime / secondsPerBeat);
             if (currentBeatIndex !== lastBeatIndexRef.current) {
               playMetronomeClick(currentBeatIndex % beatsPerMeasure === 0);
               lastBeatIndexRef.current = currentBeatIndex;
@@ -869,23 +868,21 @@ export function Timeline({ songId }: { songId: string }) {
           }
 
           // Advance playhead — pure position computation + audio scheduling only, no scroll side effects.
-          setPlayheadPosition((prev) => {
-            const newPos = prev + pixelDelta;
-            const prevTime = (prev - 256) / zoom;
-            const playheadTime = (newPos - 256) / zoom;
+          setPlayheadTime((prev) => {
+            const newTime = prev + timeDelta;
+            const prevTime = prev;
 
             if (isLooping) {
               const currentSection = sectionLayout.find(
                 (sec) => prevTime >= sec.start && prevTime < sec.start + sec.duration
               );
               if (currentSection) {
-                if (playheadTime >= currentSection.start + currentSection.duration) {
-                  const loopStartPos = 256 + currentSection.start * zoom;
+                if (newTime >= currentSection.start + currentSection.duration) {
                   Object.values(customAudioRefs.current).forEach((audio) => {
                     if (audio && !audio.paused) audio.currentTime = currentSection.start;
                   });
                   window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: currentSection.start } }));
-                  return loopStartPos;
+                  return currentSection.start;
                 }
               }
             }
@@ -900,11 +897,11 @@ export function Timeline({ songId }: { songId: string }) {
                 const trimEnd = clip.trimEnd ?? clip.duration;
                 const effectiveDuration = trimEnd - trimStart;
                 const clipEnd = clipStart + effectiveDuration;
-                const inRange = playheadTime >= clipStart && playheadTime < clipEnd;
+                const inRange = newTime >= clipStart && newTime < clipEnd;
 
                 if (inRange && isPlaying) {
                   if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
-                    audio.currentTime = trimStart + Math.max(0, playheadTime - clipStart);
+                    audio.currentTime = trimStart + Math.max(0, newTime - clipStart);
                     pendingPlayRef.current.add(clip.id);
                     audio.play()
                       .then(() => pendingPlayRef.current.delete(clip.id))
@@ -931,11 +928,11 @@ export function Timeline({ songId }: { songId: string }) {
               }
             }
 
-            window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadTime } }));
-            return newPos;
+            window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
+            return newTime;
           });
 
-          // Edge-riding scroll: runs once per frame, after setPlayheadPosition has updated playheadRef.
+          // Edge-riding scroll: runs once per frame, after setPlayheadTime has updated playheadRef.
           //
           // Two-state model:
           //   ENGAGED (isFollowingRef = true): auto-scroll is active. Any manual scroll (detected
@@ -947,7 +944,7 @@ export function Timeline({ songId }: { songId: string }) {
           // visibility alone is what controls the engaged/disengaged state.
           const el = timelineRef.current;
           if (el) {
-            const pos = playheadRef.current; // fresh: setPlayheadPosition syncs this synchronously
+            const pos = 256 + playheadRef.current * zoom; // derive pixel from time
             const cw = el.clientWidth;
             const sl = el.scrollLeft;
 
@@ -986,7 +983,7 @@ export function Timeline({ songId }: { songId: string }) {
       });
     }
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
-  }, [isPlaying, tracks, bpm, timeSignature, isLooping, sectionLayout, zoom, setPlayheadPosition]);
+  }, [isPlaying, tracks, bpm, timeSignature, isLooping, sectionLayout, zoom, setPlayheadTime]);
 
 
   useEffect(() => {
@@ -1498,9 +1495,8 @@ export function Timeline({ songId }: { songId: string }) {
   };
 
   const handleRulerSeek = (pos: number) => {
-    const newPos = Math.max(256, pos + 256);
-    setPlayheadPosition(newPos);
     const time = Math.max(0, pos / zoom);
+    setPlayheadTime(time);
     window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
@@ -1523,16 +1519,15 @@ export function Timeline({ songId }: { songId: string }) {
           timelineRef.current.clientWidth / 2 +
           (targetSection.duration * zoom) / 2;
         timelineRef.current.scrollTo({ left: Math.max(0, scrollX), behavior: 'smooth' });
-        const newPos = Math.max(256, targetSection.start * zoom + 256);
-        setPlayheadPosition(newPos);
-        checkAudioMuteState(newPos);
-        const time = Math.max(0, (newPos - 256) / zoom);
+        const time = Math.max(0, targetSection.start);
+        setPlayheadTime(time);
+        checkAudioMuteState(time);
         window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
         hasAutoScrolled.current = currentSearch;
       }
     }
-  }, [location, sectionLayout, zoom, setPlayheadPosition, checkAudioMuteState]);
+  }, [location, sectionLayout, zoom, setPlayheadTime, checkAudioMuteState]);
 
   const [timelineHeight, setTimelineHeight] = useState(
     typeof window !== 'undefined' ? (window.innerHeight - 136) / 2 : 400
@@ -1614,6 +1609,8 @@ export function Timeline({ songId }: { songId: string }) {
     window.addEventListener('pointerup', handlePointerUp);
   };
 
+  const playheadPx = 256 + playheadTimeSecs * zoom;
+
   return (
     <DndContext
       sensors={sensors}
@@ -1686,7 +1683,7 @@ export function Timeline({ songId }: { songId: string }) {
               <div className="h-1.5 sticky top-0 z-[35] relative bg-card pointer-events-none">
                 <div
                   className="absolute top-0 z-10 flex flex-col items-center cursor-grab active:cursor-grabbing pointer-events-auto before:absolute before:-inset-2 before:content-['']"
-                  style={{ left: `${playheadPositionState}px`, transform: 'translateX(-50%)' }}
+                  style={{ left: `${playheadPx}px`, transform: 'translateX(-50%)' }}
                   onPointerDown={handlePlayheadPointerDown}
                 >
                   <div className="w-[13px] h-[14px] bg-primary rounded-sm shadow-sm flex items-center justify-center">
@@ -1841,7 +1838,7 @@ export function Timeline({ songId }: { songId: string }) {
                   left is in content coordinates; no scrollLeft math needed. */}
               <div
                 className="absolute bottom-0 w-[1px] z-40 pointer-events-none bg-primary shadow-[0_0_15px_rgba(212,175,55,0.6)]"
-                style={{ left: `${playheadPositionState}px`, top: 0, transform: 'translateX(-50%)' }}
+                style={{ left: `${playheadPx}px`, top: 0, transform: 'translateX(-50%)' }}
               />
 
               {/* Bottom spacer: replaces pb-32 — sticky-left panel (z-50) covers the playhead
