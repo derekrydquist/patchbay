@@ -428,6 +428,11 @@ export function Timeline({ songId }: { songId: string }) {
   // Stable refs for mutable values needed inside zero-dep useEffect handlers (stale closure safety).
   const tracksRef = React.useRef<Track[]>(tracks);
   const zoomRef = React.useRef<number>(zoom);
+  // Chained skip-back: track the last landing point and when it happened so rapid
+  // successive presses walk backward one boundary at a time instead of searching
+  // from live current time (which drifts forward during playback between clicks).
+  const lastSkipBackTargetRef = React.useRef<number | null>(null);
+  const lastSkipBackTimestampRef = React.useRef<number | null>(null);
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -640,13 +645,30 @@ export function Timeline({ songId }: { songId: string }) {
       let targetTime: number | null = null;
 
       if (direction === 'next') {
+        // Reset chain state: switching to forward breaks any active backward chain.
+        lastSkipBackTargetRef.current = null;
+        lastSkipBackTimestampRef.current = null;
         targetTime = boundaries.find((b) => b > currentTime + EPSILON) ?? null;
       } else {
-        const earlier = boundaries.filter((b) => b < currentTime - EPSILON);
+        // Chained rapid-repeat: if the previous skip-back landed within 500ms, search
+        // from that landing point so rapid presses walk backward one boundary at a time
+        // even while the playhead keeps drifting forward between clicks during playback.
+        const now = Date.now();
+        const isChaining =
+          lastSkipBackTimestampRef.current !== null &&
+          now - lastSkipBackTimestampRef.current < 500 &&
+          lastSkipBackTargetRef.current !== null;
+        const referenceTime = isChaining ? lastSkipBackTargetRef.current! : currentTime;
+        const earlier = boundaries.filter((b) => b < referenceTime - EPSILON);
         targetTime = earlier.length > 0 ? earlier[earlier.length - 1] : null;
       }
 
       if (targetTime === null) return;
+
+      if (direction === 'previous') {
+        lastSkipBackTargetRef.current = targetTime;
+        lastSkipBackTimestampRef.current = Date.now();
+      }
 
       setPlayheadTime(targetTime);
       // Seek spanning clips directly to the corrected position. Setting .currentTime
