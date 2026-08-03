@@ -292,6 +292,7 @@ export function Timeline({ songId }: { songId: string }) {
   const [sectionInsertGap, setSectionInsertGap] = useState<number | null>(null);
 
   useEffect(() => { sectionOrderRef.current = sectionOrder; }, [sectionOrder]);
+  useEffect(() => { tracksRef.current = tracks; }, [tracks]);
 
   useEffect(() => {
     if (apiTracks && !tracksInitialized.current) {
@@ -401,6 +402,8 @@ export function Timeline({ songId }: { songId: string }) {
   const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
 
+  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+
   const animationRef = React.useRef<number | null>(null);
   const lastTimeRef = React.useRef<number | null>(null);
   // Last scrollLeft value edge-riding itself wrote — used to detect manual scroll.
@@ -422,6 +425,9 @@ export function Timeline({ songId }: { songId: string }) {
   const isMetronomeOnRef = useRef(isMetronomeOn);
   // Captured at first render; compared against when tracks first arrive to detect slow loads.
   const mountTimeRef = useRef(performance.now());
+  // Stable refs for mutable values needed inside zero-dep useEffect handlers (stale closure safety).
+  const tracksRef = React.useRef<Track[]>(tracks);
+  const zoomRef = React.useRef<number>(zoom);
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -595,6 +601,91 @@ export function Timeline({ songId }: { songId: string }) {
     window.addEventListener('song-updated', handleSongUpdated);
     return () => window.removeEventListener('song-updated', handleSongUpdated);
   }, []);
+
+  useEffect(() => {
+    const handleSkipToClip = (e: any) => {
+      const { direction } = e.detail as { direction: 'next' | 'previous' };
+      const currentTracks = tracksRef.current;
+      const currentZoom = zoomRef.current;
+      const EPSILON = 0.05;
+
+      // Collect every clip boundary (effectiveStart and effectiveEnd) across all tracks.
+      const raw: number[] = [];
+      for (const track of currentTracks) {
+        for (const clip of track.clips) {
+          raw.push(clip.start);
+          raw.push(clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0));
+        }
+      }
+
+      if (raw.length === 0) return;
+
+      raw.sort((a, b) => a - b);
+
+      // Epsilon-cluster: walk sorted values and merge any consecutive pair within EPSILON
+      // into one boundary, keeping the first value in each cluster. This prevents
+      // float-imprecise near-identical boundaries (e.g. one clip's end == another's start
+      // on a different track) from requiring a double press to cross a single musical point.
+      const boundaries: number[] = [];
+      let clusterStart = raw[0];
+      for (let i = 1; i < raw.length; i++) {
+        if (raw[i] - clusterStart > EPSILON) {
+          boundaries.push(clusterStart);
+          clusterStart = raw[i];
+        }
+      }
+      boundaries.push(clusterStart);
+
+      const currentTime = playheadRef.current;
+      let targetTime: number | null = null;
+
+      if (direction === 'next') {
+        targetTime = boundaries.find((b) => b > currentTime + EPSILON) ?? null;
+      } else {
+        const earlier = boundaries.filter((b) => b < currentTime - EPSILON);
+        targetTime = earlier.length > 0 ? earlier[earlier.length - 1] : null;
+      }
+
+      if (targetTime === null) return;
+
+      setPlayheadTime(targetTime);
+      // Seek spanning clips directly to the corrected position. Setting .currentTime
+      // is synchronous and takes effect whether a play() Promise is pending or already
+      // resolved — this eliminates the race where !audio.paused silently no-ops during
+      // Chrome's pending-play window (0-2 frames after play() before paused flips false).
+      // No pause() or pendingPlayRef changes: the clip keeps playing uninterrupted.
+      // Clips newly entering or leaving range are handled by the existing rAF branches.
+      for (const track of currentTracks) {
+        for (const clip of track.clips) {
+          const clipEnd = clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
+          const wasInRange = currentTime >= clip.start && currentTime < clipEnd;
+          const isStillInRange = targetTime >= clip.start && targetTime < clipEnd;
+          if (wasInRange && isStillInRange) {
+            const audio = customAudioRefs.current[clip.id];
+            if (audio) {
+              audio.currentTime = (clip.trimStart ?? 0) + Math.max(0, targetTime - clip.start);
+            }
+          }
+        }
+      }
+      window.dispatchEvent(new CustomEvent('time-update', { detail: { time: targetTime } }));
+
+      const el = timelineRef.current;
+      if (el) {
+        const newPos = 256 + targetTime * currentZoom;
+        const sl = el.scrollLeft;
+        const cw = el.clientWidth;
+        if (newPos < sl || newPos > sl + cw) {
+          el.scrollLeft = Math.max(0, Math.min(newPos - cw * 0.5, el.scrollWidth - cw));
+          lastAutoScrollRef.current = el.scrollLeft;
+          isFollowingRef.current = true;
+        }
+      }
+    };
+
+    window.addEventListener('skip-to-clip', handleSkipToClip);
+    return () => window.removeEventListener('skip-to-clip', handleSkipToClip);
+  }, [setPlayheadTime]);
 
   // One-shot restore: reads all localStorage keys and seeds local state.
   // Must be declared BEFORE the mute/solo persist effect so it runs first
@@ -793,7 +884,6 @@ export function Timeline({ songId }: { songId: string }) {
       const newTime = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
       setPlayheadTime(newTime);
       checkAudioMuteState(newTime);
-      window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: newTime } }));
       window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
 
       // Stop when scroll hits a boundary — zone state is unchanged (hysteresis in pointermove owns it)
@@ -845,7 +935,6 @@ export function Timeline({ songId }: { songId: string }) {
       const time = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
       setPlayheadTime(time);
       checkAudioMuteState(time);
-      window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
       window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
     };
 
@@ -976,7 +1065,6 @@ export function Timeline({ songId }: { songId: string }) {
                   Object.values(customAudioRefs.current).forEach((audio) => {
                     if (audio && !audio.paused) audio.currentTime = currentSection.start;
                   });
-                  window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time: currentSection.start } }));
                   return currentSection.start;
                 }
               }
@@ -1592,7 +1680,6 @@ export function Timeline({ songId }: { songId: string }) {
   const handleRulerSeek = (pos: number) => {
     const time = Math.max(0, pos / zoom);
     setPlayheadTime(time);
-    window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
 
@@ -1617,7 +1704,6 @@ export function Timeline({ songId }: { songId: string }) {
         const time = Math.max(0, targetSection.start);
         setPlayheadTime(time);
         checkAudioMuteState(time);
-        window.dispatchEvent(new CustomEvent('seek-audio', { detail: { time } }));
         window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
         hasAutoScrolled.current = currentSearch;
       }

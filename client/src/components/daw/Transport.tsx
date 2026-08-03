@@ -231,7 +231,12 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
         >
           <MetronomeIcon size={18} />
         </Button>
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground"
+          onClick={() => window.dispatchEvent(new CustomEvent('skip-to-clip', { detail: { direction: 'previous' } }))}
+        >
           <SkipBack size={18} />
         </Button>
         <Button
@@ -244,7 +249,12 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
         >
           {isPlaying ? <Square fill="currentColor" size={20} /> : <Play fill="currentColor" className="ml-1" size={20} />}
         </Button>
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="text-muted-foreground hover:text-foreground"
+          onClick={() => window.dispatchEvent(new CustomEvent('skip-to-clip', { detail: { direction: 'next' } }))}
+        >
           <SkipForward size={18} />
         </Button>
         <Button
