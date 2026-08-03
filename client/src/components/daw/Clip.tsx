@@ -89,6 +89,22 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const { user } = useAuth();
   const effectiveId = bucketClipId ?? clip.id;
 
+  // When opened from a TimelineClip, clip.metadata is absent (the timeline
+  // conversion never includes it). Resolve metadata from the warm bucket cache
+  // using the already-known bucketClipId so read-only display fields render.
+  const effectiveMetadata = (() => {
+    if (!bucketClipId) return clip.metadata;
+    const bucketData = queryClient.getQueryData<any[]>(bucketKeys.bucket(songId));
+    if (!bucketData) return clip.metadata;
+    for (const track of bucketData) {
+      for (const idea of (track.ideas ?? [])) {
+        const found = idea.clips?.find((c: any) => c.id === bucketClipId);
+        if (found) return (found.metadata ?? clip.metadata);
+      }
+    }
+    return clip.metadata;
+  })();
+
   const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
     queryKey: ['users'],
     queryFn: () => fetch('/api/users').then(r => r.json()),
@@ -394,9 +410,9 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
             {/* ── Technical stats (read-only) ── */}
             <div className="grid grid-cols-4 gap-3">
               <InfoStat icon={Clock} label="Duration" value={formatDuration(clip.duration)} mono />
-              <InfoStat icon={Hash} label="Sample Rate" value={clip.metadata?.sampleRate} mono />
-              <InfoStat icon={Activity} label="Bit Depth" value={clip.metadata?.bitDepth} mono />
-              <InfoStat icon={HardDrive} label="Format" value={clip.metadata?.format} mono />
+              <InfoStat icon={Hash} label="Sample Rate" value={effectiveMetadata?.sampleRate} mono />
+              <InfoStat icon={Activity} label="Bit Depth" value={effectiveMetadata?.bitDepth} mono />
+              <InfoStat icon={HardDrive} label="Format" value={effectiveMetadata?.format} mono />
             </div>
 
             {/* ── Musical Intelligence (editable) ── */}
@@ -470,10 +486,10 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                 <div className="h-px flex-1 bg-primary/20" /> Asset Chain
               </h4>
               <div className="grid grid-cols-2 gap-3">
-                <InfoStat icon={User} label="Uploaded By" value={clip.metadata?.uploadedBy ? capitalize(clip.metadata.uploadedBy) : undefined} />
-                <InfoStat icon={Calendar} label="Date Added" value={clip.metadata?.uploadedDate} mono />
+                <InfoStat icon={User} label="Uploaded By" value={effectiveMetadata?.uploadedBy ? capitalize(effectiveMetadata.uploadedBy) : undefined} />
+                <InfoStat icon={Calendar} label="Date Added" value={effectiveMetadata?.uploadedDate} mono />
                 <div className="col-span-2">
-                  <InfoStat icon={Info} label="Original File Name" value={clip.metadata?.originalFileName} mono />
+                  <InfoStat icon={Info} label="Original File Name" value={effectiveMetadata?.originalFileName} mono />
                 </div>
               </div>
             </div>
@@ -487,7 +503,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                 <div className="space-y-2">
                   <div className="flex justify-between text-[11px]">
                     <span className="text-muted-foreground">Channels</span>
-                    <span className="text-foreground font-mono">{clip.metadata?.channels || '—'}</span>
+                    <span className="text-foreground font-mono">{effectiveMetadata?.channels || '—'}</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="text-muted-foreground">Peak Level</span>
