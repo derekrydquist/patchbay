@@ -196,6 +196,7 @@ export const timelineClips = sqliteTable("timeline_clips", {
   isFinal: integer("is_final", { mode: "boolean" }).notNull().default(false),
   trimStart: real("trim_start").notNull().default(0),
   trimEnd: real("trim_end"),
+  bucketClipId: text("bucket_clip_id").references(() => clips.id, { onDelete: "set null" }),
 });
 
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);

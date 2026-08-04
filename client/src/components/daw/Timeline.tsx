@@ -1453,6 +1453,7 @@ export function Timeline({ songId }: { songId: string }) {
           start: finalClip?.start ?? 0, duration: clip.duration,
           src: clip.src ?? null, sectionName,
           trimStart: 0, trimEnd: null,
+          bucketClipId: clip.id,
         }),
       })
         .then(() => Promise.all([

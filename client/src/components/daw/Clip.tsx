@@ -1177,6 +1177,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           isFinal: false,
           trimStart: 0,
           trimEnd: null,
+          bucketClipId: replacement.id,
         }),
       });
       if (res.ok) {
