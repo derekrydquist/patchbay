@@ -126,7 +126,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const [mentionIndex, setMentionIndex] = useState(0);
 
   // ── Musical Intelligence editable fields ────────────────────────────────────
-  const [bpm, setBpm] = useState<string>(clip.metadata?.bpm ? String(clip.metadata.bpm) : '');
+  const [bpm, setBpm] = useState<string>(effectiveMetadata?.bpm ? String(effectiveMetadata.bpm) : '');
   const [keyScale, setKeyScale] = useState<string>(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
   const [timeSignature, setTimeSignature] = useState<string>(clip.metadata?.timeSignature ?? '');
   const [savedField, setSavedField] = useState<string | null>(null);
@@ -140,11 +140,12 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
 
   // Re-sync editable fields when clip prop changes (e.g. after bucket refetch)
   useEffect(() => {
-    setBpm(clip.metadata?.bpm ? String(clip.metadata.bpm) : '');
+    setBpm(effectiveMetadata?.bpm ? String(effectiveMetadata.bpm) : '');
     setKeyScale(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
     setTimeSignature(clip.metadata?.timeSignature ?? '');
     setTags(clip.metadata?.tags ?? []);
-  }, [clip.id]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip.id, JSON.stringify(effectiveMetadata)]);
 
   // Compute peak level — from provided buffer (TimelineClip) or decode on demand (BucketClip)
   useEffect(() => {
