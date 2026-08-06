@@ -422,6 +422,7 @@ export function Timeline({ songId }: { songId: string }) {
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
+  const seekPendingRef = React.useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
   const lastBeatIndexRef = useRef<number>(-1);
@@ -1108,6 +1109,11 @@ export function Timeline({ songId }: { songId: string }) {
                 const inRange = newTime >= clipStart && newTime < clipEnd;
 
                 if (inRange && isPlaying) {
+                  // On a seek-while-playing, force-reset currentTime even if the clip wasn't
+                  // paused (it stayed in-range across the seek so audio.paused never went true).
+                  if (seekPendingRef.current && !audio.paused) {
+                    audio.currentTime = trimStart + Math.max(0, newTime - clipStart);
+                  }
                   if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
                     audio.currentTime = trimStart + Math.max(0, newTime - clipStart);
                     pendingPlayRef.current.add(clip.id);
@@ -1136,6 +1142,7 @@ export function Timeline({ songId }: { songId: string }) {
               }
             }
 
+            seekPendingRef.current = false;
             window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
             return newTime;
           });
@@ -1763,6 +1770,22 @@ export function Timeline({ songId }: { songId: string }) {
       document.removeEventListener('keydown', onKey);
     };
   }, [contextMenuPos]);
+
+  // Return key → reposition playhead to time 0.
+  useEffect(() => {
+    const onReturnKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.repeat) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      if (document.querySelector('[data-state="open"]')) return;
+      e.preventDefault();
+      seekPendingRef.current = true;
+      setPlayheadTime(0);
+      window.dispatchEvent(new CustomEvent('time-update', { detail: { time: 0 } }));
+    };
+    document.addEventListener('keydown', onReturnKey);
+    return () => document.removeEventListener('keydown', onReturnKey);
+  }, [setPlayheadTime]);
 
   const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
