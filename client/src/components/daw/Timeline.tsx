@@ -2066,6 +2066,8 @@ export function Timeline({ songId }: { songId: string }) {
                     onDeleteTrack={handleDeleteTrack}
                     songId={songId}
                     flashClipId={flashClipId}
+                    selectedTrackId={selectedTimelineTrackId}
+                    selectedClipId={selectedTimelineClipId}
                   />
                 );
               })}

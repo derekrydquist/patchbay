@@ -30,6 +30,7 @@ interface SectionCellProps {
   trackId: string;
   songId: string;
   flashClipId?: string | null;
+  selectedClipId?: string | null;
 }
 
 function SectionCell({
@@ -43,6 +44,7 @@ function SectionCell({
   trackId,
   songId,
   flashClipId,
+  selectedClipId,
 }: SectionCellProps) {
   return (
     <div
@@ -52,7 +54,7 @@ function SectionCell({
       {clips.map((clip) => {
         const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
         return (
-          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} instanceCount={instanceCount} isFlash={flashClipId === clip.id} />
+          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} instanceCount={instanceCount} isFlash={flashClipId === clip.id} isSelected={selectedClipId === clip.id} />
         );
       })}
       {insertionX !== undefined && (
@@ -76,6 +78,8 @@ interface TrackProps {
   onDeleteTrack?: (trackId: string) => void;
   songId: string;
   flashClipId?: string | null;
+  selectedTrackId?: string | null;
+  selectedClipId?: string | null;
 }
 
 export function TimelineTrack({
@@ -89,6 +93,8 @@ export function TimelineTrack({
   onDeleteTrack,
   songId,
   flashClipId,
+  selectedTrackId,
+  selectedClipId,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -235,6 +241,7 @@ export function TimelineTrack({
                 insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
               }
               flashClipId={flashClipId}
+              selectedClipId={selectedClipId}
             />
           );
         })}

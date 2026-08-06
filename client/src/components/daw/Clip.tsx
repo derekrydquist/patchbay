@@ -68,6 +68,7 @@ interface ClipProps {
   songId?: string;
   instanceCount?: number;
   isFlash?: boolean;
+  isSelected?: boolean;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -795,7 +796,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1, isFlash = false }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1329,6 +1330,11 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 </>
               );
             })()}
+
+            {/* Selection indicator — persistent gold border + tint; same inset-border technique as flash halo */}
+            {!isOverlay && isSelected && (
+              <div className="pointer-events-none absolute inset-0 rounded-md border-2 border-primary bg-primary/10 z-[19]" />
+            )}
 
             {/* Flash halo — outside overflow-hidden's clip path so border is fully visible */}
             {!isOverlay && (
