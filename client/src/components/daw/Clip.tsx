@@ -1252,7 +1252,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               else { setTrimEdge(null); }
             }}
             className={cn(
-              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none",
+              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none focus-visible:outline-none",
               isOverlay && "shadow-2xl scale-105 opacity-90",
               isFinal && "ring-1 ring-primary/50"
             )}
@@ -1371,7 +1371,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             {isHovered && !isOverlay && (
               <div
                 className="pointer-events-none absolute inset-0 z-20"
-                style={{ boxShadow: 'inset 0 0 0 2px rgba(212,175,55,0.9), inset 0 0 14px rgba(212,175,55,0.35)' }}
+                style={{ boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)' }}
               />
             )}
           </div>
