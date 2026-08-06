@@ -823,6 +823,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
   const drawRef = useRef<(() => void) | null>(null);
   const clipContainerRef = useRef<HTMLDivElement | null>(null);
+  const isFinalRef = useRef(clip.isFinal);
+  const removeClipButtonRef = useRef<HTMLButtonElement | null>(null);
 
   // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
   useEffect(() => {
@@ -923,7 +925,26 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);
+    isFinalRef.current = clip.isFinal ?? false;
   }, [clip.isFinal]);
+
+  // Keep isFinalRef in sync whenever local isFinal state changes (e.g. optimistic updates).
+  useEffect(() => { isFinalRef.current = isFinal; }, [isFinal]);
+
+  // Keyboard Delete/Backspace — Timeline dispatches this when the selected clip should be removed.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { clipId } = (e as CustomEvent).detail;
+      if (clipId !== clip.id) return;
+      if (isFinalRef.current) {
+        setShowRemoveConfirm(true);
+      } else {
+        window.dispatchEvent(new CustomEvent('remove-clip', { detail: { clipId: clip.id } }));
+      }
+    };
+    window.addEventListener('keyboard-remove-clip', handler);
+    return () => window.removeEventListener('keyboard-remove-clip', handler);
+  }, [clip.id]);
 
   useEffect(() => {
     setTrimStart(clip.trimStart ?? 0);
@@ -1494,7 +1515,13 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       )}
 
       <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            removeClipButtonRef.current?.focus();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Final Clip?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1504,6 +1531,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={removeClipButtonRef}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => {
                 window.dispatchEvent(new CustomEvent('remove-clip', { detail: { clipId: clip.id } }));

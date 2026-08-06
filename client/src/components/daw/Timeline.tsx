@@ -1285,6 +1285,14 @@ export function Timeline({ songId }: { songId: string }) {
         });
         return recalced;
       });
+      // Clear selection if the deleted clip was selected.
+      setSelectedTimelineClipId((prev) => {
+        if (prev === clipId) {
+          localStorage.removeItem(`patchbay-selected-timeline-clip-${songId}`);
+          return null;
+        }
+        return prev;
+      });
     };
 
     const handleTrackSelected = (e: any) => {
@@ -1786,6 +1794,25 @@ export function Timeline({ songId }: { songId: string }) {
     document.addEventListener('keydown', onReturnKey);
     return () => document.removeEventListener('keydown', onReturnKey);
   }, [setPlayheadTime]);
+
+  // Delete/Backspace → remove the selected timeline clip (same path as right-click Remove Clip).
+  // Non-final: dispatches remove-clip immediately. Final: dispatches keyboard-remove-clip, which
+  // causes the clip's own showRemoveConfirm AlertDialog to open (exact same component as right-click).
+  useEffect(() => {
+    const onDeleteKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      if (e.repeat) return;
+      if (!selectedTimelineClipId) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      if (document.querySelector('[data-state="open"]')) return;
+      if (activeDragData) return;
+      e.preventDefault();
+      window.dispatchEvent(new CustomEvent('keyboard-remove-clip', { detail: { clipId: selectedTimelineClipId } }));
+    };
+    document.addEventListener('keydown', onDeleteKey);
+    return () => document.removeEventListener('keydown', onDeleteKey);
+  }, [selectedTimelineClipId, activeDragData]);
 
   const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
