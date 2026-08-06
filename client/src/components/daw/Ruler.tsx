@@ -2,6 +2,7 @@ import React from 'react';
 
 export function Ruler({ onSeek, zoom = 80 }: { onSeek?: (pos: number) => void, zoom?: number }) {
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
     if (onSeek) {
       const rect = e.currentTarget.getBoundingClientRect();
       const pos = e.clientX - rect.left;

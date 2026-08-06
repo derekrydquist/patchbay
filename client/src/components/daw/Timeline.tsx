@@ -33,7 +33,6 @@ import { cn } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
 import { TimelineTrack, SectionInfo } from './Track';
-import { TimelineClip } from './Clip';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DawScrollbar } from './DawScrollbar';
@@ -285,9 +284,6 @@ export function Timeline({ songId }: { songId: string }) {
   // computeSectionLayout uses it instead of inferring order from MOCK_SONG.sections.
   const [sectionOrder, setSectionOrder] = useState<string[]>([]);
   const sectionOrderRef = useRef<string[]>([]);
-  // True when the drag pointer is over a between-column gap zone.
-  const [isOverGap, setIsOverGap] = useState(false);
-
   // Section-reorder drag state — separate from clip drag state.
   const [activeSectionName, setActiveSectionName] = useState<string | null>(null);
   // Which gap index the cursor is nearest to during a section header drag (0 = before first column).
@@ -392,7 +388,6 @@ export function Timeline({ songId }: { songId: string }) {
     setPlayheadTimeState(playheadRef.current);
   }, []);
 
-  const [tracksVersion, setTracksVersion] = useState(0);
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
   const [timeSignature, setTimeSignature] = useState('4/4');
   const [zoom, setZoom] = useState(() => {
@@ -437,6 +432,12 @@ export function Timeline({ songId }: { songId: string }) {
   // from live current time (which drifts forward during playback between clicks).
   const lastSkipBackTargetRef = React.useRef<number | null>(null);
   const lastSkipBackTimestampRef = React.useRef<number | null>(null);
+  // Set to true on pointerdown for Mute/Solo/volume-slider in track headers, cleared after the
+  // next rAF post-pointerup. Guards handleTrackSelected and handleTimelineClick against the second
+  // native click event that the browser fires at the cursor's physical position after a drag
+  // releases pointer capture — which can land on the track header even when the drag started inside
+  // a child control.
+  const controlInteractionRef = React.useRef(false);
 
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
@@ -605,11 +606,6 @@ export function Timeline({ songId }: { songId: string }) {
     return () => window.removeEventListener('update-master-volume', handleMasterVolume);
   }, []);
 
-  useEffect(() => {
-    const handleSongUpdated = () => setTracksVersion((v) => v + 1);
-    window.addEventListener('song-updated', handleSongUpdated);
-    return () => window.removeEventListener('song-updated', handleSongUpdated);
-  }, []);
 
   useEffect(() => {
     const handleSkipToClip = (e: any) => {
@@ -1296,6 +1292,7 @@ export function Timeline({ songId }: { songId: string }) {
     };
 
     const handleTrackSelected = (e: any) => {
+      if (controlInteractionRef.current) return;
       const { trackId } = e.detail;
       setSelectedTimelineTrackId(trackId);
       setSelectedTimelineClipId(null);
@@ -1503,8 +1500,7 @@ export function Timeline({ songId }: { songId: string }) {
   const handleDragMove = (event: DragMoveEvent) => {
     const { over } = event;
     setInsertionPoint(null);
-    if (!over) { setIsOverGap(false); return; }
-    setIsOverGap(String(over.id).startsWith('gap||'));
+    if (!over) return;
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -1513,7 +1509,6 @@ export function Timeline({ songId }: { songId: string }) {
     const dragData = activeDragData;
 
     setActiveDragData(null);
-    setIsOverGap(false);
 
     if (!over) { setInsertionPoint(null); return; }
 
@@ -1814,6 +1809,105 @@ export function Timeline({ songId }: { songId: string }) {
     return () => document.removeEventListener('keydown', onDeleteKey);
   }, [selectedTimelineClipId, activeDragData]);
 
+  // Arrow keys → navigate selection between clips and tracks.
+  useEffect(() => {
+    const selectClipOnTrack = (track: (typeof tracks)[0], clipId: string) => {
+      setSelectedTimelineTrackId(track.id);
+      setSelectedTimelineClipId(clipId);
+      localStorage.setItem(`patchbay-selected-timeline-track-${songId}`, track.id);
+      localStorage.setItem(`patchbay-selected-timeline-clip-${songId}`, clipId);
+    };
+
+    const firstClipOf = (track: (typeof tracks)[0]) =>
+      [...track.clips].sort((a, b) => a.start - b.start)[0];
+
+    const onArrowKey = (e: KeyboardEvent) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+      if (e.repeat) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      if (document.querySelector('[data-state="open"]')) return;
+      if (activeDragData) return;
+      e.preventDefault();
+
+      // Nothing selected → find the first track in render order that has at least one clip
+      // and select its first clip. No-op if every track is empty.
+      if (!selectedTimelineTrackId) {
+        const firstNonEmpty = tracks.find((t) => t.clips.length > 0);
+        if (!firstNonEmpty) return;
+        selectClipOnTrack(firstNonEmpty, firstClipOf(firstNonEmpty).id);
+        return;
+      }
+
+      const trackIndex = tracks.findIndex((t) => t.id === selectedTimelineTrackId);
+      if (trackIndex === -1) return;
+      const currentTrack = tracks[trackIndex];
+
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        const sorted = [...currentTrack.clips].sort((a, b) => a.start - b.start);
+
+        // No clips on this track — nothing to navigate to.
+        if (sorted.length === 0) return;
+
+        // Track-only selection: select first clip in time order regardless of direction.
+        if (!selectedTimelineClipId) {
+          selectClipOnTrack(currentTrack, sorted[0].id);
+          return;
+        }
+
+        const clipIndex = sorted.findIndex((c) => c.id === selectedTimelineClipId);
+        if (clipIndex === -1) return;
+
+        if (e.key === 'ArrowLeft') {
+          if (clipIndex === 0) return;
+          selectClipOnTrack(currentTrack, sorted[clipIndex - 1].id);
+        } else {
+          if (clipIndex === sorted.length - 1) return;
+          selectClipOnTrack(currentTrack, sorted[clipIndex + 1].id);
+        }
+        return;
+      }
+
+      // ArrowUp / ArrowDown — walk tracks in the given direction until a suitable clip is found.
+      const step = e.key === 'ArrowUp' ? -1 : 1;
+
+      if (selectedTimelineClipId) {
+        // Clip selected: keep stepping until a track has a clip whose audible range contains
+        // the reference clip's start time. No-op if no such track exists before the boundary.
+        const currentClip = currentTrack.clips.find((c) => c.id === selectedTimelineClipId);
+        if (!currentClip) return;
+
+        for (let i = trackIndex + step; i >= 0 && i < tracks.length; i += step) {
+          const candidate = tracks[i];
+          const match = candidate.clips.find((c) => {
+            const effectiveDuration = (c.trimEnd ?? c.duration) - (c.trimStart ?? 0);
+            return currentClip.start >= c.start && currentClip.start < c.start + effectiveDuration;
+          });
+          if (match) {
+            selectClipOnTrack(candidate, match.id);
+            return;
+          }
+        }
+        // No matching clip found before the boundary — stay put.
+        return;
+      }
+
+      // Track-only selected: step until a track with at least one clip is found, then select
+      // its first clip in time order. No-op if no non-empty track exists before the boundary.
+      for (let i = trackIndex + step; i >= 0 && i < tracks.length; i += step) {
+        const candidate = tracks[i];
+        if (candidate.clips.length > 0) {
+          selectClipOnTrack(candidate, firstClipOf(candidate).id);
+          return;
+        }
+      }
+      // No non-empty track found before the boundary — stay put.
+    };
+
+    document.addEventListener('keydown', onArrowKey);
+    return () => document.removeEventListener('keydown', onArrowKey);
+  }, [tracks, selectedTimelineTrackId, selectedTimelineClipId, songId, activeDragData]);
+
   const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     // Suppress on clips and draggable section header labels (all carry cursor-grab).
@@ -1823,6 +1917,21 @@ export function Timeline({ songId }: { songId: string }) {
     if (containerRect && e.clientX - containerRect.left < 256) return;
     e.preventDefault();
     setContextMenuPos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (controlInteractionRef.current) return;
+    const target = e.target as HTMLElement;
+    // cursor-grab doubles as a hit-test sentinel: clips, section headers, and the playhead flag
+    // all carry it. If that class is ever renamed during a visual pass, this guard breaks silently
+    // — consider switching to data-timeline-interactive if this area is touched again.
+    if (target.closest('.cursor-grab')) return;
+    const containerRect = timelineRef.current?.getBoundingClientRect();
+    if (containerRect && e.clientX - containerRect.left < 256) return;
+    setSelectedTimelineTrackId(null);
+    setSelectedTimelineClipId(null);
+    localStorage.removeItem(`patchbay-selected-timeline-track-${songId}`);
+    localStorage.removeItem(`patchbay-selected-timeline-clip-${songId}`);
   };
 
   const handleClearAll = () => {
@@ -1933,6 +2042,7 @@ export function Timeline({ songId }: { songId: string }) {
                 minWidth: `${TRACK_PANEL_WIDTH + 100 * zoom}px`,
               }}
               onContextMenu={handleTimelineContextMenu}
+              onClick={handleTimelineClick}
             >
               {/* Flag-band: thin sticky strip that holds the draggable playhead handle.
                   The flag overflows this 6px band downward — that is intentional.
@@ -2095,6 +2205,7 @@ export function Timeline({ songId }: { songId: string }) {
                     flashClipId={flashClipId}
                     selectedTrackId={selectedTimelineTrackId}
                     selectedClipId={selectedTimelineClipId}
+                    controlInteractionRef={controlInteractionRef}
                   />
                 );
               })}

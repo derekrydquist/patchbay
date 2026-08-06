@@ -80,6 +80,7 @@ interface TrackProps {
   flashClipId?: string | null;
   selectedTrackId?: string | null;
   selectedClipId?: string | null;
+  controlInteractionRef: React.RefObject<boolean>;
 }
 
 export function TimelineTrack({
@@ -95,6 +96,7 @@ export function TimelineTrack({
   flashClipId,
   selectedTrackId,
   selectedClipId,
+  controlInteractionRef,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -106,6 +108,12 @@ export function TimelineTrack({
 
   const isValidTarget = isDragging && !isInvalidDrop;
   const isInvalidTarget = isDragging && isInvalidDrop;
+
+  // Set the ref on pointerdown for any control that could produce a stray native click
+  // on the track header after drag-release. Cleared after the next rAF post-pointerup so
+  // the flag is still true when the resulting click event (wherever its target lands) fires.
+  const handleControlPointerDown = () => { controlInteractionRef.current = true; };
+  const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
 
   return (
     <div className="relative flex w-full h-16 bg-card/20 group">
@@ -167,11 +175,12 @@ export function TimelineTrack({
           <div className="flex items-center gap-2 mt-0.5">
             <div className="flex gap-0.5">
               <button
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('toggle-track-mute', { detail: { trackId: track.id } })
-                  )
-                }
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent('toggle-track-mute', { detail: { trackId: track.id } }));
+                }}
                 className={cn(
                   'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
                   track.muted && 'bg-destructive text-destructive-foreground border-destructive'
@@ -180,11 +189,12 @@ export function TimelineTrack({
                 M
               </button>
               <button
-                onClick={() =>
-                  window.dispatchEvent(
-                    new CustomEvent('toggle-track-solo', { detail: { trackId: track.id } })
-                  )
-                }
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent('toggle-track-solo', { detail: { trackId: track.id } }));
+                }}
                 className={cn(
                   'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
                   track.solo && 'bg-primary text-primary-foreground border-primary'
@@ -193,17 +203,23 @@ export function TimelineTrack({
                 S
               </button>
             </div>
-            <Slider
-              value={[track.volume ?? 80]}
-              onValueChange={([val]) =>
-                window.dispatchEvent(
-                  new CustomEvent('update-track-volume', { detail: { trackId: track.id, volume: val } })
-                )
-              }
-              max={100}
-              step={1}
-              className="w-16 h-1"
-            />
+            <div
+              onPointerDown={handleControlPointerDown}
+              onPointerUp={handleControlPointerUp}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Slider
+                value={[track.volume ?? 80]}
+                onValueChange={([val]) =>
+                  window.dispatchEvent(
+                    new CustomEvent('update-track-volume', { detail: { trackId: track.id, volume: val } })
+                  )
+                }
+                max={100}
+                step={1}
+                className="w-16 h-1"
+              />
+            </div>
           </div>
         </div>
       </div>
