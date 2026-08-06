@@ -127,12 +127,12 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
 
   // ── Musical Intelligence editable fields ────────────────────────────────────
   const [bpm, setBpm] = useState<string>(effectiveMetadata?.bpm ? String(effectiveMetadata.bpm) : '');
-  const [keyScale, setKeyScale] = useState<string>(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
-  const [timeSignature, setTimeSignature] = useState<string>(clip.metadata?.timeSignature ?? '');
+  const [keyScale, setKeyScale] = useState<string>(effectiveMetadata?.key && effectiveMetadata.key !== 'Unknown' ? effectiveMetadata.key : '');
+  const [timeSignature, setTimeSignature] = useState<string>(effectiveMetadata?.timeSignature ?? '');
   const [savedField, setSavedField] = useState<string | null>(null);
 
   // ── Meta Tags ──────────────────────────────────────────────────────────────
-  const [tags, setTags] = useState<string[]>(clip.metadata?.tags ?? []);
+  const [tags, setTags] = useState<string[]>(effectiveMetadata?.tags ?? []);
   const [tagInput, setTagInput] = useState('');
 
   // ── Peak Level (computed client-side, never stored in DB) ─────────────────
@@ -141,9 +141,9 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   // Re-sync editable fields when clip prop changes (e.g. after bucket refetch)
   useEffect(() => {
     setBpm(effectiveMetadata?.bpm ? String(effectiveMetadata.bpm) : '');
-    setKeyScale(clip.metadata?.key && clip.metadata.key !== 'Unknown' ? clip.metadata.key : '');
-    setTimeSignature(clip.metadata?.timeSignature ?? '');
-    setTags(clip.metadata?.tags ?? []);
+    setKeyScale(effectiveMetadata?.key && effectiveMetadata.key !== 'Unknown' ? effectiveMetadata.key : '');
+    setTimeSignature(effectiveMetadata?.timeSignature ?? '');
+    setTags(effectiveMetadata?.tags ?? []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clip.id, JSON.stringify(effectiveMetadata)]);
 
@@ -192,7 +192,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   };
 
   const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
-    const merged = { ...(clip.metadata ?? {}), ...updates } as NonNullable<Clip['metadata']>;
+    const merged = { ...(effectiveMetadata ?? {}), ...updates } as NonNullable<Clip['metadata']>;
     try {
       await fetch(`/api/clips/${effectiveId}`, {
         method: 'PATCH',
@@ -1467,21 +1467,25 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         </ContextMenuContent>
       </ContextMenu>
 
-      <ClipInfoWindow
-        clip={{...clip, isFinal}}
-        open={showInfo}
-        onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
-        focusNotes={focusNotes}
-        songId={songId}
-        audioBuffer={decodedBufferRef.current ?? undefined}
-        bucketClipId={(() => {
-          const bucketData = queryClient.getQueryData<any[]>(bucketKeys.bucket(songId));
-          if (!bucketData || !trackId) return undefined;
-          const track = bucketData.find((t: any) => t.id === trackId);
-          const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
-          return idea?.clips?.find((c: any) => c.name === clip.name)?.id as string | undefined;
-        })()}
-      />
+      {showInfo && (
+        <ClipInfoWindow
+          clip={{...clip, isFinal}}
+          open={showInfo}
+          onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
+          focusNotes={focusNotes}
+          songId={songId}
+          audioBuffer={decodedBufferRef.current ?? undefined}
+          bucketClipId={clip.bucketClipId}
+          // DEPRECATED (cache-walk fallback — remove after one testing cycle):
+          // bucketClipId={(() => {
+          //   const bucketData = queryClient.getQueryData<any[]>(bucketKeys.bucket(songId));
+          //   if (!bucketData || !trackId) return undefined;
+          //   const track = bucketData.find((t: any) => t.id === trackId);
+          //   const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
+          //   return idea?.clips?.find((c: any) => c.name === clip.name)?.id as string | undefined;
+          // })()}
+        />
+      )}
 
       <AlertDialog open={showRemoveConfirm} onOpenChange={setShowRemoveConfirm}>
         <AlertDialogContent className="bg-[#0c0c0e] border-border">
@@ -1745,15 +1749,17 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         </ContextMenuContent>
       </ContextMenu>
 
-      <ClipInfoWindow
-        clip={{...clip, isFinal, comments}}
-        open={showInfo}
-        onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
-        onCommentsChange={handleUpdateComments}
-        bucketClipId={clip.id}
-        focusNotes={focusNotes}
-        songId={songId}
-      />
+      {showInfo && (
+        <ClipInfoWindow
+          clip={{...clip, isFinal, comments}}
+          open={showInfo}
+          onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
+          onCommentsChange={handleUpdateComments}
+          bucketClipId={clip.id}
+          focusNotes={focusNotes}
+          songId={songId}
+        />
+      )}
 
       <AlertDialog open={showChangeFinalConfirm} onOpenChange={setShowChangeFinalConfirm}>
         <AlertDialogContent className="bg-[#0c0c0e] border-border">

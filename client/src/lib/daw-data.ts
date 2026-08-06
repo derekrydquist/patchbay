@@ -40,6 +40,7 @@ export interface Clip {
   sectionName?: string;
   trimStart?: number;
   trimEnd?: number | null;
+  bucketClipId?: string;
 }
 
 export interface Idea {

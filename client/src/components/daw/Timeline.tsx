@@ -63,6 +63,7 @@ type ApiTrack = {
     isFinal: boolean;
     trimStart: number;
     trimEnd: number | null;
+    bucketClipId: string | null;
   }[];
 };
 
@@ -170,6 +171,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
         isFinal: c.isFinal ?? false,
         trimStart: ts,
         trimEnd: te,
+        bucketClipId: c.bucketClipId ?? undefined,
       };
     }),
   }));
@@ -335,6 +337,7 @@ export function Timeline({ songId }: { songId: string }) {
             isFinal: c.isFinal ?? false,
             trimStart: ts,
             trimEnd: te,
+            bucketClipId: c.bucketClipId ?? undefined,
           };
         });
         return { ...track, clips: freshClips, volume: apiTrack.volume ?? 100 };
@@ -1434,7 +1437,7 @@ export function Timeline({ songId }: { songId: string }) {
       const insertAt = index ?? sectionClips.length;
       const newSectionClips = [
         ...sectionClips.slice(0, insertAt),
-        { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null },
+        { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null, bucketClipId: clip.id },
         ...sectionClips.slice(insertAt),
       ];
 

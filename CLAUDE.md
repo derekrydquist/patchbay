@@ -1404,36 +1404,30 @@ This is distinct from the `isFinal ↔ task status` bidirectional sync: clip add
 
 `ClipInfoWindow` in `Clip.tsx` is the shared "More Info" dialog for both `BucketClip` and `TimelineClip`. It shows clip metadata stats and a full comment thread backed by the `clip_comments` table.
 
-**`bucketClipId` prop and `effectiveId`:**
-`clip_comments` rows reference `clips.id` (bucket clip IDs), never `timeline_clips.id`. When `TimelineClip` opens the panel, it must resolve the bucket clip ID from the TanStack Query cache:
-```ts
-const bucketData = queryClient.getQueryData<any[]>(['bucket', 'patchbay-default']);
-const track = bucketData?.find((t: any) => t.id === trackId);
-const idea = track?.ideas?.find((i: any) => i.sectionName === clip.sectionName);
-const bucketClipId = idea?.clips?.find((c: any) => c.name === clip.name)?.id;
-```
-This is synchronous — no extra API call — because the bucket query is always warm. `ClipInfoWindow` then uses `effectiveId = bucketClipId ?? clip.id` for all comment API calls. `BucketClip` always passes `bucketClipId={clip.id}` directly.
+**`bucketClipId` — direct foreign key, not a name match:**
+`timeline_clips` has a `bucketClipId` column (nullable text, references `clips.id`) that stores a direct link to the source bucket clip. This replaced an earlier soft-matching scheme that resolved the link at read-time by walking the bucket cache and matching on `trackId + sectionName + name` — a guessable link that silently broke on rename, Replace, or duplicate-name collisions within a section.
+
+`bucketClipId` is set at write time by every path that creates or repoints a timeline clip's source:
+- **Drag-to-timeline** and **right-click "Add to Timeline"** (both go through `insertClipInSection` in `Timeline.tsx`) — set `bucketClipId: clip.id` directly, since `clip` at these call sites is always the source bucket clip.
+- **Timeline-clip reorder** (gap drop, track-row drop with `activeType === 'clip'`) — does not call `insertClipInSection` and never touches `bucketClipId`; only `start` is patched. The existing value is preserved automatically.
+- **Replace** (`PATCH /api/timeline-clips/:id` from the Replace submenu) — sets `bucketClipId` to the selected replacement's `id`, so the source link correctly repoints to the new version rather than staying attached to the old one.
+
+`ClipInfoWindow` reads `effectiveId = clip.bucketClipId ?? clip.id` for all comment API calls, and resolves `effectiveMetadata` via a direct `bucketClipId` lookup against the bucket cache (an O(1) find, not a nested walk). The old name-matching code is left in place, commented out, as a deprecated fallback — not deleted, in case a row is ever found with a null `bucketClipId` (should not happen given the backfill, but defensive).
+
+**Do not** reintroduce trackId+sectionName+name matching as a resolution path. If a future feature needs to resolve a timeline clip's source, use `bucketClipId` directly.
+
+**Mount-gating:** `ClipInfoWindow` is mounted conditionally (`{showInfo && <ClipInfoWindow ... />}`) on both `TimelineClip` and `BucketClip`. This is required, not optional — the component's resolution logic (bucketClipId lookup, `effectiveMetadata` computation, comment query, peak-level decode) previously ran unconditionally on every render for every visible clip on both surfaces, confirmed via direct render-count testing (~80+ resolution calls/sec from an idle MediaBucket view alone before the fix). `autoOpenInfo` is safe with mount-gating — it calls `setShowInfo(true)`, which mounts the component on demand rather than requiring it to be pre-mounted.
 
 **`focusNotes` prop:**
 Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `true` when "Add Note" is selected from the context menu and reset to `false` when the dialog closes. `ClipInfoWindow` receives this as a prop and triggers `setTimeout(() => noteInputRef.current?.focus(), 150)` inside `useEffect([open, focusNotes])`.
 
 **Comment CRUD with threading:**
-- `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`; returns `ClipCommentWithReplies[]` (top-level comments each with a `replies: ClipComment[]` array)
-- `POST /api/clips/:clipId/comments` — `{ author, text, parentId? }` — `parentId` omitted for top-level, set to parent comment ID for replies; invalidates query key on success
-- `PATCH /api/clip-comments/:id` — inline edit; pencil icon on hover
+- `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`; returns `ClipCommentWithReplies[]`
+- `POST /api/clips/:clipId/comments` — `{ author, text, parentId? }`
+- `PATCH /api/clip-comments/:id` — inline edit
 - `DELETE /api/clip-comments/:id` — server deletes replies first, then the parent
 
-**Threading UI:**
-`expandedThreadId: string | null` — one thread open at a time. `toggleThread(commentId)` flips it and resets `replyText`/`replyMentionQuery`. Top-level comments show a "Reply" link and, when replies exist, a "N replies" toggle with `ChevronDown`/`ChevronUp`. Expanded thread renders replies indented (`ml-7 border-l pl-3`) followed by the reply input row. `lastReplyRef` attaches to the last reply element; after `handleAddReply` resolves, `setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50)` scrolls it into view. Thread stays open after posting (no `setExpandedThreadId(null)`). Author display: `c.author === user?.username ? 'You' : capitalize(c.author)`.
-
-Reply input uses `placeholder={\`Reply to {Author}…\`}` (or "yourself" for self-replies) and is styled identically to the main comment input (`bg-black/40 border-white/10 text-sm h-9 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic`).
-
-**@ mention autocomplete — portal pattern:**
-Both the main comment input and the reply input use `createPortal` (from `react-dom`) to render their dropdowns into `document.body`, escaping the modal's `transform` stacking context that would otherwise clip `position: fixed` children. The rect is read from the input ref during render: `noteInputRef.current?.getBoundingClientRect()`. Main input opens dropdown downward (`top: rect.bottom + 4`); reply input opens upward (`bottom: window.innerHeight - rect.top + 4`). Both use `zIndex: 9999`.
-
-`handleNoteChange` detects `/@(\w*)$/` and sets `mentionQuery`. `handleNoteKeyDown` handles ArrowUp/Down/Enter/Escape. `onMouseDown + e.preventDefault()` on each dropdown item prevents blur before the click registers.
-
-**`avatarColor` returns hex, not a CSS class** — unlike `ProductionTracker` where the avatar helper returns a Tailwind class, `Clip.tsx`'s `avatarColor` returns a hex string. Dropdown avatar divs must use `style={{ backgroundColor: avatarColor(name) }}` with `text-black`, not a className.
+**Note:** `clip_comments` references `clips.id` only, so all timeline placements of the same bucket clip share one comment thread by design — this is unrelated to the `bucketClipId` migration and predates it. Per-placement (instance-specific) comments would need a separate schema change; not scoped or started.
 
 ### More Info panel — real file metadata — ✅ Built
 
@@ -1456,22 +1450,27 @@ These are returned in the upload response. `MediaBucket.tsx` destructures them a
 `formatDuration(secs)` — under 60s: `"4.84s"`; 60s or more: `"1m 4s"`.
 
 **Musical Intelligence (editable, blur-to-save):**
-BPM, Time Signature, and Key/Scale are `<Input>` fields with local state initialized from `clip.metadata`. On blur, `patchMeta(updates)` merges the changed field into the existing metadata and sends `PATCH /api/clips/${effectiveId}` with `{ metadata: merged }`. A 1.5s green "Saved" flash appears next to the field label via `savedField` state + `flashSaved(field)` helper. BPM uses `type="text" inputMode="decimal"` (no spinner arrows). Key/Scale treats stored `'Unknown'` as empty so the placeholder `"e.g. C Minor"` shows. All three inputs have `placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic` styling.
+BPM, Time Signature, Key/Scale, and Tags are editable fields — see "Musical Intelligence & Meta Tags fields" section below for the current read/write pattern. BPM uses `type="text" inputMode="decimal"` (no spinner arrows). Key/Scale treats stored `'Unknown'` as empty so the placeholder `"e.g. C Minor"` shows. All inputs have `placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic` styling. A 1.5s green "Saved" flash appears next to the field label via `savedField` state + `flashSaved(field)` helper.
 
 **Meta Tags (editable):**
-`tags` state initializes from `clip.metadata?.tags ?? []`. User types into a text `<Input>` and presses Enter to add a tag (lowercased, spaces → hyphens, deduped). Each existing tag renders as a pill with an `×` button that removes it immediately. Both add and remove call `patchMeta({ tags: next })` and invalidate `['bucket', songId]`. "Saved" flash on add only.
+User types into a text `<Input>` and presses Enter to add a tag (lowercased, spaces → hyphens, deduped). Each existing tag renders as a pill with an `×` button that removes it immediately. "Saved" flash on add only.
 
 **`patchMeta` and invalidation:**
-```ts
-const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
-  const merged = { ...(clip.metadata ?? {}), ...updates };
-  await fetch(`/api/clips/${effectiveId}`, { method: 'PATCH', ... body: JSON.stringify({ metadata: merged }) });
-  queryClient.invalidateQueries({ queryKey: ['bucket', songId] });
-};
-```
-The `PATCH /api/clips/:clipId` route handles metadata updates without triggering `isFinal` sync logic (since `isFinal` is not in the body). `ClipInfoWindow` receives `songId?: string` (default `'patchbay-default'`) for scoped invalidation.
+Sends `PATCH /api/clips/${effectiveId}` with `{ metadata: merged }` and invalidates `['bucket', songId]`. The `PATCH /api/clips/:clipId` route handles metadata updates without triggering `isFinal` sync logic (since `isFinal` is not in the body). `ClipInfoWindow` receives `songId?: string` (default `'patchbay-default'`) for scoped invalidation.
 
 **Header:** Shows only the clip name (and `(FINAL)` if applicable). The type badge and clip ID have been removed.
+
+### Musical Intelligence & Meta Tags fields — read/write consistency — ✅ Built
+
+BPM, Time Signature, Key/Scale, and Tags in `ClipInfoWindow` all read from and write to `effectiveMetadata`/`effectiveId`, consistently — this was not always true. `bpm` was fixed first; `timeSignature`, `keyScale`, and `tags` previously read `clip.metadata` directly, which is always `undefined` on timeline-originated clip objects (the timeline conversion in `Timeline.tsx` never includes metadata). This meant those three fields always displayed blank and reset to blank after every save when opened from a timeline clip, even though the underlying save succeeded.
+
+**`patchMeta`'s merge base is `effectiveMetadata`, not `clip.metadata` — this is load-bearing.**
+```ts
+const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
+  const merged = { ...(effectiveMetadata ?? {}), ...updates };
+  // ...PATCH /api/clips/${effectiveId} with { metadata: merged }
+```
+Using `clip.metadata` as the merge base is a data-loss bug on timeline clips: since `clip.metadata` is always empty there, any single-field save would silently wipe every other previously-saved metadata field on that clip (e.g. saving a new Time Signature would erase an existing BPM value). Verified fixed via direct test — editing one field with three others already populated leaves all three intact. **Do not revert this merge base to `clip.metadata`**, even to "simplify" — it will reintroduce silent metadata loss on every timeline-clip edit.
 
 ### Timeline clip waveform — ✅ Built
 
