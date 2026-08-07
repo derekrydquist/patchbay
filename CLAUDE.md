@@ -240,7 +240,7 @@ in route handlers.
 | `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
 | `clips` | Versions uploaded to a bucket idea (linked to `ideas`); `isFinal` marks the chosen version |
 | `timeline_clips` | Clips placed on the arrangement timeline (linked to `instrument_tracks`); `isFinal` mirrors the corresponding bucket clip's final state; `trimStart` (real, default 0) and `trimEnd` (real, nullable) store non-destructive trim points in seconds |
-| `clip_comments` | Timestamped comments on bucket clips; `parentId` (nullable self-reference, no FK) supports one level of replies — same pattern as `song_review_comments` |
+| `clip_comments` | Timestamped comments on bucket clips; `parentId` (nullable self-reference, no FK) supports one level of replies — same pattern as `song_review_comments`. Also backs the clip comment indicator badge (see Planned Features) via `GET /api/songs/:songId/clip-comment-summary`, which aggregates `MAX(timestamp)` per `clipId` across both top-level comments and replies. |
 | `production_tasks` | Kanban tasks linked to a song |
 | `task_subtasks` | Checklist items on a task |
 | `task_comments` | Comments on a task; `parentId` (nullable self-reference, no FK) supports one level of replies |
@@ -567,6 +567,7 @@ When implementing auth or any permission checks, always consult this table.
 | Audio playback from real files | ✅ Done | Full per-clip audio system in `Timeline.tsx` — see Audio Playback System in Planned Features below |
 | Non-destructive clip trim | ✅ Done | Trim handles on timeline clips; `trimStart`/`trimEnd` stored in `timeline_clips`; `clip.duration` never modified; effective duration used throughout layout; `PATCH /api/timeline-clips/:id/trim`; Trim submenu groups all trim actions |
 | Clip session notes (More Info panel) | ✅ Done | `ClipInfoWindow` in `Clip.tsx` — full comment CRUD with one-level threading against `clip_comments` table via `effectiveId = bucketClipId ?? clip.id`; top-level comments show "Reply" link and "N replies" toggle; replies indented under parent with inline reply input; thread stays open after posting and scrolls new reply into view; "Add Note" shortcut focuses the input via `focusNotes` prop; @ mention dropdowns portaled to `document.body` via `createPortal` to escape modal overflow/transform stacking context; section header labeled "COMMENTS"; placeholder "Add a comment..." |
+| Clip comment indicator badge | ✅ Done | Bottom-right corner badge on `BucketClip`/`TimelineClip`, matching the final-checkmark badge's position/size/radius treatment (top-right final vs bottom-right comment, no collision). Backed by `GET /api/songs/:songId/clip-comment-summary` (`GROUP BY clipId` over `clip_comments`, includes replies since they share `clipId` with `parentId` set — no separate query needed). Read/unread state is NOT server-side (no per-user auth yet) — tracked via a client-local TanStack Query cache (`['lastViewedComments']`) backed by localStorage, written via `markCommentsViewed(clipId)` both on More Info open and on the submitting client's own comment/reply post (so you never see your own comment as unread). This cache-write pattern is what makes the badge update live across all open instances of a clip (bucket + every timeline placement) without a page refresh — raw `localStorage` reads alone aren't reactive. Because `clip_comments` keys to `clips.id` (source clip) not `timeline_clips.id`, badge state is identical across a source clip's bucket entry and all its timeline placements — consistent with the existing shared-comment-thread design, not a bug. Clicking the badge opens More Info with `focusComments=true` (same pattern as the existing `focusNotes` prop): auto-expands the thread containing the latest comment/reply via `setExpandedThreadId` directly (not `toggleThread`, so it never collapses an already-open thread), then `scrollIntoView` on a 150ms delay — top-level comments scroll with `block: 'nearest'` (Reply link already visible below the comment), replies scroll their thread's reply input into view with `block: 'end'` so the reply box is visible alongside the latest reply without a second manual scroll. |
 | More Info panel — real file metadata | ✅ Done | Upload route extracts `sampleRate`, `bitDepth`, `channels` via music-metadata and returns them with `uploadedDate`/`uploadedBy`; `ClipInfoWindow` shows Duration (formatted), Sample Rate, Bit Depth, Format, Channels, Original File Name, Uploaded By, Date Added; Peak Level computed client-side from `AudioBuffer` (passed from `TimelineClip`'s decoded waveform buffer, or decoded on-demand for `BucketClip`), stored in state not DB; Musical Intelligence fields (BPM, Time Signature, Key/Scale) are editable inputs that PATCH `metadata` on blur with a 1.5s green "Saved" flash; Meta Tags pill input adds tags on Enter, removes with ×; `'Unknown'` key value treated as empty so placeholder shows; header shows clip name only (no badge or ID) |
 | Timeline clip waveform | ✅ Done | `<canvas>` inside each `TimelineClip`; decoded once via `AudioContext.decodeAudioData`, cached in `decodedBufferRef`; redrawn on trim change and on zoom/resize via `ResizeObserver`; rendered at device pixel ratio for retina sharpness; trim-aware (only the active region is drawn); fails silently |
 | Email notifications | ❌ Not built | Spec item for future |
@@ -705,6 +706,13 @@ POST   /api/upload                       — upload an audio file; multipart fie
 GET    /api/songs/:songId/task-counts             — returns { completed: number, total: number } for
                                                      a song; counts `complete` and `will-not-play` both
                                                      as completed; `will-not-play` is a final decision
+
+GET    /api/songs/:songId/clip-comment-summary      — map of { clipId → { count, latestCommentAt } }
+                                                     for clips that have at least one comment; aggregates
+                                                     clip_comments by clipId (GROUP BY) including replies
+                                                     (replies share clipId, only differ by parentId); used
+                                                     by the clip comment indicator badge to compute
+                                                     read/unread state client-side
 
 GET    /api/songs/:songId/task-comment-counts      — map of { taskId → count } for human comments
                                                      (excludes author = "System" or "Unknown")
@@ -1489,6 +1497,10 @@ User types into a text `<Input>` and presses Enter to add a tag (lowercased, spa
 Sends `PATCH /api/clips/${effectiveId}` with `{ metadata: merged }` and invalidates `['bucket', songId]`. The `PATCH /api/clips/:clipId` route handles metadata updates without triggering `isFinal` sync logic (since `isFinal` is not in the body). `ClipInfoWindow` receives `songId?: string` (default `'patchbay-default'`) for scoped invalidation.
 
 **Header:** Shows only the clip name (and `(FINAL)` if applicable). The type badge and clip ID have been removed.
+
+**Focus-stealing fixes (surfaced by comment badge auto-scroll work):**
+- Radix's default "focus first focusable element" behavior on `ClipInfoWindow`'s `DialogContent` was autofocusing the BPM input on every More Info open, regardless of entry path. Fixed via `onOpenAutoFocus={e => e.preventDefault()}` on the `DialogContent`. Pre-existing issue (not introduced by badge work), but it actively conflicted with badge-triggered auto-scroll — typing immediately after open could unintentionally edit BPM, or scroll position would jump to the focused off-screen field.
+- The reply input's `autoFocus` attribute was firing on any `expandedThreadId` change, including programmatic expansion (e.g. badge's auto-scroll-to-latest-reply effect), not just user-initiated "Reply" clicks. Fixed by removing `autoFocus` from the reply input and instead calling `replyInputRef.current?.focus()` directly inside the "Reply" link's `onClick`, only when the click is opening the thread (not closing it). The "N replies" toggle still calls `toggleThread` alone with no focus side effect.
 
 ### Musical Intelligence & Meta Tags fields — read/write consistency — ✅ Built
 

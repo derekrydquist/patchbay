@@ -109,7 +109,7 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
   );
 }
 
-export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, bucketClipId, audioBuffer, songId = 'patchbay-default' }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string }) {
+export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default' }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string }) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const effectiveId = bucketClipId ?? clip.id;
@@ -147,6 +147,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const noteInputRef = useRef<HTMLInputElement | null>(null);
   const replyInputRef = useRef<HTMLInputElement | null>(null);
   const lastReplyRef = useRef<HTMLDivElement | null>(null);
+  const commentsScrollRef = useRef<HTMLDivElement | null>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
 
@@ -299,6 +300,46 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     }
   }, [open, focusNotes]);
 
+  useEffect(() => {
+    if (!open || !focusComments || clipCommentsList.length === 0) return;
+
+    // Find the item (top-level or reply) with the highest timestamp.
+    let latestTs = -Infinity;
+    let latestId: string | null = null;
+    let latestParentId: string | null = null;
+
+    for (const c of clipCommentsList) {
+      if (c.timestamp > latestTs) {
+        latestTs = c.timestamp; latestId = c.id; latestParentId = null;
+      }
+      for (const r of c.replies) {
+        if (r.timestamp > latestTs) {
+          latestTs = r.timestamp; latestId = r.id; latestParentId = c.id;
+        }
+      }
+    }
+
+    if (!latestId) return;
+
+    // Expand parent thread if the target is a reply (set, don't toggle).
+    if (latestParentId) setExpandedThreadId(latestParentId);
+
+    const timer = setTimeout(() => {
+      if (latestParentId) {
+        // Reply case: scroll the reply input into view so it's visible at the bottom,
+        // with the latest reply naturally sitting above it.
+        replyInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      } else {
+        // Top-level case: scroll the comment itself — Reply link is right below it.
+        commentsScrollRef.current
+          ?.querySelector(`[data-comment-id="${latestId}"]`)
+          ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }, 150);
+
+    return () => clearTimeout(timer);
+  }, [open, focusComments, clipCommentsList]);
+
   const handleAddComment = async () => {
     if (!newComment.trim()) return;
     try {
@@ -308,6 +349,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
         body: JSON.stringify({ author: user?.username ?? 'Unknown', text: newComment.trim() }),
       });
       setNewComment("");
+      markCommentsViewed(effectiveId, queryClient);
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
@@ -355,6 +397,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
         body: JSON.stringify({ author: user?.username ?? 'Unknown', text, parentId }),
       });
       setReplyText('');
+      markCommentsViewed(effectiveId, queryClient);
       await queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -418,7 +461,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0" onPointerDown={e => e.stopPropagation()}>
+      <DialogContent className="max-w-2xl bg-[#0c0c0e] border-primary/30 shadow-2xl p-0 overflow-hidden gap-0" onPointerDown={e => e.stopPropagation()} onOpenAutoFocus={e => e.preventDefault()}>
         <div className="bg-gradient-to-r from-primary/20 to-transparent p-6 border-b border-primary/10">
           <DialogHeader>
             <div className="flex items-center gap-3 mb-2">
@@ -623,11 +666,11 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                   </Button>
                 </div>
 
-                <div className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
+                <div ref={commentsScrollRef} className="bg-black/30 rounded border border-white/5 p-1 max-h-[300px] overflow-y-auto">
                   {clipCommentsList.length > 0 ? (
                     <div className="space-y-1">
                       {clipCommentsList.map(c => (
-                        <div key={c.id}>
+                        <div key={c.id} data-comment-id={c.id}>
                           {/* Top-level comment */}
                           <div className="p-3 hover:bg-white/5 transition-colors rounded group/comment">
                             <div className="flex justify-between items-start mb-1">
@@ -679,7 +722,11 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                             {/* Reply controls */}
                             <div className="flex items-center gap-3 mt-1.5">
                               <button
-                                onClick={() => toggleThread(c.id)}
+                                onClick={() => {
+                                  const wasOpen = expandedThreadId === c.id;
+                                  toggleThread(c.id);
+                                  if (!wasOpen) setTimeout(() => replyInputRef.current?.focus(), 0);
+                                }}
                                 className="text-[10px] text-muted-foreground hover:text-primary transition-colors"
                               >
                                 Reply
@@ -702,7 +749,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                           {expandedThreadId === c.id && (
                             <div className="ml-7 border-l border-white/10 pl-3 space-y-1 mb-1">
                               {c.replies.map((r, ri) => (
-                                <div key={r.id} ref={ri === c.replies.length - 1 ? lastReplyRef : null} className="p-2 hover:bg-white/5 transition-colors rounded group/reply">
+                                <div key={r.id} ref={ri === c.replies.length - 1 ? lastReplyRef : null} data-comment-id={r.id} className="p-2 hover:bg-white/5 transition-colors rounded group/reply">
                                   <div className="flex justify-between items-start mb-1">
                                     <div className="flex items-center gap-2">
                                       <div
@@ -760,7 +807,6 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                   onKeyDown={(e) => handleReplyKeyDown(e, c.id)}
                                   placeholder={`Reply to ${c.author === (user?.username ?? '') ? 'yourself' : capitalize(c.author)}…`}
                                   className="bg-black/40 border-white/10 text-sm h-9 flex-1 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
-                                  autoFocus
                                 />
                                 <Button
                                   size="sm"
@@ -828,6 +874,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
+  const [focusComments, setFocusComments] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal);
   const [showRemoveConfirm, setShowRemoveConfirm] = useState(false);
   const [replacements, setReplacements] = useState<ReplacementClip[] | null>(null);
@@ -1430,7 +1477,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                   tcHasUnread ? 'bg-primary' : 'bg-white/[0.25]'
                 )}
                 onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
+                onClick={(e) => { e.stopPropagation(); setShowInfo(true); setFocusComments(true); }}
               >
                 <MessageCircle size={10} className={tcHasUnread ? 'text-black' : 'text-white/60'} />
               </div>
@@ -1559,8 +1606,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         <ClipInfoWindow
           clip={{...clip, isFinal}}
           open={showInfo}
-          onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
+          onOpenChange={(open) => { setShowInfo(open); if (!open) { setFocusNotes(false); setFocusComments(false); } }}
           focusNotes={focusNotes}
+          focusComments={focusComments}
           songId={songId}
           audioBuffer={decodedBufferRef.current ?? undefined}
           bucketClipId={clip.bucketClipId}
@@ -1693,6 +1741,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
+  const [focusComments, setFocusComments] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
   const [showChangeFinalConfirm, setShowChangeFinalConfirm] = useState(false);
@@ -1827,7 +1876,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
                     hasUnread ? 'bg-primary' : 'bg-white/[0.25]'
                   )}
                   onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                  onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
+                  onClick={(e) => { e.stopPropagation(); setShowInfo(true); setFocusComments(true); }}
                 >
                   <MessageCircle size={10} className={hasUnread ? 'text-black' : 'text-white/60'} />
                 </div>
@@ -1874,10 +1923,11 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         <ClipInfoWindow
           clip={{...clip, isFinal, comments}}
           open={showInfo}
-          onOpenChange={(open) => { setShowInfo(open); if (!open) setFocusNotes(false); }}
+          onOpenChange={(open) => { setShowInfo(open); if (!open) { setFocusNotes(false); setFocusComments(false); } }}
           onCommentsChange={handleUpdateComments}
           bucketClipId={clip.id}
           focusNotes={focusNotes}
+          focusComments={focusComments}
           songId={songId}
         />
       )}
