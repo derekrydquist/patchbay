@@ -41,6 +41,7 @@ import { CheckCircle2 } from 'lucide-react';
 
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 const TRACK_PANEL_WIDTH = 256;
+const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
 
 type ApiTrack = {
   id: string;
@@ -1811,6 +1812,40 @@ export function Timeline({ songId }: { songId: string }) {
 
   // Arrow keys → navigate selection between clips and tracks.
   useEffect(() => {
+    // Scrolls the timeline to bring a clip into view when keyboard nav moves selection off-screen.
+    // Only fires when the clip is not already fully visible. Applies a directional overscroll margin
+    // so the user can see a preview of what's next. Clamped to actual scrollable bounds.
+    const scrollClipIntoView = (
+      clip: { start: number; duration: number; trimStart?: number | null; trimEnd?: number | null },
+      direction: 'left' | 'right' | 'vertical',
+    ) => {
+      const el = timelineRef.current;
+      if (!el) return;
+      const z = zoomRef.current;
+      const effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
+      const clipLeft = TRACK_PANEL_WIDTH + clip.start * z;
+      const clipRight = clipLeft + effectiveDuration * z;
+      const { scrollLeft, clientWidth, scrollWidth } = el;
+      const maxScroll = scrollWidth - clientWidth;
+      // The sticky 256px panel always covers the leftmost TRACK_PANEL_WIDTH pixels of the
+      // viewport, so visible content begins at scrollLeft + TRACK_PANEL_WIDTH, not scrollLeft.
+      const fullyVisible = clipLeft >= scrollLeft + TRACK_PANEL_WIDTH && clipRight <= scrollLeft + clientWidth;
+      if (fullyVisible) return;
+      let newScrollLeft: number;
+      if (direction === 'left') {
+        // Align clip's left edge just past the panel, then back off by the overscroll margin.
+        newScrollLeft = clipLeft - TRACK_PANEL_WIDTH - KEYBOARD_NAV_OVERSCROLL_PX;
+      } else if (direction === 'right') {
+        newScrollLeft = clipRight - clientWidth + KEYBOARD_NAV_OVERSCROLL_PX;
+      } else {
+        // vertical: scroll minimum with overscroll in whichever direction is needed
+        newScrollLeft = clipLeft < scrollLeft + TRACK_PANEL_WIDTH
+          ? clipLeft - TRACK_PANEL_WIDTH - KEYBOARD_NAV_OVERSCROLL_PX
+          : clipRight - clientWidth + KEYBOARD_NAV_OVERSCROLL_PX;
+      }
+      el.scrollLeft = Math.max(0, Math.min(newScrollLeft, maxScroll));
+    };
+
     const selectClipOnTrack = (track: (typeof tracks)[0], clipId: string) => {
       setSelectedTimelineTrackId(track.id);
       setSelectedTimelineClipId(clipId);
@@ -1836,7 +1871,10 @@ export function Timeline({ songId }: { songId: string }) {
       if (!selectedTimelineTrackId) {
         const firstNonEmpty = tracks.find((t) => t.clips.length > 0);
         if (!firstNonEmpty) return;
-        selectClipOnTrack(firstNonEmpty, firstClipOf(firstNonEmpty).id);
+        const initialClip = firstClipOf(firstNonEmpty);
+        selectClipOnTrack(firstNonEmpty, initialClip.id);
+        const initialDir = e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : 'vertical';
+        scrollClipIntoView(initialClip, initialDir);
         return;
       }
 
@@ -1853,6 +1891,7 @@ export function Timeline({ songId }: { songId: string }) {
         // Track-only selection: select first clip in time order regardless of direction.
         if (!selectedTimelineClipId) {
           selectClipOnTrack(currentTrack, sorted[0].id);
+          scrollClipIntoView(sorted[0], e.key === 'ArrowLeft' ? 'left' : 'right');
           return;
         }
 
@@ -1864,14 +1903,16 @@ export function Timeline({ songId }: { songId: string }) {
         if (e.key === 'ArrowLeft') {
           if (clipIndex > 0) {
             selectClipOnTrack(currentTrack, sorted[clipIndex - 1].id);
+            scrollClipIntoView(sorted[clipIndex - 1], 'left');
           } else {
             // First clip on this track — fall through upward, picking the latest clip on each
-            // candidate track whose start is <= the reference clip's start.
+            // candidate track whose start is strictly less than the reference clip's start.
             for (let i = trackIndex - 1; i >= 0; i--) {
               const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
-              const match = [...candidateSorted].reverse().find((c) => c.start <= refStart);
+              const match = [...candidateSorted].reverse().find((c) => c.start < refStart);
               if (match) {
                 selectClipOnTrack(tracks[i], match.id);
+                scrollClipIntoView(match, 'left');
                 return;
               }
             }
@@ -1880,14 +1921,16 @@ export function Timeline({ songId }: { songId: string }) {
         } else {
           if (clipIndex < sorted.length - 1) {
             selectClipOnTrack(currentTrack, sorted[clipIndex + 1].id);
+            scrollClipIntoView(sorted[clipIndex + 1], 'right');
           } else {
             // Last clip on this track — fall through downward, picking the earliest clip on each
-            // candidate track whose start is >= the reference clip's start.
+            // candidate track whose start is strictly greater than the reference clip's start.
             for (let i = trackIndex + 1; i < tracks.length; i++) {
               const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
-              const match = candidateSorted.find((c) => c.start >= refStart);
+              const match = candidateSorted.find((c) => c.start > refStart);
               if (match) {
                 selectClipOnTrack(tracks[i], match.id);
+                scrollClipIntoView(match, 'right');
                 return;
               }
             }
@@ -1914,6 +1957,7 @@ export function Timeline({ songId }: { songId: string }) {
           });
           if (match) {
             selectClipOnTrack(candidate, match.id);
+            scrollClipIntoView(match, 'vertical');
             return;
           }
         }
@@ -1926,7 +1970,9 @@ export function Timeline({ songId }: { songId: string }) {
       for (let i = trackIndex + step; i >= 0 && i < tracks.length; i += step) {
         const candidate = tracks[i];
         if (candidate.clips.length > 0) {
-          selectClipOnTrack(candidate, firstClipOf(candidate).id);
+          const clip = firstClipOf(candidate);
+          selectClipOnTrack(candidate, clip.id);
+          scrollClipIntoView(clip, 'vertical');
           return;
         }
       }
