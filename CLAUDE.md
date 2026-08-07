@@ -1913,6 +1913,8 @@ All shortcut handlers live in `Timeline.tsx`. Common guard pattern (applied in e
 **Return/Enter — seek to timeline start:**
 Registered as `document.addEventListener('keydown', onReturnKey)` with deps `[setPlayheadTime]`. Calls `e.preventDefault()` after the typing-target and dialog guards to prevent the browser's "Enter activates focused button" behavior. Sets `seekPendingRef.current = true`, then calls `setPlayheadTime(0)` and dispatches `time-update` with `{ time: 0 }`. The `e.repeat` guard bails early (no repeated seeks on hold). Does NOT stop or start playback — continues uninterrupted if already playing.
 
+After dispatching `time-update`, corrects horizontal scroll position if position 0 is not currently visible in the unoccluded viewport: checks `newPos < sl + TRACK_PANEL_WIDTH || newPos > sl + cw` (panel-aware — see Sticky Panel & Scroll Guards below), writes `el.scrollLeft`, reads the **post-write value** back into `lastAutoScrollRef.current`, and sets `isFollowingRef.current = true`. The post-write read-back (not the pre-clamp computed value) is load-bearing — the browser silently clamps `scrollLeft` to `[0, scrollWidth - clientWidth]`, so the ref must reflect what actually landed or the rAF edge-riding loop's manual-scroll detector will see a false divergence and disengage auto-follow on the very next frame. Uses `zoomRef.current` (not the closure-captured `zoom`) so the pixel position is always current even though the effect deps are just `[setPlayheadTime]`.
+
 **`seekPendingRef` — audio sync for in-range clips:** `seekPendingRef.current` is read inside the rAF `animate` loop. When a clip is within the playhead's range and is not paused (so the loop's out-of-range→in-range transition check never fires), the loop normally just lets it keep playing from wherever it is. When `seekPendingRef.current` is `true`, the loop additionally force-resets `audio.currentTime = trimStart + Math.max(0, newTime - clipStart)` on those in-range, non-paused clips so they sync to the new position. Cleared unconditionally at the end of every rAF frame.
 
 **Delete/Backspace — remove selected clip:**
@@ -1945,6 +1947,29 @@ Arrow navigation does NOT move the playhead — selection and playback are delib
 
 **Escape — deselect:**
 Registered with `{ capture: true }` on both `addEventListener` and `removeEventListener`. The capture phase is required because Radix's `DismissableLayer` (used by Dialog, AlertDialog, ContextMenu) closes overlays via its own capture-phase Escape listener. A bubble-phase listener would only see the event after Radix has already torn the overlay down, making the `[data-state="open"]` guard always find `null` and incorrectly calling `clearTimelineSelection()` every time the user closes a modal. Guards: typing target; open Radix overlay (returns without `stopPropagation` so Radix still receives the event); nothing selected (no-op). Never calls `stopPropagation` or `preventDefault` on bail.
+
+### Sticky Panel & Scroll Guards — load-bearing
+
+The Timeline has a sticky, always-visible 256px track panel (`TRACK_PANEL_WIDTH = 256`) that occludes the left edge of the scrollable content area regardless of `scrollLeft`. Any code that checks "is this content position currently visible" or computes a scroll target **must** account for this — the actual unoccluded viewport starts at `scrollLeft + TRACK_PANEL_WIDTH`, not `scrollLeft` alone.
+
+**The bug a naive check produces:** `newPos < sl || newPos > sl + cw` incorrectly treats content in the range `[scrollLeft, scrollLeft + TRACK_PANEL_WIDTH)` as "already visible" when it is actually hidden behind the panel. The symptom looks intermittent: state updates correctly (playhead jumps, selection moves), but the view doesn't scroll to expose it. On repeated presses each target inches closer to clearing the dead zone, so it can take 2–3 presses before a scroll finally fires — which makes it easy to misattribute to a race condition or page-load timing issue rather than a permanently wrong constant.
+
+**This bug was independently found and fixed in three separate call sites in this file:**
+1. `scrollClipIntoView` — arrow-key clip navigation (fixed earlier)
+2. The Return handler — seek-to-zero scroll correction (fixed this session)
+3. `handleSkipToClip` — skip-back / skip-next (fixed this session; both directions share one handler so one fix covered both)
+
+**The corrected guard formula used at all three sites:**
+```ts
+if (newPos < sl + TRACK_PANEL_WIDTH || newPos > sl + cw) { ... }
+```
+
+**Reference implementation:** `scrollClipIntoView` is the canonical version — it has the visibility check, a direction-aware scroll target (left/right/vertical cases), and overscroll handling all in one place. Any future scroll-into-view or scroll-target code added to `Timeline.tsx` must use the `TRACK_PANEL_WIDTH`-aware formula from the start. This is the second and third time this exact bug has been independently rediscovered in this file; it should not need a fourth.
+
+**`lastAutoScrollRef` / `isFollowingRef` contract (applies to all three sites):**
+After writing `el.scrollLeft`, always:
+1. Read `lastAutoScrollRef.current = el.scrollLeft` — the **post-write DOM value**, not the pre-clamp computed value. The browser clamps silently; the ref must reflect what actually landed.
+2. Set `isFollowingRef.current = true` — marks this write as programmatic so the rAF edge-riding loop's manual-scroll detector doesn't misread it as a user drag and disengage auto-follow on the next frame.
 
 ---
 

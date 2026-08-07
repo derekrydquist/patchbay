@@ -698,7 +698,7 @@ export function Timeline({ songId }: { songId: string }) {
         const newPos = 256 + targetTime * currentZoom;
         const sl = el.scrollLeft;
         const cw = el.clientWidth;
-        if (newPos < sl || newPos > sl + cw) {
+        if (newPos < sl + TRACK_PANEL_WIDTH || newPos > sl + cw) {
           el.scrollLeft = Math.max(0, Math.min(newPos - cw * 0.5, el.scrollWidth - cw));
           lastAutoScrollRef.current = el.scrollLeft;
           isFollowingRef.current = true;
@@ -1182,6 +1182,7 @@ export function Timeline({ songId }: { songId: string }) {
               el.scrollLeft = newScrollLeft;
               lastAutoScrollRef.current = newScrollLeft;
             }
+
           }
         }
         lastTimeRef.current = time;
@@ -1786,6 +1787,17 @@ export function Timeline({ songId }: { songId: string }) {
       seekPendingRef.current = true;
       setPlayheadTime(0);
       window.dispatchEvent(new CustomEvent('time-update', { detail: { time: 0 } }));
+      const el = timelineRef.current;
+      if (el) {
+        const newPos = 256 + 0 * zoomRef.current;
+        const sl = el.scrollLeft;
+        const cw = el.clientWidth;
+        if (newPos < sl + TRACK_PANEL_WIDTH || newPos > sl + cw) {
+          el.scrollLeft = Math.max(0, Math.min(newPos - cw * 0.5, el.scrollWidth - cw));
+          lastAutoScrollRef.current = el.scrollLeft;
+          isFollowingRef.current = true;
+        }
+      }
     };
     document.addEventListener('keydown', onReturnKey);
     return () => document.removeEventListener('keydown', onReturnKey);
