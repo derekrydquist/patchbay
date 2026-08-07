@@ -80,6 +80,7 @@ function CellModal({
   songId,
   currentUser,
   assignees,
+  finalClipNames,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -87,6 +88,7 @@ function CellModal({
   songId: string;
   currentUser: string;
   assignees: string[];
+  finalClipNames?: string[];
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -427,6 +429,23 @@ function CellModal({
               </div>
             </div>
 
+            {/* ── FINAL CLIPS ── */}
+            {finalClipNames && finalClipNames.length > 0 && (
+              <div className="space-y-2 pt-4 border-t border-white/5">
+                <label className="text-[10px] uppercase tracking-widest text-muted-foreground font-bold px-1">
+                  Final Clips
+                </label>
+                <div className="space-y-1 px-1">
+                  {finalClipNames.map((name) => (
+                    <div key={name} className="flex items-center gap-2 py-1.5 px-2 rounded bg-white/[0.03] border border-white/5">
+                      <CheckCircle2 size={12} className="text-primary shrink-0" />
+                      <span className="text-xs font-mono text-white/80 truncate">{name}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* ── SESSION NOTES ── */}
             <div className="pt-4 border-t border-white/5">
               <div className="flex items-center justify-between mb-3">
@@ -688,9 +707,18 @@ export function ProductionTracker({ songId }: { songId: string }) {
     queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
   });
 
-  const { data: finalClipsBucket = [] } = useQuery<ApiTrack[]>({
+  type TimelineApiTrack = {
+    id: string; name: string;
+    timelineClips: { name: string; start: number; isFinal: boolean; sectionName: string | null }[];
+  };
+
+  const { data: finalClipsTracks = [] } = useQuery<TimelineApiTrack[]>({
     queryKey: ['final-clips', songId],
-    queryFn: () => fetch(`/api/songs/${songId}/bucket`).then(r => r.json()),
+    queryFn: () =>
+      fetch(`/api/songs/${songId}/timeline`).then(async r => {
+        const body = await r.json();
+        return Array.isArray(body) ? body : (body.tracks ?? []);
+      }),
   });
 
   const { data: commentCounts = {} } = useQuery<Record<string, number>>({
@@ -698,17 +726,25 @@ export function ProductionTracker({ songId }: { songId: string }) {
     queryFn: () => fetch(`/api/songs/${songId}/task-comment-counts`).then(r => r.json()),
   });
 
-  // Map of `${instrument}__${sectionName}` → final clip name
+  // Map of `${instrument}__${sectionName}` → ordered, deduplicated final clip names
   const finalClipsMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const track of finalClipsBucket) {
-      for (const idea of track.ideas) {
-        const finalClip = idea.clips?.find(c => c.isFinal);
-        if (finalClip) map[`${track.name}__${idea.sectionName}`] = finalClip.name;
+    const map: Record<string, string[]> = {};
+    for (const track of finalClipsTracks) {
+      const finalClips = track.timelineClips
+        .filter(c => c.isFinal && c.sectionName)
+        .sort((a, b) => a.start - b.start);
+      const seenNames = new Set<string>();
+      for (const c of finalClips) {
+        const key = `${track.name}__${c.sectionName}`;
+        if (!map[key]) map[key] = [];
+        if (!seenNames.has(c.name)) {
+          seenNames.add(c.name);
+          map[key].push(c.name);
+        }
       }
     }
     return map;
-  }, [finalClipsBucket]);
+  }, [finalClipsTracks]);
 
   // Deduplicated sections in first-appearance order across all tracks
   const sections = useMemo(() => {
@@ -1076,11 +1112,17 @@ export function ProductionTracker({ songId }: { songId: string }) {
                             {cfg.label}
                           </span>
                         </div>
-                        {status === 'complete' && (
-                          <div className="text-[10px] text-primary truncate font-bold font-mono">
-                            {finalClipsMap[`${track.name}__${section}`] ?? task?.title}
-                          </div>
-                        )}
+                        {status === 'complete' && (() => {
+                          const names = finalClipsMap[`${track.name}__${section}`];
+                          const label = names && names.length > 0
+                            ? names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`
+                            : (task?.title ?? '');
+                          return (
+                            <div className="text-[10px] text-primary truncate font-bold font-mono">
+                              {label}
+                            </div>
+                          );
+                        })()}
                       </div>
 
                       {/* BOTTOM ZONE */}
@@ -1157,6 +1199,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
           songId={songId}
           currentUser={currentUser}
           assignees={assignees}
+          finalClipNames={finalClipsMap[`${activeTask.instrument}__${activeTask.sectionName}`]}
         />
       )}
 

@@ -214,6 +214,8 @@ export function UploadModal({
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       onOpenChange(false);
       setUploadFiles([]);
       setUploadDestination('');

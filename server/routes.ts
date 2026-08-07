@@ -190,6 +190,78 @@ function reviewCommentSongId(commentId: string): string | null {
   return row?.songId ?? null;
 }
 
+// ─── reconcileSectionTaskStatus ───────────────────────────────────────────────
+// Central helper: reads the current isFinal state of ALL timeline clips for a
+// given trackId+sectionName and reconciles the linked production task status.
+//
+// Rules:
+//   - 0 clips       → no-op (leave task as-is)
+//   - all final     → advance to "complete" if not already
+//   - not all final → revert to "in-progress" if currently "complete"
+//   - task is "todo" && ≥1 clip → advance to "in-progress"
+async function reconcileSectionTaskStatus(
+  trackId: string,
+  sectionName: string,
+  actor: string,
+  commentAuthor: string,
+): Promise<void> {
+  const sectionClips = db.select().from(timelineClips)
+    .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.sectionName, sectionName)))
+    .all();
+
+  if (sectionClips.length === 0) return;
+
+  const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
+  if (!track) return;
+
+  const task = await storage.getTaskByInstrumentSection(track.songId, track.name, sectionName);
+  if (!task) return;
+
+  const allFinal = sectionClips.every(c => c.isFinal);
+
+  if (allFinal && task.status !== 'complete') {
+    await storage.updateTask(task.id, { status: 'complete' });
+    await storage.addTaskComment({
+      id: randomUUID(),
+      taskId: task.id,
+      author: commentAuthor,
+      text: 'All clips marked final — task completed',
+      timestamp: Date.now(),
+    });
+    storage.logActivity({
+      id: randomUUID(),
+      songId: track.songId,
+      type: 'marked-final',
+      description: `${actor} completed ${track.name} · ${sectionName}`,
+      timestamp: Date.now(),
+      instrument: track.name,
+      sectionName,
+      author: actor,
+    }).catch(console.error);
+  } else if (!allFinal && task.status === 'complete') {
+    await storage.updateTask(task.id, { status: 'in-progress' });
+    await storage.addTaskComment({
+      id: randomUUID(),
+      taskId: task.id,
+      author: commentAuthor,
+      text: 'Clip state changed — task reverted to In Progress',
+      timestamp: Date.now(),
+    });
+    storage.logActivity({
+      id: randomUUID(),
+      songId: track.songId,
+      type: 'clip-unmarked-final',
+      description: `${actor} reverted ${track.name} · ${sectionName} to In Progress`,
+      timestamp: Date.now(),
+      instrument: track.name,
+      sectionName,
+      author: actor,
+    }).catch(console.error);
+  } else if (task.status === 'todo') {
+    await storage.updateTask(task.id, { status: 'in-progress' });
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -713,16 +785,17 @@ export async function registerRoutes(
       }
     }
 
-    // Log clip-added-to-timeline activity event
+    // Log activity + reconcile task status after placement
     if (clip.sectionName) {
+      const clipAddedActor = req.session.userId
+        ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+        : 'Someone';
+
       try {
         const addTrack = db.select().from(instrumentTracks)
           .where(eq(instrumentTracks.id, trackId))
           .get();
         if (addTrack) {
-          const clipAddedActor = req.session.userId
-            ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-            : 'Someone';
           storage.logActivity({
             id: randomUUID(),
             songId: addTrack.songId,
@@ -738,19 +811,16 @@ export async function registerRoutes(
         console.error("[timeline clip add] failed to log activity:", err);
       }
 
-      // Advance task from "todo" → "in-progress" when a clip is placed on the timeline
+      // Reconcile task status (subsumes todo→in-progress since ≥1 clip now exists)
       try {
-        const timelineTrack = db.select().from(instrumentTracks)
-          .where(eq(instrumentTracks.id, trackId))
-          .get();
-        if (timelineTrack) {
-          const task = await storage.getTaskByInstrumentSection(timelineTrack.songId, timelineTrack.name, clip.sectionName);
-          if (task?.status === "todo") {
-            await storage.updateTask(task.id, { status: "in-progress" });
-          }
-        }
+        await reconcileSectionTaskStatus(
+          trackId,
+          clip.sectionName,
+          clipAddedActor,
+          clipAddedActor,
+        );
       } catch (err) {
-        console.error("[timeline clip add] failed to advance task status:", err);
+        console.error("[timeline clip add] failed to reconcile task status:", err);
       }
     }
 
@@ -781,66 +851,25 @@ export async function registerRoutes(
         }
 
         if (isFinal === true) {
-          // Same name = same version: mark all same-name clips on this track as final
+          // Same-name rule: mark all same-name timeline clips on this track as final
           db.update(timelineClips).set({ isFinal: true })
             .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.name, clip.name)))
             .run();
-          // Clear siblings in the same section with a different name
-          const clipSectionName = clip.sectionName;
-          if (clipSectionName) {
-            db.update(timelineClips).set({ isFinal: false })
-              .where(and(
-                eq(timelineClips.trackId, clip.trackId),
-                eq(timelineClips.sectionName, clipSectionName),
-                ne(timelineClips.name, clip.name)
-              ))
-              .run();
-          }
         } else {
-          // Clear isFinal on all same-name clips on this track
+          // Same-name rule: clear isFinal on all same-name clips on this track
           db.update(timelineClips).set({ isFinal: false })
             .where(and(eq(timelineClips.trackId, clip.trackId), eq(timelineClips.name, clip.name)))
             .run();
         }
 
-        const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clip.trackId)).get();
-        if (track && clip.sectionName) {
-          const task = await storage.getTaskByInstrumentSection(track.songId, track.name, clip.sectionName);
-          if (task) {
-            const author = commentAuthor || "Unknown";
-            if (isFinal === true && task.status !== "complete") {
-              await storage.updateTask(task.id, { status: "complete" });
-              await storage.addTaskComment({
-                id: randomUUID(),
-                taskId: task.id,
-                author,
-                text: `Clip marked as final: "${clip.name}"`,
-                timestamp: Date.now(),
-              });
-              storage.logActivity({
-                id: randomUUID(),
-                songId: track.songId,
-                type: 'marked-final',
-                description: `${timelineClipActor} marked ${clip.name} as final`,
-                timestamp: Date.now(),
-                instrument: track.name,
-                sectionName: clip.sectionName ?? undefined,
-                author: timelineClipActor,
-              }).catch(console.error);
-            } else if (isFinal === false && task.status === "complete") {
-              await storage.updateTask(task.id, { status: "in-progress" });
-              storage.logActivity({
-                id: randomUUID(),
-                songId: track.songId,
-                type: 'clip-unmarked-final',
-                description: `${timelineClipActor} unmarked ${clip.name} as final`,
-                timestamp: Date.now(),
-                instrument: track.name,
-                sectionName: clip.sectionName ?? undefined,
-                author: timelineClipActor,
-              }).catch(console.error);
-            }
-          }
+        // Reconcile task status from the full section state
+        if (clip.sectionName) {
+          await reconcileSectionTaskStatus(
+            clip.trackId,
+            clip.sectionName,
+            timelineClipActor,
+            commentAuthor || "Unknown",
+          );
         }
       } catch (err) {
         console.error("[timeline-clip isFinal] failed to sync task status:", err);
@@ -922,6 +951,15 @@ export async function registerRoutes(
           sectionName: clipToRemove.sectionName ?? undefined,
           author: clipRemovedActor,
         }).catch(console.error);
+      }
+      // Reconcile task status now that a clip has been removed from the section
+      if (clipToRemove.sectionName) {
+        await reconcileSectionTaskStatus(
+          clipToRemove.trackId,
+          clipToRemove.sectionName,
+          clipRemovedActor,
+          clipRemovedActor,
+        ).catch(err => console.error("[timeline clip delete] failed to reconcile task status:", err));
       }
     }
     res.status(204).send();
@@ -1220,72 +1258,24 @@ export async function registerRoutes(
       try {
         const idea = db.select().from(ideas).where(eq(ideas.id, clip.ideaId)).get();
         if (idea) {
+          // Same-name rule: sync isFinal to timeline clips (no sibling clearing anywhere)
           if (clipUpdates.isFinal === true) {
-            db.update(clips).set({ isFinal: false })
-              .where(and(eq(clips.ideaId, idea.id), ne(clips.id, clip.id)))
-              .run();
-          }
-
-          const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
-          if (track) {
-            const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
-            if (task) {
-              const author = commentAuthor || "Unknown";
-              if (clipUpdates.isFinal === true && task.status !== "complete") {
-                await storage.updateTask(task.id, { status: "complete" });
-                await storage.addTaskComment({
-                  id: randomUUID(),
-                  taskId: task.id,
-                  author,
-                  text: `Clip marked as final: "${clip.name}"`,
-                  timestamp: Date.now(),
-                });
-                storage.logActivity({
-                  id: randomUUID(),
-                  songId: track.songId,
-                  type: 'marked-final',
-                  description: `${bucketClipActor} marked ${clip.name} as final`,
-                  timestamp: Date.now(),
-                  instrument: track.name,
-                  sectionName: idea.sectionName,
-                  author: bucketClipActor,
-                }).catch(console.error);
-              } else if (clipUpdates.isFinal === false && task.status === "complete") {
-                await storage.updateTask(task.id, { status: "in-progress" });
-                storage.logActivity({
-                  id: randomUUID(),
-                  songId: track.songId,
-                  type: 'clip-unmarked-final',
-                  description: `${bucketClipActor} unmarked ${clip.name} as final`,
-                  timestamp: Date.now(),
-                  instrument: track.name,
-                  sectionName: idea.sectionName,
-                  author: bucketClipActor,
-                }).catch(console.error);
-              }
-            }
-          }
-
-          // Sync isFinal to timeline clips using name-matching logic
-          if (clipUpdates.isFinal === true) {
-            // Same name = same version: mark all same-name timeline clips on this track as final
             db.update(timelineClips).set({ isFinal: true })
               .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.name, clip.name)))
               .run();
-            // Clear siblings in the same section with a different name
-            db.update(timelineClips).set({ isFinal: false })
-              .where(and(
-                eq(timelineClips.trackId, idea.trackId),
-                eq(timelineClips.sectionName, idea.sectionName),
-                ne(timelineClips.name, clip.name)
-              ))
-              .run();
           } else {
-            // Clear isFinal on all same-name timeline clips on this track
             db.update(timelineClips).set({ isFinal: false })
               .where(and(eq(timelineClips.trackId, idea.trackId), eq(timelineClips.name, clip.name)))
               .run();
           }
+
+          // Reconcile task status from full section state
+          await reconcileSectionTaskStatus(
+            idea.trackId,
+            idea.sectionName,
+            bucketClipActor,
+            commentAuthor || "Unknown",
+          );
         }
       } catch (err) {
         console.error("[isFinal] failed to sync task status:", err);
@@ -1363,6 +1353,8 @@ export async function registerRoutes(
         const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
         if (track) {
           const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
+          // Keep direct todo→in-progress for bucket-only uploads (reconcile returns early
+          // when there are zero timeline clips, so this is the only path that fires then)
           if (task?.status === "todo") {
             await storage.updateTask(task.id, { status: "in-progress" });
           }
@@ -1375,6 +1367,13 @@ export async function registerRoutes(
             sectionName: idea.sectionName,
             author: uploadActor,
           }).catch(console.error);
+          // Also reconcile in case timeline clips already exist for this section
+          await reconcileSectionTaskStatus(
+            idea.trackId,
+            idea.sectionName,
+            uploadActor,
+            uploadActor,
+          );
         }
       }
     } catch (err) {
@@ -1673,59 +1672,49 @@ export async function registerRoutes(
     if (taskUpdates.status === "complete") {
       if (!previous) return res.status(404).json({ message: "Task not found" });
 
-      const [timelineClipForTask, finalClipForTask] = await Promise.all([
-        storage.getTimelineClipForTask(previous.instrument, previous.sectionName, previous.songId),
-        storage.getFinalClipForTask(previous.instrument, previous.sectionName, previous.songId),
-      ]);
+      // Resolve the track once so we can query timeline clips
+      const completeTrack = db.select().from(instrumentTracks)
+        .where(and(eq(instrumentTracks.songId, previous.songId), eq(instrumentTracks.name, previous.instrument)))
+        .get();
 
-      if (!timelineClipForTask && !finalClipForTask) {
+      if (!completeTrack) {
+        return res.status(400).json({ message: "Cannot mark as complete — instrument track not found." });
+      }
+
+      // Guard: at least one timeline clip must exist for this section
+      const allSectionClips = db.select().from(timelineClips)
+        .where(and(
+          eq(timelineClips.trackId, completeTrack.id),
+          eq(timelineClips.sectionName, previous.sectionName),
+        ))
+        .all();
+
+      if (allSectionClips.length === 0) {
         return res.status(400).json({
-          message: "Cannot mark as complete — no clip in the timeline or marked as final for this instrument and section.",
+          message: "Cannot mark as complete — no clip in the timeline for this instrument and section.",
         });
       }
 
-      if (timelineClipForTask && !finalClipForTask) {
-        try {
-          const track = db.select().from(instrumentTracks)
-            .where(and(eq(instrumentTracks.songId, previous.songId), eq(instrumentTracks.name, previous.instrument)))
-            .get();
-          if (track) {
-            const idea = db.select().from(ideas)
-              .where(and(eq(ideas.trackId, track.id), eq(ideas.sectionName, previous.sectionName)))
-              .get();
-            if (idea) {
-              const bucketClip = db.select().from(clips).where(eq(clips.ideaId, idea.id)).get();
-              if (bucketClip) {
-                await storage.updateClip(bucketClip.id, { isFinal: true });
-
-                await storage.updateTimelineClip(timelineClipForTask.id, { isFinal: true });
-
-                // Clear isFinal on any other timeline clips in the same section
-                const taskClipSection = timelineClipForTask.sectionName;
-                if (taskClipSection) {
-                  db.update(timelineClips)
-                    .set({ isFinal: false })
-                    .where(and(
-                      eq(timelineClips.trackId, timelineClipForTask.trackId),
-                      eq(timelineClips.sectionName, taskClipSection),
-                      ne(timelineClips.id, timelineClipForTask.id)
-                    ))
-                    .run();
-                }
-
-                await storage.addTaskComment({
-                  id: randomUUID(),
-                  taskId,
-                  author: commentAuthor || "Unknown",
-                  text: `Clip marked as final: "${bucketClip.name}"`,
-                  timestamp: Date.now(),
-                });
-              }
-            }
-          }
-        } catch (err) {
-          console.error("[task patch] failed to auto-mark clip as final:", err);
+      // Mark ALL timeline clips in this section as final (same-name rule + bucket sync)
+      try {
+        const uniqueNames = Array.from(new Set(allSectionClips.map(c => c.name).filter((n): n is string => Boolean(n))));
+        for (const name of uniqueNames) {
+          db.update(timelineClips).set({ isFinal: true })
+            .where(and(eq(timelineClips.trackId, completeTrack.id), eq(timelineClips.name, name)))
+            .run();
+          await storage.syncFinalClipFromTimeline(completeTrack.id, previous.sectionName, name, true);
         }
+        if (uniqueNames.length > 0) {
+          await storage.addTaskComment({
+            id: randomUUID(),
+            taskId,
+            author: commentAuthor || "Unknown",
+            text: `All clips marked final: ${uniqueNames.map(n => `"${n}"`).join(', ')}`,
+            timestamp: Date.now(),
+          });
+        }
+      } catch (err) {
+        console.error("[task patch] failed to auto-mark clips as final:", err);
       }
     }
 
@@ -1792,33 +1781,48 @@ export async function registerRoutes(
 
     if (taskUpdates.status && taskUpdates.status !== "complete" && previous?.status === "complete") {
       try {
-        const finalClip = await storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId);
-        if (finalClip) {
-          await storage.updateClip(finalClip.id, { isFinal: false });
+        const revertTrack = db.select().from(instrumentTracks)
+          .where(and(eq(instrumentTracks.songId, task.songId), eq(instrumentTracks.name, task.instrument)))
+          .get();
+        if (revertTrack && task.sectionName) {
+          // Unmark ALL currently-final timeline clips in this section (same-name rule + bucket sync)
+          const finalSectionClips = db.select().from(timelineClips)
+            .where(and(
+              eq(timelineClips.trackId, revertTrack.id),
+              eq(timelineClips.sectionName, task.sectionName),
+              eq(timelineClips.isFinal, true),
+            ))
+            .all();
 
-          // Also unmark the timeline clip
-          const timelineClipToUnmark = await storage.getTimelineClipForTask(task.instrument, task.sectionName, task.songId);
-          if (timelineClipToUnmark) {
-            await storage.updateTimelineClip(timelineClipToUnmark.id, { isFinal: false });
+          const processedNames = new Set<string>();
+          const unmarkedNames: string[] = [];
+          for (const tc of finalSectionClips) {
+            if (!tc.name || processedNames.has(tc.name)) continue;
+            processedNames.add(tc.name);
+            unmarkedNames.push(tc.name);
+            db.update(timelineClips).set({ isFinal: false })
+              .where(and(eq(timelineClips.trackId, revertTrack.id), eq(timelineClips.name, tc.name)))
+              .run();
+            await storage.syncFinalClipFromTimeline(revertTrack.id, task.sectionName, tc.name, false);
           }
 
-          const statusNames: Record<string, string> = {
-            "todo": "To Do",
-            "in-progress": "In Progress",
-            "will-not-play": "Will Not Play",
-          };
-          const unmarkText = `Clip unmarked as final: "${finalClip.name}". Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`;
-          console.log('[addTaskComment isFinal=false] text:', unmarkText);
-          await storage.addTaskComment({
-            id: randomUUID(),
-            taskId,
-            author,
-            text: unmarkText,
-            timestamp: Date.now(),
-          });
+          if (unmarkedNames.length > 0) {
+            const statusNames: Record<string, string> = {
+              "todo": "To Do",
+              "in-progress": "In Progress",
+              "will-not-play": "Will Not Play",
+            };
+            await storage.addTaskComment({
+              id: randomUUID(),
+              taskId,
+              author,
+              text: `Clips unmarked as final: ${unmarkedNames.map(n => `"${n}"`).join(', ')}. Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`,
+              timestamp: Date.now(),
+            });
+          }
         }
       } catch (err) {
-        console.error("[task patch] failed to unmark final clip:", err);
+        console.error("[task patch] failed to unmark final clips:", err);
       }
     }
 

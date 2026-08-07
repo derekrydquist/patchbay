@@ -1731,20 +1731,18 @@ interface BucketClipProps {
   trackId?: string;
   songId?: string;
   onAddToTimeline?: (clip: Clip, trackId?: string) => void;
-  siblingClips?: Clip[];
   autoOpenInfo?: boolean;
 }
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, siblingClips = [], autoOpenInfo }: BucketClipProps) {
+export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo }: BucketClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
   const [focusComments, setFocusComments] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
-  const [showChangeFinalConfirm, setShowChangeFinalConfirm] = useState(false);
   const [location] = useLocation();
   const [isHighlighted, setIsHighlighted] = useState(false);
   const queryClient = useQueryClient();
@@ -1821,15 +1819,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   };
 
   const handleToggleFinal = () => {
-    const newIsFinal = !isFinal;
-    if (newIsFinal) {
-      const anotherIsFinal = siblingClips.some(c => c.id !== clip.id && c.isFinal);
-      if (anotherIsFinal) {
-        setShowChangeFinalConfirm(true);
-        return;
-      }
-    }
-    executeMark(newIsFinal);
+    executeMark(!isFinal);
   };
 
   const handleRemove = async () => {
@@ -1932,24 +1922,6 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         />
       )}
 
-      <AlertDialog open={showChangeFinalConfirm} onOpenChange={setShowChangeFinalConfirm}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
-          <AlertDialogHeader>
-            <AlertDialogTitle className="font-heading uppercase tracking-wider">Change Final Version?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Another version is already marked as final for this section. Do you want to make this version the final instead?
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => { executeMark(true); setShowChangeFinalConfirm(false); }}
-            >
-              Make Final
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </>
   );
 }

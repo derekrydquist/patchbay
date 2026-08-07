@@ -539,7 +539,6 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                         trackId={selectedTrack?.id}
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}
-                        siblingClips={selectedIdea.clips.map(toClip)}
                         autoOpenInfo={clip.id === autoOpenClipId}
                       />
                     ))

@@ -687,9 +687,8 @@ export class SQLiteStorage implements IStorage {
     if (!ideaClips.length) return;
 
     if (isFinal) {
-      // Clear isFinal on all clips for this idea first
-      db.update(clips).set({ isFinal: false }).where(eq(clips.ideaId, idea.id)).run();
-      // Find exact name match, fall back to most recently created
+      // Set isFinal on the clip whose name matches clipName, fall back to most recently created.
+      // No blanket clearing — multiple differently-named clips in the same idea can all be final.
       const matchedClip = ideaClips.find(c => c.name === clipName)
         ?? ideaClips.sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
       db.update(clips).set({ isFinal: true }).where(eq(clips.id, matchedClip.id)).run();
