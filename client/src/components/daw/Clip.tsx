@@ -7,7 +7,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, MessageCircle } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import {
   ContextMenu,
@@ -285,6 +285,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       });
       setNewComment("");
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
@@ -302,6 +303,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       });
       setEditingId(null);
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] edit failed:', err);
@@ -312,6 +314,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     try {
       await fetch(`/api/clip-comments/${id}`, { method: 'DELETE' });
       queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] delete failed:', err);
@@ -329,6 +332,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
       });
       setReplyText('');
       await queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
     } catch (err) {
@@ -826,11 +830,27 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const isFinalRef = useRef(clip.isFinal);
   const removeClipButtonRef = useRef<HTMLButtonElement | null>(null);
 
+  const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
+    queryKey: ['clip-comment-summary', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
+  });
+  const tcEffectiveId = clip.bucketClipId ?? clip.id;
+  const tcLsKey = `lastViewedComments:${tcEffectiveId}`;
+  const tcCommentInfo = clipCommentSummary[tcEffectiveId];
+  const tcLastViewed = localStorage.getItem(tcLsKey);
+  const tcHasUnread = tcCommentInfo != null && (!tcLastViewed || tcCommentInfo.latestCommentAt > tcLastViewed);
+
   // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
   useEffect(() => {
     if (!isFlash || !clipContainerRef.current) return;
     clipContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
   }, [isFlash]);
+
+  useEffect(() => {
+    if (showInfo) {
+      localStorage.setItem(tcLsKey, new Date().toISOString());
+    }
+  }, [showInfo, tcLsKey]);
 
   // Always keep drawRef current so ResizeObserver and trim effects get fresh values
   drawRef.current = () => {
@@ -1379,6 +1399,22 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 style={{ boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)' }}
               />
             )}
+
+            {/* Comment indicator badge */}
+            {!isOverlay && tcCommentInfo && (
+              <button
+                className="absolute bottom-1 right-1 z-[21] flex items-center"
+                onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
+              >
+                <span className="relative">
+                  <MessageCircle size={10} className={tcHasUnread ? 'text-primary' : 'text-white/25'} />
+                  {tcHasUnread && (
+                    <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
+                  )}
+                </span>
+              </button>
+            )}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">
@@ -1644,6 +1680,15 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   const [isHighlighted, setIsHighlighted] = useState(false);
   const queryClient = useQueryClient();
 
+  const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
+    queryKey: ['clip-comment-summary', songId],
+    queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
+  });
+  const commentInfo = clipCommentSummary[clip.id];
+  const lsKey = `lastViewedComments:${clip.id}`;
+  const lastViewed = localStorage.getItem(lsKey);
+  const hasUnread = commentInfo != null && (!lastViewed || commentInfo.latestCommentAt > lastViewed);
+
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);
   }, [clip.isFinal]);
@@ -1664,6 +1709,12 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       return () => clearTimeout(timer);
     }
   }, [location, clip.id]);
+
+  useEffect(() => {
+    if (showInfo) {
+      localStorage.setItem(lsKey, new Date().toISOString());
+    }
+  }, [showInfo, lsKey]);
 
   const { attributes, listeners, setNodeRef, transform } = useDraggable({
     id: `bucket-${clip.id}`,
@@ -1750,7 +1801,22 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
               className={cn(
                 isHighlighted && 'ring-1 ring-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]'
               )}
-            />
+            >
+              {commentInfo && (
+                <button
+                  className="absolute bottom-1 right-1.5 z-10 flex items-center"
+                  onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                  onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
+                >
+                  <span className="relative">
+                    <MessageCircle size={11} className={hasUnread ? 'text-primary' : 'text-white/25'} />
+                    {hasUnread && (
+                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
+                    )}
+                  </span>
+                </button>
+              )}
+            </WaveformPlayerCard>
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">

@@ -1615,6 +1615,34 @@ export async function registerRoutes(
     res.json({ completed, total, applicable: true });
   });
 
+  app.get("/api/songs/:songId/clip-comment-summary", requireBand, (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const rows = db
+      .select({
+        clipId: clipComments.clipId,
+        count: count(),
+        latestTimestamp: max(clipComments.timestamp),
+      })
+      .from(clipComments)
+      .innerJoin(clips, eq(clipComments.clipId, clips.id))
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .where(eq(instrumentTracks.songId, songId))
+      .groupBy(clipComments.clipId)
+      .all();
+    const result: Record<string, { count: number; latestCommentAt: string }> = {};
+    for (const row of rows) {
+      if (row.count > 0) {
+        result[row.clipId] = {
+          count: row.count,
+          latestCommentAt: new Date(row.latestTimestamp ?? 0).toISOString(),
+        };
+      }
+    }
+    res.json(result);
+  });
+
   app.get("/api/songs/:songId/task-comment-counts", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
