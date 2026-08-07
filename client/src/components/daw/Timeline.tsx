@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
@@ -1994,20 +1994,47 @@ export function Timeline({ songId }: { songId: string }) {
     setContextMenuPos({ x: e.clientX, y: e.clientY });
   };
 
+  const clearTimelineSelection = useCallback(() => {
+    setSelectedTimelineTrackId(null);
+    setSelectedTimelineClipId(null);
+    localStorage.removeItem(`patchbay-selected-timeline-track-${songId}`);
+    localStorage.removeItem(`patchbay-selected-timeline-clip-${songId}`);
+  }, [songId]);
+
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (controlInteractionRef.current) return;
     const target = e.target as HTMLElement;
+    // React propagates portal clicks up through the React tree (not the DOM tree), so e.target
+    // may be a Radix overlay element (dialog, menu, popover) that is not a DOM descendant of
+    // this div. Bail if the click didn't originate inside our own DOM subtree — covers all
+    // current and future Radix overlays without needing per-primitive attribute checks.
+    if (!e.currentTarget.contains(target)) return;
     // cursor-grab doubles as a hit-test sentinel: clips, section headers, and the playhead flag
     // all carry it. If that class is ever renamed during a visual pass, this guard breaks silently
     // — consider switching to data-timeline-interactive if this area is touched again.
     if (target.closest('.cursor-grab')) return;
     const containerRect = timelineRef.current?.getBoundingClientRect();
     if (containerRect && e.clientX - containerRect.left < 256) return;
-    setSelectedTimelineTrackId(null);
-    setSelectedTimelineClipId(null);
-    localStorage.removeItem(`patchbay-selected-timeline-track-${songId}`);
-    localStorage.removeItem(`patchbay-selected-timeline-clip-${songId}`);
+    clearTimelineSelection();
   };
+
+  // Escape → deselect the currently selected clip/track.
+  // Registered with capture:true so our guard runs before Radix's capture-phase DismissableLayer
+  // handler, which closes dialogs/menus synchronously in capture phase and removes data-state="open"
+  // before any bubble-phase listener can see it. We must NOT call stopPropagation/preventDefault
+  // when bailing — Radix still needs to receive this event to close the overlay normally.
+  useEffect(() => {
+    const onEscapeKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const active = document.activeElement as HTMLElement | null;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      if (document.querySelector('[data-state="open"]')) return;
+      if (!selectedTimelineTrackId && !selectedTimelineClipId) return;
+      clearTimelineSelection();
+    };
+    document.addEventListener('keydown', onEscapeKey, { capture: true });
+    return () => document.removeEventListener('keydown', onEscapeKey, { capture: true });
+  }, [selectedTimelineTrackId, selectedTimelineClipId, clearTimelineSelection]);
 
   const handleClearAll = () => {
     const allClips = tracks.flatMap((t) => t.clips);

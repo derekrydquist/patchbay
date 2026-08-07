@@ -1280,6 +1280,36 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 
 **Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
 
+### Timeline Selection — ✅ Built
+
+`selectedTimelineTrackId` and `selectedTimelineClipId` are personal, per-song localStorage state (same pattern as mute/solo/zoom/scroll). Selecting a clip always sets both (clip + its parent track). Selecting a track header directly sets track only and clears clip. Both are persisted to `patchbay-selected-timeline-track-${songId}` and `patchbay-selected-timeline-clip-${songId}` and restored by the one-shot `useLayoutEffect` on first tracks load.
+
+**Visual indicator — selected clip:**
+A separate `pointer-events-none absolute inset-0 rounded-md border-2 border-primary bg-primary/10 z-[19]` child div is rendered inside the clip container when `!isOverlay && isSelected`. This is an inset border (not `ring-*`) because `overflow-hidden` on the clip container clips inline box-shadows to a sliver on one edge — `ring-*` is not usable on `TimelineClip`.
+
+**Visual indicator — track-only selection:**
+No visual indicator. Track selection is kept exclusively as a "current track" reference for keyboard navigation (`selectedTimelineTrackId`) — a highlight added no value and confused users. Selecting a track header only clears the clip selection; the track ID is remembered silently.
+
+**Hover glow:**
+`isHovered && !isOverlay` renders a child div with `boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)'` — deliberately grey, not gold. Gold is reserved app-wide for "this is the thing keyboard actions will act on" (the selection state). Hover being visually identical to selection was a real bug source, especially since Delete acts on the selected clip, not the hovered one.
+
+**`tabIndex` and `focus-visible`:**
+`TimelineClip`'s container div carries `focus-visible:outline-none`. The `tabIndex={0}` is added automatically by dnd-kit's `{...attributes}` spread from `useDraggable` — `KeyboardSensor` is not configured in this app's `DndContext` so it is not wired to any drag behavior. The `outline-none` class suppresses the native blue focus ring that appears after arrow-key navigation moves selection away from a clip that still holds native browser focus from an earlier click.
+
+**Click-to-deselect:**
+`handleTimelineClick` fires on the timeline container's `onClick`. Guards:
+1. `controlInteractionRef.current` — bail (Mute/Solo/slider interaction)
+2. `!e.currentTarget.contains(target)` — bail (Radix portal content is not a DOM descendant of the Timeline even when visually overlapping; `contains` is the only general test that excludes all current and future Radix overlays without per-component allowlisting)
+3. `target.closest('.cursor-grab')` — bail (clip, section header, playhead flag)
+4. `e.clientX - containerRect.left < 256` — bail (click was inside the 256px instrument panel)
+If all guards pass: `clearTimelineSelection()`.
+
+**Right-click also selects:**
+`TimelineClip`'s `onContextMenu` dispatches `timeline-clip-selected` (same event as left-click `onClick`), so right-clicking a clip selects it before the context menu opens. This ensures context-menu actions and subsequent keyboard shortcuts always target the same clip you were just inspecting. Previously decoupled — right-clicking a clip could leave Delete targeting a different, previously-selected clip elsewhere on screen.
+
+**Mute/Solo/volume-slider guard — `controlInteractionRef`:**
+Set `true` on `pointerdown` for any Mute/Solo/volume-slider control in the track header; cleared on `requestAnimationFrame` after `pointerup`. Checked at the top of both `handleTrackSelected` and `handleTimelineClick`. This is necessary because dragging the volume slider to its exact min/max causes the browser to synthesize a `click` event that lands on a sibling element at release time — outside any `stopPropagation` wrapper — which would otherwise be read as "clicked blank space" and clear the selection.
+
 ### isFinal ↔ task status bidirectional sync
 
 Marking a clip as final and changing a task's status are kept in sync automatically. There are **three entry points**, all handled in `server/routes.ts`.
@@ -1876,6 +1906,46 @@ Gold-bordered card: `className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px
 **`useToast` / `ToasterToast` type fix (`client/src/hooks/use-toast.ts`):**
 `ToasterToast` uses `Omit<ToastProps, 'title'>` (not bare `ToastProps &`) to prevent the HTML `title?: string` attribute from collapsing the `title?: React.ReactNode` field to `string` via TypeScript intersection.
 
+### Timeline Keyboard Shortcuts — ✅ Built
+
+All shortcut handlers live in `Timeline.tsx`. Common guard pattern (applied in each handler before doing anything): `isTypingTarget` check (`INPUT`, `TEXTAREA`, `contentEditable`) + `document.querySelector('[data-state="open"]')` (any open Radix overlay). When either guard fires, the handler returns without calling `e.preventDefault()` so the browser's native behavior is preserved. Constants: `TRACK_PANEL_WIDTH = 256` (px), `KEYBOARD_NAV_OVERSCROLL_PX = 80` (px).
+
+**Return/Enter — seek to timeline start:**
+Registered as `document.addEventListener('keydown', onReturnKey)` with deps `[setPlayheadTime]`. Calls `e.preventDefault()` after the typing-target and dialog guards to prevent the browser's "Enter activates focused button" behavior. Sets `seekPendingRef.current = true`, then calls `setPlayheadTime(0)` and dispatches `time-update` with `{ time: 0 }`. The `e.repeat` guard bails early (no repeated seeks on hold). Does NOT stop or start playback — continues uninterrupted if already playing.
+
+**`seekPendingRef` — audio sync for in-range clips:** `seekPendingRef.current` is read inside the rAF `animate` loop. When a clip is within the playhead's range and is not paused (so the loop's out-of-range→in-range transition check never fires), the loop normally just lets it keep playing from wherever it is. When `seekPendingRef.current` is `true`, the loop additionally force-resets `audio.currentTime = trimStart + Math.max(0, newTime - clipStart)` on those in-range, non-paused clips so they sync to the new position. Cleared unconditionally at the end of every rAF frame.
+
+**Delete/Backspace — remove selected clip:**
+Registered with deps `[selectedTimelineClipId, activeDragData]`. Guards: `!selectedTimelineClipId` → no-op; `activeDragData` → no-op during drag. After the common guards and `e.preventDefault()`, dispatches `keyboard-remove-clip` CustomEvent with `{ clipId: selectedTimelineClipId }`.
+
+`TimelineClip` listens for `keyboard-remove-clip` (in a `useEffect([clip.id])`) and routes identically to the right-click "Remove Clip" menu item: if `isFinalRef.current` → opens the `showRemoveConfirm` AlertDialog; otherwise → dispatches `remove-clip` immediately. Uses `isFinalRef.current` (a ref synced from the `isFinal` prop and local state) to avoid stale closure. No duplicate deletion logic.
+
+The `showRemoveConfirm` `AlertDialogContent` overrides `onOpenAutoFocus`:
+```tsx
+onOpenAutoFocus={(e) => { e.preventDefault(); removeClipButtonRef.current?.focus(); }}
+```
+This is required because Radix's default `focusFirst` fallback loses to ContextMenu's FocusScope timing when the dialog is opened via right-click — the Cancel button may never receive focus, leaving the dialog unkeyboardable. The override explicitly focuses the destructive action button so Return always confirms deletion regardless of whether the dialog was triggered by right-click or keyboard.
+
+**Arrow Keys — clip/track navigation:**
+Registered with deps `[tracks, selectedTimelineTrackId, selectedTimelineClipId, songId, activeDragData]`. The handler calls `e.preventDefault()` before checking `e.repeat` — this is load-bearing: without it, the held-key early-return lets the event fall through to the browser's native "scroll a focused container" behavior.
+
+*Nothing selected:* Any arrow key selects the first clip (by `start` time) on the first track (in render order) that has any clips.
+
+*ArrowLeft / ArrowRight:* Navigate to prev/next clip in time order within the current track. At a boundary (no more clips that direction on the current track): fall through to the next track in that direction, skipping tracks with no qualifying clip. Fall-through logic uses strict `< refStart` (Left) / `> refStart` (Right) — not `<=`/`>=` — to avoid same-timestamp ties causing sideways jumps between tracks that start at the same time. "True" start/end of the timeline (no candidates in any direction) → clean no-op.
+
+*ArrowUp / ArrowDown:* Step to the adjacent track, finding a clip whose audible range `[c.start, c.start + effectiveDuration)` contains `currentClip.start`. Skips tracks with no clip covering that time, so Up/Down can visually jump multiple rows when intervening tracks are empty at the current timestamp — this is intentional. Track-only selection (no clip): walks to the next non-empty track and selects its earliest clip.
+
+*`scrollClipIntoView(clipId, direction)`:* Called after every successful selection change. Reads the clip's pixel position (`TRACK_PANEL_WIDTH + clip.start * zoom` for left edge, `+ displayWidth` for right edge). Checks full visibility accounting for the 256px panel (`clipLeft >= scrollLeft + TRACK_PANEL_WIDTH`). Formulas:
+- `'left'`: `newScrollLeft = clipLeft - TRACK_PANEL_WIDTH - KEYBOARD_NAV_OVERSCROLL_PX`
+- `'right'`: `newScrollLeft = clipRight - clientWidth + KEYBOARD_NAV_OVERSCROLL_PX`
+- `'vertical'`: picks left or right formula based on which side is off-screen
+Clamped to `[0, maxScroll]`. The 80px overscroll (`KEYBOARD_NAV_OVERSCROLL_PX`) ensures the next clip in the navigation direction is partially visible after the scroll.
+
+Arrow navigation does NOT move the playhead — selection and playback are deliberately decoupled.
+
+**Escape — deselect:**
+Registered with `{ capture: true }` on both `addEventListener` and `removeEventListener`. The capture phase is required because Radix's `DismissableLayer` (used by Dialog, AlertDialog, ContextMenu) closes overlays via its own capture-phase Escape listener. A bubble-phase listener would only see the event after Radix has already torn the overlay down, making the `[data-state="open"]` guard always find `null` and incorrectly calling `clearTimelineSelection()` every time the user closes a modal. Guards: typing target; open Radix overlay (returns without `stopPropagation` so Radix still receives the event); nothing selected (no-op). Never calls `stopPropagation` or `preventDefault` on bail.
+
 ---
 
 ## Version Control
@@ -1914,7 +1984,6 @@ These are things that need a decision before being built:
 
 ## Known Issues
 
-- **Timeline selection state has no visual indicator yet** — `selectedTimelineTrackId` and `selectedTimelineClipId` are wired up, persisted to localStorage, and restored on mount. They are not dead code — they are intended to be consumed by future Timeline keyboard shortcuts (delete selected clip, nudge, navigate between clips, etc.). No visual highlight on the selected track/clip has been added yet.
 - **Small stutter on pressing play** — pre-existing; cause not yet investigated. Unrelated to the session-state persistence work.
 - **Deleting the currently-looped section correctly disables looping** — the generalized disable-on-reposition watcher catches the transition from a real section to `null` (no section) the same way it catches any other section change, so `isLooping` is set to `false` and `loop-force-disabled` is dispatched cleanly. No lingering state issue.
 - **`activity_log.author` is nullable; pre-existing rows have `author=null`** — the column was retrofitted after initial `activity_log` usage. Rows written before the retrofit have no author and will not contribute to any user's personalized "Your Songs" sort. This is acceptable — those events are old and the sort degrades gracefully to `createdAt` for songs with no user-attributed activity.
