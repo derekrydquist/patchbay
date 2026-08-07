@@ -1400,20 +1400,18 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               />
             )}
 
-            {/* Comment indicator badge */}
+            {/* Comment indicator badge — mirrors the final-checkmark badge at top-0 right-0 rounded-bl */}
             {!isOverlay && tcCommentInfo && (
-              <button
-                className="absolute bottom-1 right-1 z-[21] flex items-center"
+              <div
+                className={cn(
+                  'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-[21] cursor-pointer',
+                  tcHasUnread ? 'bg-primary' : 'bg-white/[0.15]'
+                )}
                 onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
                 onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
               >
-                <span className="relative">
-                  <MessageCircle size={10} className={tcHasUnread ? 'text-primary' : 'text-white/25'} />
-                  {tcHasUnread && (
-                    <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
-                  )}
-                </span>
-              </button>
+                <MessageCircle size={10} className={tcHasUnread ? 'text-black' : 'text-white/40'} />
+              </div>
             )}
           </div>
         </ContextMenuTrigger>
@@ -1803,18 +1801,16 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
               )}
             >
               {commentInfo && (
-                <button
-                  className="absolute bottom-1 right-1.5 z-10 flex items-center"
+                <div
+                  className={cn(
+                    'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-10 cursor-pointer',
+                    hasUnread ? 'bg-primary' : 'bg-white/[0.15]'
+                  )}
                   onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
                   onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
                 >
-                  <span className="relative">
-                    <MessageCircle size={11} className={hasUnread ? 'text-primary' : 'text-white/25'} />
-                    {hasUnread && (
-                      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
-                    )}
-                  </span>
-                </button>
+                  <MessageCircle size={10} className={hasUnread ? 'text-black' : 'text-white/40'} />
+                </div>
               )}
             </WaveformPlayerCard>
           </div>
