@@ -42,6 +42,30 @@ import { ClipComment } from '@shared/schema';
 
 type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
 
+// ── Reactive lastViewedComments ──────────────────────────────────────────────
+// Stored as a single JSON blob so one setQueryData call re-renders all subscribers.
+const LS_VIEWED_KEY = 'patchbay-lastViewedComments';
+
+function readViewedMap(): Record<string, string> {
+  try { return JSON.parse(localStorage.getItem(LS_VIEWED_KEY) ?? '{}'); }
+  catch { return {}; }
+}
+
+function useLastViewedComments() {
+  return useQuery<Record<string, string>>({
+    queryKey: ['lastViewedComments'],
+    queryFn: readViewedMap,
+    staleTime: Infinity,
+  });
+}
+
+function markCommentsViewed(clipId: string, qc: ReturnType<typeof useQueryClient>) {
+  const updated = { ...readViewedMap(), [clipId]: new Date().toISOString() };
+  localStorage.setItem(LS_VIEWED_KEY, JSON.stringify(updated));
+  qc.setQueryData(['lastViewedComments'], updated);
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
   const minutes = Math.floor(diff / 60000);
@@ -834,10 +858,10 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     queryKey: ['clip-comment-summary', songId],
     queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
   });
+  const { data: viewedMap = {} } = useLastViewedComments();
   const tcEffectiveId = clip.bucketClipId ?? clip.id;
-  const tcLsKey = `lastViewedComments:${tcEffectiveId}`;
   const tcCommentInfo = clipCommentSummary[tcEffectiveId];
-  const tcLastViewed = localStorage.getItem(tcLsKey);
+  const tcLastViewed = viewedMap[tcEffectiveId];
   const tcHasUnread = tcCommentInfo != null && (!tcLastViewed || tcCommentInfo.latestCommentAt > tcLastViewed);
 
   // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
@@ -847,10 +871,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   }, [isFlash]);
 
   useEffect(() => {
-    if (showInfo) {
-      localStorage.setItem(tcLsKey, new Date().toISOString());
-    }
-  }, [showInfo, tcLsKey]);
+    if (showInfo) markCommentsViewed(tcEffectiveId, queryClient);
+  }, [showInfo, tcEffectiveId, queryClient]);
 
   // Always keep drawRef current so ResizeObserver and trim effects get fresh values
   drawRef.current = () => {
@@ -1405,12 +1427,12 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               <div
                 className={cn(
                   'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-[21] cursor-pointer',
-                  tcHasUnread ? 'bg-primary' : 'bg-white/[0.15]'
+                  tcHasUnread ? 'bg-primary' : 'bg-white/[0.25]'
                 )}
                 onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
                 onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
               >
-                <MessageCircle size={10} className={tcHasUnread ? 'text-black' : 'text-white/40'} />
+                <MessageCircle size={10} className={tcHasUnread ? 'text-black' : 'text-white/60'} />
               </div>
             )}
           </div>
@@ -1682,9 +1704,9 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     queryKey: ['clip-comment-summary', songId],
     queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
   });
+  const { data: viewedMap = {} } = useLastViewedComments();
   const commentInfo = clipCommentSummary[clip.id];
-  const lsKey = `lastViewedComments:${clip.id}`;
-  const lastViewed = localStorage.getItem(lsKey);
+  const lastViewed = viewedMap[clip.id];
   const hasUnread = commentInfo != null && (!lastViewed || commentInfo.latestCommentAt > lastViewed);
 
   useEffect(() => {
@@ -1709,10 +1731,8 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   }, [location, clip.id]);
 
   useEffect(() => {
-    if (showInfo) {
-      localStorage.setItem(lsKey, new Date().toISOString());
-    }
-  }, [showInfo, lsKey]);
+    if (showInfo) markCommentsViewed(clip.id, queryClient);
+  }, [showInfo, clip.id, queryClient]);
 
   const { attributes, listeners, setNodeRef, transform } = useDraggable({
     id: `bucket-${clip.id}`,
@@ -1804,12 +1824,12 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
                 <div
                   className={cn(
                     'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-10 cursor-pointer',
-                    hasUnread ? 'bg-primary' : 'bg-white/[0.15]'
+                    hasUnread ? 'bg-primary' : 'bg-white/[0.25]'
                   )}
                   onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
                   onClick={(e) => { e.stopPropagation(); setShowInfo(true); }}
                 >
-                  <MessageCircle size={10} className={hasUnread ? 'text-black' : 'text-white/40'} />
+                  <MessageCircle size={10} className={hasUnread ? 'text-black' : 'text-white/60'} />
                 </div>
               )}
             </WaveformPlayerCard>
