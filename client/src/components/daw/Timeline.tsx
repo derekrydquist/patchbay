@@ -1859,12 +1859,12 @@ export function Timeline({ songId }: { songId: string }) {
 
     const onArrowKey = (e: KeyboardEvent) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
-      if (e.repeat) return;
       const active = document.activeElement as HTMLElement | null;
       if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+      e.preventDefault();
+      if (e.repeat) return;
       if (document.querySelector('[data-state="open"]')) return;
       if (activeDragData) return;
-      e.preventDefault();
 
       // Nothing selected → find the first track in render order that has at least one clip
       // and select its first clip. No-op if every track is empty.
