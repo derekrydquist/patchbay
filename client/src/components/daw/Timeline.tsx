@@ -1821,6 +1821,7 @@ export function Timeline({ songId }: { songId: string }) {
     const firstClipOf = (track: (typeof tracks)[0]) =>
       [...track.clips].sort((a, b) => a.start - b.start)[0];
 
+
     const onArrowKey = (e: KeyboardEvent) => {
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight' && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
       if (e.repeat) return;
@@ -1858,12 +1859,40 @@ export function Timeline({ songId }: { songId: string }) {
         const clipIndex = sorted.findIndex((c) => c.id === selectedTimelineClipId);
         if (clipIndex === -1) return;
 
+        const refStart = sorted[clipIndex].start;
+
         if (e.key === 'ArrowLeft') {
-          if (clipIndex === 0) return;
-          selectClipOnTrack(currentTrack, sorted[clipIndex - 1].id);
+          if (clipIndex > 0) {
+            selectClipOnTrack(currentTrack, sorted[clipIndex - 1].id);
+          } else {
+            // First clip on this track — fall through upward, picking the latest clip on each
+            // candidate track whose start is <= the reference clip's start.
+            for (let i = trackIndex - 1; i >= 0; i--) {
+              const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
+              const match = [...candidateSorted].reverse().find((c) => c.start <= refStart);
+              if (match) {
+                selectClipOnTrack(tracks[i], match.id);
+                return;
+              }
+            }
+            // No qualifying clip above — true start of the timeline.
+          }
         } else {
-          if (clipIndex === sorted.length - 1) return;
-          selectClipOnTrack(currentTrack, sorted[clipIndex + 1].id);
+          if (clipIndex < sorted.length - 1) {
+            selectClipOnTrack(currentTrack, sorted[clipIndex + 1].id);
+          } else {
+            // Last clip on this track — fall through downward, picking the earliest clip on each
+            // candidate track whose start is >= the reference clip's start.
+            for (let i = trackIndex + 1; i < tracks.length; i++) {
+              const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
+              const match = candidateSorted.find((c) => c.start >= refStart);
+              if (match) {
+                selectClipOnTrack(tracks[i], match.id);
+                return;
+              }
+            }
+            // No qualifying clip below — true end of the timeline.
+          }
         }
         return;
       }
