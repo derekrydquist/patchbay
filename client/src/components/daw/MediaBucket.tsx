@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type Clip } from '@/lib/daw-data';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import {
-  useAddInstrument, useAddSection,
+  useAddInstrument, useAddSection, useAddFullTake,
   useDeleteTrack, useRestoreTrack,
   useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
@@ -22,6 +22,9 @@ import { Button } from '@/components/ui/button';
 import {
   ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem,
 } from '@/components/ui/context-menu';
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 
 // ─── Convert ApiClip → daw-data Clip (for BucketClip component) ──────────────
@@ -271,6 +274,19 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     onSuccess: () => { setIsAddSectionOpen(false); },
   });
 
+  const addFullTakeMutation = useAddFullTake(songId, {
+    onCreated: (idea) => {
+      queryClient.fetchQuery<ApiTrack[]>({
+        queryKey: bucketKeys.bucket(songId),
+        queryFn: () => fetchBucket(songId),
+      }).then(fresh => {
+        const track = fresh.find(t => t.id === selectedTrack?.id);
+        const newIdea = track?.ideas.find(i => i.id === idea.id);
+        if (newIdea) setSelectedIdea(newIdea);
+      }).catch(err => console.error('[addFullTake] auto-select failed:', err));
+    },
+  });
+
   // ── File input helpers ───────────────────────────────────────────────────────
 
   const handleIdeaFileDrop = (e: React.DragEvent, idea: ApiIdea, track: ApiTrack) => {
@@ -300,6 +316,8 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         });
       })
     : [];
+
+  const selectedTrackHasFullTake = selectedTrack?.ideas.some(i => i.isFullTake) ?? false;
 
   const filteredVersions = selectedIdea
     ? selectedIdea.clips.filter((clip: ApiClip) => {
@@ -424,12 +442,28 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         <div className="w-1/4 flex flex-col bg-black/10">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Sections</span>
-            <button
-              className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5"
-              onClick={() => setIsAddSectionOpen(true)}
-            >
-              <Plus size={12} />
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
+                  <Plus size={12} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="bg-popover border-border min-w-[160px]">
+                <DropdownMenuItem
+                  className="text-xs cursor-pointer"
+                  onClick={() => setIsAddSectionOpen(true)}
+                >
+                  Named Section
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-xs cursor-pointer"
+                  onClick={() => { if (selectedTrack) addFullTakeMutation.mutate(selectedTrack.id); }}
+                  disabled={!selectedTrack || selectedTrackHasFullTake || addFullTakeMutation.isPending}
+                >
+                  Full Takes Section
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">

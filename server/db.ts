@@ -101,3 +101,21 @@ if (!hasTaskTrackId) {
     console.log("[PatchBay] production_tasks.track_id backfill complete — all rows resolved.");
   }
 }
+
+// Add is_full_take to ideas table if missing.
+const hasIdeasIsFullTake = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('ideas') WHERE name='is_full_take'"
+).get() as { c: number }).c;
+if (!hasIdeasIsFullTake) {
+  sqlite.exec("ALTER TABLE ideas ADD COLUMN is_full_take INTEGER NOT NULL DEFAULT 0");
+  console.log("[PatchBay] Added is_full_take column to ideas table.");
+}
+
+// Add is_full_take to timeline_clips table if missing.
+const hasTimelineClipsIsFullTake = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('timeline_clips') WHERE name='is_full_take'"
+).get() as { c: number }).c;
+if (!hasTimelineClipsIsFullTake) {
+  sqlite.exec("ALTER TABLE timeline_clips ADD COLUMN is_full_take INTEGER NOT NULL DEFAULT 0");
+  console.log("[PatchBay] Added is_full_take column to timeline_clips table.");
+}

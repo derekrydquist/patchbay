@@ -80,6 +80,7 @@ export const ideas = sqliteTable("ideas", {
   sectionName: text("section_name").notNull(),
   sortOrder: integer("sort_order").notNull().default(0),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
+  isFullTake: integer("is_full_take", { mode: "boolean" }).notNull().default(false),
 }, (table) => ({
   uniqTrackSection: uniqueIndex("uniq_track_section").on(table.trackId, table.sectionName),
 }));
@@ -197,6 +198,7 @@ export const timelineClips = sqliteTable("timeline_clips", {
   trimStart: real("trim_start").notNull().default(0),
   trimEnd: real("trim_end"),
   bucketClipId: text("bucket_clip_id").references(() => clips.id, { onDelete: "set null" }),
+  isFullTake: integer("is_full_take", { mode: "boolean" }).notNull().default(false),
 });
 
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);

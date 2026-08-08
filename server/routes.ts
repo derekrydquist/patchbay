@@ -1102,6 +1102,48 @@ export async function registerRoutes(
 
   // ─── Ideas ──────────────────────────────────────────────────────────────────
 
+  /** POST /api/tracks/:trackId/full-take — create (or restore) a Full Takes idea for a single track */
+  app.post("/api/tracks/:trackId/full-take", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const trackSongIdVal = trackSongId(trackId);
+    if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+
+    // Check for an existing full-take idea — active or hidden.
+    const existing = db.select().from(ideas)
+      .where(and(eq(ideas.trackId, trackId), eq(ideas.isFullTake, true)))
+      .get();
+
+    if (existing) {
+      if (existing.active) {
+        return res.status(409).json({ message: "A Full Takes section already exists for this instrument." });
+      }
+      // Hidden — restore it rather than creating a duplicate.
+      db.update(ideas).set({ active: true }).where(eq(ideas.id, existing.id)).run();
+      const restored = db.select().from(ideas).where(eq(ideas.id, existing.id)).get()!;
+      return res.status(200).json(restored);
+    }
+
+    // Compute sortOrder: append after the last existing idea for this track.
+    const maxOrderRow = db.select({ val: max(ideas.sortOrder) })
+      .from(ideas)
+      .where(eq(ideas.trackId, trackId))
+      .get();
+    const nextSortOrder = (maxOrderRow?.val ?? -1) + 1;
+
+    const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
+    const id = randomUUID();
+    await storage.createIdea({
+      id,
+      trackId,
+      name: `${track?.name ?? 'Unknown'} Full Takes`,
+      sectionName: "Full Takes",
+      sortOrder: nextSortOrder,
+      isFullTake: true,
+    });
+    const created = db.select().from(ideas).where(eq(ideas.id, id)).get()!;
+    return res.status(201).json(created);
+  });
+
   /** POST /api/tracks/:trackId/ideas — create an idea (section slot) under a track */
   app.post("/api/tracks/:trackId/ideas", requireBand, async (req, res) => {
     const trackId = req.params.trackId as string;

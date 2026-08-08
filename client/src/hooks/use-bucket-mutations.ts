@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { type ApiTrack, bucketKeys } from '@/lib/bucket-api';
+import { type ApiIdea, type ApiTrack, bucketKeys } from '@/lib/bucket-api';
 
 export function useAddInstrument(
   songId: string | undefined,
@@ -156,6 +156,30 @@ export function useHideIdea(
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+export function useAddFullTake(
+  songId: string | undefined,
+  opts?: { onCreated?: (idea: ApiIdea) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (trackId: string) => {
+      const res = await fetch(`/api/tracks/${trackId}/full-take`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to create Full Takes section' }));
+        throw new Error(err.message ?? 'Failed to create Full Takes section');
+      }
+      return res.json() as Promise<ApiIdea>;
+    },
+    onSuccess: (idea) => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      opts?.onCreated?.(idea);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
   });

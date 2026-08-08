@@ -547,6 +547,7 @@ export class SQLiteStorage implements IStorage {
         eq(instrumentTracks.songId, track.songId),
         eq(instrumentTracks.active, true),
         eq(ideas.active, true),
+        eq(ideas.isFullTake, false),
       ))
       .groupBy(ideas.sectionName)
       .orderBy(asc(min(ideas.sortOrder)))
@@ -631,12 +632,13 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(ideas)
       .where(and(
         eq(ideas.trackId, trackId),
-        eq(ideas.active, false)
+        eq(ideas.active, false),
+        eq(ideas.isFullTake, false),
       )).all();
   }
 
   async createIdea(data: InsertIdea): Promise<Idea> {
-    const idea: Idea = { sortOrder: 0, active: true, ...data, id: data.id ?? randomUUID() };
+    const idea: Idea = { sortOrder: 0, active: true, isFullTake: false, ...data, id: data.id ?? randomUUID() };
     db.insert(ideas).values(idea).run();
     return db.select().from(ideas).where(eq(ideas.id, idea.id)).get()!;
   }

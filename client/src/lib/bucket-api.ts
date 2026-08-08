@@ -33,6 +33,7 @@ export interface ApiIdea {
   name: string;
   sectionName: string;
   sortOrder: number;
+  isFullTake?: boolean;
   clips: ApiClip[];
 }
 
