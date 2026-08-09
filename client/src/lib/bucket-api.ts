@@ -21,6 +21,7 @@ export interface ApiClip {
   duration: number;
   src: string | null;
   isFinal: boolean;
+  isFullTake?: boolean;
   sectionName: string | null;
   metadata: DawClip['metadata'] | null;
   createdAt: string;

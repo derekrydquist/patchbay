@@ -33,6 +33,36 @@ interface SectionCellProps {
   selectedClipId?: string | null;
 }
 
+// Renders full-take clips at their absolute timeline positions. Used instead of the
+// section-cell grid when a track has at least one full-take clip on it.
+function FullTakeLane({ clips, zoom, trackId, songId, flashClipId, selectedClipId }: {
+  clips: Clip[];
+  zoom: number;
+  trackId: string;
+  songId: string;
+  flashClipId?: string | null;
+  selectedClipId?: string | null;
+}) {
+  const fullTakeClips = clips.filter((c) => c.isFullTake);
+  return (
+    <div className="relative h-full w-full">
+      {fullTakeClips.map((clip) => (
+        <TimelineClip
+          key={clip.id}
+          clip={clip}
+          zoom={zoom}
+          sectionStart={0}
+          trackId={trackId}
+          songId={songId}
+          instanceCount={1}
+          isFlash={flashClipId === clip.id}
+          isSelected={selectedClipId === clip.id}
+        />
+      ))}
+    </div>
+  );
+}
+
 function SectionCell({
   sectionStart,
   sectionDuration,
@@ -234,34 +264,53 @@ export function TimelineTrack({
       </ContextMenuContent>
       </ContextMenu>
 
-      {/* Section cells — full row is the droppable target */}
-      <div
-        ref={setNodeRef}
-        className="flex h-full border-b border-border bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]"
-        style={{ backgroundSize: `${zoom / 4}px 100%` }}
-      >
-        {sections.map((section) => {
-          const sectionClips = track.clips.filter((c) => c.sectionName === section.name);
-          return (
-            <SectionCell
-              key={section.name}
-              sectionStart={section.start}
-              sectionDuration={section.duration}
-              clips={sectionClips}
-              allTrackClips={track.clips}
-              zoom={zoom}
-              isInvalid={invalidSections.has(section.name)}
-              trackId={track.id}
-              songId={songId}
-              insertionX={
-                insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
-              }
-              flashClipId={flashClipId}
-              selectedClipId={selectedClipId}
-            />
-          );
-        })}
-      </div>
+      {/* Section cells — full row is the droppable target.
+          For tracks that have full-take clips, FullTakeLane replaces the section grid. */}
+      {(() => {
+        const hasFullTake = track.clips.some((c) => c.isFullTake);
+        return (
+          <div
+            ref={setNodeRef}
+            className="flex-1 relative h-full border-b border-border bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]"
+            style={{ backgroundSize: `${zoom / 4}px 100%` }}
+          >
+            {hasFullTake ? (
+              <FullTakeLane
+                clips={track.clips}
+                zoom={zoom}
+                trackId={track.id}
+                songId={songId}
+                flashClipId={flashClipId}
+                selectedClipId={selectedClipId}
+              />
+            ) : (
+              <div className="flex h-full">
+                {sections.map((section) => {
+                  const sectionClips = track.clips.filter((c) => c.sectionName === section.name);
+                  return (
+                    <SectionCell
+                      key={section.name}
+                      sectionStart={section.start}
+                      sectionDuration={section.duration}
+                      clips={sectionClips}
+                      allTrackClips={track.clips}
+                      zoom={zoom}
+                      isInvalid={invalidSections.has(section.name)}
+                      trackId={track.id}
+                      songId={songId}
+                      insertionX={
+                        insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
+                      }
+                      flashClipId={flashClipId}
+                      selectedClipId={selectedClipId}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
         <AlertDialogContent className="bg-[#0c0c0e] border-border">

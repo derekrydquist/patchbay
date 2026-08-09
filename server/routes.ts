@@ -776,10 +776,10 @@ export async function registerRoutes(
         .where(and(eq(ideas.trackId, trackId), eq(ideas.sectionName, clip.sectionName)))
         .get();
       if (idea) {
-        const finalBucketClip = db.select().from(clips)
-          .where(and(eq(clips.ideaId, idea.id), eq(clips.isFinal, true)))
+        const matchingBucketClip = db.select().from(clips)
+          .where(and(eq(clips.ideaId, idea.id), eq(clips.name, clip.name)))
           .get();
-        if (finalBucketClip && finalBucketClip.name === clip.name) {
+        if (matchingBucketClip?.isFinal === true) {
           clip = (await storage.updateTimelineClip(clip.id, { isFinal: true })) ?? clip;
         }
       }

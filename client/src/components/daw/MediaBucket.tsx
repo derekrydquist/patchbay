@@ -39,6 +39,7 @@ function toClip(apiClip: ApiClip): Clip {
     duration: apiClip.duration,
     src: apiClip.src ?? undefined,
     isFinal: apiClip.isFinal,
+    isFullTake: apiClip.isFullTake ?? false,
     sectionName: apiClip.sectionName ?? undefined,
     metadata: apiClip.metadata as unknown as Clip['metadata'],
   };
@@ -569,7 +570,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                     filteredVersions.map(clip => (
                       <BucketClip
                         key={clip.id}
-                        clip={toClip(clip)}
+                        clip={toClip({ ...clip, isFullTake: selectedIdea?.isFullTake ?? false })}
                         trackId={selectedTrack?.id}
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}

@@ -37,6 +37,7 @@ export interface Clip {
   metadata?: ClipMetadata;
   comments?: Comment[];
   isFinal?: boolean;
+  isFullTake?: boolean;
   sectionName?: string;
   trimStart?: number;
   trimEnd?: number | null;

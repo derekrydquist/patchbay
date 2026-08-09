@@ -61,6 +61,7 @@ type ApiTrack = {
     src: string | null;
     sectionName: string | null;
     isFinal: boolean;
+    isFullTake?: boolean;
     trimStart: number;
     trimEnd: number | null;
     bucketClipId: string | null;
@@ -72,7 +73,7 @@ type InsertionPoint = { trackId: string; sectionName: string; index: number; x: 
 // Returns the ordered list of sections that have at least one clip anywhere on the tracks.
 // Uses sectionOrder as the authoritative order; sections not yet in sectionOrder are appended.
 function getActiveSections(tracks: Track[], sectionOrder: string[]): string[] {
-  const present = new Set(tracks.flatMap((t) => t.clips.map((c) => c.sectionName).filter(Boolean) as string[]));
+  const present = new Set(tracks.flatMap((t) => t.clips.filter((c) => !c.isFullTake).map((c) => c.sectionName).filter(Boolean) as string[]));
   const ordered = sectionOrder.filter((s) => present.has(s));
   present.forEach((s) => { if (!ordered.includes(s)) ordered.push(s); });
   return ordered;
@@ -88,7 +89,7 @@ function computeSectionLayout(tracks: Track[], sectionOrder: string[]): SectionI
     let maxWidth = MIN_SECTION_WIDTH;
     for (const t of tracks) {
       const total = t.clips
-        .filter((c) => c.sectionName === name)
+        .filter((c) => c.sectionName === name && !c.isFullTake)
         .reduce((s, c) => s + (c.trimEnd ?? c.duration) - (c.trimStart ?? 0), 0);
       if (total > maxWidth) maxWidth = total;
     }
@@ -106,8 +107,9 @@ function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
   const sections = layout.map((s) => s.name);
 
   return tracks.map((track) => {
+    const fullTakeClips = track.clips.filter((c) => c.isFullTake);
     const sectioned = sections.flatMap((name) => {
-      const sc = track.clips.filter((c) => c.sectionName === name);
+      const sc = track.clips.filter((c) => c.sectionName === name && !c.isFullTake);
       let pos = sectionStarts[name];
       return sc.map((clip) => {
         const updated = { ...clip, start: pos };
@@ -115,8 +117,8 @@ function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
         return updated;
       });
     });
-    const unsectioned = track.clips.filter((c) => !c.sectionName);
-    return { ...track, clips: [...sectioned, ...unsectioned] };
+    const unsectioned = track.clips.filter((c) => !c.sectionName && !c.isFullTake);
+    return { ...track, clips: [...sectioned, ...unsectioned, ...fullTakeClips] };
   });
 }
 
@@ -169,6 +171,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
         src: c.src ?? undefined,
         sectionName: c.sectionName ?? undefined,
         isFinal: c.isFinal ?? false,
+        isFullTake: c.isFullTake ?? false,
         trimStart: ts,
         trimEnd: te,
         bucketClipId: c.bucketClipId ?? undefined,
@@ -332,6 +335,7 @@ export function Timeline({ songId }: { songId: string }) {
             src: c.src ?? undefined,
             sectionName: c.sectionName ?? undefined,
             isFinal: c.isFinal ?? false,
+            isFullTake: c.isFullTake ?? false,
             trimStart: ts,
             trimEnd: te,
             bucketClipId: c.bucketClipId ?? undefined,
@@ -1428,6 +1432,59 @@ export function Timeline({ songId }: { songId: string }) {
     setInsertionPoint(null);
   };
 
+  // Places a full-take clip at an arbitrary start time on a track, bypassing section logic.
+  const insertFreeformClip = (trackId: string, clip: Clip, startTime: number) => {
+    const newId = nanoid();
+    setTracks((prev) => {
+      const targetTrack = prev.find((t) => t.id === trackId);
+      if (!targetTrack) return prev;
+      const newClip: Clip = {
+        ...clip,
+        id: newId,
+        start: startTime,
+        isFullTake: true,
+        sectionName: undefined,
+        trimStart: 0,
+        trimEnd: null,
+        bucketClipId: clip.id,
+        isFinal: false,
+      };
+      return prev.map((t) =>
+        t.id === trackId ? { ...t, clips: [...t.clips, newClip] } : t
+      );
+    });
+
+    fetch(`/api/tracks/${trackId}/clips`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: newId, trackId, name: clip.name, type: clip.type, color: clip.color,
+        start: startTime, duration: clip.duration,
+        src: clip.src ?? null, sectionName: 'Full Takes',
+        trimStart: 0, trimEnd: null,
+        bucketClipId: clip.id,
+        isFullTake: true,
+      }),
+    })
+      .then(async (res) => {
+        const serverClip = await res.json();
+        if (serverClip.isFinal) {
+          setTracks((prev) => prev.map((t) =>
+            t.id === trackId
+              ? { ...t, clips: t.clips.map((c) => c.id === newId ? { ...c, isFinal: true } : c) }
+              : t
+          ));
+        }
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['activity'] }),
+          queryClient.invalidateQueries({ queryKey: ['songs'] }),
+        ]);
+      })
+      .catch((err) => console.error('Failed to persist full-take clip:', err));
+
+    return newId;
+  };
+
   // Inserts a clip into a specific section of a track. index is the position within that
   // section's clip array; omit to append at end. newOrder lets callers pre-compute the
   // section order when they've already updated it (e.g. gap drops).
@@ -1619,6 +1676,24 @@ export function Timeline({ songId }: { songId: string }) {
         setInsertionPoint(null);
         return;
       }
+
+      // ── Full-take path: freeform placement at drop position ──────────────────
+      if (clip.isFullTake) {
+        const el = timelineRef.current;
+        const activatorEvent = event.activatorEvent as MouseEvent;
+        const scrollLeft = el?.scrollLeft ?? 0;
+        const containerLeft = el?.getBoundingClientRect().left ?? 0;
+        const releaseClientX = activatorEvent.clientX + event.delta.x;
+        const dropTime = Math.max(0, (releaseClientX - containerLeft + scrollLeft - 256) / zoom);
+        const newClipId = insertFreeformClip(targetTrack.id, clip, dropTime);
+        setInsertionPoint(null);
+        if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+        setFlashClipId(newClipId);
+        flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
+        return;
+      }
+      // ── End full-take path ────────────────────────────────────────────────────
+
       const clipSectionName = dragData?.clip?.sectionName ?? dragData?.sectionName;
       if (!clipSectionName) { setInsertionPoint(null); return; }
 
@@ -2119,8 +2194,42 @@ export function Timeline({ songId }: { songId: string }) {
           songId={songId}
           onAddToTimeline={(clip, trackId) => {
             const targetTrack = tracks.find((t) => t.id === trackId);
-            if (!targetTrack || !clip.sectionName) {
-              console.warn('[AddToTimeline] missing', { trackId, sectionName: clip.sectionName });
+            if (!targetTrack) {
+              console.warn('[AddToTimeline] missing trackId', { trackId });
+              return;
+            }
+
+            // ── Full-take: append after the last full-take clip on this track ──
+            if (clip.isFullTake) {
+              const existing = targetTrack.clips.filter((c) => c.isFullTake);
+              const dropTime = existing.length > 0
+                ? Math.max(...existing.map((c) => c.start + (c.trimEnd ?? c.duration) - (c.trimStart ?? 0)))
+                : 0;
+              const newClipId = insertFreeformClip(targetTrack.id, clip, dropTime);
+              toast({
+                className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]',
+                title: (
+                  <span className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.2em] text-primary">
+                    <CheckCircle2 size={14} /> Added to timeline
+                  </span>
+                ),
+                description: (
+                  <span className="text-sm text-white/80">
+                    <span className="text-white font-semibold">{targetTrack.name}</span>
+                    <span className="text-white/40"> · </span>
+                    <span className="text-white font-semibold">Full Take</span>
+                  </span>
+                ),
+              });
+              if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+              setFlashClipId(newClipId);
+              flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
+              return;
+            }
+            // ─────────────────────────────────────────────────────────────────
+
+            if (!clip.sectionName) {
+              console.warn('[AddToTimeline] missing sectionName', { trackId, sectionName: clip.sectionName });
               return;
             }
             const newClipId = insertClipInSection(targetTrack.id, clip.sectionName, clip);
