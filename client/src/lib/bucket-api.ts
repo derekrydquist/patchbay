@@ -34,8 +34,10 @@ export interface ApiIdea {
   name: string;
   sectionName: string;
   sortOrder: number;
+  active: boolean;
   isFullTake?: boolean;
   clips: ApiClip[];
+  hasNew: boolean;
 }
 
 export interface ApiTrack {

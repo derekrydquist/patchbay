@@ -306,6 +306,21 @@ export const insertAlbumSongSchema = createInsertSchema(albumSongs);
 export type InsertAlbumSong = z.infer<typeof insertAlbumSongSchema>;
 export type AlbumSong = typeof albumSongs.$inferSelect;
 
+// ─── Bucket Folder Views ──────────────────────────────────────────────────────
+
+export const bucketFolderViews = sqliteTable("bucket_folder_views", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  ideaId: text("idea_id").notNull().references(() => ideas.id),
+  viewedAt: text("viewed_at").notNull(),
+}, (table) => ({
+  uniqUserIdeaView: uniqueIndex("uniq_user_idea_view").on(table.userId, table.ideaId),
+}));
+
+export const insertBucketFolderViewSchema = createInsertSchema(bucketFolderViews);
+export type InsertBucketFolderView = z.infer<typeof insertBucketFolderViewSchema>;
+export type BucketFolderView = typeof bucketFolderViews.$inferSelect;
+
 // ─── Global Settings ──────────────────────────────────────────────────────────
 
 export const globalSettings = sqliteTable("global_settings", {

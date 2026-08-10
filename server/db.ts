@@ -119,3 +119,30 @@ if (!hasTimelineClipsIsFullTake) {
   sqlite.exec("ALTER TABLE timeline_clips ADD COLUMN is_full_take INTEGER NOT NULL DEFAULT 0");
   console.log("[PatchBay] Added is_full_take column to timeline_clips table.");
 }
+
+// Create bucket_folder_views table if not exists, then backfill on first creation only.
+const hasBucketFolderViews = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='bucket_folder_views'"
+).get() as { c: number }).c;
+if (!hasBucketFolderViews) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS bucket_folder_views (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      idea_id TEXT NOT NULL REFERENCES ideas(id),
+      viewed_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS uniq_user_idea_view
+      ON bucket_folder_views(user_id, idea_id);
+  `);
+  // Backfill: every existing (user, idea) pair is marked viewed now so that
+  // pre-existing clips are never falsely flagged as "new" at launch.
+  // New ideas/users created after this run will have no row (correctly "new").
+  sqlite.exec(`
+    INSERT OR IGNORE INTO bucket_folder_views (id, user_id, idea_id, viewed_at)
+    SELECT lower(hex(randomblob(16))), u.id, i.id,
+           strftime('%Y-%m-%dT%H:%M:%S.000Z', 'now')
+    FROM users u CROSS JOIN ideas i
+  `);
+  console.log("[PatchBay] Created bucket_folder_views table and backfilled existing users × ideas.");
+}

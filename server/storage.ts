@@ -19,7 +19,7 @@ import {
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
-  activityLog, globalSettings, albums, albumSongs, bands,
+  activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -78,7 +78,7 @@ export type TrackWithTimelineClips = InstrumentTrack & { timelineClips: Timeline
 
 /** The shape returned by GET /api/songs/:id/bucket */
 export type BucketTrack = InstrumentTrack & {
-  ideas: (Idea & { clips: Clip[] })[];
+  ideas: (Idea & { clips: Clip[]; hasNew: boolean })[];
 };
 
 // ─── Interface ────────────────────────────────────────────────────────────────
@@ -127,7 +127,8 @@ export interface IStorage {
   deleteTimelineClip(id: string): Promise<void>;
 
   // Bucket
-  getBucket(songId: string): Promise<BucketTrack[]>;
+  getBucket(songId: string, userId?: string): Promise<BucketTrack[]>;
+  upsertFolderView(userId: string, ideaId: string): void;
 
   // Tracks
   createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
@@ -489,7 +490,7 @@ export class SQLiteStorage implements IStorage {
 
   // ── Bucket ─────────────────────────────────────────────────────────────────
 
-  async getBucket(songId: string): Promise<BucketTrack[]> {
+  async getBucket(songId: string, userId?: string): Promise<BucketTrack[]> {
     const tracks = db
       .select()
       .from(instrumentTracks)
@@ -517,15 +518,49 @@ export class SQLiteStorage implements IStorage {
           .all()
       : [];
 
+    // Build a viewedAt map for this user so we can compute hasNew per idea.
+    const viewMap = new Map<string, string>(); // ideaId → viewedAt ISO string
+    if (userId && allIdeas.length) {
+      const viewRows = db
+        .select({ ideaId: bucketFolderViews.ideaId, viewedAt: bucketFolderViews.viewedAt })
+        .from(bucketFolderViews)
+        .where(and(
+          eq(bucketFolderViews.userId, userId),
+          inArray(bucketFolderViews.ideaId, allIdeas.map((i) => i.id))
+        ))
+        .all();
+      for (const row of viewRows) viewMap.set(row.ideaId, row.viewedAt);
+    }
+
     return tracks.map((track) => ({
       ...track,
       ideas: allIdeas
         .filter((idea) => idea.trackId === track.id)
-        .map((idea) => ({
-          ...idea,
-          clips: allClips.filter((clip) => clip.ideaId === idea.id),
-        })),
+        .map((idea) => {
+          const ideaClips = allClips.filter((clip) => clip.ideaId === idea.id);
+          let hasNew = false;
+          if (userId) {
+            const viewedAt = viewMap.get(idea.id);
+            if (!viewedAt) {
+              // No view row — treat as epoch: new if any clips exist.
+              hasNew = ideaClips.length > 0;
+            } else {
+              hasNew = ideaClips.some((clip) => clip.createdAt > viewedAt);
+            }
+          }
+          return { ...idea, clips: ideaClips, hasNew };
+        }),
     }));
+  }
+
+  upsertFolderView(userId: string, ideaId: string): void {
+    db.insert(bucketFolderViews)
+      .values({ id: randomUUID(), userId, ideaId, viewedAt: new Date().toISOString() })
+      .onConflictDoUpdate({
+        target: [bucketFolderViews.userId, bucketFolderViews.ideaId],
+        set: { viewedAt: new Date().toISOString() },
+      })
+      .run();
   }
 
   // ── Tracks ─────────────────────────────────────────────────────────────────

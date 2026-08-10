@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { type Clip } from '@/lib/daw-data';
 import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
 import {
@@ -56,6 +56,16 @@ interface MediaBucketProps {
 
 export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const queryClient = useQueryClient();
+
+  const viewIdeaMutation = useMutation({
+    mutationFn: (ideaId: string) =>
+      fetch(`/api/ideas/${ideaId}/view`, { method: 'POST' }).then(r => {
+        if (!r.ok) throw new Error('Failed to mark idea as viewed');
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+    },
+  });
 
   const [selectedTrack, setSelectedTrack] = useState<ApiTrack | null>(null);
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
@@ -222,6 +232,12 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
 
   useEffect(() => {
     selectedIdeaRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [selectedIdea?.id]);
+
+  // ── Mark idea as viewed whenever a section is selected ───────────────────────
+
+  useEffect(() => {
+    if (selectedIdea) viewIdeaMutation.mutate(selectedIdea.id);
   }, [selectedIdea?.id]);
 
   // ── Bucket mutations (add/delete/restore instrument and section) ─────────────
@@ -400,6 +416,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                 })
                 .map(track => {
                   const hasFiles = track.ideas.some(i => i.clips.length > 0);
+                  const trackHasNew = track.ideas.some(i => i.active && i.hasNew);
                   return (
                     <ContextMenu key={track.id}>
                       <ContextMenuTrigger asChild>
@@ -421,7 +438,10 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                             />
                             <span className="font-bold tracking-tight">{track.name}</span>
                           </div>
-                          <ChevronRight size={12} className="opacity-40" />
+                          <div className="flex items-center gap-1.5">
+                            {trackHasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
+                            <ChevronRight size={12} className="opacity-40" />
+                          </div>
                         </button>
                       </ContextMenuTrigger>
                       <ContextMenuContent className="bg-popover border-border">
@@ -500,7 +520,10 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                           />
                           <span className="font-bold tracking-tight">{idea.sectionName}</span>
                         </div>
-                        <ChevronRight size={12} className="opacity-40" />
+                        <div className="flex items-center gap-1.5">
+                          {idea.hasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
+                          <ChevronRight size={12} className="opacity-40" />
+                        </div>
                       </button>
                     </ContextMenuTrigger>
                     <ContextMenuContent className="bg-popover border-border">

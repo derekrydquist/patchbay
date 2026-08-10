@@ -1288,6 +1288,21 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 
 **Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
 
+### Media Bucket — "new content" indicator — ✅ Built
+
+Gold dot next to instrument and section folder names in MediaBucket's INSTRUMENTS/SECTIONS columns, showing content added since the current user last opened that folder.
+
+**Schema:** `bucket_folder_views` (id, userId, ideaId, viewedAt) — unique index on (userId, ideaId), upserted per user per idea. Created via a guarded `CREATE TABLE IF NOT EXISTS` in `server/db.ts` at boot (not `drizzle-kit push`, per the migration-safety rule above). On first creation only, backfills a `viewedAt = now` row for every existing user × idea pair so no pre-existing content is falsely flagged new at launch — this backfill does not re-run on subsequent boots.
+
+**Server:** `GET /api/songs/:id/bucket` now takes the session user into account and returns `hasNew: boolean` on every idea — true if any active clip's `createdAt` is later than that user's `viewedAt` for that idea (a missing view row counts as "never viewed," so any clips present make it `true`). `POST /api/ideas/:ideaId/view` upserts the view row for the current session user; ownership-checked against the idea's song.
+
+**Client:** Selecting a section (`selectedIdea` change in `MediaBucket.tsx` — covers direct clicks, `find-in-bucket` navigation, add-section/add-instrument auto-select, and session restore) fires the view mutation and invalidates `['bucket', songId]` so the dot clears immediately rather than waiting for the next poll.
+
+- **Section-level dot:** rendered when `idea.hasNew` is true.
+- **Instrument-level dot:** pure client-side derivation, no separate tracking — `track.ideas.some(i => i.active && i.hasNew)`. The `active` check matters: without it, a hidden section's stale `hasNew` can light up the parent with no way for the user to clear it.
+- Full Takes ideas need no special-casing — they're a normal `ideas` row and flow through the same path as any other section.
+- Clip-level (VERSIONS column) is intentionally untouched — this is folder-level only.
+
 ### Timeline Selection — ✅ Built
 
 `selectedTimelineTrackId` and `selectedTimelineClipId` are personal, per-song localStorage state (same pattern as mute/solo/zoom/scroll). Selecting a clip always sets both (clip + its parent track). Selecting a track header directly sets track only and clears clip. Both are persisted to `patchbay-selected-timeline-track-${songId}` and `patchbay-selected-timeline-clip-${songId}` and restored by the one-shot `useLayoutEffect` on first tracks load.

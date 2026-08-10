@@ -1096,8 +1096,19 @@ export async function registerRoutes(
     const id = req.params.id as string;
     if (!assertSongOwned(req, res, id)) return;
     await storage.bootstrapDefaultSong();
-    const bucket = await storage.getBucket(id);
+    const bucket = await storage.getBucket(id, req.session.userId);
     res.json(bucket);
+  });
+
+  /** POST /api/ideas/:ideaId/view — mark a bucket idea folder as viewed for the session user */
+  app.post("/api/ideas/:ideaId/view", requireBand, async (req, res) => {
+    const ideaId = req.params.ideaId as string;
+    const userId = req.session.userId;
+    if (!userId) return res.status(401).json({ message: "Not authenticated" });
+    const songId = ideaSongId(ideaId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    storage.upsertFolderView(userId, ideaId);
+    res.json({ ok: true });
   });
 
   // ─── Ideas ──────────────────────────────────────────────────────────────────
