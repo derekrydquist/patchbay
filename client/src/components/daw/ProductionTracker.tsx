@@ -1253,7 +1253,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
           <div className="grid grid-cols-2 gap-4 pt-2 pb-1">
             <button
               onClick={() => { setIsAddChoiceOpen(false); setIsAddSectionOpen(true); }}
-              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
+              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
                 <LayoutList size={20} className="text-primary/70" />
@@ -1265,7 +1265,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
             </button>
             <button
               onClick={() => { setIsAddChoiceOpen(false); setIsAddInstrumentOpen(true); }}
-              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group"
+              className="flex flex-col items-center gap-3 rounded-md border-2 border-white/5 bg-white/[0.02] p-5 hover:border-primary/50 hover:bg-primary/5 transition-all cursor-pointer group ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center group-hover:border-primary/40 transition-colors">
                 <Music2 size={20} className="text-primary/70" />
