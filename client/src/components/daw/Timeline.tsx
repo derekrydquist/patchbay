@@ -51,6 +51,7 @@ type ApiTrack = {
   sortOrder: number;
   songId: string;
   volume: number;
+  pan: number;
   timelineClips: {
     id: string;
     name: string;
@@ -154,7 +155,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
     name: t.name,
     type: t.type as Track['type'],
     volume: t.volume ?? 100,
-    pan: 0,
+    pan: t.pan ?? 0,
     muted: false,
     solo: false,
     color: t.color ?? 'hsl(var(--chart-1))',
@@ -310,7 +311,7 @@ export function Timeline({ songId }: { songId: string }) {
   }, [apiTracks]);
 
   // Merge track additions, removals, and clip changes after initial load.
-  // Trusts server for volume; preserves local mute/solo state for existing tracks.
+  // Trusts server for volume/pan; preserves local mute/solo state for existing tracks.
   useEffect(() => {
     if (!apiTracks || !tracksInitialized.current) return;
     setTracks(prev => {
@@ -341,7 +342,7 @@ export function Timeline({ songId }: { songId: string }) {
             bucketClipId: c.bucketClipId ?? undefined,
           };
         });
-        return { ...track, clips: freshClips, volume: apiTrack.volume ?? 100 };
+        return { ...track, clips: freshClips, volume: apiTrack.volume ?? 100, pan: apiTrack.pan ?? 0 };
       });
 
       const newTracks = apiTracks
@@ -351,7 +352,7 @@ export function Timeline({ songId }: { songId: string }) {
           name: t.name,
           type: t.type as Track['type'],
           volume: t.volume ?? 100,
-          pan: 0,
+          pan: t.pan ?? 0,
           muted: false,
           solo: false,
           color: t.color ?? 'hsl(var(--chart-1))',
@@ -415,12 +416,14 @@ export function Timeline({ songId }: { songId: string }) {
   // re-engaged only when the playhead is visible in the viewport again.
   const isFollowingRef = React.useRef<boolean>(true);
   const volumePatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const panPatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const uiRestored = React.useRef(false);
   const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const playheadSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
+  const panNodesRef = React.useRef<{ [clipId: string]: StereoPannerNode }>({});
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
   const seekPendingRef = React.useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -566,8 +569,17 @@ export function Timeline({ songId }: { songId: string }) {
     if (!isPlaying) {
       Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
       pendingPlayRef.current.clear();
-      audioCtxRef.current?.close();
-      audioCtxRef.current = null;
+      // Once any clip has been wired into the Web Audio graph (panNodesRef non-empty),
+      // its <audio> element is permanently bound to this AudioContext per the
+      // createMediaElementSource spec — closing it here would leave that clip's audio
+      // with no output path on the next play (a new context can never rebind it).
+      // Suspend instead so the same context and node graph can be resumed next play.
+      if (Object.keys(panNodesRef.current).length > 0) {
+        audioCtxRef.current?.suspend();
+      } else {
+        audioCtxRef.current?.close();
+        audioCtxRef.current = null;
+      }
     }
   }, [isPlaying]);
 
@@ -1087,6 +1099,21 @@ export function Timeline({ songId }: { songId: string }) {
         lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentBeatIndex;
       }
 
+      // Lazily wires a clip's audio element into the Web Audio graph so its pan can be
+      // driven via a StereoPannerNode. createMediaElementSource can only ever be called
+      // once per <audio> element — the panNodesRef entry is the guard against a second
+      // attempt on the same element (matters across StrictMode double-invoke too).
+      const ensurePanNode = (clipId: string, audio: HTMLAudioElement) => {
+        if (panNodesRef.current[clipId]) return;
+        const ctx = audioCtxRef.current;
+        if (!ctx) return;
+        const source = ctx.createMediaElementSource(audio);
+        const panner = ctx.createStereoPanner();
+        source.connect(panner);
+        panner.connect(ctx.destination);
+        panNodesRef.current[clipId] = panner;
+      };
+
       // The metronome is a guide click and intentionally NOT scaled by masterVolumeRef
       // so it stays audible even when the user lowers mix volume to work quietly.
       const playMetronomeClick = (accent: boolean) => {
@@ -1120,8 +1147,14 @@ export function Timeline({ songId }: { songId: string }) {
             setPlayheadTime(frameTimelineEnd);
             Object.values(customAudioRefs.current).forEach((audio) => audio.pause());
             pendingPlayRef.current.clear();
-            audioCtxRef.current?.close();
-            audioCtxRef.current = null;
+            // See the isPlaying-false effect above: once panNodesRef has entries, those
+            // <audio> elements are permanently bound to this context — suspend, don't close.
+            if (Object.keys(panNodesRef.current).length > 0) {
+              audioCtxRef.current?.suspend();
+            } else {
+              audioCtxRef.current?.close();
+              audioCtxRef.current = null;
+            }
             setIsPlaying(false);
             window.dispatchEvent(new CustomEvent('playback-ended'));
             lastTimeRef.current = time;
@@ -1196,6 +1229,10 @@ export function Timeline({ songId }: { songId: string }) {
                   audio.volume = (track.volume / 100) * masterVolumeRef.current;
                   audio.muted = track.muted;
                   audio.playbackRate = bpm / 120;
+                  ensurePanNode(clip.id, audio);
+                  if (panNodesRef.current[clip.id]) {
+                    panNodesRef.current[clip.id].pan.value = track.pan / 100;
+                  }
                 } else {
                   if (!audio.paused) {
                     audio.pause();
@@ -1296,6 +1333,24 @@ export function Timeline({ songId }: { songId: string }) {
           .catch((err) => console.error('Failed to persist track volume:', err));
       }, 500);
     };
+    // Debounced independently from volume (separate timer map, keyed by trackId) so
+    // dragging one control doesn't cancel or delay the other's pending write.
+    const handleUpdatePan = (e: any) => {
+      const { trackId, pan } = e.detail as { trackId: string; pan: number };
+      setTracks((prev) =>
+        prev.map((t) => (t.id === trackId ? { ...t, pan } : t))
+      );
+      clearTimeout(panPatchTimers.current[trackId]);
+      panPatchTimers.current[trackId] = setTimeout(() => {
+        fetch(`/api/tracks/${trackId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pan }),
+        })
+          .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+          .catch((err) => console.error('Failed to persist track pan:', err));
+      }, 500);
+    };
     const handleReplaceClip = (e: any) => {
       const { oldClipId, newClip } = e.detail;
       setTracks((prev) =>
@@ -1380,6 +1435,7 @@ export function Timeline({ songId }: { songId: string }) {
     window.addEventListener('toggle-track-mute', handleToggleMute);
     window.addEventListener('toggle-track-solo', handleToggleSolo);
     window.addEventListener('update-track-volume', handleUpdateVolume);
+    window.addEventListener('update-track-pan', handleUpdatePan);
     window.addEventListener('replace-clip', handleReplaceClip);
     window.addEventListener('remove-clip', handleRemoveClip);
     window.addEventListener('timeline-track-selected', handleTrackSelected);
@@ -1388,6 +1444,7 @@ export function Timeline({ songId }: { songId: string }) {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
       window.removeEventListener('update-track-volume', handleUpdateVolume);
+      window.removeEventListener('update-track-pan', handleUpdatePan);
       window.removeEventListener('replace-clip', handleReplaceClip);
       window.removeEventListener('remove-clip', handleRemoveClip);
       window.removeEventListener('timeline-track-selected', handleTrackSelected);

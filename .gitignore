@@ -13,3 +13,4 @@ server/db.sqlite
 .local/server/db.sqlite
 .local/
 patchbay.db
+.claude/settings.local.json

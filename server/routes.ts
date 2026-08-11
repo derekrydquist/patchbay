@@ -548,12 +548,18 @@ export async function registerRoutes(
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
-    const { volume } = req.body as { volume?: unknown };
-    if (volume === undefined) return res.status(400).json({ message: "No updates provided" });
-    if (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0 || volume > 100) {
+    const { volume, pan } = req.body as { volume?: unknown; pan?: unknown };
+    if (volume === undefined && pan === undefined) return res.status(400).json({ message: "No updates provided" });
+    if (volume !== undefined && (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0 || volume > 100)) {
       return res.status(400).json({ message: "volume must be a number between 0 and 100" });
     }
-    const track = await storage.updateTrack(trackId, { volume: Math.round(volume) });
+    if (pan !== undefined && (typeof pan !== "number" || !Number.isFinite(pan) || pan < -100 || pan > 100)) {
+      return res.status(400).json({ message: "pan must be a number between -100 and 100" });
+    }
+    const updates: { volume?: number; pan?: number } = {};
+    if (volume !== undefined) updates.volume = Math.round(volume as number);
+    if (pan !== undefined) updates.pan = Math.round(pan as number);
+    const track = await storage.updateTrack(trackId, updates);
     if (!track) return res.status(404).json({ message: "Track not found" });
 
     const volumeActor = req.session.userId

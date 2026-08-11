@@ -19,6 +19,12 @@ export interface SectionInfo {
   duration: number;
 }
 
+// L75 / C / R60 — sign is implicit in an audio pan context, so a raw signed number is never shown.
+function formatPan(pan: number): string {
+  if (pan === 0) return 'C';
+  return pan < 0 ? `L${Math.abs(pan)}` : `R${pan}`;
+}
+
 interface SectionCellProps {
   sectionStart: number;
   sectionDuration: number;
@@ -130,6 +136,9 @@ export function TimelineTrack({
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Timestamp of the last pointerdown whose OWN target (at its own dispatch time, before
+  // Radix's click-to-jump can move anything) landed on the pan handle. See handlePanPointerDown.
+  const lastPanHandleDownRef = useRef<number | null>(null);
 
   const { setNodeRef } = useDroppable({
     id: track.id,
@@ -145,6 +154,31 @@ export function TimelineTrack({
   // the flag is still true when the resulting click event (wherever its target lands) fires.
   const handleControlPointerDown = () => { controlInteractionRef.current = true; };
   const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
+
+  // Radix's Slider jumps the handle to the click position on pointerdown for any click that
+  // doesn't land on the handle itself. That means the SECOND click of a double-click on empty
+  // track always ends up physically on top of the (just-relocated) handle by the time it fires —
+  // so a native `dblclick` listener can't tell "double-clicked the handle" apart from "clicked
+  // track, then clicked again where the handle now sits." Recording each pointerdown's own
+  // target independently (evaluated at that click's own dispatch time, before its own jump can
+  // have happened) sidesteps this: only two CONSECUTIVE pointerdowns that were both, on their own,
+  // over the handle count as a reset — a track click always breaks the pairing.
+  const handlePanPointerDown = (e: React.PointerEvent) => {
+    const isHandle = !!(e.target as HTMLElement).closest('[role="slider"]');
+    if (!isHandle) {
+      lastPanHandleDownRef.current = null;
+      return;
+    }
+    const now = Date.now();
+    if (lastPanHandleDownRef.current !== null && now - lastPanHandleDownRef.current < 500) {
+      lastPanHandleDownRef.current = null;
+      window.dispatchEvent(
+        new CustomEvent('update-track-pan', { detail: { trackId: track.id, pan: 0 } })
+      );
+    } else {
+      lastPanHandleDownRef.current = now;
+    }
+  };
 
   return (
     <div className="relative flex w-full h-16 bg-card/20 group">
@@ -249,7 +283,30 @@ export function TimelineTrack({
                 max={100}
                 step={1}
                 className="w-16 h-1"
+                title={`Volume: ${track.volume ?? 80}`}
               />
+            </div>
+            <div
+              className="relative"
+              onPointerDown={(e) => { handleControlPointerDown(); handlePanPointerDown(e); }}
+              onPointerUp={handleControlPointerUp}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Slider
+                value={[track.pan ?? 0]}
+                onValueChange={([val]) =>
+                  window.dispatchEvent(
+                    new CustomEvent('update-track-pan', { detail: { trackId: track.id, pan: val } })
+                  )
+                }
+                min={-100}
+                max={100}
+                step={1}
+                className="w-16 h-1"
+                title={`Pan: ${formatPan(track.pan ?? 0)}`}
+              />
+              {/* Center (0) tick — dead center is a meaningful value, not just a midpoint of the range. */}
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-px h-1.5 bg-border pointer-events-none" />
             </div>
           </div>
         </div>

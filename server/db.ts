@@ -120,6 +120,15 @@ if (!hasTimelineClipsIsFullTake) {
   console.log("[PatchBay] Added is_full_take column to timeline_clips table.");
 }
 
+// Add pan to instrument_tracks table if missing.
+const hasTracksPan = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('instrument_tracks') WHERE name='pan'"
+).get() as { c: number }).c;
+if (!hasTracksPan) {
+  sqlite.exec("ALTER TABLE instrument_tracks ADD COLUMN pan INTEGER NOT NULL DEFAULT 0");
+  console.log("[PatchBay] Added pan column to instrument_tracks table.");
+}
+
 // Create bucket_folder_views table if not exists, then backfill on first creation only.
 const hasBucketFolderViews = (sqlite.prepare(
   "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='bucket_folder_views'"

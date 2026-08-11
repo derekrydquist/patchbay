@@ -63,6 +63,7 @@ export const instrumentTracks = sqliteTable("instrument_tracks", {
   sortOrder: integer("sort_order").notNull().default(0),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   volume: integer("volume").notNull().default(100),
+  pan: integer("pan").notNull().default(0), // -100 (full left) to 100 (full right), 0 = center
 }, (table) => ({
   uniqueSongName: uniqueIndex("uniq_song_track_name").on(table.songId, table.name),
 }));

@@ -132,7 +132,7 @@ export interface IStorage {
 
   // Tracks
   createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
-  updateTrack(trackId: string, updates: { volume: number }): Promise<InstrumentTrack | undefined>;
+  updateTrack(trackId: string, updates: { volume?: number; pan?: number }): Promise<InstrumentTrack | undefined>;
   deleteTrack(trackId: string): Promise<void>;
   hideTrack(trackId: string): Promise<void>;
   restoreTrack(trackId: string): Promise<void>;
@@ -603,7 +603,7 @@ export class SQLiteStorage implements IStorage {
     return track;
   }
 
-  async updateTrack(trackId: string, updates: { volume: number }): Promise<InstrumentTrack | undefined> {
+  async updateTrack(trackId: string, updates: { volume?: number; pan?: number }): Promise<InstrumentTrack | undefined> {
     db.update(instrumentTracks).set(updates).where(eq(instrumentTracks.id, trackId)).run();
     return db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
   }
