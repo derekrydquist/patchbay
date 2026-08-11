@@ -1288,7 +1288,6 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           duration: replacement.duration,
           type: 'audio',
           color: clip.color,
-          isFinal: false,
           trimStart: 0,
           trimEnd: null,
           bucketClipId: replacement.id,

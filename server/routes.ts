@@ -837,6 +837,15 @@ export async function registerRoutes(
       : 'Someone';
     const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
+    // Compute isReplace before the update so we can use existingClip.name in the isFinal block below.
+    const isReplace = typeof clipUpdates.name === 'string' && typeof clipUpdates.src === 'string'
+      && clipUpdates.name !== existingClip.name;
+    // For Replace: derive isFinal from the bucket clip's current state via bucketClipId rather than
+    // trusting the client. Uses current DB value (not stale from when the replacement menu opened).
+    if (isReplace && clipUpdates.bucketClipId) {
+      const bucketClip = db.select().from(clips).where(eq(clips.id, clipUpdates.bucketClipId as string)).get();
+      clipUpdates.isFinal = bucketClip?.isFinal ?? false;
+    }
     const clip = Object.keys(clipUpdates).length > 0
       ? await storage.updateTimelineClip(clipId, clipUpdates)
       : existingClip;
@@ -845,8 +854,12 @@ export async function registerRoutes(
     const isFinal = clipUpdates.isFinal;
     if (isFinal === true || isFinal === false) {
       try {
-        // Sync isFinal to the corresponding bucket clip so it persists across reloads
-        if (clip.sectionName) {
+        // Sync isFinal to the corresponding bucket clip so it persists across reloads.
+        // Skipped during Replace: performReplace always sends isFinal:false as a mechanical reset
+        // ("new/replaced clips start non-final"), not as a user decision to unmark a version.
+        // Running this after the rename would use clip.name (the replacement's name) and strip
+        // isFinal from the replacement's own bucket clip — the bug this gate fixes.
+        if (clip.sectionName && !isReplace) {
           await storage.syncFinalClipFromTimeline(clip.trackId, clip.sectionName, clip.name, isFinal);
         }
 
@@ -877,8 +890,6 @@ export async function registerRoutes(
     }
 
     // Log clip-replaced activity when name+src both change (= replace operation from Replace submenu)
-    const isReplace = typeof clipUpdates.name === 'string' && typeof clipUpdates.src === 'string'
-      && clipUpdates.name !== existingClip.name;
     if (isReplace && clip.sectionName) {
       try {
         const replaceTrack = db.select().from(instrumentTracks)
