@@ -550,7 +550,7 @@ When implementing auth or any permission checks, always consult this table.
 | Workspace page | ✅ UI done | Layout and components complete; timeline is fully persisted to DB; Transport still uses mock data |
 | Timeline with drag-and-drop | ✅ Done | Full-track droppable with custom collision detection; gap zones at clip boundaries enable clip reordering within a section; track-row drop snaps leftward drags to index 0, rightward to end; invalid tracks get dark overlay (rgba 0,0,0,0.5) at zIndex 20; valid track shows full-row gold border; MeasuringStrategy.Always + live getBoundingClientRect() in collision function for reliable gap zone hits; no speculative section injection during drag |
 | Section header drag-to-reorder | ✅ Done | Separate inner DndContext from clip drag; dragging a section header moves entire column and all clips across all tracks; insertion line shows between columns; recalcAllStarts runs on drop; section headers are sticky (top-8 z-10 bg-[#09090b]) — pin below the ruler on vertical scroll while remaining draggable |
-| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation); right-click timeline clip → Replace submenu (fetches real bucket versions from `/api/timeline-clips/:id/replacements` on open; confirmation dialog if clip is final; PATCHes name/src/duration/type/color + isFinal:false on select); "Show in File Browser" (dispatches `find-in-bucket` CustomEvent; MediaBucket navigates to matching instrument + section) |
+| Right-click context menu (timeline) | ✅ Done | Right-click timeline background → "Clear Timeline" (server checks for finals first; simple dialog if none, enhanced dialog with "Leave Final Clips" / "Clear All" if finals exist); right-click track header → "Remove Instrument" (AlertDialog confirmation); right-click timeline clip → Replace submenu (fetches real bucket versions from `/api/timeline-clips/:id/replacements` on open; confirmation dialog if clip is final; PATCHes name/src/duration/type/color on select; new timeline row inherits isFinal from replacement's current bucket status, never writes to the clips table — see Replace flow — isFinal handling section); "Show in File Browser" (dispatches `find-in-bucket` CustomEvent; MediaBucket navigates to matching instrument + section) |
 | Media Bucket (file browser) | ✅ Done | Fully wired to real API; fetches bucket from `/api/songs/:id/bucket`; upload persists files to disk + DB; clips draggable to timeline with correct track validation; "Add Section" adds a section idea across all tracks simultaneously; right-click instrument → hides instrument (soft-delete, restorable); right-click section → hides section idea (soft-delete, restorable); "Add Instrument" and "Add Section" dialogs show restore dropdowns when hidden items exist; VERSIONS column shows compact `WaveformPlayerCard` rows (32px canvas, play button, colored left border, gold checkmark for FINAL); right-click clip → More Info / Add Note / Mark as Final / Add to Timeline / Download / **Remove** (soft-delete via `PATCH /api/clips/:clipId { active: false }`); `getBucket` filters `active = true` clips; **UploadModal** (exported from `MediaBucket.tsx`) is the single shared upload dialog used in both MediaBucket and Dashboard — see UploadModal architecture section below |
 | File upload (persist files) | ✅ Done | `POST /api/upload` — multer memory storage, 50MB limit, audio/* filter; writes to `uploads/`; extracts duration via music-metadata (two-attempt with mimetype then without); falls back to 5s if duration < 1; returns `{ url, duration, format, originalFileName }` |
 | Transport (play/pause/BPM) | ✅ Done | Pure controls component — dispatches `toggle-play`, `update-bpm`, `toggle-loop`, `update-master-volume`, `update-time-signature`, `toggle-metronome` events; no audio logic of its own; dummy CDN audio system removed; BPM is persisted to `songs.bpm` via `PATCH /api/songs/:id` on blur/Enter (not on every keystroke); Transport initializes `bpm` state as `null` and the input renders `disabled` until `songData` arrives from the `['song', songId]` query, preventing a flash of the stale `useState` default before the real value loads; `songs.timeSignature` (text column, default `"4/4"`) persisted alongside `bpm`; TIME SIG field is a shadcn `Select` with presets 4/4, 3/4, 6/8, 2/4, 5/4 — commits immediately on selection (unlike BPM which commits on blur/Enter) and dispatches `update-time-signature`; metronome toggle is a bare ghost icon button (first in the transport controls cluster, before skip-back); `isMetronomeOn` is personal localStorage state per song in both Transport and Timeline (same pattern as `isLooping`, not DB-persisted) and dispatches `toggle-metronome` |
@@ -1453,6 +1453,16 @@ Both routes wrap this logic in a `try/catch` so a task-lookup failure (e.g. no t
 
 This is distinct from the `isFinal ↔ task status` bidirectional sync: clip addition advances `todo → in-progress` (one-way); marking a clip final advances `in-progress → complete` (bidirectional — unmarking reverts to `in-progress`).
 
+### Replace flow — isFinal handling — ✅ Fixed (Aug 10, 2026)
+
+Replace (`PATCH /api/timeline-clips/:id` from the Replace submenu) has two isFinal-related rules, both server-enforced:
+
+**Replace never writes to the `clips` table.** `syncFinalClipFromTimeline` — the function that propagates an explicit final/non-final *decision* to the bucket — is gated on `!isReplace` in this route. Replace's `isFinal` value is a mechanical reset of the timeline row, not a user decision about the bucket clip's identity; it must never be interpreted as one. (Historical bug: before this gate existed, replacing a clip would incorrectly strip `isFinal` from the *replacement's* bucket clip, because the sync call ran after the row had already been renamed to the replacement's name and used the post-rename name to look up which bucket clip to unmark.)
+
+**The new timeline row inherits isFinal from the replacement's current bucket status**, read server-side via `bucketClipId` (not from the client's `ReplacementClip.isFinal`, which can be stale by the time the user confirms — another user may have changed the bucket clip's final status between menu-open and confirm). This matches how drag-to-timeline and "Add to Timeline" already behave — all three placement paths now consistently reflect the source clip's final status on arrival.
+
+If the clip being **displaced** by Replace was itself final, its bucket clip's `isFinal` is left untouched — Replace does not rescind a prior final designation; only an explicit unmark action does that.
+
 ### Clip session notes (More Info panel) — ✅ Built
 
 `ClipInfoWindow` in `Clip.tsx` is the shared "More Info" dialog for both `BucketClip` and `TimelineClip`. It shows clip metadata stats and a full comment thread backed by the `clip_comments` table.
@@ -1974,6 +1984,85 @@ Arrow navigation does NOT move the playhead — selection and playback are delib
 
 **Escape — deselect:**
 Registered with `{ capture: true }` on both `addEventListener` and `removeEventListener`. The capture phase is required because Radix's `DismissableLayer` (used by Dialog, AlertDialog, ContextMenu) closes overlays via its own capture-phase Escape listener. A bubble-phase listener would only see the event after Radix has already torn the overlay down, making the `[data-state="open"]` guard always find `null` and incorrectly calling `clearTimelineSelection()` every time the user closes a modal. Guards: typing target; open Radix overlay (returns without `stopPropagation` so Radix still receives the event); nothing selected (no-op). Never calls `stopPropagation` or `preventDefault` on bail.
+
+### Pinch-to-zoom / Ctrl+scroll — ✅ Built
+
+Cursor-anchored zoom on the timeline triggered by trackpad pinch or literal Ctrl+scroll. Both gestures set `e.ctrlKey = true` in all major browsers — no separate `GestureEvent` or `PointerEvent` handling is needed.
+
+**Refs** (declared alongside other timeline refs in `Timeline.tsx`):
+- `wheelDeltaAccRef` — running sum of raw `e.deltaY` between rAF ticks; reset to 0 after each tick consumes it
+- `wheelRafRef` — pending `requestAnimationFrame` handle; `null` means no tick is scheduled
+- `wheelCursorClientXRef` — stores the most recent `e.clientX`; the rAF tick uses whatever the last wheel event recorded, so anchoring reflects the current cursor position even when many events fire before a single tick
+
+**Listener registration:**
+```ts
+el.addEventListener('wheel', handleWheel, { passive: false });
+```
+Registered on `timelineRef.current` (the `overflow-x-auto overflow-y-auto` scroll container). `passive: false` is required so `e.preventDefault()` can suppress the browser's native page zoom. The listener is added in a `useEffect([songId])` that mirrors the scroll-persist effect's dep and cleanup pattern. When `e.ctrlKey` is false the handler returns immediately — normal two-finger pan is completely untouched.
+
+**Zoom calculation (per rAF tick):**
+```ts
+const factor = Math.exp(-accumulated * 0.0040);
+const newZoom = Math.max(10, Math.min(300, currentZoom * factor));
+```
+- Multiplicative, not additive — `Math.exp` maps the signed accumulated `deltaY` to a ratio applied to the current zoom
+- Positive `deltaY` (pinch-close / Ctrl+scroll-down) → `factor < 1` → zoom out; negative → zoom in
+- Bounds `10–300` match `MIN_ZOOM`/`MAX_ZOOM` in `DawScrollbar.tsx` (the only other zoom control)
+- Sensitivity 0.0040 tuned so a moderate pinch gesture covers close to the full zoom range in 1–2 gestures
+
+**Cursor-anchored scroll write (same rAF tick as the zoom update):**
+```ts
+const containerLeft = el.getBoundingClientRect().left;
+const cursorXInContent = el.scrollLeft + (wheelCursorClientXRef.current - containerLeft);
+const cursorTimeSec = Math.max(0, (cursorXInContent - TRACK_PANEL_WIDTH) / currentZoom);
+const targetScrollLeft = cursorTimeSec * newZoom + TRACK_PANEL_WIDTH - (wheelCursorClientXRef.current - containerLeft);
+const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+const newScrollLeft = Math.max(0, Math.min(targetScrollLeft, maxScroll));
+```
+Uses the `TRACK_PANEL_WIDTH`-aware formula established elsewhere — see **Sticky Panel & Scroll Guards** section for why `TRACK_PANEL_WIDTH` must appear in both the cursor position calculation and the `scrollLeft` clamp check. Do not write a bare `scrollLeft + clientX` formula without the panel offset.
+
+After writing `el.scrollLeft`, the handler seeds the edge-riding refs exactly as every other programmatic scroll-write does:
+```ts
+lastAutoScrollRef.current = el.scrollLeft; // post-write DOM value, not the pre-clamp target
+isFollowingRef.current = true;
+```
+This prevents the rAF edge-riding loop from misreading the zoom-driven scroll as a manual drag and disengaging auto-follow during playback.
+
+**Known issue — oscillation/bounce near the timeline's right boundary**
+
+*Symptom:* During a pinch gesture, zoom oscillates (rapidly zooms in and out) when the trailing edge of the last real clip sits near the viewport's right boundary. The zoom value itself bounces between the outgoing and incoming zoom levels rather than advancing smoothly.
+
+*Confirmed NOT the cause:* Scroll clamping against `maxScroll`. Instrumentation (logging `el.scrollWidth`, `el.clientWidth`, `targetScrollLeft`, and `maxScroll` both before and after `setZoom`) showed the clamp never engages in this scenario — `newScrollLeft` equals `targetScrollLeft` throughout the affected frames, and `scrollLeft` never approaches `maxScroll`.
+
+*Three remediation attempts, all reverted (each made behavior worse):*
+1. **EMA smoothing on the accumulated delta** (`smoothedDeltaRef * 0.6 + rawAcc * 0.4`) — eliminated large spikes but introduced lag-then-overshoot on gesture reversals; the smoothed value lagged direction changes and then kept driving in the old direction after the user corrected.
+2. **Hard per-tick delta clamp** (`Math.max(-150, Math.min(150, accumulated))`) — capped individual tick magnitude but traded infrequent large swings for more-frequent small ones; felt more jittery, not less, especially at the boundary.
+3. **60ms update batching** (accumulate all events in a time window, apply once) — caused visible black-frame-like flashes between updates; smooth trackpad input rendered as discrete jumps at ~16fps.
+
+*Current shipped state:* The original per-tick raw-accumulated-delta approach. The boundary oscillation is unresolved and deferred.
+
+*Next investigation direction:* Log raw wheel event `deltaY` values individually (before accumulation) during a boundary-case pinch, not just post-accumulation totals. Also worth testing zoom with cursor-anchoring disabled (hard-code `newScrollLeft = el.scrollLeft`) to isolate whether the anchor math itself is contributing to the oscillation or whether it is entirely in the zoom factor.
+
+### AlertDialog focus management — ✅ Built (Aug 10, 2026 audit)
+
+Every `AlertDialog` in the app that performs a destructive or confirmable action follows this pattern:
+
+**`onOpenAutoFocus`** — Radix's default `focusFirst` behavior focuses the first element in DOM order, which is always `AlertDialogCancel` given how these dialogs are structured. Without an override, pressing Enter immediately on open silently cancels instead of confirming. Every dialog with more than a pure informational message sets:
+```tsx
+onOpenAutoFocus={(e) => {
+  e.preventDefault();
+  actionButtonRef.current?.focus();
+}}
+```
+For dialogs with two non-equal action buttons (e.g. Clear Timeline's "Leave Final Clips" vs. "Clear All"), focus defaults to the **non-destructive** option. The more destructive action always requires an explicit click — never bind it as the Enter-key default.
+
+**`trapDialogTab`** (in `utils.ts`) — `@radix-ui/react-focus-scope@1.1.7`'s `loop: true` Tab-wrap has a bug (reasoned from source, not an upstream-confirmed issue): when focus starts on the *last* tabbable element (which `onOpenAutoFocus` above deliberately does), pressing Tab moves focus to the dialog's own container `div[tabindex="-1"]` instead of wrapping to the first button. This never surfaces with Radix's own default (focus starts on Cancel, the *first* element), which is why it went unnoticed until dialogs started intentionally focusing the action button. Fix: `trapDialogTab` is applied via `onKeyDown` on every `AlertDialogContent` that also sets `onOpenAutoFocus` — it runs before `FocusScope`'s own handler (via `Slot`'s `mergeProps` ordering) and moves focus correctly, so `FocusScope` has nothing left to act on.
+
+**Any new AlertDialog with more than one action button must include both `onOpenAutoFocus` (targeting the safe/expected action) and `onKeyDown={trapDialogTab}`.** Omitting either reintroduces one of the two bugs above.
+
+**Known gap:** the focus-visible ring (`ring-2 ring-offset-2`) that should visually indicate the currently-focused button is invisible in Safari specifically — a WebKit bug in the interaction between CSS Nesting and `@property(inherits:false)` custom properties (Tailwind v4 generates `focus-visible:` variants via CSS nesting; WebKit incorrectly falls back to the registered property's transparent initial-value instead of the value set in the same nested block). This affects every `ring-2` component app-wide (Button, TabsTrigger, Switch, Input, Select, Checkbox), not just dialogs. Purely cosmetic — Tab still moves focus correctly — and deliberately deprioritized. If ever revisited, non-nested ring rules (e.g. the existing `.ring-ring` class) already render correctly in Safari, so the fix is restructuring the ring utility's CSS generation, not a full pattern change.
+
+**Known gap:** ProductionTracker's Add Instrument/Section chooser modal does not move focus from the Section card to the Instrument card on Tab at all (confirmed — not the ring-invisibility issue, actual focus is stuck). Not yet investigated.
 
 ### Sticky Panel & Scroll Guards — load-bearing
 
