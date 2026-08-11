@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useDroppable } from '@dnd-kit/core';
-import { cn } from '@/lib/utils';
+import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip } from '@/lib/daw-data';
 import { TimelineClip } from './Clip';
 import { Mic, Headphones, Activity } from 'lucide-react';
@@ -129,6 +129,7 @@ export function TimelineTrack({
   controlInteractionRef,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const { setNodeRef } = useDroppable({
     id: track.id,
@@ -313,7 +314,14 @@ export function TimelineTrack({
       })()}
 
       <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            removeTrackButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Instrument</AlertDialogTitle>
             <AlertDialogDescription>
@@ -323,6 +331,7 @@ export function TimelineTrack({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={removeTrackButtonRef}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={() => { onDeleteTrack?.(track.id); setShowDeleteConfirm(false); }}
             >

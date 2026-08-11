@@ -6,7 +6,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import {
   CheckCircle2, Circle, Clock, Ban, Music2, Plus, Minus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp, LayoutList,
 } from 'lucide-react';
-import { cn, capitalize } from '@/lib/utils';
+import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { bucketKeys, type ApiTrack } from '@/lib/bucket-api';
 import {
   useAddSection, useAddInstrument,
@@ -780,6 +780,8 @@ export function ProductionTracker({ songId }: { songId: string }) {
 
   const [removeTrackId, setRemoveTrackId] = useState<string | null>(null);
   const [removeSectionName, setRemoveSectionName] = useState<string | null>(null);
+  const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
+  const removeSectionButtonRef = useRef<HTMLButtonElement | null>(null);
   const [isAddChoiceOpen, setIsAddChoiceOpen] = useState(false);
 
   const firstTrackId = bucket[0]?.id;
@@ -1278,7 +1280,14 @@ export function ProductionTracker({ songId }: { songId: string }) {
       </Dialog>
 
       <AlertDialog open={!!removeTrackId} onOpenChange={(v) => !v && setRemoveTrackId(null)}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            removeTrackButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Remove Instrument?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1288,6 +1297,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={removeTrackButtonRef}
               className="bg-red-600 hover:bg-red-700 text-white"
               onClick={() => removeTrackId && deleteTrackMutation.mutate(removeTrackId)}
             >
@@ -1298,7 +1308,14 @@ export function ProductionTracker({ songId }: { songId: string }) {
       </AlertDialog>
 
       <AlertDialog open={!!removeSectionName} onOpenChange={(v) => !v && setRemoveSectionName(null)}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            removeSectionButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Remove Section?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1308,6 +1325,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={removeSectionButtonRef}
               className="bg-red-600 hover:bg-red-700 text-white"
               onClick={() => removeSectionName && hideSectionMutation.mutate(removeSectionName)}
             >

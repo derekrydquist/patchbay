@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { capitalize } from '@/lib/utils';
+import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil } from 'lucide-react';
@@ -349,6 +349,7 @@ export default function Dashboard() {
   const [renameAlbumName, setRenameAlbumName] = useState('');
   const [renameAlbumError, setRenameAlbumError] = useState<string | null>(null);
   const [deleteAlbumId, setDeleteAlbumId] = useState<string | null>(null);
+  const deleteAlbumButtonRef = useRef<HTMLButtonElement | null>(null);
   const [isAlbumSongPickerOpen, setIsAlbumSongPickerOpen] = useState(false);
   const [albumSongPickerSearch, setAlbumSongPickerSearch] = useState('');
   const [albumSongPickerSelected, setAlbumSongPickerSelected] = useState<Set<string>>(new Set());
@@ -673,6 +674,7 @@ export default function Dashboard() {
   });
 
   const [songToDelete, setSongToDelete] = useState<Song | null>(null);
+  const deleteSongButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const deleteSong = useMutation({
     mutationFn: (id: string) =>
@@ -2785,7 +2787,14 @@ export default function Dashboard() {
       </Dialog>
 
       <AlertDialog open={!!songToDelete} onOpenChange={open => { if (!open) setSongToDelete(null); }}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-white/10 max-w-sm">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10 max-w-sm"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            deleteSongButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="text-sm font-bold text-white">Delete "{songToDelete?.name}"?</AlertDialogTitle>
             <AlertDialogDescription className="text-xs text-muted-foreground">
@@ -2795,6 +2804,7 @@ export default function Dashboard() {
           <AlertDialogFooter>
             <AlertDialogCancel className="border-white/10 hover:bg-white/5 text-xs">Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={deleteSongButtonRef}
               className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
               onClick={() => songToDelete && deleteSong.mutate(songToDelete.id)}
             >
@@ -2881,7 +2891,14 @@ export default function Dashboard() {
 
       {/* Delete Album confirm */}
       <AlertDialog open={!!deleteAlbumId} onOpenChange={open => { if (!open) setDeleteAlbumId(null); }}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-white/10">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            deleteAlbumButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="text-sm font-bold text-white">
               Delete "{albumList.find(a => a.id === deleteAlbumId)?.name}"?
@@ -2893,6 +2910,7 @@ export default function Dashboard() {
           <AlertDialogFooter>
             <AlertDialogCancel className="border-white/10 hover:bg-white/5 text-xs">Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={deleteAlbumButtonRef}
               className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
               onClick={() => deleteAlbumId && deleteAlbumMutation.mutate(deleteAlbumId)}
             >

@@ -29,7 +29,7 @@ import {
   MouseSensor,
 } from '@dnd-kit/core';
 import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
-import { cn } from '@/lib/utils';
+import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
 import { TimelineTrack, SectionInfo } from './Track';
@@ -1907,6 +1907,8 @@ export function Timeline({ songId }: { songId: string }) {
 
   const [contextMenuPos, setContextMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [clearDialogState, setClearDialogState] = useState<'none' | 'checking' | 'simple' | 'enhanced'>('none');
+  const clearSimpleButtonRef = useRef<HTMLButtonElement | null>(null);
+  const clearLeaveFinalButtonRef = useRef<HTMLButtonElement | null>(null);
   const [flashClipId, setFlashClipId] = useState<string | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -2582,7 +2584,14 @@ export function Timeline({ songId }: { songId: string }) {
         open={clearDialogState === 'simple'}
         onOpenChange={(open) => { if (!open) setClearDialogState('none'); }}
       >
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            clearSimpleButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Clear Timeline</AlertDialogTitle>
             <AlertDialogDescription>
@@ -2592,6 +2601,7 @@ export function Timeline({ songId }: { songId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={clearSimpleButtonRef}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleClearAll}
             >
@@ -2606,7 +2616,14 @@ export function Timeline({ songId }: { songId: string }) {
         open={clearDialogState === 'enhanced'}
         onOpenChange={(open) => { if (!open) setClearDialogState('none'); }}
       >
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            clearLeaveFinalButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Clear Timeline</AlertDialogTitle>
             <AlertDialogDescription>
@@ -2616,6 +2633,7 @@ export function Timeline({ songId }: { songId: string }) {
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={clearLeaveFinalButtonRef}
               className="bg-card text-foreground border border-border hover:bg-muted"
               onClick={handleLeaveFinalClips}
             >

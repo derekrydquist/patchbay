@@ -4,7 +4,7 @@ import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
-import { cn, capitalize } from '@/lib/utils';
+import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, MessageCircle } from 'lucide-react';
@@ -900,6 +900,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const clipContainerRef = useRef<HTMLDivElement | null>(null);
   const isFinalRef = useRef(clip.isFinal);
   const removeClipButtonRef = useRef<HTMLButtonElement | null>(null);
+  const replaceClipButtonRef = useRef<HTMLButtonElement | null>(null);
+  const resetTrimAllButtonRef = useRef<HTMLButtonElement | null>(null);
+  const applyTrimAllButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
     queryKey: ['clip-comment-summary', songId],
@@ -1630,6 +1633,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             e.preventDefault();
             removeClipButtonRef.current?.focus();
           }}
+          onKeyDown={trapDialogTab}
         >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Final Clip?</AlertDialogTitle>
@@ -1654,7 +1658,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       </AlertDialog>
 
       <AlertDialog open={showReplaceConfirm} onOpenChange={(open) => { if (!open) { setShowReplaceConfirm(false); setPendingReplacement(null); } }}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            replaceClipButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Replace Final Clip?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1664,6 +1675,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
+              ref={replaceClipButtonRef}
               onClick={() => {
                 if (pendingReplacement) performReplace(pendingReplacement);
                 setShowReplaceConfirm(false);
@@ -1677,7 +1689,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       </AlertDialog>
 
       <AlertDialog open={showResetTrimAllConfirm} onOpenChange={(open) => { if (!open) setShowResetTrimAllConfirm(false); }}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            resetTrimAllButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Reset Trim on All Instances?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1686,7 +1705,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={async () => {
+            <AlertDialogAction ref={resetTrimAllButtonRef} onClick={async () => {
               setShowResetTrimAllConfirm(false);
               try {
                 await fetch('/api/timeline-clips/apply-trim-to-instances', {
@@ -1707,7 +1726,14 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       </AlertDialog>
 
       <AlertDialog open={showApplyTrimConfirm} onOpenChange={(open) => { if (!open) setShowApplyTrimConfirm(false); }}>
-        <AlertDialogContent className="bg-[#0c0c0e] border-border">
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            applyTrimAllButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle className="font-heading uppercase tracking-wider">Apply Trim to All Instances?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -1716,7 +1742,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={performApplyTrimToInstances}>
+            <AlertDialogAction ref={applyTrimAllButtonRef} onClick={performApplyTrimToInstances}>
               Apply to All
             </AlertDialogAction>
           </AlertDialogFooter>
