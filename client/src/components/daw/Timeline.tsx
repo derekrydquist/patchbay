@@ -416,7 +416,6 @@ export function Timeline({ songId }: { songId: string }) {
   // re-engaged only when the playhead is visible in the viewport again.
   const isFollowingRef = React.useRef<boolean>(true);
   const volumePatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const panPatchTimers = React.useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const uiRestored = React.useRef(false);
   const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const playheadSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1333,24 +1332,6 @@ export function Timeline({ songId }: { songId: string }) {
           .catch((err) => console.error('Failed to persist track volume:', err));
       }, 500);
     };
-    // Debounced independently from volume (separate timer map, keyed by trackId) so
-    // dragging one control doesn't cancel or delay the other's pending write.
-    const handleUpdatePan = (e: any) => {
-      const { trackId, pan } = e.detail as { trackId: string; pan: number };
-      setTracks((prev) =>
-        prev.map((t) => (t.id === trackId ? { ...t, pan } : t))
-      );
-      clearTimeout(panPatchTimers.current[trackId]);
-      panPatchTimers.current[trackId] = setTimeout(() => {
-        fetch(`/api/tracks/${trackId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pan }),
-        })
-          .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
-          .catch((err) => console.error('Failed to persist track pan:', err));
-      }, 500);
-    };
     const handleReplaceClip = (e: any) => {
       const { oldClipId, newClip } = e.detail;
       setTracks((prev) =>
@@ -1435,7 +1416,6 @@ export function Timeline({ songId }: { songId: string }) {
     window.addEventListener('toggle-track-mute', handleToggleMute);
     window.addEventListener('toggle-track-solo', handleToggleSolo);
     window.addEventListener('update-track-volume', handleUpdateVolume);
-    window.addEventListener('update-track-pan', handleUpdatePan);
     window.addEventListener('replace-clip', handleReplaceClip);
     window.addEventListener('remove-clip', handleRemoveClip);
     window.addEventListener('timeline-track-selected', handleTrackSelected);
@@ -1444,7 +1424,6 @@ export function Timeline({ songId }: { songId: string }) {
       window.removeEventListener('toggle-track-mute', handleToggleMute);
       window.removeEventListener('toggle-track-solo', handleToggleSolo);
       window.removeEventListener('update-track-volume', handleUpdateVolume);
-      window.removeEventListener('update-track-pan', handleUpdatePan);
       window.removeEventListener('replace-clip', handleReplaceClip);
       window.removeEventListener('remove-clip', handleRemoveClip);
       window.removeEventListener('timeline-track-selected', handleTrackSelected);
