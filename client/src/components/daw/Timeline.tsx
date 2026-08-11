@@ -444,6 +444,11 @@ export function Timeline({ songId }: { songId: string }) {
   // a child control.
   const controlInteractionRef = React.useRef(false);
 
+  // Pinch-to-zoom / Ctrl+scroll — accumulator and rAF handle
+  const wheelDeltaAccRef = React.useRef<number>(0);
+  const wheelRafRef = React.useRef<number | null>(null);
+  const wheelCursorClientXRef = React.useRef<number>(0);
+
   // Section layout: one entry per section that has at least one clip, in sectionOrder order.
   // Empty sections are absent — no column, no space. Derived entirely from clips on tracks.
   const sectionLayout = React.useMemo(
@@ -835,6 +840,63 @@ export function Timeline({ songId }: { songId: string }) {
       if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
     };
   }, [songId]);
+
+  // Pinch-to-zoom / Ctrl+scroll — cursor-anchored multiplicative zoom.
+  // Only fires when e.ctrlKey is true (trackpad pinch or literal Ctrl+scroll).
+  // Normal two-finger pan is untouched: when ctrlKey is false the event falls through.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+
+      // Capture latest cursor position; rAF will use the most-recent value.
+      wheelCursorClientXRef.current = e.clientX;
+      wheelDeltaAccRef.current += e.deltaY;
+
+      if (wheelRafRef.current !== null) return; // rAF already pending
+
+      wheelRafRef.current = requestAnimationFrame(() => {
+        wheelRafRef.current = null;
+        const accumulated = wheelDeltaAccRef.current;
+        wheelDeltaAccRef.current = 0;
+
+        const currentZoom = zoomRef.current;
+        const factor = Math.exp(-accumulated * 0.0040);
+        const newZoom = Math.max(10, Math.min(300, currentZoom * factor));
+
+        if (Math.abs(newZoom - currentZoom) < 0.01) return;
+
+        // Cursor-anchored: keep the timestamp under the cursor fixed on screen.
+        // cursorTimeSec = (content-space cursor X − panel) / oldZoom
+        // newScrollLeft  = cursorTimeSec * newZoom + panel − (cursor screen X − container left)
+        const containerLeft = el.getBoundingClientRect().left;
+        const cursorXInContent = el.scrollLeft + (wheelCursorClientXRef.current - containerLeft);
+        const cursorTimeSec = Math.max(0, (cursorXInContent - TRACK_PANEL_WIDTH) / currentZoom);
+        const targetScrollLeft = cursorTimeSec * newZoom + TRACK_PANEL_WIDTH - (wheelCursorClientXRef.current - containerLeft);
+        const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+        const newScrollLeft = Math.max(0, Math.min(targetScrollLeft, maxScroll));
+
+        setZoom(newZoom);
+        el.scrollLeft = newScrollLeft;
+        // Seed the edge-riding refs so the rAF loop doesn't misread this as a manual scroll.
+        lastAutoScrollRef.current = el.scrollLeft;
+        isFollowingRef.current = true;
+      });
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', handleWheel);
+      if (wheelRafRef.current !== null) {
+        cancelAnimationFrame(wheelRafRef.current);
+        wheelRafRef.current = null;
+      }
+      wheelDeltaAccRef.current = 0;
+    };
+  }, [songId]); // songId matches the scroll-persist effect's dep; setZoom is stable
 
   const checkAudioMuteState = React.useCallback(
     (playheadTime: number) => {
