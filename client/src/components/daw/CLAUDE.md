@@ -826,15 +826,43 @@ After writing `el.scrollLeft`, always:
   coordinates). Never position it with scrollLeft math or toggle it from scroll events: Safari
   throttles scroll events during momentum/rubber-band (sparse deltas, negative scrollLeft) while
   the compositor moves content every frame — JS cannot keep up, by construction.
-- The draggable flag is a separate element inside the sticky flag band (band z-35 so the flag,
-  which overflows the 6px band, paints over the z-30 ruler). Line and flag both read
-  playheadPositionState.
+- The draggable flag is a separate element inside the sticky flag band (band z-35 by default —
+  see the dynamic-stacking entry below — so the flag, which overflows the 6px band, paints over
+  the z-30 ruler). Line and flag both read playheadPositionState.
+- **Playhead flag/panel stacking is dynamic, not a static z-map entry (updated 2026-08-12).** The
+  playhead is two independently-positioned elements sharing one source value, `playheadPx = 256 +
+  playheadTimeSecs * zoom` (256 = `TRACK_PANEL_WIDTH`): the full-height line (z-40, `left:
+  playheadPx`, `translateX(-50%)`) and the flag/marker (`left: playheadPx`, same
+  `translateX(-50%)`, no clamp). Both now derive position identically — a prior clamp on the
+  flag's `left` (`Math.max(playheadPx, TRACK_PANEL_WIDTH + 6.5)`) that kept it fully clear of the
+  sticky instruments panel at low timecodes has been removed; the flag's point now stays
+  pixel-aligned with the line at all times, including t=0, at the cost of the flag's body
+  legitimately overhanging left onto the panel near t=0.
+
+  To keep that overhang visible (not hidden behind the panel's opaque background) without
+  breaking the case where the playhead is scrolled fully off-screen to the left (where the panel
+  must still occlude it), the flag-band's z-index is now computed per render rather than static:
+  ```ts
+  const flagAbovePanel = playheadPx - scrollLeft >= TRACK_PANEL_WIDTH;
+  // flag-band zIndex: 51 when flagAbovePanel, 35 otherwise
+  ```
+  51 sits above the panel's z-50 spacer (fully visible overhang); 35 is the original resting
+  layer (correctly hidden when scrolled away). A scroll listener (`flagAbovePanelRef`) forces a
+  re-render on pure-scroll boundary crossings, since playhead-position state alone doesn't change
+  in that case.
+
+  **Gotcha:** this z-index is applied to the whole sticky flag-band container, not just the flag
+  element inside it — raising only the child would leave it trapped under the band's own
+  stacking context (see the WebKit sticky-stacking-context rule below). Don't try to z-index the
+  flag div directly.
 - WEBKIT LAW: position:sticky creates a stacking context even at z-index auto. Occluders must BE
   the sticky element (z on the leaf, plain non-sticky/z-auto/transform-free ancestors up to the
   scroll content root) — never a child of a sticky band root. Band spacers are content-root
   siblings overlaying their bands via negative margins.
-- Z-map (leaves only; all containers z-auto): panel spacers/cells 50 > playhead line 40 >
-  flag band 35 > ruler & section bands 30 (fully opaque) > resize strip 25.
+- Z-map (leaves only; all containers z-auto — read as the default/resting order; the flag-band is
+  the one exception that toggles between two z values based on scroll position, per the
+  dynamic-stacking entry above): panel spacers/cells 50 > playhead line 40 > flag band 35 >
+  ruler & section bands 30 (fully opaque) > resize strip 25.
 - The top-edge pane-resize strip must stay BELOW the flag band and the flag opts into pointer
   events (band is pointer-events-none, flag pointer-events-auto) — the strip intercepted all
   scrub input for multiple debugging rounds before DevTools inspection caught it.

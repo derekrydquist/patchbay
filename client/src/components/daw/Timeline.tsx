@@ -419,6 +419,12 @@ export function Timeline({ songId }: { songId: string }) {
   const uiRestored = React.useRef(false);
   const scrollSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const playheadSaveTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Whether the playhead flag's point is at/right of the sticky instruments panel's edge, last
+  // computed by either a render (playhead-driven) or the scroll listener below (scroll-driven).
+  // Kept in sync via a useEffect on flagAbovePanel further down; used only to dedupe the scroll
+  // listener's force-rerenders so pure scrolling doesn't re-render on every pixel.
+  const flagAbovePanelRef = React.useRef(true);
+  const [, bumpFlagStack] = useState(0);
 
   const timelineRef = React.useRef<HTMLDivElement>(null!);
   const customAudioRefs = React.useRef<{ [clipId: string]: HTMLAudioElement }>({});
@@ -873,6 +879,27 @@ export function Timeline({ songId }: { songId: string }) {
       if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
     };
   }, [songId]);
+
+  // Playhead flag stacking — the flag renders above the sticky panel when its point sits at/right
+  // of the panel's edge, and stays occluded by the panel once scrolling moves the point behind it
+  // (see the flag-band's style below). That check is recomputed on every render already (it reads
+  // playheadPx, which is state-driven), but pure scrolling with no playhead movement doesn't
+  // trigger a render on its own — this listener exists only to force one when the scroll-driven
+  // side of the check would flip the boolean. Compares against a ref (not state) so scrolling
+  // that doesn't cross the boundary never re-renders.
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const checkFlagStack = () => {
+      const above = 256 + playheadRef.current * zoomRef.current - el.scrollLeft >= TRACK_PANEL_WIDTH;
+      if (above !== flagAbovePanelRef.current) {
+        flagAbovePanelRef.current = above;
+        bumpFlagStack((n) => n + 1);
+      }
+    };
+    el.addEventListener('scroll', checkFlagStack, { passive: true });
+    return () => el.removeEventListener('scroll', checkFlagStack);
+  }, []);
 
   // Pinch-to-zoom / Ctrl+scroll — cursor-anchored multiplicative zoom.
   // Only fires when e.ctrlKey is true (trackpad pinch or literal Ctrl+scroll).
@@ -2309,6 +2336,11 @@ export function Timeline({ songId }: { songId: string }) {
   };
 
   const playheadPx = 256 + playheadTimeSecs * zoom;
+  // Whether the flag's point is at/right of the sticky panel's edge — read live from the DOM so
+  // this is correct on the very next render regardless of whether that render was triggered by a
+  // playhead change or by the scroll listener above. See the flag-band's style for how this is used.
+  const flagAbovePanel = playheadPx - (timelineRef.current?.scrollLeft ?? 0) >= TRACK_PANEL_WIDTH;
+  useEffect(() => { flagAbovePanelRef.current = flagAbovePanel; }, [flagAbovePanel]);
 
   return (
     <DndContext
@@ -2413,16 +2445,27 @@ export function Timeline({ songId }: { songId: string }) {
             >
               {/* Flag-band: thin sticky strip that holds the draggable playhead handle.
                   The flag overflows this 6px band downward — that is intentional.
-                  z-50 cover is provided by the content-root sibling spacer below. */}
-              <div className="h-1.5 sticky top-0 z-[35] relative bg-card pointer-events-none">
+                  z is dynamic, not the static 35 in the z-map: when the flag's point is at/right
+                  of the panel edge (flagAbovePanel), the whole band — and thus the flag riding
+                  inside it — is bumped above the z-50 panel spacers so the flag's overhang past
+                  the boundary (near/at t=0) renders on top instead of tucked behind the panel.
+                  This is safe because the band's own bg-card fill is pixel-identical to the
+                  spacer's in the strip they share, so raising it doesn't reveal anything new —
+                  only the flag itself becomes visible there. Once scrolling moves the flag's
+                  point behind the panel (flagAbovePanel false), z drops back to 35 and the z-50
+                  spacers correctly occlude it again, per the original design. */}
+              <div
+                className="h-1.5 sticky top-0 relative bg-card pointer-events-none"
+                style={{ zIndex: flagAbovePanel ? 51 : 35 }}
+              >
                 <div
                   className="absolute top-0 z-10 flex flex-col items-center cursor-grab active:cursor-grabbing pointer-events-auto before:absolute before:-inset-2 before:content-['']"
                   style={{
-                    // Clamp left so the flag's right half is always visible at the panel boundary.
-                    // At time=0 (playheadPx=256), the full 13px flag sits just right of x=256.
-                    // The z-50 panel spacer still correctly covers the flag when the playhead
-                    // is scrolled off the left side of the visible track area.
-                    left: `${Math.max(playheadPx, TRACK_PANEL_WIDTH + 6.5)}px`,
+                    // No clamp: must match the playhead line's x-position exactly, including at
+                    // time=0. At time=0 (playheadPx=256), half the flag body sits left of the
+                    // panel boundary — see flagAbovePanel/the flag-band's style above for why
+                    // that overhang renders on top of the panel instead of being clipped by it.
+                    left: `${playheadPx}px`,
                     transform: 'translateX(-50%)',
                   }}
                   onPointerDown={handlePlayheadPointerDown}
