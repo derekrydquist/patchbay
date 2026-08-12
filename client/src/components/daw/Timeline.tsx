@@ -426,6 +426,10 @@ export function Timeline({ songId }: { songId: string }) {
   const pendingPlayRef = React.useRef<Set<string>>(new Set());
   const seekPendingRef = React.useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  // True once audioCtxRef's most recent resume() call has resolved to "running". Gates
+  // audio.play() in the rAF loop so it never fires while the Web Audio graph is still on
+  // a suspended context (see the toggle-play handler and the rAF play-call site below).
+  const audioCtxReadyRef = useRef<boolean>(false);
   const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
   const lastBeatIndexRef = useRef<number>(-1);
   const isMetronomeOnRef = useRef(isMetronomeOn);
@@ -557,7 +561,25 @@ export function Timeline({ songId }: { songId: string }) {
         if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
           audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         }
-        audioCtxRef.current.resume();
+
+        // Gate audio.play() in the rAF loop until resume() has actually resolved to
+        // "running". Calling play() while ctx.state is still "suspended" (confirmed via
+        // real-Safari instrumentation to happen on essentially every play press, 70-260ms
+        // window) leaves the <audio> element reporting paused:false with no audible output,
+        // since the Web Audio graph downstream (source → panner → destination) produces no
+        // sound on a suspended context. See audioCtxReadyRef read site in the rAF loop below.
+        audioCtxReadyRef.current = false;
+        audioCtxRef.current.resume()
+          .then(() => {
+            audioCtxReadyRef.current = true;
+          })
+          .catch((err) => {
+            // resume() rejecting is rare, but if it happens we still flip the gate open
+            // rather than leaving playback permanently silent-stuck waiting on a promise
+            // that will never resolve — this falls back to the old (racy) behavior only
+            // in that edge case, which is strictly no worse than before this fix.
+            audioCtxReadyRef.current = true;
+          });
       }
     };
     window.addEventListener('toggle-play', handleTogglePlay);
@@ -1209,11 +1231,19 @@ export function Timeline({ songId }: { songId: string }) {
                   if (seekPendingRef.current && !audio.paused) {
                     audio.currentTime = trimStart + Math.max(0, newTime - clipStart);
                   }
-                  if (audio.paused && !pendingPlayRef.current.has(clip.id)) {
+                  // audioCtxReadyRef.current gates this on resume() having actually resolved
+                  // to "running" (set in the toggle-play handler above) — without it, play()
+                  // fires while the graph is still on a suspended context and produces no
+                  // audible output despite the element reporting paused:false. When not yet
+                  // ready, this simply no-ops and retries on the next rAF frame; audio.paused
+                  // stays true and pendingPlayRef stays empty for this clip until it's ready.
+                  if (audio.paused && !pendingPlayRef.current.has(clip.id) && audioCtxReadyRef.current) {
                     audio.currentTime = trimStart + Math.max(0, newTime - clipStart);
                     pendingPlayRef.current.add(clip.id);
                     audio.play()
-                      .then(() => pendingPlayRef.current.delete(clip.id))
+                      .then(() => {
+                        pendingPlayRef.current.delete(clip.id);
+                      })
                       .catch((e) => {
                         pendingPlayRef.current.delete(clip.id);
                         console.warn('play failed:', e);
