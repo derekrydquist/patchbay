@@ -149,6 +149,7 @@ export function TimelineTrack({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     },
     onError: (err) => console.error('Failed to persist track pan:', err),
   });

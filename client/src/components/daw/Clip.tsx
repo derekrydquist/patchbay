@@ -1055,6 +1055,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       if (res.ok) {
         queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
         queryClient.invalidateQueries({ queryKey: ['songs'] });
+        queryClient.invalidateQueries({ queryKey: ['activity'] });
       }
     } catch (err) {
       console.error('Failed to patch trim:', err);
@@ -1209,6 +1210,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch (err) {
       console.error('Failed to apply trim to instances:', err);
     }
@@ -1714,6 +1716,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 });
                 queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
                 queryClient.invalidateQueries({ queryKey: ['songs'] });
+                queryClient.invalidateQueries({ queryKey: ['activity'] });
               } catch (err) {
                 console.error('Failed to reset trim on instances:', err);
               }

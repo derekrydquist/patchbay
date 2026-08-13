@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, count, and, isNull, max, min } from "drizzle-orm";
+import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -84,7 +84,24 @@ export type BucketTrack = InstrumentTrack & {
 // ─── Interface ────────────────────────────────────────────────────────────────
 
 export interface ActivityEvent {
-  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change' | 'task-status-change' | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline' | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted' | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply' | 'song-created' | 'idea-created';
+  // Tier 1 (synthesized at read time):
+  type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change'
+      | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline'
+      | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted'
+      | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply'
+      | 'song-created' | 'idea-created'
+      // Tier 2 (written verbatim via logActivity()) — kept in sync with the
+      // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
+      // last audited 2026-08-12:
+      | 'song-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
+      | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
+      | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
+      | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
+      | 'clip-comment-deleted' | 'task-status-change' | 'task-comment-added'
+      | 'task-comment-reply' | 'task-comment-edited' | 'task-comment-deleted'
+      | 'review-comment-edited' | 'review-comment-deleted' | 'review-comment-resolved'
+      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -1013,7 +1030,29 @@ export class SQLiteStorage implements IStorage {
     }
 
     // Activity log: song-structure events
-    const logCond = songId ? and(eq(activityLog.songId, songId), bandCond) : bandCond;
+    // Sort-only types are still written by logActivity() (getSongsWithLastActive depends on
+    // seeing all of them) but must never render as a feed row. Filtered here, at the read path,
+    // not at write time.
+    const sortOnlyCond = notInArray(activityLog.type, [
+      'volume-changed',
+      'pan-changed',
+      'clip-trim-adjusted',
+      'timeline-reordered',
+      'clip-metadata-edited',
+      'idea-hidden',
+      'clip-comment-edited',
+      'clip-comment-deleted',
+      'clip-comment-reply',
+      'task-comment-edited',
+      'task-comment-deleted',
+      'task-comment-reply',
+      'review-comment-edited',
+      'review-comment-deleted',
+      'album-song-reordered',
+    ]);
+    const logCond = songId
+      ? and(eq(activityLog.songId, songId), bandCond, sortOnlyCond)
+      : and(bandCond, sortOnlyCond);
     const logRows = db
       .select({
         type: activityLog.type,

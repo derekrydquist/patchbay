@@ -1385,7 +1385,10 @@ export function Timeline({ songId }: { songId: string }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ volume }),
         })
-          .then(() => queryClient.invalidateQueries({ queryKey: ['songs'] }))
+          .then(() => Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['songs'] }),
+            queryClient.invalidateQueries({ queryKey: ['activity'] }),
+          ]))
           .catch((err) => console.error('Failed to persist track volume:', err));
       }, 500);
     };
@@ -1439,7 +1442,9 @@ export function Timeline({ songId }: { songId: string }) {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ start: updated.start }),
-            }).catch((err) => console.error('Failed to update clip start after remove:', err));
+            })
+              .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
+              .catch((err) => console.error('Failed to update clip start after remove:', err));
           }
         });
         return recalced;
@@ -1545,6 +1550,7 @@ export function Timeline({ songId }: { songId: string }) {
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
                 queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
+                queryClient.invalidateQueries({ queryKey: ['activity'] }),
               ]))
               .catch((err) => console.error('Failed to patch clip start after section reorder:', err));
           }
@@ -1708,6 +1714,7 @@ export function Timeline({ songId }: { songId: string }) {
             .then(() => Promise.all([
               queryClient.invalidateQueries({ queryKey: ['songs'] }),
               queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
+              queryClient.invalidateQueries({ queryKey: ['activity'] }),
             ]))
             .catch((err) => console.error('Failed to update clip start:', err));
         }
@@ -1803,6 +1810,7 @@ export function Timeline({ songId }: { songId: string }) {
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
                 queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
+                queryClient.invalidateQueries({ queryKey: ['activity'] }),
               ]))
               .catch((err) => console.error('Failed to patch clip start after gap drop:', err));
           }
@@ -1938,6 +1946,7 @@ export function Timeline({ songId }: { songId: string }) {
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
                 queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
+                queryClient.invalidateQueries({ queryKey: ['activity'] }),
               ]))
               .catch((err) => console.error('Failed to update clip start:', err));
           }

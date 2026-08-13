@@ -849,6 +849,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
       setAddSectionError(null);

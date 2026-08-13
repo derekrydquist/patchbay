@@ -159,7 +159,7 @@ in route handlers.
 |---|---|
 | `users` | Auth — username/password accounts |
 | `songs` | Top-level song container (name, bpm, sections JSON) |
-| `instrument_tracks` | One row per instrument per song (Drums, Bass, etc.); has `active` boolean — false = hidden; `volume` integer (default 100, range 0–100) — persisted via `PATCH /api/tracks/:trackId`, debounced 500ms on slider drag; read back on initial load and every live-sync poll |
+| `instrument_tracks` | One row per instrument per song (Drums, Bass, etc.); has `active` boolean — false = hidden; `volume` integer (default 100, range 0–100) — persisted via `PATCH /api/tracks/:trackId`, debounced 500ms on slider drag; read back on initial load and every live-sync poll; `pan` integer (default 0/center, range -100 full left to 100 full right) — persisted via the same `PATCH /api/tracks/:trackId` route. The L/C/R button UI only ever writes `-65`, `0`, or `65`; the column allows the full range for forward compatibility, but nothing currently sets anything outside those three values. See "Track panning" in `client/src/components/daw/CLAUDE.md` for the audio-graph side. |
 | `ideas` | A section slot per instrument (e.g. "Drums — Verse 1"); has `active` boolean — false = hidden |
 | `deleted_sections` | Tracks intentionally deleted default sections (songId + sectionName) so bootstrap doesn't re-add them |
 | `clips` | Versions uploaded to a bucket idea (linked to `ideas`); `isFinal` marks the chosen version |
@@ -470,6 +470,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Never omit `requireBand` from an API route** — every route under `/api/` must include `requireBand` as middleware. Routes without it bypass band scoping entirely and expose all bands' data. See the Route ownership rules section under Bands (multi-tenancy).
 - **Never spread a partial/request-body object into Drizzle `.values()` or an ON CONFLICT `set:`** — build a filtered object with only the defined keys first. See the "Partial updates" rule under Bands (multi-tenancy). Drizzle safely skips `undefined` in plain `.set()` UPDATEs, but JS spread in `.values()` + conflict upsert will overwrite NOT NULL columns with `undefined` before Drizzle sees the data.
 - **When adding a route that touches two independent entity IDs, assert ownership on both** — `assertSongOwned` / `assertAlbumOwned` only cover the single ID passed in; they say nothing about any other ID in the same request body or URL. See the "Two-ID routes" rule under Bands (multi-tenancy).
+- **`instrument_tracks.pan` writes only go through `PATCH /api/tracks/:trackId`** — same single write path as `volume`; there is no separate pan-specific route. Do not add one.
 
 ---
 
@@ -523,14 +524,14 @@ load-bearing depends on these loading at the right moment.
 
 | Topic | Location | Loads when |
 |---|---|---|
-| Timeline drag-and-drop internals (section columns, droppable zones, `recalcAllStarts`, stale-closure rules), audio playback system, non-destructive trim + AI trim detection, apply/reset trim to instances, Media Bucket internals (add section, hidden-tracks invalidation, empty state, session persistence, new-content indicator), Timeline Selection, clip session notes / More Info panel, Musical Intelligence & Meta Tags, timeline clip waveform, Timeline background/clip right-click menus, placement feedback, keyboard shortcuts, pinch-to-zoom, AlertDialog focus management, Sticky Panel & Scroll Guards, Timeline playhead & occlusion, Production Tracker scroll container architecture, clip trim visual redesign, free-position (reverted) notes | `client/src/components/daw/CLAUDE.md` | Editing a file under `client/src/components/daw/` |
+| Timeline drag-and-drop internals (section columns, droppable zones, `recalcAllStarts`, stale-closure rules), audio playback system, track panning (Web Audio graph, `panNodesRef`/`ensurePanNode`), Safari playback-start failure (parked investigation), non-destructive trim + AI trim detection, apply/reset trim to instances, Media Bucket internals (add section, hidden-tracks invalidation, empty state, session persistence, new-content indicator), Timeline Selection, clip session notes / More Info panel, Musical Intelligence & Meta Tags, timeline clip waveform, Timeline background/clip right-click menus, placement feedback, keyboard shortcuts, pinch-to-zoom, AlertDialog focus management, Sticky Panel & Scroll Guards, Timeline playhead & occlusion, Production Tracker scroll container architecture, clip trim visual redesign, free-position (reverted) notes | `client/src/components/daw/CLAUDE.md` | Editing a file under `client/src/components/daw/` |
 | Bands (multi-tenancy) schema, startup backfill, session plumbing, storage additions, Phase 2 query scoping, route ownership rules, band admin & first-login | `server/CLAUDE.md` | Editing a file under `server/` |
 | isFinal ↔ task-status bidirectional sync, Complete status guard, clip addition → task in-progress, Replace flow isFinal handling | `.claude/skills/isfinal-sync/SKILL.md` | Working on final-clip / task-status logic |
 | Review tab architecture (waveform player, comments, @mentions, avatar markers) | `.claude/skills/review-tab/SKILL.md` | Working on the Review tab |
 | Activity feed architecture, Promote to Song | `.claude/skills/activity-feed/SKILL.md` | Working on the activity feed or Dashboard |
 | Full API endpoint reference | `.claude/skills/api-reference/SKILL.md` | Adding or modifying an API route |
 | Feature-by-feature build status ("Core Features & Status") | `.claude/skills/feature-status/SKILL.md` | Checking whether a feature is built |
-| Deployment (Railway) steps | `.claude/skills/deploy/SKILL.md` | Deploying the app |
+| Deployment (Railway) steps, schema migration safety (why `drizzle-kit push` is banned from production) | `.claude/skills/deploy/SKILL.md` | Deploying the app, or making any change to `shared/schema.ts` |
 
 ## Doc Sync & Permissions
 
@@ -559,15 +560,20 @@ the source of truth. If the two ever disagree, the Claude.ai master wins.
 safety classifier rather than prompting every time). Auto mode auto-approves plain `git push`,
 including to `main`, by default — it only holds back force-push, remote branch/tag deletion,
 history rewrites, and pushes to deploy-named branches (`production`, `release`, `gh-pages`).
-**PatchBay's Railway deployment auto-builds and deploys on every push to `main`** (confirmed
-2026-08-11), and `npm start`'s `prestart` hook runs `drizzle-kit push --force` — which skips
-Drizzle's normal confirmation for destructive schema changes (see "Schema bootstrap" in
-`.claude/skills/deploy/SKILL.md`). So a plain `git push` to `main` is the one action standing
-between an unreviewed schema change and it applying itself in production with no confirmation.
-An explicit override is set in `~/.claude/settings.json` (user scope — applies to all projects,
-not just PatchBay): `"permissions": { "ask": ["Bash(git push *)"] }`. This forces every
-`git push` to prompt for confirmation regardless of what the classifier would otherwise decide.
-**Do not remove this rule** without discussing the deploy risk above first.
+**PatchBay's Railway deployment auto-builds and deploys on every push to `main`.** Until
+2026-08-11, `npm start`'s `prestart` hook ran `drizzle-kit push --force` on every boot, which
+skipped Drizzle's normal confirmation for destructive schema changes and caused a full
+production crash loop that day (see "Schema changes — drizzle-kit push is banned from
+production" in `.claude/skills/deploy/SKILL.md` for the incident and fix). That specific hook
+has since been removed — `npm start` now runs `node dist/index.cjs` directly, with no
+drizzle-kit involved at boot. The underlying exposure remains, just narrower: a plain `git push`
+to `main` still applies whatever is on the branch straight to production with no review gate, so
+any other breaking change (code or schema) ships the same way. An explicit override is set in
+`~/.claude/settings.json` (user scope — applies to all projects, not just PatchBay):
+`"permissions": { "ask": ["Bash(git push *)"] }`. This forces every `git push` to prompt for
+confirmation regardless of what the classifier would otherwise decide. **Do not remove this
+rule** — it wasn't what caught the 2026-08-11 incident (that fix was reviewed before pushing),
+but it remains the only gate standing between any future unreviewed change and production.
 
 ## CLAUDE.md Maintenance
 
@@ -621,7 +627,7 @@ These are things that need a decision before being built:
 
 ## Known Issues
 
-- **Small stutter on pressing play** — pre-existing; cause not yet investigated. Unrelated to the session-state persistence work.
+- **Playback stutter / fails to start on first press (Safari) — parked, unresolved** — the original minor stutter on pressing play is still unexplained on its own (unrelated to the session-state persistence work). This session confirmed a related but more severe symptom via manual testing in real Safari.app: playback fails to start on first press more than 50% of the time. Root cause not yet isolated — a code-level race in `Timeline.tsx`'s rAF playback loop (`audio.play()` firing before `ensurePanNode()`'s Web Audio graph wiring completes, no gate between them) is a lead, not a confirmed cause. Could not be reproduced via headless WebKit (Playwright) as a Safari proxy — real Safari.app is required for any future investigation. Full investigation notes and the headless-repro gotcha: see "Safari playback-start failure" in `client/src/components/daw/CLAUDE.md`.
 - **Deleting the currently-looped section correctly disables looping** — the generalized disable-on-reposition watcher catches the transition from a real section to `null` (no section) the same way it catches any other section change, so `isLooping` is set to `false` and `loop-force-disabled` is dispatched cleanly. No lingering state issue.
 - **`activity_log.author` is nullable; pre-existing rows have `author=null`** — the column was retrofitted after initial `activity_log` usage. Rows written before the retrofit have no author and will not contribute to any user's personalized "Your Songs" sort. This is acceptable — those events are old and the sort degrades gracefully to `createdAt` for songs with no user-attributed activity.
 
@@ -704,6 +710,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Section `sortOrder` divergence across tracks** — fixed structurally by the section-add redesign below. Section creation is now a single atomic server-side operation (`POST /api/songs/:songId/sections`) that computes `sortOrder` once (`MAX(existing) + 1`) and shares it across all tracks, replacing the old per-track `Promise.all` flow. No secondary sort tiebreaker (manual drag-to-reorder is planned and will own this).
 - **Section restore modal not closing** — Production Tracker's `restoreSectionMutation.onSuccess` was missing the modal-close state resets (`setIsAddSectionOpen(false)`, etc.) that the instrument-restore counterpart already had. Fixed to match.
 - **Dashboard "Your Songs" sort not reflecting real activity** — Previously the sort only moved on song creation or direct song metadata edits. Root cause: nearly all mutations never wrote to `activity_log` and/or never invalidated `['songs']` client-side, so `getSongsWithLastActive` had no data to rank by and the Dashboard sort was effectively `createdAt`. Fixed across ~45 mutations spanning `Timeline.tsx`, `Clip.tsx`, `ProductionTracker.tsx`, `use-bucket-mutations.ts`, upload flows, reviews, and `Dashboard.tsx`. Two related sub-bugs found and fixed along the way: (a) several routes stored `req.body.author` verbatim instead of resolving the session user — production task status-change comments and review comments were affected; fixed at the server, `author` removed from client request bodies; (b) task status changes and mark-final actions only wrote to `task_comments` and never reached `activity_log` at all — fixed by adding explicit `logActivity()` calls for `task-status-change` and `marked-final` types, and suppressing the redundant tier-1 synthesis of those two event types from `task_comments` to avoid feed duplication.
+- **Railway deploy crash loop from `drizzle-kit push --force` in `prestart`** (2026-08-11) — any schema change to an FK-referenced table (here, adding `instrument_tracks.pan`, referenced by `production_tasks.trackId` and `timeline_clips.trackId`) forces drizzle-kit's SQLite push into a table-recreate strategy (`CREATE new table → copy rows → DROP old → RENAME`). That strategy's `PRAGMA foreign_keys=OFF` toggle is a documented SQLite no-op when run inside an already-open transaction, which is exactly how drizzle-kit runs it — so FK enforcement stayed active through the `DROP TABLE` step and threw `SqliteError: FOREIGN KEY constraint failed` on every boot, leaving production completely unreachable. Production data was confirmed intact afterward: zero FK violations, `PRAGMA integrity_check: ok`, no leftover staging tables (the failed push rolled back cleanly inside its own transaction). Fixed by removing `prestart`'s `drizzle-kit push --force` entirely — schema changes now go exclusively through the idempotent `pragma_table_info`-guarded `ALTER TABLE` pattern in `server/db.ts`, which runs safely at server startup regardless of FK relationships. `drizzle-kit` remains available as a manual, local-dev-only `npm run db:push` command. Full mechanism and the broader "no schema change to an FK-referenced table is safe via `drizzle-kit push`" rule: see "Schema changes — drizzle-kit push is banned from production" in `.claude/skills/deploy/SKILL.md`.
 
 ---
 
@@ -713,4 +720,4 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Manual drag-to-reorder (instruments + sections)** — instrument `sortOrder` data is now clean and ready; sections `sortOrder` is now clean too (fixed by section-add redesign).
 - **Production Tracker's song-wide `hideSectionMutation` has no error handling** — sends bare `fetch()` PATCH calls with no `res.ok` check; a failed request silently drops with no error toast. Fix: match `useHideIdea`'s error-handling pattern.
 - **Section row-label right-click trigger has no visual affordance** — Production Tracker's sticky left column section labels are right-clickable ("Remove Section") but there's no hover indicator, unlike instrument column headers' hover-reveal `+`. Consider a tooltip or hover-reveal `···` button.
-- **Activity feed feed-worthiness audit (not started)** — The sort-data-only `logActivity()` events (events 26–39 in the Tier 2 list: `file-uploaded`, `clip-removed`, `clip-metadata-edited`, all comment/reply/edit/delete events, `volume-changed`, `clip-trimmed`, `timeline-reordered`, `timeline-cleared`, and others) were added purely to give `getSongsWithLastActive` data to rank by. None of them have been evaluated for whether they should appear as user-visible rows in the Activity feed UI. Before surfacing any of them, each needs a product decision on: whether the event is meaningful at a band level, how to phrase the description for feed display, and whether it would create feed noise.
+- ~~**Activity feed feed-worthiness audit (not started)**~~ **Resolved 2026-08-12.** Every Tier 2 event type was audited and classified feed-visible vs. sort-only, and that classification is now enforced server-side via a `notInArray` filter in `getActivity()` — previously it was documentation intent only, and every sort-only type leaked through as a visible feed row. Full per-type classification and rationale: see "Tier 2 event types — full reference" in `.claude/skills/activity-feed/SKILL.md`.

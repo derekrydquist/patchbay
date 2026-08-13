@@ -167,7 +167,7 @@ Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.t
 **Key refs in `Timeline.tsx`:**
 - `customAudioRefs` — `{ [clipId: string]: HTMLAudioElement }`. One `Audio` object pre-created per clip as clips appear in `tracks`. Set `audio.preload = 'auto'` so the browser buffers ahead of play. Created in a `useEffect` on `tracks`; only adds new entries, never overwrites existing ones.
 - `pendingPlayRef` — `Set<string>` of clip IDs whose `.play()` Promise is still resolving. Guards against calling `.play()` again before the previous call settles, which would throw `AbortError`.
-- `audioCtxRef` — persistent `AudioContext | null`. Used solely to unlock Safari's audio pipeline; not used to route audio. Closed when playback stops.
+- `audioCtxRef` — persistent `AudioContext | null`. Originally used solely to unlock Safari's audio pipeline. Since track panning it also routes clip audio for any clip that's been wired into the Web Audio graph (see **Track panning** below) — no longer "not used to route audio." Suspended, not unconditionally closed, once any clip has been routed through it — see the gotcha under Track panning.
 - `masterVolumeRef` — `number`, initialized to `0.8` (matching the Transport slider's default of 80). Updated by a `useEffect` listening for `update-master-volume` events (`e.detail.volume / 100`). The listener also immediately applies the new volume to all currently-playing elements in `customAudioRefs`. The rAF loop multiplies per-track volume by this ref: `audio.volume = (track.volume / 100) * masterVolumeRef.current`.
 
 **Playhead position model:**
@@ -190,7 +190,7 @@ Safari requires `AudioContext.resume()` to be called synchronously within a user
 
 Fix: `Timeline.tsx` listens to the `toggle-play` CustomEvent synchronously. `Transport.tsx` dispatches this event synchronously from the play button click handler and the spacebar handler. When `isPlaying: true` arrives in that synchronous listener, `Timeline.tsx` immediately calls `audioCtxRef.current.resume()` — still within the gesture window. The `audio.play()` calls that happen frames later then run without delay.
 
-When `isPlaying` becomes `false`: all audios are paused, `pendingPlayRef` is cleared, `audioCtxRef.current?.close()` is called, and `audioCtxRef` is set to `null`.
+When `isPlaying` becomes `false`: all audios are paused, `pendingPlayRef` is cleared, and `audioCtxRef` is either suspended or closed depending on whether any clip has been routed through the Web Audio graph — see **Track panning** below for the exact rule and why. (This branch did not exist before track panning; previously the close was unconditional.)
 
 **Stale audio on clip replace — `clip-replaced` CustomEvent:**
 When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the Replace submenu in `Clip.tsx`), the old `HTMLAudioElement` in `customAudioRefs` still holds the old `src` and will keep playing. Fix: `Clip.tsx` dispatches `clip-replaced` with `{ clipId }` after a successful PATCH. `Timeline.tsx` listens for this event (in a `useEffect(fn, [])`, so `customAudioRefs.current` is never stale) and pauses + removes the old element. The pre-create `useEffect` then creates a fresh `Audio` for the new `src` when `tracks` updates after the query refetch.
@@ -200,6 +200,7 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Call `audio.play()` outside the rAF loop without checking `pendingPlayRef` — overlapping play/pause calls throw `AbortError`.
 - Create a new `AudioContext` per clip or per play call — one persistent `audioCtxRef` per play session is correct.
 - Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
+- Unconditionally `.close()` `audioCtxRef` on stop once any clip may have been routed through the Web Audio graph — see **Track panning** below for the suspend/close rule and why.
 - Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
 - Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadPosition` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
 
@@ -213,6 +214,34 @@ If the playhead's pixel position reaches or passes `timelineEndPx` on a given fr
 **Transport button sync (`playback-ended` event):** Transport.tsx and Timeline.tsx hold independent `isPlaying` state with no shared props or context. Transport dispatches `toggle-play` on button/spacebar (one-way, Transport → Timeline). Because auto-stop originates in Timeline.tsx (not via a `toggle-play` dispatch), a second one-way event was added: Timeline's auto-stop block dispatches `playback-ended` immediately after its own `setIsPlaying(false)`; Transport listens for it and calls its own local `setIsPlaying(false)` to un-stick the button.
 
 **Do not:** have Transport dispatch `playback-ended`, or have Timeline listen for it — this must stay strictly one-way (Timeline → Transport) to avoid a dispatch loop. The manual pause/stop path (originating from Transport's own `toggle-play`) does not dispatch `playback-ended` — only the auto-stop block does, since Transport already knows its own state in the manual case.
+
+### Track panning — ✅ Built
+
+`instrument_tracks.pan` (see Database > Tables in root `CLAUDE.md`) drives per-track stereo pan. This is the first feature to route clip audio through the Web Audio API — previously all clip playback was plain `<audio>` elements with `audio.volume` set directly, no Web Audio graph involved at all.
+
+**Web Audio graph (`Timeline.tsx`):**
+- `panNodesRef` — `{ [clipId: string]: StereoPannerNode }`. One node per clip, created lazily.
+- `ensurePanNode(clipId, audio)` — called every frame a clip is in-range and playing, in the rAF `animate` loop, the same place `audio.volume`/`muted`/`playbackRate` are updated. Guarded by `panNodesRef.current[clipId]` — a `<audio>` element can only ever be passed to `createMediaElementSource` once; a second call throws. Wires `audio → createMediaElementSource → StereoPannerNode → audioCtxRef.current.destination`.
+- `panner.pan.value = track.pan / 100` — converts the `-100..100` integer column to the Web Audio API's `-1..1` range. Applied every frame alongside volume/mute/rate, not just at wiring time.
+- `audio.volume` is **unchanged** and still applies pre-graph, upstream of the pan node. Volume and pan are independent, non-interfering paths — panning does not replace or wrap the existing volume mechanism.
+
+**Gotcha — never unconditionally `.close()` `audioCtxRef` once any clip may have been panned:**
+`createMediaElementSource` permanently binds an `<audio>` element to the `AudioContext` it was created from — an element can never be rebound to a new context. Closing and recreating `audioCtxRef` on every stop (the pre-panning behavior) would silently break playback for every previously-panned clip on the next play — a fresh context can't reconnect to an already-bound element. The stop paths (the `isPlaying → false` effect, auto-stop-at-end-of-timeline, and the rAF loop's own stop branch) now all branch on `Object.keys(panNodesRef.current).length > 0`: if any clip has been wired in, `audioCtxRef.current?.suspend()` — context and graph survive, resumed on next play via the existing Safari-unlock `toggle-play` listener; if not, the original unconditional `.close()` + null-out still applies. The unmount cleanup `useEffect` still always closes unconditionally — that's fine, the component is going away and nothing needs to survive.
+
+**UI — L/C/R segmented buttons (`Track.tsx`):**
+Not a slider, not shadcn's `ToggleGroup` — Radix's deselect-to-null semantics don't fit "pan always has a value." A hand-rolled three-button group next to the M/S buttons, matching their sizing/border/hover treatment. Discrete values only: `L = -65`, `C = 0`, `R = 65`. Active-button state uses strict equality (`track.pan === -65 / 0 / 65`) with no nearest-match fallback — an out-of-band pan value (possible since the column allows the full `-100..100` range) shows no button highlighted rather than guessing the closest one, consistent with the project's "warn loudly, don't silently coerce" convention (see `onAddToTimeline` in root `CLAUDE.md`'s What To Avoid). Writes go through `patchPan` (`useMutation` → `PATCH /api/tracks/:trackId`, same route and pattern as volume) — there is no separate pan-specific write path.
+
+### Safari playback-start failure — parked, unresolved
+
+Confirmed via manual testing in real Safari.app: playback fails to start on first press more than 50% of the time. More severe than, but likely related to, the pre-existing minor stutter on pressing play (see root `CLAUDE.md` Known Issues). Root cause not yet isolated.
+
+**Lead, not a confirmed cause — a code-level race:** in the rAF `animate` loop above, `audio.play()` (guarded by `pendingPlayRef`) and `ensurePanNode(clip.id, audio)` both run in the same synchronous pass of the same frame, with no gate between them — `ensurePanNode` wires the Web Audio graph immediately after `.play()` fires, not after its promise resolves.
+
+**Investigation to date:**
+- Reproducing via headless WebKit (Playwright) as a Safari proxy: 0/24 fresh-load failures — could not reproduce.
+- The race window WAS observed to occur in that harness, but only in Firefox, and Firefox silently recovered rather than failing audibly/visibly.
+
+**Gotcha for any future session picking this up:** headless WebKit via Playwright does not reliably reproduce this failure — real Safari.app is required to test any fix. The likely explanation is real audio-hardware session init latency and system load that a clean automated headless environment doesn't reproduce. Do not trust a headless-only pass/fail result here; any fix must be confirmed against real Safari.app directly.
 
 **Metronome — ✅ Built**
 

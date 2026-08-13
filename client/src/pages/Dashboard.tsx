@@ -637,6 +637,7 @@ export default function Dashboard() {
     onSuccess: (song) => {
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       closeModal();
       toast({ description: `Song '${song.name}' created` });
       if (createSongSource === 'browser') {
@@ -683,6 +684,7 @@ export default function Dashboard() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setSongToDelete(null);
     },
   });
@@ -1095,6 +1097,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['albums'] });
       queryClient.invalidateQueries({ queryKey: ['album-songs', albumId] });
       queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
       return result;
     },
   });
@@ -1107,6 +1110,7 @@ export default function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['albums'] });
       queryClient.invalidateQueries({ queryKey: ['album-songs', albumId] });
       queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
     },
   });
 

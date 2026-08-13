@@ -10,11 +10,23 @@ The activity feed aggregates recent events across the app into a unified timelin
 **`ActivityEvent` interface (in `storage.ts`):**
 ```ts
 interface ActivityEvent {
+  // Tier 1 (synthesized at read time):
   type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change'
       | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline'
       | 'clip-removed-from-timeline' | 'section-added' | 'section-deleted'
       | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply'
-      | 'song-created' | 'idea-created';
+      | 'song-created' | 'idea-created'
+      // Tier 2 (written verbatim via logActivity()) — kept in sync with the
+      // "Tier 2 event types — full reference" table below; last audited 2026-08-12:
+      | 'song-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
+      | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
+      | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
+      | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
+      | 'clip-comment-deleted' | 'task-status-change' | 'task-comment-added'
+      | 'task-comment-reply' | 'task-comment-edited' | 'task-comment-deleted'
+      | 'review-comment-edited' | 'review-comment-deleted' | 'review-comment-resolved'
+      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album';
   description: string;
   timestamp: number;
   songId: string;
@@ -46,6 +58,55 @@ Events come from two sources that `getActivity()` merges and sorts by timestamp:
 
 All tier-2 events resolve the actor from `req.session.userId → storage.getUser()?.username`, falling back to `'Someone'` if the session can't be resolved. The pattern appears at the top of each route handler as a const before the `logActivity` call.
 
+**Read-path filtering (added 2026-08-12):** `activity_log` had never had type-based filtering — every write, including types intended as "sort-only" (meant only to feed `getSongsWithLastActive`'s ranking, never to render), rendered as a visible Activity Feed row. This is now corrected inside `getActivity()` (`server/storage.ts`): a `notInArray(activityLog.type, [...])` condition excludes sort-only types from the `events[]` array returned to the client. The filter is read-path only — `logActivity()` still writes every type unconditionally, and `getSongsWithLastActive` (a separate function, separate query, no `type` condition) is untouched and still sees the full unfiltered table. Sort-only events continue to influence the Dashboard "Your Songs" ranking; they just never appear as feed rows. This also means the "Feed-visible?" column below is no longer just documentation intent — it is enforced in code for the first time. Two classifications changed as a result of actually auditing this (see the numbered lists below for detail): `idea-hidden` (item 15) turned out to be sort-only despite living in the old "Structural events" grouping, and the old single `clip-trimmed` type was split into `clip-trim-adjusted` (sort-only) and `clip-trim-applied-to-instances` (feed-visible) — they were previously indistinguishable in the log.
+
+### Tier 2 event types — full reference
+
+| Type | Feed-visible? | Notes |
+|---|---|---|
+| `marked-final` | Yes | |
+| `clip-unmarked-final` | Yes | |
+| `song-created` | Yes | |
+| `idea-created` | Yes | |
+| `song-deleted` | Yes | |
+| `track-added` | Yes | |
+| `track-deleted` | Yes | |
+| `track-restored` | Yes | |
+| `volume-changed` | No — sort-only | Debounced 500ms on the volume slider. Split from `pan-changed` this session — the route previously conflated both under this single type. |
+| `pan-changed` | No — sort-only | Discrete on L/C/R button click. New type, split out from `volume-changed`. |
+| `section-added` | Yes | Two independent call sites (song section add; per-track idea/section bootstrap) both dedup via a 5-second lookback window against `activity_log` so simultaneous per-track calls collapse to one row. |
+| `section-deleted` | Yes | |
+| `section-restored` | Yes | Two independent client mutations hit this same server route (MediaBucket's `useRestoreSectionSongWide`, Production Tracker's `restoreSectionMutation`) — both are now wired to invalidate the feed; previously only one was. |
+| `clip-added-to-timeline` | Yes | |
+| `clip-replaced` | Yes | |
+| `timeline-reordered` | No — sort-only | A single drag reorder PATCHes every sibling clip whose `start` shifted. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (reorders are section-locked, so this is a correct proxy key) so one drag produces one row, not one per shifted clip. |
+| `clip-removed-from-timeline` | Yes | |
+| `clip-trim-adjusted` | No — sort-only | Single-clip drag trim. Split from the old shared `clip-trimmed` type this session. |
+| `clip-trim-applied-to-instances` | Yes | Explicit bulk "Apply Trim to All Instances" action. Split from `clip-trimmed`; distinct from the drag-trim case above — was previously indistinguishable in the log. |
+| `timeline-cleared` | Yes | |
+| `idea-hidden` | No — sort-only | Per-instrument section hide is a personal decluttering action, not band-visible news. |
+| `idea-restored` | Yes | |
+| `clip-metadata-edited` | No — sort-only | Fires once per blur-to-save field edit in `ClipInfoWindow` — too granular for the feed. |
+| `clip-removed` | Yes | Bucket soft-delete. |
+| `file-uploaded` | Yes | |
+| `clip-comment-added` / `clip-comment-reply` | Added: Yes / Reply: No | Only the top-level comment has a rationale for feed visibility — no Tier-1 synthesized counterpart exists for replies, so surfacing them would risk duplicate-feeling events. |
+| `clip-comment-edited` / `clip-comment-deleted` | No — sort-only | Editing/deleting comment text isn't meaningful production activity. |
+| `task-status-change` | Yes | |
+| `task-comment-added` / `task-comment-reply` | Added: Yes / Reply: No | Same rationale as clip comments. |
+| `task-comment-edited` / `task-comment-deleted` | No — sort-only | Same rationale as clip comments. |
+| `review-shared` | Yes | |
+| `review-comment` / `review-reply` | Yes | Review comments are the one comment surface where all five actions (add/reply/edit/delete/resolve) were already correctly wired for live feed updates before this session — reference pattern. |
+| `review-comment-edited` / `review-comment-deleted` | No — sort-only | Consistent with clip/task comment treatment, despite review comments' add/reply being feed-visible. |
+| `review-comment-resolved` / `review-comment-unresolved` | Yes | |
+| `album-created` / `album-renamed` / `album-deleted` | Not implemented | No `songId` to attach to under the current `activity_log` schema (`songId` is NOT NULL). Deferred — would require a nullable `songId` (or new `albumId` column), a LEFT JOIN change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision, not implemented this session. |
+| `song-added-to-album` | Yes | Dedup note: the album song picker POSTs this route sequentially per selected song. No `albumId` column exists on `activity_log` to scope a tight dedup key, so this dedups on `bandId + type` within a 5-second window — looser than other dedup keys in this doc. Tradeoff: two different users adding songs to two different albums within the same 5 seconds would also collapse to one logged row. Underlying album membership writes are unaffected either way — this only suppresses a duplicate log row. |
+| `song-removed-from-album` | Yes | |
+| `album-song-reordered` | No — sort-only, and not currently implemented | The Move Up/Down route (`PATCH /api/albums/:id/songs/:songId/move`) has no `logActivity()` call today. Listed here so if that logging is ever added, it's pre-classified as sort-only, consistent with `timeline-reordered`. |
+
+**Known dedup tradeoffs:** Three event types use a 5-second lookback window to collapse a burst of near-identical server calls (from one client gesture) into a single logged row: `section-added`, `timeline-reordered`, `song-added-to-album`. In all three cases, the dedup key is a proxy for "same user gesture," not a guarantee — two independent actions from different users landing in the same narrow window and matching the same key will also collapse to one row. This is treated as an acceptable tradeoff: the underlying mutation always succeeds regardless of what gets logged; only the activity-feed/sort-input row can be silently suppressed in the rare collision case.
+
+The numbered lists below retain per-event route and description detail not repeated in the table above; where the two disagree on feed-visibility, the table above is authoritative (it reflects the enforced filter, not just original intent).
+
 **Structural events (feed-visible and user-visible):**
 
 6. **`clip-added-to-timeline`** — logged from `POST /api/tracks/:trackId/clips`. Description: `"{user} added {clipName} to {trackName} — {sectionName}"`.
@@ -57,7 +118,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 12. **`section-added`** — logged from `POST /api/tracks/:trackId/ideas` with 5-second dedup. Description: `"{user} added section {sectionName}"`. **Skipped entirely when the parent song has `type='idea'`** — sub-bucket creation for idea Parts is an invisible implementation detail. The type check fetches the song via `storage.getSongById(ideaTrack.songId)` after the dedup check.
 13. **`section-deleted`** — logged from `DELETE /api/songs/:songId/sections/:sectionName`. Description: `"{user} deleted section {sectionName}"`.
 14. **`section-restored`** — logged from `POST /api/songs/:songId/sections/restore`. Description: `"{user} restored section {sectionName}"`.
-15. **`idea-hidden`** — logged from `PATCH /api/ideas/:ideaId` (active=false). Description: `"{user} hid section {sectionName} on {trackName}"`.
+15. **`idea-hidden`** — logged from `PATCH /api/ideas/:ideaId` (active=false). Description: `"{user} hid section {sectionName} on {trackName}"`. **Reclassified sort-only as of 2026-08-12** — despite living in this "Structural events" grouping historically, it's excluded by the read-path filter (see "Tier 2 event types — full reference" above): a per-instrument section hide is a personal decluttering action, not band-visible news.
 16. **`idea-restored`** — logged from `POST /api/ideas/:ideaId/restore`. Description: `"{user} restored section {sectionName} on {trackName}"`.
 17. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description branches on parent song type: `"{user} added a part — {trackName}"` when `song.type === 'idea'`; `"{user} added an instrument — {trackName}"` when `song.type === 'song'`. Song is fetched via `storage.getSongById(req.params.songId)` after track creation.
 18. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"{user} deleted an instrument — {trackName}"`.
@@ -69,7 +130,9 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 24. **`song-created`** — logged from `POST /api/songs` when `type !== 'idea'`. Description: `"{user} created a new song — {name}"`.
 25. **`idea-created`** — logged from `POST /api/songs` when `type === 'idea'`. Description: `"{user} created a new idea — {name}"`.
 
-**Sort-data-only events (written to `activity_log` so `getSongsWithLastActive` can rank the song; not yet evaluated for feed display — see "On the horizon"):**
+**Events 26–42 below (mixed feed-visibility — see "Tier 2 event types — full reference" above for the authoritative Yes/No per type):**
+
+This grouping predates the read-path filter and originally assumed every item here was sort-only "not yet evaluated for feed display." That assumption turned out to be wrong for several of them once actually audited (2026-08-12) — `file-uploaded`, `clip-removed`, `clip-comment-added`, `task-comment-added`, `review-comment-resolved`/`unresolved`, `clip-trim-applied-to-instances`, `timeline-cleared`, `song-added-to-album`, and `song-removed-from-album` are all feed-visible today. The reference table above is the source of truth for visibility; this list keeps the per-route implementation detail.
 
 26. **`file-uploaded`** — logged from `POST /api/ideas/:ideaId/clips`. Bumps the song in the sort even though `file-added` is already synthesized tier-1 from the `clips` table.
 27. **`clip-removed`** — logged from `PATCH /api/clips/:clipId { active: false }` (bucket clip soft-delete).
@@ -81,10 +144,17 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 33. **`review-comment-edited`** — logged from `PATCH /api/review-comments/:id` when `text` changes.
 34. **`review-comment-resolved`** / **`review-comment-unresolved`** — logged from `PATCH /api/review-comments/:id` when `resolved` changes.
 35. **`review-comment-deleted`** — logged from `DELETE /api/review-comments/:id`.
-36. **`volume-changed`** — logged from `PATCH /api/tracks/:trackId` when `volume` changes.
-37. **`clip-trimmed`** — logged from `PATCH /api/timeline-clips/:id/trim` and the general PATCH when trim values change.
-38. **`timeline-reordered`** — logged from `PATCH /api/timeline-clips/:id` when `start` changes without a name/src change.
+36. **`volume-changed`** — logged from `PATCH /api/tracks/:trackId` when `volume` changes, debounced 500ms on slider drag. **Split from `pan-changed` (item 36b) on 2026-08-12** — the route previously wrote `volume-changed` for both volume and pan updates.
+36b. **`pan-changed`** — logged from the same `PATCH /api/tracks/:trackId` route when `pan` changes (L/C/R button click, discrete). New type as of 2026-08-12; previously indistinguishable from `volume-changed` in the log.
+37. **`clip-trim-adjusted`** — logged from `PATCH /api/timeline-clips/:id/trim` (single-clip drag trim). **Split from the old shared `clip-trimmed` type on 2026-08-12** into this (sort-only) and item 37b (feed-visible) — they were previously the same type and indistinguishable in the log.
+37b. **`clip-trim-applied-to-instances`** — logged from `POST /api/timeline-clips/apply-trim-to-instances`, covering both the "Apply Trim to All Instances" and "Reset Trim on All Instances" actions. Feed-visible — an explicit bulk action, unlike the single-clip drag trim above.
+38. **`timeline-reordered`** — logged from `PATCH /api/timeline-clips/:id` when `start` changes without a name/src change. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (see "Known dedup tradeoffs" above) so one drag reorder (which PATCHes every shifted sibling clip) produces one row.
 39. **`timeline-cleared`** — logged from `DELETE /api/songs/:songId/timeline-clips/non-final`.
+40. **`song-added-to-album`** — logged from `POST /api/albums/:id/songs`. Deduped on `bandId + type` within a 5-second window (looser than other dedup keys here — `activity_log` has no `albumId` column to scope tighter) so the album song picker's sequential per-song POSTs collapse to one row.
+41. **`song-removed-from-album`** — logged from `DELETE /api/albums/:id/songs/:songId`. No dedup (not a batch-prone action).
+42. **`album-song-reordered`** — not currently implemented. `PATCH /api/albums/:id/songs/:songId/move` (Move Up/Down) has no `logActivity()` call today. Pre-classified sort-only for whenever that logging is added, consistent with `timeline-reordered`.
+
+**Album lifecycle events not implemented:** `album-created` / `album-renamed` / `album-deleted` have no logging path — `activity_log.songId` is `NOT NULL`, and albums have no song to attach an event to. Implementing these would need a nullable `songId` (or a new `albumId` column), a `LEFT JOIN` change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision.
 
 **`task-comment` routing (tier 1, event type 4):**
    - `text.startsWith('Status changed to ')` → **skipped** (now covered by tier-2 `task-status-change` events written at mutation time; suppressed to avoid duplication).
@@ -106,7 +176,9 @@ useQuery({ queryKey: ['activity'], queryFn: () => fetch('/api/activity').then(r 
 useQuery({ queryKey: ['activity', songId], queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()), refetchInterval: 10000 })
 ```
 
-**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers an activity event must call this in its `onSuccess` (or `.then()` for fire-and-forget fetches). Mutations that currently do this: song created (modal), idea created (modal), file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track (instrument/part) added, track deleted, review shared, review comment/reply posted.
+**TanStack Query invalidation:** `queryClient.invalidateQueries({ queryKey: ['activity'] })` uses prefix matching — it invalidates both `['activity']` (Dashboard) and `['activity', songId]` (SongHome) simultaneously. Every mutation that triggers a feed-visible activity event should call this in its `onSuccess` (or `.then()` for fire-and-forget fetches) — note that even a mutation missing this call isn't permanently stale: both surfaces also poll on `refetchInterval: 10000`, so a missing invalidation shows up as up to a 10-second display delay, not a dead feed.
+
+An audit on 2026-08-12 found 10 mutation call sites missing this invalidation and fixed them: `Dashboard.tsx` `createSong` (song-created) and `deleteSong` (song-deleted); `Dashboard.tsx` `addSongToAlbumMutation` and `removeSongFromAlbumMutation` (song-added-to-album / song-removed-from-album); `Track.tsx` `patchPan` (pan-changed); `Timeline.tsx` `handleUpdateVolume` (volume-changed) plus all 5 of its start-shift PATCH call sites that produce `timeline-reordered`; `Clip.tsx` `patchTrim` and `performApplyTrimToInstances` (plus its Reset-to-instances sibling) for `clip-trim-adjusted`/`clip-trim-applied-to-instances`; and Production Tracker's `restoreSectionMutation` (`section-restored`) — a second, independent client mutation hitting the same restore route as MediaBucket's already-correct `useRestoreSectionSongWide`. Mutations confirmed correctly wired (including pre-existing ones): idea created (modal), file upload, clip added to timeline, clip removed from timeline, clip marked/unmarked final (both bucket and timeline), clip replaced, section added, section deleted, track (instrument/part) added/deleted/restored, review shared, and all five review-comment actions (add/reply/edit/delete/resolve) — the last of these was already a full reference pattern for comment-thread invalidation before this session, unlike the equivalent clip-comment and task-comment surfaces (see the `clip-comment-reply`/`task-comment-reply` note in the reference table above — those remain sort-only by design, not a gap).
 
 **Current user:** Auth is built — `CURRENT_USER` is no longer a hardcoded constant anywhere in the codebase. On the client, `Dashboard.tsx` and `SongHome.tsx` read `user?.username ?? ''` from `useAuth()` to filter tasks to the logged-in user. On the server, actors are resolved from `req.session.userId → storage.getUser()` for all activity events — `uploadedBy`/`createdBy` in upload/review routes, `author` on status-change task comments, and tier-2 `activity_log` descriptions. `getActivity()` in `storage.ts` reads `row.author` (stored at write time) and `clip.metadata.uploadedBy` for tier-1 events — no hardcoded name anywhere.
 
