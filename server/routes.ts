@@ -15,7 +15,7 @@ import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte, max, inArray } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection } from "./storage";
 import {
@@ -562,17 +562,29 @@ export async function registerRoutes(
     const track = await storage.updateTrack(trackId, updates);
     if (!track) return res.status(404).json({ message: "Track not found" });
 
-    const volumeActor = req.session.userId
+    const trackChangeActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
+    // Timeline.tsx's volume slider always sends { volume } only; Track.tsx's L/C/R pan
+    // buttons always send { pan } only — no current client sends both in one request.
+    // Handled explicitly anyway (rather than silently mislabeling) in case a future
+    // caller ever combines them.
+    const volumeChanged = volume !== undefined;
+    const panChanged = pan !== undefined;
+    const trackChangeType = panChanged && !volumeChanged ? 'pan-changed' : 'volume-changed';
+    const trackChangeDescription = volumeChanged && panChanged
+      ? `${trackChangeActor} changed volume and pan on ${track.name}`
+      : panChanged
+        ? `${trackChangeActor} changed pan on ${track.name}`
+        : `${trackChangeActor} changed volume on ${track.name}`;
     storage.logActivity({
       id: randomUUID(),
       songId: trackSongIdVal,
-      type: 'volume-changed',
-      description: `${volumeActor} changed volume on ${track.name}`,
+      type: trackChangeType,
+      description: trackChangeDescription,
       timestamp: Date.now(),
       instrument: track.name,
-      author: volumeActor,
+      author: trackChangeActor,
     }).catch(console.error);
 
     res.json(track);
@@ -927,16 +939,35 @@ export async function registerRoutes(
           .where(eq(instrumentTracks.id, clip.trackId))
           .get();
         if (reorderTrack) {
-          storage.logActivity({
-            id: randomUUID(),
-            songId: reorderTrack.songId,
-            type: 'timeline-reordered',
-            description: `${timelineClipActor} reordered clips on ${reorderTrack.name}`,
-            timestamp: Date.now(),
-            instrument: reorderTrack.name,
-            sectionName: clip.sectionName ?? undefined,
-            author: timelineClipActor,
-          }).catch(console.error);
+          // A single drag reorder PATCHes every sibling clip whose start shifted (see
+          // "API calls after mutations" in client/src/components/daw/CLAUDE.md — one
+          // PATCH per shifted clip), so dedupe on songId+type+instrument+sectionName
+          // within a 5-second window — same pattern as section-added's dedup at
+          // POST /api/tracks/:trackId/ideas — to collapse the whole burst to one row.
+          const fiveSecondsAgo = Date.now() - 5000;
+          const recentReorder = db.select().from(activityLog)
+            .where(and(
+              eq(activityLog.songId, reorderTrack.songId),
+              eq(activityLog.type, 'timeline-reordered'),
+              eq(activityLog.instrument, reorderTrack.name),
+              clip.sectionName
+                ? eq(activityLog.sectionName, clip.sectionName)
+                : isNull(activityLog.sectionName),
+              gte(activityLog.timestamp, fiveSecondsAgo)
+            ))
+            .get();
+          if (!recentReorder) {
+            storage.logActivity({
+              id: randomUUID(),
+              songId: reorderTrack.songId,
+              type: 'timeline-reordered',
+              description: `${timelineClipActor} reordered clips on ${reorderTrack.name}`,
+              timestamp: Date.now(),
+              instrument: reorderTrack.name,
+              sectionName: clip.sectionName ?? undefined,
+              author: timelineClipActor,
+            }).catch(console.error);
+          }
         }
       } catch (err) {
         console.error("[timeline-clip reorder] failed to log activity:", err);
@@ -1003,7 +1034,7 @@ export async function registerRoutes(
       storage.logActivity({
         id: randomUUID(),
         songId: trimTrack.songId,
-        type: 'clip-trimmed',
+        type: 'clip-trim-adjusted',
         description: `${trimActor} trimmed ${clip.name} in ${trimTrack.name}`,
         timestamp: Date.now(),
         instrument: trimTrack.name,
@@ -1040,7 +1071,7 @@ export async function registerRoutes(
       storage.logActivity({
         id: randomUUID(),
         songId: applyTrimTrack.songId,
-        type: 'clip-trimmed',
+        type: 'clip-trim-applied-to-instances',
         description: `${applyTrimActor} applied trim to all instances of ${name} in ${applyTrimTrack.name}`,
         timestamp: Date.now(),
         instrument: applyTrimTrack.name,
@@ -2212,6 +2243,37 @@ export async function registerRoutes(
     if (!songId) return res.status(400).json({ message: "songId is required." });
     if (!assertSongOwned(req, res, songId)) return;
     const result = await storage.addSongToAlbum(albumId, songId);
+
+    // The song picker POSTs this route once per selected song in a sequential loop.
+    // activity_log has no albumId column, so dedup scopes to bandId+type within a
+    // 5-second window (looser than section-added's songId+sectionName scoping, but
+    // that's the tightest key available here) — collapses a picker batch to one row.
+    const album = db.select({ name: albums.name }).from(albums).where(eq(albums.id, albumId)).get();
+    const song = await storage.getSongById(songId);
+    if (album && song) {
+      const fiveSecondsAgo = Date.now() - 5000;
+      const recentAlbumAdd = db.select().from(activityLog)
+        .where(and(
+          eq(activityLog.bandId, req.bandId!),
+          eq(activityLog.type, 'song-added-to-album'),
+          gte(activityLog.timestamp, fiveSecondsAgo)
+        ))
+        .get();
+      if (!recentAlbumAdd) {
+        const addSongToAlbumActor = req.session.userId
+          ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+          : 'Someone';
+        storage.logActivity({
+          id: randomUUID(),
+          songId,
+          type: 'song-added-to-album',
+          description: `${addSongToAlbumActor} added ${song.name} to ${album.name}`,
+          timestamp: Date.now(),
+          author: addSongToAlbumActor,
+        }).catch(console.error);
+      }
+    }
+
     return res.status(201).json(result);
   });
 
@@ -2220,7 +2282,26 @@ export async function registerRoutes(
     const songId = req.params.songId as string;
     if (!assertAlbumOwned(req, res, albumId)) return;
     if (!assertSongOwned(req, res, songId)) return;
+
+    const album = db.select({ name: albums.name }).from(albums).where(eq(albums.id, albumId)).get();
+    const song = await storage.getSongById(songId);
+
     await storage.removeSongFromAlbum(albumId, songId);
+
+    if (album && song) {
+      const removeSongFromAlbumActor = req.session.userId
+        ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+        : 'Someone';
+      storage.logActivity({
+        id: randomUUID(),
+        songId,
+        type: 'song-removed-from-album',
+        description: `${removeSongFromAlbumActor} removed ${song.name} from ${album.name}`,
+        timestamp: Date.now(),
+        author: removeSongFromAlbumActor,
+      }).catch(console.error);
+    }
+
     res.status(204).send();
   });
 
