@@ -384,6 +384,13 @@ export function Timeline({ songId }: { songId: string }) {
   // Initialize ref to match the lazy-initialized state so they're in sync from the first render.
   const playheadRef = React.useRef(playheadTimeSecs);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Pointer capture (used by the playhead flag drag) does not retarget the synthetic `click` the
+  // browser fires on pointerup — that click hit-tests wherever the cursor physically is, which is
+  // very often over the Ruler (they share the same horizontal strip). Without this guard, ending a
+  // flag drag there immediately re-seeks via handleRulerSeek's raw, unclamped click position,
+  // overwriting whatever the drag had just (correctly, clamped) landed on. Set by the drag's
+  // cleanup, consumed (and cleared) by the very next ruler click.
+  const suppressRulerClickRef = React.useRef(false);
 
   const setPlayheadTime = React.useCallback((val: number | ((prev: number) => number)) => {
     if (typeof val === 'function') {
@@ -393,6 +400,17 @@ export function Timeline({ songId }: { songId: string }) {
     }
     setPlayheadTimeState(playheadRef.current);
   }, []);
+
+  // TEMP INSTRUMENTATION — measures call-to-commit latency. Fires synchronously right after React
+  // has applied the DOM mutation for this playheadTimeSecs value (useLayoutEffect runs before the
+  // browser paints), so its performance.now() timestamp is "when this value became visible" as
+  // closely as JS can observe it. Compare against the perfNow logged at the moment
+  // clampToVisibleWindow computed the same value (see clampTrace logs) to see whether commits are
+  // keeping pace with a fast burst of pointermove-driven calls, or falling behind and batching.
+  React.useLayoutEffect(() => {
+    // eslint-disable-next-line no-console
+    console.log('[commitTrace]', { t: performance.now(), playheadTimeSecs });
+  }, [playheadTimeSecs]);
 
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
   const [timeSignature, setTimeSignature] = useState('4/4');
@@ -985,10 +1003,21 @@ export function Timeline({ songId }: { songId: string }) {
     const pointerId = e.pointerId;
     flagEl.setPointerCapture(pointerId);
 
-    // Edge-scroll constants
-    const SCROLL_SPEED_PX = 300; // pixels/second of viewport scroll when zone is active
-    const ACTIVATE_PX = 48;      // pointer within this px of edge → zone ON
-    const DEACTIVATE_PX = 64;    // pointer must move this far from edge → zone OFF
+    // Edge-scroll constants — SINGLE threshold system. The same two numbers govern both whether
+    // auto-scroll is running AND whether the playhead position is clamped near the edge.
+    // Previously these were two separate, nested pairs (ACTIVATE_PX/DEACTIVATE_PX for the zone;
+    // EDGE_CLAMP_MARGIN_PX/CLAMP_RELEASE_MARGIN_PX + isClampEngagedRef for the clamp). Because the
+    // zone's thresholds (48/64) were far tighter than the clamp's (200/280), the clamp was always
+    // forced from "not evaluating at all" straight to "already past its own engage bound" the
+    // instant the zone turned on (confirmed via live trace: a ~0.94s snap in one frame), and from
+    // "held" straight to "unconditionally raw" the instant the zone turned off (confirmed via
+    // trace: a ~0.8s snap in one frame) — regardless of where raw actually was relative to either
+    // bound. Unifying removes the possibility of one gate short-circuiting before the other has a
+    // chance to run: there is now exactly one evaluation, used by the zone hysteresis in
+    // handlePointerMove below AND by clampToVisibleWindow.
+    const SCROLL_SPEED_PX = 300;       // pixels/second of viewport scroll when the zone is active
+    const EDGE_ZONE_PX = 200;          // pointer within this px of the edge → zone ON, clamp engages
+    const EDGE_ZONE_RELEASE_PX = 280;  // pointer must clear this px from the edge → zone OFF
 
     type EdgeZone = 'off' | 'on-left' | 'on-right';
     const edgeZoneRef = { current: 'off' as EdgeZone };
@@ -997,6 +1026,36 @@ export function Timeline({ songId }: { songId: string }) {
     // Last known pointer viewport-X — updated by every pointermove; rAF reads it each frame
     const el0 = timelineRef.current;
     const pointerViewportXRef = { current: el0 ? e.clientX - el0.getBoundingClientRect().left : 0 };
+
+    // Pointer speed can outrun SCROLL_SPEED_PX during a fast flick, deriving a time whose pixel
+    // position is past what's currently scrolled into view (and thus clipped/invisible). While
+    // the zone is active, hold the derived time at EDGE_ZONE_PX back from the visible track
+    // area's near edge — a no-op outside the zone. Deliberately no separate latch/state (no
+    // isClampEngagedRef): Math.max/Math.min is continuous by construction — at the exact instant
+    // the zone activates, raw IS the bound (same EDGE_ZONE_PX threshold drives both), so this is
+    // a no-op there; and whenever raw is already on the safe side of the bound (which it will be
+    // for the whole EDGE_ZONE_PX→EDGE_ZONE_RELEASE_PX buffer, since the zone's own deactivation
+    // is wider), this already returns raw directly — so there is nothing "held" left to jump when
+    // the zone eventually turns off. This is the ONLY clamp calculation in the file — both call
+    // sites below (the rAF edge-scroll loop and the pointermove handler) route through this
+    // single function, and nothing runs on release that could recompute a different value (see
+    // suppressRulerClickRef in cleanup()).
+    const clampToVisibleWindow = (time: number, scrollLeft: number, clientWidth: number, __site?: string) => {
+      const zone = edgeZoneRef.current;
+      if (zone === 'off') {
+        // eslint-disable-next-line no-console
+        console.log('[clampTrace]', __site, 'zone=off', { t: performance.now(), time, returned: time });
+        return time;
+      }
+      const isLeft = zone === 'on-left';
+      const bound = isLeft
+        ? (scrollLeft + EDGE_ZONE_PX) / zoom
+        : (scrollLeft + clientWidth - TRACK_PANEL_WIDTH - EDGE_ZONE_PX) / zoom;
+      const returned = isLeft ? Math.max(time, bound) : Math.min(time, bound);
+      // eslint-disable-next-line no-console
+      console.log('[clampTrace]', __site, isLeft ? 'on-left' : 'on-right', { t: performance.now(), time, bound, returned });
+      return returned;
+    };
 
     const stopEdgeLoop = () => {
       if (edgeRafRef.current !== null) {
@@ -1030,7 +1089,12 @@ export function Timeline({ songId }: { songId: string }) {
 
       // Single authority: time always = f(pointer viewport-X, current scrollLeft)
       const rawX = pointerViewportXRef.current + newScrollLeft;
-      const newTime = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
+      const newTime = clampToVisibleWindow(
+        Math.max(0, Math.min((rawX - TRACK_PANEL_WIDTH) / zoom, endOfTimeline)),
+        newScrollLeft,
+        el.clientWidth,
+        'rAF',
+      );
       setPlayheadTime(newTime);
       checkAudioMuteState(newTime);
       window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
@@ -1057,14 +1121,15 @@ export function Timeline({ songId }: { songId: string }) {
 
       const prevZone = edgeZoneRef.current;
 
-      // Hysteresis: activate at 48px, deactivate only when >= 64px from the triggering edge
+      // Hysteresis: activate at EDGE_ZONE_PX, deactivate only when >= EDGE_ZONE_RELEASE_PX from
+      // the triggering edge — same two constants clampToVisibleWindow uses for the clamp bound.
       if (prevZone === 'off') {
-        if (leftDist < ACTIVATE_PX)       edgeZoneRef.current = 'on-left';
-        else if (rightDist < ACTIVATE_PX) edgeZoneRef.current = 'on-right';
+        if (leftDist < EDGE_ZONE_PX)       edgeZoneRef.current = 'on-left';
+        else if (rightDist < EDGE_ZONE_PX) edgeZoneRef.current = 'on-right';
       } else if (prevZone === 'on-left') {
-        if (leftDist >= DEACTIVATE_PX)    edgeZoneRef.current = 'off';
+        if (leftDist >= EDGE_ZONE_RELEASE_PX)    edgeZoneRef.current = 'off';
       } else {
-        if (rightDist >= DEACTIVATE_PX)   edgeZoneRef.current = 'off';
+        if (rightDist >= EDGE_ZONE_RELEASE_PX)   edgeZoneRef.current = 'off';
       }
 
       // Start loop when zone just activated
@@ -1077,17 +1142,45 @@ export function Timeline({ songId }: { songId: string }) {
         stopEdgeLoop();
       }
 
-      // ALWAYS derive time from pointer + current scrollLeft — no "zone owns time" branch.
-      // This is the single authority. When zone is ON the rAF loop also calls this formula
-      // (using pointerViewportXRef) so both produce identical results between move events.
-      const rawX = viewportX + el.scrollLeft;
-      const time = Math.max(0, Math.min((rawX - 256) / zoom, endOfTimeline));
-      setPlayheadTime(time);
-      checkAudioMuteState(time);
-      window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
+      // ALWAYS derive time from pointer + current scrollLeft — no "zone owns time" branch. This
+      // is the single authority: the formula itself never differs by zone state.
+      //
+      // But WHICH caller gets to render it does differ by zone state. While the zone is active,
+      // this handler skips calling setPlayheadTime entirely — the already-running rAF loop
+      // (edgeScrollFrame) is the sole render driver during that phase. Confirmed via live timing
+      // trace: with both pointermove (uncapped, can fire far faster than 60Hz) and the 60fps rAF
+      // loop independently calling setPlayheadTime and each triggering a full re-render of this
+      // large component tree, the combined volume periodically overwhelmed the main thread —
+      // recurring ~55-70ms stalls during which NO clampTrace calls fired at all (not just missing
+      // commits; the whole thread went quiet), which is what produced the velocity-dependent
+      // catch-up snap. Capping renders at the rAF loop's 60fps removes the second, uncapped
+      // driver. pointerViewportXRef is still updated above on every pointermove regardless of
+      // zone state, so the rAF loop always reads the freshest pointer position next frame.
+      if (edgeZoneRef.current === 'off') {
+        const rawX = viewportX + el.scrollLeft;
+        const time = clampToVisibleWindow(
+          Math.max(0, Math.min((rawX - TRACK_PANEL_WIDTH) / zoom, endOfTimeline)),
+          el.scrollLeft,
+          el.clientWidth,
+          'pointermove',
+        );
+        setPlayheadTime(time);
+        checkAudioMuteState(time);
+        window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
+      }
     };
 
     const cleanup = () => {
+      // Pointer capture doesn't cover the synthetic `click` the browser dispatches right after
+      // pointerup, which hit-tests the cursor's real screen position — very often the Ruler,
+      // since it shares the flag's horizontal strip. Without this, that click's own seek handler
+      // (handleRulerSeek) fires immediately after and overwrites the drag's last (possibly
+      // clamped) position with an unclamped one derived from raw cursor position. No time value
+      // is set here — release intentionally freezes on whatever handlePointerMove/edgeScrollFrame
+      // last wrote.
+      suppressRulerClickRef.current = true;
+      // eslint-disable-next-line no-console
+      console.log('[clampTrace]', 'cleanup', 'DRAG-END', { t: performance.now(), frozenPlayheadTime: playheadRef.current, zoneAtRelease: edgeZoneRef.current });
       flagEl.releasePointerCapture(pointerId);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', cleanup);
@@ -1969,7 +2062,15 @@ export function Timeline({ songId }: { songId: string }) {
   };
 
   const handleRulerSeek = (pos: number) => {
+    if (suppressRulerClickRef.current) {
+      suppressRulerClickRef.current = false;
+      // eslint-disable-next-line no-console
+      console.log('[clampTrace]', 'handleRulerSeek', 'suppressed', { pos });
+      return;
+    }
     const time = Math.max(0, pos / zoom);
+    // eslint-disable-next-line no-console
+    console.log('[clampTrace]', 'handleRulerSeek', 'SEEK-FIRED', { pos, time });
     setPlayheadTime(time);
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
