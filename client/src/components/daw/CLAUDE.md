@@ -899,6 +899,24 @@ After writing `el.scrollLeft`, always:
   is wrong — stop patching; instrument (console logs) or inspect the live DOM (DevTools element
   picker). Source-reading cannot see browser-specific behavior or hit-testing.
 
+### Playhead edge-scroll drag — architecture and constants
+
+**Canonical time-value rule:** the playhead's time position must always be derived from a single formula — pointer screen position combined with current `scrollLeft` — computed fresh on every `pointermove` event and every `rAF` frame. Never write to the time value independently from two different code paths; this was the root cause of a full day of edge-scroll bugs (dead zones, release snaps, mid-drag jumps) before the rebuild. The edge-scroll auto-scroll loop's only job is to advance `scrollLeft`; it must never write time directly.
+
+**Zone hysteresis (prevents flicker):** edge-scroll activation uses two thresholds, not one, so pointer jitter right at a boundary can't flip the zone on/off/on repeatedly:
+- `EDGE_ZONE_PX` (150) — pointer must come within this distance of the true edge for the zone to activate.
+- `EDGE_ZONE_RELEASE_PX` (210) — pointer must move back out past this wider distance for the zone to deactivate. The gap between the two absorbs normal hand jitter.
+
+**Minimum drag-distance gate:** `MIN_DRAG_DISTANCE_PX` (72) requires cumulative pointer displacement from the pointerdown origin (via `Math.hypot`, so diagonal movement counts) before initial zone engagement is allowed. Without this, a static click-and-hold with the flag already positioned inside the edge zone would engage auto-scroll on the very first sub-pixel jitter — no real mouse or trackpad holds literally zero pixels of movement. This constant only gates the OFF→ON transition; once engaged, it plays no further role.
+
+**Known geometric tradeoff:** if the flag is re-grabbed at a starting position closer to the edge than `MIN_DRAG_DISTANCE_PX`, a natural drag further toward the edge can require the cursor to briefly cross onto the instrument panel (negative `leftDist`) before the cumulative-displacement gate is satisfied. This is unavoidable geometry given the mechanism, not a bug — the "danger zone" for this shrinks proportionally as `MIN_DRAG_DISTANCE_PX` is lowered, but can't be fully eliminated without a structural change (e.g., clamping the phantom cursor position at the panel boundary). Considered low-priority; only affects re-grabbing very close to an edge.
+
+**Right-edge centering cap:** when auto-scroll reaches the right edge, `scrollLeft` stops such that the final clip's end sits at the horizontal center of the *visible track area* — i.e., `256 + (clientWidth - TRACK_PANEL_WIDTH) / 2` — not the center of the full container. Using `clientWidth / 2` alone lands 128px (half of `TRACK_PANEL_WIDTH`) short of true visual center, since the instrument panel eats real screen space on the left that isn't part of the timeline.
+
+**Reversal-pause mechanism:** while auto-scroll is engaged, a sample-to-sample comparison (not a distance threshold) checks whether the pointer's distance-from-edge increased or decreased since the last event. Any increase (even 1px) pauses auto-scroll on that same event; any decrease resumes it. This has no delay and no minimum threshold — deliberately, to stop a reversal as promptly as possible.
+
+**Known UX friction (open, not yet addressed):** because the reversal-pause check has zero threshold, real trackpad input's involuntary micro-movements (which a user doesn't consciously make, but the OS's tracking/acceleration curve still registers) can be misread as an intentional reversal, pausing auto-scroll unexpectedly. This is two individually-correct behaviors interacting badly, not a bug in either one. Likely fix direction if revisited: add a small deadband specifically to the reversal-pause check (distinct from `MIN_DRAG_DISTANCE_PX`, which only gates initial engagement, not continued tracking) so trivial jitter doesn't register as a reversal once already engaged.
+
 ## Production Tracker scroll container architecture — hard-won rules (do not relearn these)
 
 **The card div is the single scroll owner for both axes** — `overflow-x-auto overflow-y-auto max-h-full`, with `ref={cardRef}`. This is the only element that should ever own scroll here. Two failure modes were hit and ruled out:
