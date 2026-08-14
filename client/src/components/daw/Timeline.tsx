@@ -401,17 +401,6 @@ export function Timeline({ songId }: { songId: string }) {
     setPlayheadTimeState(playheadRef.current);
   }, []);
 
-  // TEMP INSTRUMENTATION — measures call-to-commit latency. Fires synchronously right after React
-  // has applied the DOM mutation for this playheadTimeSecs value (useLayoutEffect runs before the
-  // browser paints), so its performance.now() timestamp is "when this value became visible" as
-  // closely as JS can observe it. Compare against the perfNow logged at the moment
-  // clampToVisibleWindow computed the same value (see clampTrace logs) to see whether commits are
-  // keeping pace with a fast burst of pointermove-driven calls, or falling behind and batching.
-  React.useLayoutEffect(() => {
-    // eslint-disable-next-line no-console
-    console.log('[commitTrace]', { t: performance.now(), playheadTimeSecs });
-  }, [playheadTimeSecs]);
-
   const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
   const [timeSignature, setTimeSignature] = useState('4/4');
   const [zoom, setZoom] = useState(() => {
@@ -1003,21 +992,38 @@ export function Timeline({ songId }: { songId: string }) {
     const pointerId = e.pointerId;
     flagEl.setPointerCapture(pointerId);
 
-    // Edge-scroll constants — SINGLE threshold system. The same two numbers govern both whether
-    // auto-scroll is running AND whether the playhead position is clamped near the edge.
-    // Previously these were two separate, nested pairs (ACTIVATE_PX/DEACTIVATE_PX for the zone;
-    // EDGE_CLAMP_MARGIN_PX/CLAMP_RELEASE_MARGIN_PX + isClampEngagedRef for the clamp). Because the
-    // zone's thresholds (48/64) were far tighter than the clamp's (200/280), the clamp was always
-    // forced from "not evaluating at all" straight to "already past its own engage bound" the
-    // instant the zone turned on (confirmed via live trace: a ~0.94s snap in one frame), and from
-    // "held" straight to "unconditionally raw" the instant the zone turned off (confirmed via
-    // trace: a ~0.8s snap in one frame) — regardless of where raw actually was relative to either
-    // bound. Unifying removes the possibility of one gate short-circuiting before the other has a
-    // chance to run: there is now exactly one evaluation, used by the zone hysteresis in
-    // handlePointerMove below AND by clampToVisibleWindow.
+    // Edge-scroll constants. EDGE_ZONE_PX / EDGE_ZONE_RELEASE_PX are hysteresis thresholds ONLY —
+    // they decide when the auto-scroll zone turns on/off in handlePointerMove below. They are
+    // deliberately NOT used by clampToVisibleWindow's bound formula. Those two jobs (zone
+    // activation vs. position-clamp bound) have different correctness requirements: the clamp
+    // bound must reach exactly 0 / endOfTimeline at the true scroll limits with a constant
+    // (undistorted) rate throughout, which a shared hysteresis-distance constant cannot express
+    // without either leaving a residual floor/ceiling (a fixed margin) or a variable-rate taper
+    // (margin that shrinks with scrollLeft — tried and reverted; a linear taper doubles the
+    // effective rate throughout the tapered region, and a smoothstep taper only matches the rate
+    // AT the two endpoints while leaving a ~2.5x mid-taper speed bump). See clampToVisibleWindow
+    // below for the constant-rate, no-margin formula that replaced both.
     const SCROLL_SPEED_PX = 300;       // pixels/second of viewport scroll when the zone is active
-    const EDGE_ZONE_PX = 200;          // pointer within this px of the edge → zone ON, clamp engages
-    const EDGE_ZONE_RELEASE_PX = 280;  // pointer must clear this px from the edge → zone OFF
+    const EDGE_ZONE_PX = 150;          // pointer within this px of the edge → zone ON
+    const EDGE_ZONE_RELEASE_PX = 210;  // pointer must clear this px from the edge → zone OFF
+    // Minimum total pointer displacement from the pointerdown origin before a zone can engage AT
+    // ALL. Filters the case where the flag happens to already render within EDGE_ZONE_PX at the
+    // moment of pointerdown (e.g. after a prior manual scroll) — without this, any sub-pixel
+    // jitter from a real hand trying to hold still would immediately trigger full-speed
+    // auto-scroll on a click the user never intended as a drag toward the edge. History: 6 -> 24
+    // -> 48 -> 96 -> 72. At 96 against a 100px EDGE_ZONE_PX (96% of the zone width), a natural
+    // drag toward the edge from a starting position already inside the zone required the cursor
+    // to cross onto the instrument panel (leftDist going negative) before the displacement gate
+    // was satisfied — confirmed via live testing, not just reasoned about. EDGE_ZONE_PX was raised
+    // to 150 and this lowered to 72 together to restore a real gap (78px) between the two, so a
+    // drag toward the edge from anywhere inside the zone can satisfy both conditions without
+    // needing to overshoot past the panel. Each step up from 6 still read as too sensitive for
+    // real trackpad input, whose OS-level pointer-acceleration curve can turn a small physical
+    // touch into a much larger on-screen CSS-pixel delta than the same gesture produces via direct
+    // pixel-targeted input. Gating logic itself confirmed correct and unbypassable; this value is
+    // a pure feel/tuning knob, not a correctness fix — but it and EDGE_ZONE_PX are not
+    // independently tunable without checking this relationship.
+    const MIN_DRAG_DISTANCE_PX = 72;
 
     type EdgeZone = 'off' | 'on-left' | 'on-right';
     const edgeZoneRef = { current: 'off' as EdgeZone };
@@ -1026,35 +1032,75 @@ export function Timeline({ songId }: { songId: string }) {
     // Last known pointer viewport-X — updated by every pointermove; rAF reads it each frame
     const el0 = timelineRef.current;
     const pointerViewportXRef = { current: el0 ? e.clientX - el0.getBoundingClientRect().left : 0 };
+    // Fixed pointerdown origin (page coordinates) — used only to gate initial zone engagement on
+    // MIN_DRAG_DISTANCE_PX; never updated after this.
+    const dragOriginRef = { current: { x: e.clientX, y: e.clientY } };
+    // leftDist/rightDist as of the PREVIOUS pointermove within the current zone engagement (reset
+    // on every off→on transition, cleared on every on→off transition). Compared against the
+    // CURRENT sample on every move to detect direction of travel frame-to-frame — see
+    // zonePausedRef below. Deliberately the immediately-preceding sample, not a running minimum:
+    // an earlier version paused only once the pointer had pulled some extra distance (80px) away
+    // from its closest approach, which left a window right after a reversal where auto-scroll kept
+    // going at full speed. Comparing consecutive samples instead means ANY outward movement,
+    // however small, is visible on the very next event with no extra distance to travel first.
+    const lastZoneDistRef = { current: null as number | null };
+    // True when the most recent pointermove showed the pointer moving AWAY from the edge (current
+    // dist > lastZoneDistRef) within the current engagement — the rAF loop reads this to freeze
+    // scrollLeft in place (effectively 0 speed) without touching edgeZoneRef.current at all. See
+    // the comment in handlePointerMove's hysteresis block for why this must be a separate flag
+    // rather than folded into zone state.
+    const zonePausedRef = { current: false };
 
     // Pointer speed can outrun SCROLL_SPEED_PX during a fast flick, deriving a time whose pixel
     // position is past what's currently scrolled into view (and thus clipped/invisible). While
-    // the zone is active, hold the derived time at EDGE_ZONE_PX back from the visible track
-    // area's near edge — a no-op outside the zone. Deliberately no separate latch/state (no
-    // isClampEngagedRef): Math.max/Math.min is continuous by construction — at the exact instant
-    // the zone activates, raw IS the bound (same EDGE_ZONE_PX threshold drives both), so this is
-    // a no-op there; and whenever raw is already on the safe side of the bound (which it will be
-    // for the whole EDGE_ZONE_PX→EDGE_ZONE_RELEASE_PX buffer, since the zone's own deactivation
-    // is wider), this already returns raw directly — so there is nothing "held" left to jump when
-    // the zone eventually turns off. This is the ONLY clamp calculation in the file — both call
-    // sites below (the rAF edge-scroll loop and the pointermove handler) route through this
-    // single function, and nothing runs on release that could recompute a different value (see
-    // suppressRulerClickRef in cleanup()).
-    const clampToVisibleWindow = (time: number, scrollLeft: number, clientWidth: number, __site?: string) => {
+    // the zone is active, hold the derived time at the current visible window's near edge — a
+    // no-op outside the zone.
+    //
+    // Bound formula — a direct, undistorted linear function of scrollLeft, with no margin and no
+    // taper, so the rate exactly matches normal 1:1 pointer tracking (1/zoom) at every point in
+    // the drag, not just at the endpoints. Each side is simply the content-space position of that
+    // edge of the currently-visible viewport, converted to time — the left edge is occluded by
+    // the sticky TRACK_PANEL_WIDTH panel, the right edge is not:
+    //   left:  bound = scrollLeft / zoom
+    //   right: bound = (scrollLeft + clientWidth - TRACK_PANEL_WIDTH) / zoom
+    // Both have d(bound)/d(scrollLeft) = 1/zoom, constant, for every scrollLeft — no case-split,
+    // no anchor point, so there is no region where the rate differs from normal tracking.
+    //
+    // Neither formula references endOfTimeline or maxScroll, and that's deliberate, not an
+    // oversight: an earlier version of this fix computed the right bound as
+    // `endOfTimeline - (maxScroll - scrollLeft) / zoom` to try to land exactly on endOfTimeline
+    // at scrollLeft === maxScroll. That's wrong — maxScroll is NOT simply
+    // `endOfTimeline * zoom` plus the documented +15s content-width pad; the content div also
+    // carries `minWidth: TRACK_PANEL_WIDTH + 100 * zoom` (see its style below), a floor that
+    // guarantees ~100s of navigable canvas regardless of actual content length. For a short
+    // timeline this floor dominates scrollWidth, so maxScroll can be many times larger than
+    // endOfTimeline * zoom — anchoring a slope-1/zoom line at (maxScroll, endOfTimeline) then
+    // gives a massively negative bound (and therefore a negative displayed time) early in the
+    // drag, while scrollLeft is still small. Confirmed via live trace: dragging to the right edge
+    // from a fresh session produced `time: -67` at scrollLeft 70 of 6857.
+    //
+    // The fix: don't try to hit the true endpoint inside this function at all. Property (a) — the
+    // clamp reaching exactly 0 / endOfTimeline — is already guaranteed by the pre-existing OUTER
+    // clamp at both call sites below (`Math.max(0, Math.min(..., endOfTimeline))`), which wraps
+    // `time` before it ever reaches this function. Once that outer clamp saturates raw pointer
+    // position at endOfTimeline, the right bound above keeps growing past it as scrollLeft
+    // continues toward maxScroll, so Math.min(time, bound) just holds flat at endOfTimeline —
+    // correct regardless of what governs scrollWidth (the pad, the minWidth floor, or anything
+    // else added later). This function's only remaining job is preventing the fast-flick overshoot
+    // into not-yet-visible territory described above, which a same-frame, undistorted viewport-
+    // edge formula does correctly by construction.
+    //
+    // This is the ONLY clamp calculation in the file — both call sites below (the rAF edge-scroll
+    // loop and the pointermove handler) route through this single function, and nothing runs on
+    // release that could recompute a different value (see suppressRulerClickRef in cleanup()).
+    const clampToVisibleWindow = (time: number, scrollLeft: number, clientWidth: number) => {
       const zone = edgeZoneRef.current;
-      if (zone === 'off') {
-        // eslint-disable-next-line no-console
-        console.log('[clampTrace]', __site, 'zone=off', { t: performance.now(), time, returned: time });
-        return time;
-      }
+      if (zone === 'off') return time;
       const isLeft = zone === 'on-left';
       const bound = isLeft
-        ? (scrollLeft + EDGE_ZONE_PX) / zoom
-        : (scrollLeft + clientWidth - TRACK_PANEL_WIDTH - EDGE_ZONE_PX) / zoom;
-      const returned = isLeft ? Math.max(time, bound) : Math.min(time, bound);
-      // eslint-disable-next-line no-console
-      console.log('[clampTrace]', __site, isLeft ? 'on-left' : 'on-right', { t: performance.now(), time, bound, returned });
-      return returned;
+        ? scrollLeft / zoom
+        : (scrollLeft + clientWidth - TRACK_PANEL_WIDTH) / zoom;
+      return isLeft ? Math.max(time, bound) : Math.min(time, bound);
     };
 
     const stopEdgeLoop = () => {
@@ -1083,7 +1129,36 @@ export function Timeline({ songId }: { songId: string }) {
       // rAF loop's ONLY job: advance scrollLeft. Time is derived below from pointer + scrollLeft.
       const dir = edgeZoneRef.current === 'on-left' ? -1 : 1;
       const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-      const newScrollLeft = Math.max(0, Math.min(el.scrollLeft + dir * SCROLL_SPEED_PX * delta, maxScroll));
+      // Rightward auto-scroll is capped so the final clip's end lands centered (50%) in the
+      // viewport, not at the raw DOM maxScroll. maxScroll includes the content div's
+      // `minWidth: TRACK_PANEL_WIDTH + 100 * zoom` floor (~100s of always-navigable canvas — see
+      // that style below), which for a short timeline is mostly empty; scrolling all the way to it
+      // strands the user looking at nothing but blank track rows. Computed from endOfTimeline
+      // (the real content end) rather than from scrollWidth/maxScroll, which bakes in that
+      // unrelated padding. This only changes WHERE scrollLeft stops — it does not touch
+      // clampToVisibleWindow or the time value it computes, which stay governed entirely by the
+      // pre-existing endOfTimeline outer clamp regardless of this cap.
+      //
+      // "Centered" means centered in the VISIBLE TRACK AREA, not the raw container width — the
+      // sticky TRACK_PANEL_WIDTH instrument panel permanently occludes the left 256px of the
+      // container, so that strip isn't part of what the user actually sees as "the timeline." The
+      // true visible-track midpoint (in viewport coordinates) is TRACK_PANEL_WIDTH +
+      // visibleTrackWidth/2, not clientWidth/2. A first version used el.clientWidth/2 directly as
+      // the target viewport position, which is 128px (TRACK_PANEL_WIDTH/2) short of that true
+      // midpoint — confirmed via screenshot: the final clip's right edge stopped noticeably left
+      // of the visible track area's actual center. Solving scrollLeft = contentEndPx − targetViewportX
+      // for the corrected target (TRACK_PANEL_WIDTH + visibleTrackWidth/2) and substituting
+      // contentEndPx = TRACK_PANEL_WIDTH + endOfTimeline*zoom cancels both TRACK_PANEL_WIDTH terms,
+      // leaving the formula below — it only happens to not mention TRACK_PANEL_WIDTH explicitly
+      // because it already canceled out algebraically, not because it was left out.
+      const visibleTrackWidth = el.clientWidth - TRACK_PANEL_WIDTH;
+      const rightScrollCap = Math.max(0, Math.min(endOfTimeline * zoom - visibleTrackWidth / 2, maxScroll));
+      const scrollCeiling = dir === 1 ? rightScrollCap : maxScroll;
+      // zonePausedRef freezes scrollLeft in place (0 effective speed) while the pointer is pulling
+      // away from its closest approach to the edge, without changing edgeZoneRef.current or
+      // stopping this loop — see the comment in handlePointerMove's hysteresis block.
+      const effectiveSpeed = zonePausedRef.current ? 0 : SCROLL_SPEED_PX;
+      const newScrollLeft = Math.max(0, Math.min(el.scrollLeft + dir * effectiveSpeed * delta, scrollCeiling));
       el.scrollLeft = newScrollLeft;
       lastAutoScrollRef.current = newScrollLeft; // keep playback edge-riding from misreading this
 
@@ -1093,15 +1168,28 @@ export function Timeline({ songId }: { songId: string }) {
         Math.max(0, Math.min((rawX - TRACK_PANEL_WIDTH) / zoom, endOfTimeline)),
         newScrollLeft,
         el.clientWidth,
-        'rAF',
       );
       setPlayheadTime(newTime);
       checkAudioMuteState(newTime);
       window.dispatchEvent(new CustomEvent('time-update', { detail: { time: newTime } }));
 
-      // Stop when scroll hits a boundary — zone state is unchanged (hysteresis in pointermove owns it)
-      if (newScrollLeft <= 0 || newScrollLeft >= maxScroll) {
+      // Stop when scroll hits a boundary. Also turn the zone off here (not just stop the loop):
+      // auto-scroll has nowhere left to go, so there is nothing left for the rAF loop to drive.
+      // Without this, edgeZoneRef.current stays 'on-left'/'on-right' and handlePointerMove's
+      // `if (edgeZoneRef.current === 'off')` render gate never opens again — the playhead stops
+      // responding to further pointer movement until the pointer is released, even though the
+      // user is still actively holding it at the edge. Turning the zone off here lets
+      // handlePointerMove immediately resume driving updates from raw pointer position next move;
+      // its own hysteresis re-activates the zone (and restarts this loop) if the pointer is still
+      // within EDGE_ZONE_PX, which is a harmless no-op since scrollLeft is already at its limit.
+      // Uses scrollCeiling (not the raw maxScroll) so rightward auto-scroll correctly stops and
+      // hands off at the 50%-centering cap above, the same way it already stops at true 0 on the
+      // left.
+      if (newScrollLeft <= 0 || newScrollLeft >= scrollCeiling) {
         stopEdgeLoop();
+        edgeZoneRef.current = 'off';
+        lastZoneDistRef.current = null;
+        zonePausedRef.current = false;
         return;
       }
 
@@ -1121,15 +1209,64 @@ export function Timeline({ songId }: { songId: string }) {
 
       const prevZone = edgeZoneRef.current;
 
-      // Hysteresis: activate at EDGE_ZONE_PX, deactivate only when >= EDGE_ZONE_RELEASE_PX from
-      // the triggering edge — same two constants clampToVisibleWindow uses for the clamp bound.
+      // Gate fresh zone engagement on actual intentional movement, not just static position.
+      // Without this, a pointerdown that happens to land within EDGE_ZONE_PX of an edge (e.g. the
+      // flag was already rendered there from an earlier scroll) engages full-speed auto-scroll on
+      // the very next sub-pixel jitter — no real hand holds perfectly still. Only gates the OFF→ON
+      // transition below; once genuinely engaged, continued/re-engaged tracking is unaffected.
+      const movedEnough = Math.hypot(moveEvent.clientX - dragOriginRef.current.x, moveEvent.clientY - dragOriginRef.current.y) >= MIN_DRAG_DISTANCE_PX;
+
+      // Hysteresis: activate at EDGE_ZONE_PX (once movedEnough), deactivate when >= EDGE_ZONE_RELEASE_PX
+      // from the triggering edge. Unchanged from before — lastZoneDistRef/zonePausedRef below are a
+      // SEPARATE, orthogonal mechanism layered on top (not folded into this transition),
+      // specifically so a mid-zone reversal can't accidentally interact with entry/exit (an earlier
+      // attempt that set edgeZoneRef.current = 'off' directly on a pull-away broke immediately:
+      // landing back under EDGE_ZONE_PX re-triggered the OFF→ON branch on the very next
+      // pointermove, silently undoing the exit). Pausing the rAF loop's own speed instead (see
+      // edgeScrollFrame) sidesteps that: the zone state machine here is untouched by reversal
+      // detection, so it can't re-arm itself against a pause.
+      //
+      // pausedRef itself is set from a STRICT sample-to-sample comparison (current vs. the
+      // immediately preceding leftDist/rightDist), not a distance threshold — any outward movement
+      // at all, even 1px, pauses on that very event. A prior version required the pointer to pull
+      // 80px away from its closest approach before pausing, which left a real window right after a
+      // reversal where auto-scroll kept running at full speed; confirmed via manual testing, not
+      // just headless. Equal consecutive samples (e.g. pure vertical movement) leave the pause
+      // state as-is rather than forcing either way.
       if (prevZone === 'off') {
-        if (leftDist < EDGE_ZONE_PX)       edgeZoneRef.current = 'on-left';
-        else if (rightDist < EDGE_ZONE_PX) edgeZoneRef.current = 'on-right';
+        if (movedEnough && leftDist < EDGE_ZONE_PX) {
+          edgeZoneRef.current = 'on-left';
+          lastZoneDistRef.current = leftDist;
+          zonePausedRef.current = false;
+        } else if (movedEnough && rightDist < EDGE_ZONE_PX) {
+          edgeZoneRef.current = 'on-right';
+          lastZoneDistRef.current = rightDist;
+          zonePausedRef.current = false;
+        }
       } else if (prevZone === 'on-left') {
-        if (leftDist >= EDGE_ZONE_RELEASE_PX)    edgeZoneRef.current = 'off';
+        if (leftDist >= EDGE_ZONE_RELEASE_PX) {
+          edgeZoneRef.current = 'off';
+          lastZoneDistRef.current = null;
+          zonePausedRef.current = false;
+        } else {
+          if (lastZoneDistRef.current !== null) {
+            if (leftDist > lastZoneDistRef.current) zonePausedRef.current = true;       // moving away — pause immediately
+            else if (leftDist < lastZoneDistRef.current) zonePausedRef.current = false; // moving toward — resume immediately
+          }
+          lastZoneDistRef.current = leftDist;
+        }
       } else {
-        if (rightDist >= EDGE_ZONE_RELEASE_PX)   edgeZoneRef.current = 'off';
+        if (rightDist >= EDGE_ZONE_RELEASE_PX) {
+          edgeZoneRef.current = 'off';
+          lastZoneDistRef.current = null;
+          zonePausedRef.current = false;
+        } else {
+          if (lastZoneDistRef.current !== null) {
+            if (rightDist > lastZoneDistRef.current) zonePausedRef.current = true;
+            else if (rightDist < lastZoneDistRef.current) zonePausedRef.current = false;
+          }
+          lastZoneDistRef.current = rightDist;
+        }
       }
 
       // Start loop when zone just activated
@@ -1147,22 +1284,24 @@ export function Timeline({ songId }: { songId: string }) {
       //
       // But WHICH caller gets to render it does differ by zone state. While the zone is active,
       // this handler skips calling setPlayheadTime entirely — the already-running rAF loop
-      // (edgeScrollFrame) is the sole render driver during that phase. Confirmed via live timing
-      // trace: with both pointermove (uncapped, can fire far faster than 60Hz) and the 60fps rAF
-      // loop independently calling setPlayheadTime and each triggering a full re-render of this
-      // large component tree, the combined volume periodically overwhelmed the main thread —
-      // recurring ~55-70ms stalls during which NO clampTrace calls fired at all (not just missing
-      // commits; the whole thread went quiet), which is what produced the velocity-dependent
+      // (edgeScrollFrame) is the sole render driver during that phase. With both pointermove
+      // (uncapped, can fire far faster than 60Hz) and the 60fps rAF loop independently calling
+      // setPlayheadTime and each triggering a full re-render of this large component tree, the
+      // combined volume periodically overwhelmed the main thread, producing a velocity-dependent
       // catch-up snap. Capping renders at the rAF loop's 60fps removes the second, uncapped
       // driver. pointerViewportXRef is still updated above on every pointermove regardless of
       // zone state, so the rAF loop always reads the freshest pointer position next frame.
+      //
+      // Note this branch also runs immediately after edgeScrollFrame's boundary-exit resets the
+      // zone to 'off' (see edgeScrollFrame above) — that is what keeps the playhead responsive to
+      // further pointer movement while held at scrollLeft 0/maxScroll, instead of going silent
+      // until release.
       if (edgeZoneRef.current === 'off') {
         const rawX = viewportX + el.scrollLeft;
         const time = clampToVisibleWindow(
           Math.max(0, Math.min((rawX - TRACK_PANEL_WIDTH) / zoom, endOfTimeline)),
           el.scrollLeft,
           el.clientWidth,
-          'pointermove',
         );
         setPlayheadTime(time);
         checkAudioMuteState(time);
@@ -1179,8 +1318,6 @@ export function Timeline({ songId }: { songId: string }) {
       // is set here — release intentionally freezes on whatever handlePointerMove/edgeScrollFrame
       // last wrote.
       suppressRulerClickRef.current = true;
-      // eslint-disable-next-line no-console
-      console.log('[clampTrace]', 'cleanup', 'DRAG-END', { t: performance.now(), frozenPlayheadTime: playheadRef.current, zoneAtRelease: edgeZoneRef.current });
       flagEl.releasePointerCapture(pointerId);
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', cleanup);
@@ -2064,13 +2201,9 @@ export function Timeline({ songId }: { songId: string }) {
   const handleRulerSeek = (pos: number) => {
     if (suppressRulerClickRef.current) {
       suppressRulerClickRef.current = false;
-      // eslint-disable-next-line no-console
-      console.log('[clampTrace]', 'handleRulerSeek', 'suppressed', { pos });
       return;
     }
     const time = Math.max(0, pos / zoom);
-    // eslint-disable-next-line no-console
-    console.log('[clampTrace]', 'handleRulerSeek', 'SEEK-FIRED', { pos, time });
     setPlayheadTime(time);
     window.dispatchEvent(new CustomEvent('time-update', { detail: { time } }));
   };
