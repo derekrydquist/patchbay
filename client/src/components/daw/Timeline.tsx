@@ -811,6 +811,18 @@ export function Timeline({ songId }: { songId: string }) {
       });
     }
 
+    // Vertical scroll — same deferral as horizontal scroll; row height depends on
+    // track count rather than zoom, so a nested second rAF is used for the actual write.
+    const savedVScroll = localStorage.getItem(`patchbay-vscroll-${songId}`);
+    if (savedVScroll) {
+      const vs = Number(savedVScroll);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (timelineRef.current) timelineRef.current.scrollTop = vs;
+        });
+      });
+    }
+
     // Playhead — stored as time in seconds; restore directly (no pixel conversion needed)
     const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
     if (savedPlayhead) {
@@ -878,6 +890,7 @@ export function Timeline({ songId }: { songId: string }) {
       if (scrollSaveTimer.current) clearTimeout(scrollSaveTimer.current);
       scrollSaveTimer.current = setTimeout(() => {
         localStorage.setItem(`patchbay-scroll-${songId}`, String(el.scrollLeft));
+        localStorage.setItem(`patchbay-vscroll-${songId}`, String(el.scrollTop));
       }, 200);
     };
     el.addEventListener('scroll', handleScroll, { passive: true });
