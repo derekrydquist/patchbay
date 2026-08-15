@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, CheckCircle2 } from 'lucide-react';
+import { Play, Pause } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { CornerBadge } from './CornerBadge';
 
 export interface WaveformPlayerCardProps {
   src: string | null | undefined;
@@ -133,6 +134,7 @@ export function WaveformPlayerCard({
           style={{ backgroundColor: color }}
         />
       )}
+      {isFinal && <CornerBadge variant="final" corner="top-right" />}
       <div className="flex items-center gap-2 px-2.5 py-1.5">
         <button
           onPointerDown={e => e.stopPropagation()}
@@ -149,9 +151,8 @@ export function WaveformPlayerCard({
               <span className={cn('text-xs font-medium truncate', isFinal ? 'text-primary' : 'text-white/80')}>
                 {name}
               </span>
-              {isFinal && <CheckCircle2 size={10} className="text-primary shrink-0" />}
             </div>
-            <span className="text-[10px] text-white/30 ml-2 shrink-0 font-mono">
+            <span className={cn('text-[10px] text-white/30 ml-2 shrink-0 font-mono', isFinal && 'mr-4')}>
               {formatDur(isPlaying ? currentTime : duration)}
             </span>
           </div>

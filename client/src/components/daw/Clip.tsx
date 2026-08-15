@@ -7,7 +7,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, MessageCircle } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import {
@@ -1882,16 +1882,12 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
               )}
             >
               {commentInfo && (
-                <div
-                  className={cn(
-                    'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-10 cursor-pointer',
-                    hasUnread ? 'bg-primary' : 'bg-white/[0.25]'
-                  )}
-                  onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                  onClick={(e) => { e.stopPropagation(); setShowInfo(true); setFocusComments(true); }}
-                >
-                  <MessageCircle size={10} className={hasUnread ? 'text-black' : 'text-white/60'} />
-                </div>
+                <CornerBadge
+                  variant="comment"
+                  corner="bottom-right"
+                  hasUnread={hasUnread}
+                  onClick={() => { setShowInfo(true); setFocusComments(true); }}
+                />
               )}
             </WaveformPlayerCard>
           </div>
