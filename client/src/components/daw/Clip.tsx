@@ -1351,8 +1351,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             }}
             className={cn(
               "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none focus-visible:outline-none",
-              isOverlay && "shadow-2xl scale-105 opacity-90",
-              isFinal && "ring-1 ring-primary/50"
+              isOverlay && "shadow-2xl scale-105 opacity-90"
             )}
           >
             <div
@@ -1361,7 +1360,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             />
 
             {isFinal && (
-              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-lg z-10">
+              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-sm z-10">
                 <CheckCircle2 size={10} className="text-black" />
               </div>
             )}
@@ -1477,7 +1476,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             {!isOverlay && tcCommentInfo && (
               <div
                 className={cn(
-                  'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-lg z-[21] cursor-pointer',
+                  'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-sm z-[21] cursor-pointer',
                   tcHasUnread ? 'bg-primary' : 'bg-white/[0.25]'
                 )}
                 onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
