@@ -388,8 +388,8 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 **What it renders:**
 - Thin colored left border accent (`absolute left-0 top-0 bottom-0 w-0.5`) — only when `color` is provided; MediaBucket passes `clip.color`, Dashboard omits it
 - Round gold play/pause button (explicit click trigger — **no hover-to-play anywhere**)
-- Clip name with gold `CheckCircle2` icon when `isFinal` — **no "FINAL" text label anywhere**
-- Duration display (shows total duration when stopped, current position when playing)
+- Clip name in gold text when `isFinal` (icon-free — the final indicator itself is a `CornerBadge`, see below) — **no "FINAL" text label anywhere**
+- Duration display (shows total duration when stopped, current position when playing); shifts left (`mr-4`) when `isFinal` so it clears the corner badge
 - Waveform canvas: decoded once via `AudioContext.decodeAudioData`, drawn with gold playhead progress
 
 **Drag compatibility:** `BucketClip` wraps `WaveformPlayerCard` with `ContextMenuTrigger asChild` on the dnd-kit drag div. The play button and canvas both call `e.stopPropagation()` on `onPointerDown` so they do not accidentally activate drag. Right-click anywhere opens the context menu normally via `ContextMenu`.
@@ -403,6 +403,23 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 **Timeline clip removal guard** — `TimelineClip` shows an `AlertDialog` ("Remove Final Clip?") when a user selects "Remove Clip" from the context menu and `isFinal === true`. This is managed via `showRemoveConfirm` state in `TimelineClip`.
 
 **Auto-isFinal on timeline clip placement** — `POST /api/tracks/:trackId/clips` checks whether a final bucket clip exists for the same `trackId + sectionName`. If one exists, the newly placed timeline clip is immediately set to `isFinal: true`.
+
+### Shared CornerBadge component — final/comment badges — ✅ Built
+
+`CornerBadge` (`client/src/components/daw/CornerBadge.tsx`) is the single source of styling for the two small badges that can appear on a clip card: the final-version checkmark and the comment indicator. It replaced independently-styled, duplicated inline badge JSX that had drifted apart between `TimelineClip` and `WaveformPlayerCard`/`BucketClip`.
+
+**Props:** `variant: 'final' | 'comment'`, `corner: 'top-right' | 'bottom-right'`, `hasUnread?: boolean` (comment variant only), `onClick?: () => void` (comment variant only — the final badge is never clickable).
+
+**Rendering:**
+- `variant="final"` — `bg-primary rounded-bl shadow-sm z-10`, black `CheckCircle2` (size 10). Not interactive.
+- `variant="comment"` — `rounded-tl shadow-sm z-[21] cursor-pointer`; `bg-primary` + black `MessageCircle` when `hasUnread`, else `bg-white/[0.25]` + `text-white/60` `MessageCircle`. Swallows `onPointerDown` (`stopPropagation` + `stopImmediatePropagation`) so it never starts a dnd-kit drag, and `stopPropagation`s its own `onClick` before calling the passed handler so it doesn't bubble into the card's own click/select behavior.
+- `corner` positions the badge absolutely within its parent: `top-right` → `absolute top-0 right-0 p-0.5`; `bottom-right` → `absolute bottom-0 right-0 p-0.5`. The parent must be `relative` (both `TimelineClip`'s container and `WaveformPlayerCard`'s outer card are).
+
+**Used by:**
+- **`TimelineClip`** (`Clip.tsx`) — final badge `top-right` (only clip-level indicator; the `isFinal` ring on the clip container was removed separately — see "Recently fixed bugs" in root `CLAUDE.md`, "Timeline/Media Bucket final and comment badge inconsistency" — it rendered as an unwanted gold line at clip seams and added no information the badge doesn't already convey), comment badge `bottom-right` with `tcHasUnread`/`tcCommentInfo`-driven `onClick` opening `ClipInfoWindow` with `focusComments: true`.
+- **`WaveformPlayerCard`** — final badge `top-right`, rendered directly on the outer card whenever `isFinal` is true. **`BucketClip`** passes the comment badge in as `children` (`bottom-right`, `hasUnread`-driven, `onClick` opens `ClipInfoWindow` with `focusComments: true`) — both badges share the same `relative overflow-hidden` card container, so they never need coordination beyond their fixed corners.
+
+**Do not** re-inline badge JSX at a new call site — extend `CornerBadge` (e.g. a new `corner` value) instead, or the two surfaces will drift apart again.
 
 ### Media Bucket — "Add Section"
 
@@ -471,6 +488,7 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 | `patchbay-track-solo-${songId}` | JSON `Record<trackId, boolean>` | Per-track solo state |
 | `patchbay-zoom-${songId}` | number string | Pixels-per-second zoom level |
 | `patchbay-scroll-${songId}` | number string | `scrollLeft` of the timeline scroller (debounced 200ms via DOM listener) |
+| `patchbay-vscroll-${songId}` | number string | `scrollTop` of the timeline scroller (same debounced DOM listener as `scrollLeft` — one shared 200ms timer writes both keys together) |
 | `patchbay-playhead-${songId}` | number string | Playhead position as **time in seconds** (not pixels — pixel position is zoom-dependent; converted to pixels on restore using the already-restored zoom value) |
 | `patchbay-selected-timeline-track-${songId}` | string | ID of the last clicked track header |
 | `patchbay-selected-timeline-clip-${songId}` | string | ID of the last clicked timeline clip |
@@ -481,11 +499,11 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 
 **Lazy-init as the preferred pattern for first-paint state** — a `useEffect` or even `useLayoutEffect` that corrects state after mount still means the component's first render used the wrong default. With React Query's cache, `apiTracks` can be immediately available but `tracks` (separate `useState`) always starts empty, so the first render always happens with the default values before the restore logic runs. Any state that must be visually correct on the very first paint should be lazy-initialized directly from its persisted source, not corrected by a post-mount effect. The BPM input flash was worked around with a `disabled` gate — lazy init is the cleaner, more general solution. Apply it whenever this bug class (flash-default-then-jump) appears for other persisted values.
 
-**Scroll restore** is deferred via `requestAnimationFrame` so the content has rendered at the restored zoom level before `scrollLeft` is set — otherwise the scroller may not be wide enough to reach the saved position.
+**Scroll restore** is deferred via `requestAnimationFrame` so the content has rendered at the restored zoom level before `scrollLeft` is set — otherwise the scroller may not be wide enough to reach the saved position. Vertical scroll is persisted the same way as horizontal: `scrollTop` is written to `patchbay-vscroll-${songId}` by the same debounced scroll listener that writes `patchbay-scroll-${songId}` (one shared 200ms timer, both axes written together). On restore, `scrollLeft` and `scrollTop` are both set inside the same `requestAnimationFrame` callback in the `uiRestored` layout effect — not two separate rAF chains — so both axes land on the same paint tick instead of one visibly lagging the other. An earlier version wrapped the vertical restore in a second, nested rAF on the theory that row height might not be settled a frame early; real-browser testing showed this was unnecessary and caused a visible ~14ms secondary scroll jump right after the initial track pop-in (see the Known Issues entry on Timeline content pop-in in root `CLAUDE.md`) — do not reintroduce the double-rAF without a concrete repro showing the single-rAF version restores to the wrong position.
 
 **Source of truth summary:**
 - **DB-backed (shared across the band):** `songs.bpm`, `instrument_tracks.volume`
-- **localStorage-backed (per-browser, not shared):** mute, solo, zoom, scroll, playhead position, selected track, selected clip
+- **localStorage-backed (per-browser, not shared):** mute, solo, zoom, horizontal + vertical scroll, playhead position, selected track, selected clip
 
 **Why activity feed links navigate to `/workspace` not `/songs/:songId`** — The `sessionRestored` ref is a one-shot guard. If the user is already on SongHome and clicks an activity row that would just change the URL params on the same page, the guard has already fired and will not re-run. Navigating to `/songs/:songId/workspace` ensures MediaBucket is always a fresh component mount, so the URL param restore logic runs cleanly. Never use the `find-in-bucket` CustomEvent for activity-feed navigation — that path is for within-workspace navigation only (e.g. "Show in File Browser" from a timeline clip right-click).
 
