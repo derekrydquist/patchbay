@@ -9,6 +9,7 @@ import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, MessageCircle } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
+import { CornerBadge } from './CornerBadge';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -1360,9 +1361,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             />
 
             {isFinal && (
-              <div className="absolute top-0 right-0 p-0.5 bg-primary rounded-bl shadow-sm z-10">
-                <CheckCircle2 size={10} className="text-black" />
-              </div>
+              <CornerBadge variant="final" corner="top-right" />
             )}
 
             <canvas
@@ -1474,16 +1473,12 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 
             {/* Comment indicator badge — mirrors the final-checkmark badge at top-0 right-0 rounded-bl */}
             {!isOverlay && tcCommentInfo && (
-              <div
-                className={cn(
-                  'absolute bottom-0 right-0 p-0.5 rounded-tl shadow-sm z-[21] cursor-pointer',
-                  tcHasUnread ? 'bg-primary' : 'bg-white/[0.25]'
-                )}
-                onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                onClick={(e) => { e.stopPropagation(); setShowInfo(true); setFocusComments(true); }}
-              >
-                <MessageCircle size={10} className={tcHasUnread ? 'text-black' : 'text-white/60'} />
-              </div>
+              <CornerBadge
+                variant="comment"
+                corner="bottom-right"
+                hasUnread={tcHasUnread}
+                onClick={() => { setShowInfo(true); setFocusComments(true); }}
+              />
             )}
           </div>
         </ContextMenuTrigger>
