@@ -802,24 +802,18 @@ export function Timeline({ songId }: { songId: string }) {
       if (z >= 20 && z <= 400) { setZoom(z); }
     }
 
-    // Scroll — deferred one frame so the content has rendered at the new zoom
+    // Scroll — deferred one frame so the content has rendered at the new zoom.
+    // Horizontal and vertical restore share a single rAF so both land on the same
+    // tick as the track/clip pop-in, instead of vertical trailing it as a second jump.
     const savedScroll = localStorage.getItem(`patchbay-scroll-${songId}`);
-    if (savedScroll) {
-      const s = Number(savedScroll);
-      requestAnimationFrame(() => {
-        if (timelineRef.current) timelineRef.current.scrollLeft = s;
-      });
-    }
-
-    // Vertical scroll — same deferral as horizontal scroll; row height depends on
-    // track count rather than zoom, so a nested second rAF is used for the actual write.
     const savedVScroll = localStorage.getItem(`patchbay-vscroll-${songId}`);
-    if (savedVScroll) {
-      const vs = Number(savedVScroll);
+    if (savedScroll || savedVScroll) {
+      const s = savedScroll ? Number(savedScroll) : null;
+      const vs = savedVScroll ? Number(savedVScroll) : null;
       requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (timelineRef.current) timelineRef.current.scrollTop = vs;
-        });
+        if (!timelineRef.current) return;
+        if (s !== null) timelineRef.current.scrollLeft = s;
+        if (vs !== null) timelineRef.current.scrollTop = vs;
       });
     }
 
