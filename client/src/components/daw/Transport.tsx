@@ -1,13 +1,16 @@
 import React from 'react';
-import { Play, Square, SkipBack, SkipForward, Repeat, Volume2 } from 'lucide-react';
+import { Play, Square, SkipBack, SkipForward, Repeat, Volume2, ChevronDown } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { ExportDialog } from './ExportDialog';
 
 const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '2/4', '5/4'];
+const METRONOME_SUBDIVISIONS = ['1/4', '1/8', '1/16'] as const;
+type MetronomeSubdivision = typeof METRONOME_SUBDIVISIONS[number];
 
 function MetronomeIcon({ size = 18 }: { size?: number }) {
   return (
@@ -17,7 +20,7 @@ function MetronomeIcon({ size = 18 }: { size?: number }) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="2"
+      strokeWidth="2.5"
       strokeLinecap="round"
       strokeLinejoin="round"
     >
@@ -54,11 +57,47 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isLooping, setIsLooping] = React.useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
   const [isMetronomeOn, setIsMetronomeOn] = React.useState(() => localStorage.getItem(`patchbay-metronome-${songId}`) === 'true');
+  const [metronomeVolume, setMetronomeVolume] = React.useState(() => {
+    const saved = localStorage.getItem(`patchbay-metronome-volume-${songId}`);
+    if (saved) { const v = Number(saved); if (Number.isFinite(v) && v >= 0 && v <= 100) return v; }
+    return 70;
+  });
+  const [metronomeSubdivision, setMetronomeSubdivision] = React.useState<MetronomeSubdivision>(() => {
+    const saved = localStorage.getItem(`patchbay-metronome-subdivision-${songId}`);
+    return (METRONOME_SUBDIVISIONS as readonly string[]).includes(saved ?? '') ? (saved as MetronomeSubdivision) : '1/4';
+  });
+  const metronomeVolumeDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Same guard pattern as Track.tsx's Mute/Solo/volume-slider controls — prevents a
+  // slider drag from bubbling into any parent click handler.
+  const metronomeControlInteractionRef = React.useRef(false);
+  const handleMetronomeControlPointerDown = () => { metronomeControlInteractionRef.current = true; };
+  const handleMetronomeControlPointerUp = () => { requestAnimationFrame(() => { metronomeControlInteractionRef.current = false; }); };
   const [currentTime, setCurrentTime] = React.useState(0);
 
   React.useEffect(() => {
     localStorage.setItem(`patchbay-metronome-${songId}`, String(isMetronomeOn));
   }, [isMetronomeOn, songId]);
+
+  React.useEffect(() => {
+    return () => {
+      if (metronomeVolumeDebounceRef.current) clearTimeout(metronomeVolumeDebounceRef.current);
+    };
+  }, []);
+
+  const commitMetronomeVolume = (val: number) => {
+    setMetronomeVolume(val);
+    if (metronomeVolumeDebounceRef.current) clearTimeout(metronomeVolumeDebounceRef.current);
+    metronomeVolumeDebounceRef.current = setTimeout(() => {
+      localStorage.setItem(`patchbay-metronome-volume-${songId}`, String(val));
+      window.dispatchEvent(new CustomEvent('update-metronome-volume', { detail: { volume: val } }));
+    }, 150);
+  };
+
+  const commitMetronomeSubdivision = (sub: MetronomeSubdivision) => {
+    setMetronomeSubdivision(sub);
+    localStorage.setItem(`patchbay-metronome-subdivision-${songId}`, sub);
+    window.dispatchEvent(new CustomEvent('update-metronome-subdivision', { detail: { subdivision: sub } }));
+  };
 
   React.useEffect(() => {
     const handleUpdateBpm = (e: any) => {
@@ -219,18 +258,100 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
 
       {/* Center: Controls */}
       <div className="flex items-center justify-center gap-2 w-1/3">
-        <Button
-          variant="ghost"
-          size="icon"
-          className={cn("text-muted-foreground hover:text-foreground", isMetronomeOn && "text-primary hover:text-primary/80")}
-          onClick={() => {
-            const next = !isMetronomeOn;
-            setIsMetronomeOn(next);
-            window.dispatchEvent(new CustomEvent('toggle-metronome', { detail: { enabled: next } }));
-          }}
-        >
-          <MetronomeIcon size={18} />
-        </Button>
+        <Popover>
+          <div className="group flex items-center gap-0">
+            {/*
+              Deliberately NOT the shared Button component here: Button's size="icon" variant is a
+              fixed 36px square with the icon centered inside, leaving ~9px of invisible padding on
+              every side — that inset (not the flex gap or the chevron's own padding) was what kept
+              swallowing every previous attempt to close the visible gap to the chevron. A plain
+              button with explicit minimal padding lets the rendered box hug the glyph instead.
+              Note: Button also forces all descendant svgs to 16px via a global `[&_svg]:size-4`
+              rule, which is why MetronomeIcon's `size` prop (18) never actually rendered at 18px
+              before — it was always silently clamped to 16px to match its siblings. Outside Button
+              that clamp no longer applies, so size is set explicitly to 16 here to hold that same
+              parity rather than accidentally rendering larger than SkipBack/SkipForward/Repeat.
+            */}
+            <button
+              type="button"
+              className={cn(
+                // group-has-[.metronome-chevron-trigger:hover] wires the chevron as a SECOND
+                // trigger for the icon's own existing hover effect (verified by computed-style
+                // diff: hovering any transport icon, this one included, only ever changes
+                // `color` from text-muted-foreground to text-foreground/text-primary — there is
+                // no separate box-shadow/drop-shadow glow anywhere in this row). The icon's own
+                // direct hover: classes are untouched; this only adds a second path to the same
+                // classes so hovering the chevron reproduces the identical effect.
+                "inline-flex items-center justify-center rounded-md p-1 text-muted-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 hover:text-foreground group-has-[.metronome-chevron-trigger:hover]:text-foreground [&_svg]:pointer-events-none [&_svg]:shrink-0",
+                isMetronomeOn && "text-primary hover:text-primary/80 group-has-[.metronome-chevron-trigger:hover]:text-primary/80"
+              )}
+              onClick={() => {
+                const next = !isMetronomeOn;
+                setIsMetronomeOn(next);
+                window.dispatchEvent(new CustomEvent('toggle-metronome', { detail: { enabled: next } }));
+              }}
+            >
+              <MetronomeIcon size={16} />
+            </button>
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                className={cn(
+                  // Unstyled at rest — no border/background, matches the icon's own color logic so
+                  // the pair reads as one unit. hover:bg-white/5 is the app's established ghost-icon
+                  // hover treatment (see AppHeader's gear/avatar triggers).
+                  // Deliberately mouse-hover-only, NOT focus-visible: Radix returns focus to this
+                  // trigger when the Popover closes (Escape, selecting a subdivision, clicking
+                  // outside), and Chromium's focus-visible heuristic treats that programmatic
+                  // refocus as visible — a focus-visible background here would stay lit
+                  // indefinitely after every popover interaction instead of only on real hover.
+                  "metronome-chevron-trigger -ml-0.5 flex items-center justify-center rounded-full px-0.5 py-0.5 text-muted-foreground transition-colors hover:bg-white/5 hover:text-foreground focus-visible:outline-none",
+                  isMetronomeOn && "text-primary hover:text-primary/80"
+                )}
+              >
+                <ChevronDown size={11} strokeWidth={3} />
+              </button>
+            </PopoverTrigger>
+          </div>
+          <PopoverContent align="center" className="w-56 space-y-4 bg-[#0c0c0e] border-white/10 p-3">
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Volume</span>
+                <div
+                  className="mt-2"
+                  onPointerDown={handleMetronomeControlPointerDown}
+                  onPointerUp={handleMetronomeControlPointerUp}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Slider
+                    value={[metronomeVolume]}
+                    onValueChange={([val]) => commitMetronomeVolume(val)}
+                    max={100}
+                    step={1}
+                    className="w-full"
+                  />
+                </div>
+              </div>
+              <div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Subdivision</span>
+                <div className="flex mt-2 rounded border border-border overflow-hidden">
+                  {METRONOME_SUBDIVISIONS.map((sub, i) => (
+                    <button
+                      key={sub}
+                      onClick={() => commitMetronomeSubdivision(sub)}
+                      className={cn(
+                        'flex-1 py-1 text-[10px] flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
+                        i < METRONOME_SUBDIVISIONS.length - 1 && 'border-r border-border',
+                        metronomeSubdivision === sub && 'bg-primary text-primary-foreground border-primary'
+                      )}
+                    >
+                      {sub}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </PopoverContent>
+        </Popover>
         <Button
           variant="ghost"
           size="icon"

@@ -42,6 +42,8 @@ import { CheckCircle2 } from 'lucide-react';
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 const TRACK_PANEL_WIDTH = 256;
 const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
+// Ticks per quarter-note beat for each metronome subdivision setting.
+const METRONOME_SUBDIVISION_FACTORS: Record<string, number> = { '1/4': 1, '1/8': 2, '1/16': 4 };
 
 type ApiTrack = {
   id: string;
@@ -414,6 +416,7 @@ export function Timeline({ songId }: { songId: string }) {
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState<string | null>(null);
 
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
+  useEffect(() => { bpmRef.current = bpm; }, [bpm]);
 
   const animationRef = React.useRef<number | null>(null);
   const lastTimeRef = React.useRef<number | null>(null);
@@ -446,6 +449,20 @@ export function Timeline({ songId }: { songId: string }) {
   const masterVolumeRef = React.useRef<number>(0.8); // 0–1, matches slider default of 80
   const lastBeatIndexRef = useRef<number>(-1);
   const isMetronomeOnRef = useRef(isMetronomeOn);
+  // Lazy-initialized from the same localStorage keys Transport.tsx writes to, so a page
+  // reload doesn't reset metronome volume/subdivision to defaults.
+  const metronomeVolumeRef = useRef<number>((() => {
+    const saved = localStorage.getItem(`patchbay-metronome-volume-${songId}`);
+    if (saved) { const v = Number(saved); if (Number.isFinite(v) && v >= 0 && v <= 100) return v; }
+    return 70;
+  })());
+  const metronomeSubdivisionRef = useRef<string>((() => {
+    const saved = localStorage.getItem(`patchbay-metronome-subdivision-${songId}`);
+    return saved && METRONOME_SUBDIVISION_FACTORS[saved] ? saved : '1/4';
+  })());
+  // Stale-closure-safe mirror of `bpm` state, needed inside zero-dep effect handlers
+  // (the subdivision-change reseed) that can't depend on the main rAF effect's bpm closure.
+  const bpmRef = useRef(MOCK_SONG.bpm || 120);
   // Captured at first render; compared against when tracks first arrive to detect slow loads.
   const mountTimeRef = useRef(performance.now());
   // Stable refs for mutable values needed inside zero-dep useEffect handlers (stale closure safety).
@@ -643,6 +660,32 @@ export function Timeline({ songId }: { songId: string }) {
     };
     window.addEventListener('toggle-metronome', handleMetronomeToggle);
     return () => window.removeEventListener('toggle-metronome', handleMetronomeToggle);
+  }, []);
+
+  useEffect(() => {
+    const handleMetronomeVolumeUpdate = (e: any) => {
+      metronomeVolumeRef.current = e.detail.volume;
+    };
+    const handleMetronomeSubdivisionUpdate = (e: any) => {
+      metronomeSubdivisionRef.current = e.detail.subdivision;
+      // Reseed lastBeatIndexRef to the tick index at the *current* playhead position under the
+      // new subdivision — otherwise the next rAF frame sees a large index jump (old subdivision's
+      // tick count vs. new subdivision's tick count) and fires a burst of catch-up clicks.
+      // Mirrors the play-press seeding logic in the rAF effect below, including the
+      // position-0 → -1 special case.
+      const playheadTime = Math.max(0, playheadRef.current);
+      const subdivisionFactor = METRONOME_SUBDIVISION_FACTORS[e.detail.subdivision] ?? 1;
+      const secondsPerBeat = 60 / bpmRef.current;
+      const tickInterval = secondsPerBeat / subdivisionFactor;
+      const currentTickIndex = Math.floor(playheadTime / tickInterval);
+      lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentTickIndex;
+    };
+    window.addEventListener('update-metronome-volume', handleMetronomeVolumeUpdate);
+    window.addEventListener('update-metronome-subdivision', handleMetronomeSubdivisionUpdate);
+    return () => {
+      window.removeEventListener('update-metronome-volume', handleMetronomeVolumeUpdate);
+      window.removeEventListener('update-metronome-subdivision', handleMetronomeSubdivisionUpdate);
+    };
   }, []);
 
   useEffect(() => {
@@ -1373,15 +1416,18 @@ export function Timeline({ songId }: { songId: string }) {
 
       if (!lastTimeRef.current) lastTimeRef.current = performance.now();
 
-      // Seed lastBeatIndexRef so clicks only fire at real beat boundaries.
-      // Exception: playheadTime === 0 (timeline start) seeds to -1 so beat 0's click is
-      // heard immediately. Any other position seeds to the beat we're inside, so the first
+      // Seed lastBeatIndexRef so clicks only fire at real tick boundaries (ticks are
+      // subdivision-sized — quarter note by default, or the finer 1/8 or 1/16 interval).
+      // Exception: playheadTime === 0 (timeline start) seeds to -1 so tick 0's click is
+      // heard immediately. Any other position seeds to the tick we're inside, so the first
       // click waits for the next boundary rather than firing spuriously.
       {
         const playheadTime = Math.max(0, playheadRef.current);
+        const subdivisionFactor = METRONOME_SUBDIVISION_FACTORS[metronomeSubdivisionRef.current] ?? 1;
         const secondsPerBeat = 60 / bpm;
-        const currentBeatIndex = Math.floor(playheadTime / secondsPerBeat);
-        lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentBeatIndex;
+        const tickInterval = secondsPerBeat / subdivisionFactor;
+        const currentTickIndex = Math.floor(playheadTime / tickInterval);
+        lastBeatIndexRef.current = playheadTime === 0 ? -1 : currentTickIndex;
       }
 
       // Lazily wires a clip's audio element into the Web Audio graph so its pan can be
@@ -1408,10 +1454,23 @@ export function Timeline({ songId }: { songId: string }) {
         const gain = ctx.createGain();
         osc.connect(gain);
         gain.connect(ctx.destination);
+        // Square wave has far more harmonic content than the sine default at the same gain —
+        // reads as a sharper, more piercing click that cuts through the mix better.
+        osc.type = 'square';
         osc.frequency.value = accent ? 1000 : 800;
         const now = ctx.currentTime;
+        // Decibel-based curve — perceived loudness is roughly logarithmic, so mapping the
+        // slider linearly in dB (rather than any power curve on gain directly) makes each
+        // 10% of slider movement a roughly equal step in perceived loudness across the whole
+        // range. -30dB (gain ≈0.0316) at volume=0 up to 0dB (unity gain) at volume=100.
+        // Floored at 0.0001 as a hard safety clamp underneath the curve.
+        const t = metronomeVolumeRef.current / 100;
+        const minDb = -12; // volume=0 → quiet but present (gain ≈0.25), not near-silent
+        const maxDb = 0;   // volume=100 → peak gain 1.0 (unity, stays clear of clipping)
+        const db = minDb + t * (maxDb - minDb);
+        const peakGain = Math.max(0.0001, Math.pow(10, db / 20));
         gain.gain.setValueAtTime(0, now);
-        gain.gain.linearRampToValueAtTime(0.25, now + 0.005);
+        gain.gain.linearRampToValueAtTime(peakGain, now + 0.005);
         gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.045);
         osc.start(now);
         osc.stop(now + 0.05);
@@ -1446,15 +1505,27 @@ export function Timeline({ songId }: { songId: string }) {
             return;
           }
 
-          // Metronome: fire a click whenever the playhead crosses into a new beat.
+          // Metronome: fire a click whenever the playhead crosses into a new tick.
+          // A "tick" is one subdivision interval (quarter/eighth/sixteenth note), not
+          // necessarily a full quarter-note beat — see subdivisionFactor below.
           if (isMetronomeOnRef.current && bpm > 0) {
             const newTime = Math.max(0, playheadRef.current + timeDelta);
             const beatsPerMeasure = parseInt(timeSignature.split('/')[0], 10) || 4;
+            const subdivisionFactor = METRONOME_SUBDIVISION_FACTORS[metronomeSubdivisionRef.current] ?? 1;
             const secondsPerBeat = 60 / bpm;
-            const currentBeatIndex = Math.floor(newTime / secondsPerBeat);
-            if (currentBeatIndex !== lastBeatIndexRef.current) {
-              playMetronomeClick(currentBeatIndex % beatsPerMeasure === 0);
-              lastBeatIndexRef.current = currentBeatIndex;
+            const tickInterval = secondsPerBeat / subdivisionFactor;
+            const currentTickIndex = Math.floor(newTime / tickInterval);
+            if (currentTickIndex !== lastBeatIndexRef.current) {
+              // subdivisionFactor ticks make up one quarter-note beat, so only every
+              // subdivisionFactor-th tick actually lands on a true quarter-note boundary.
+              // The accent (higher pitch) is reserved for beat 0 of the measure on that
+              // boundary — an 1/8 or 1/16 tick that falls between quarter notes must
+              // never accidentally trigger it.
+              const isQuarterNoteBeat = currentTickIndex % subdivisionFactor === 0;
+              const quarterNoteBeatIndex = currentTickIndex / subdivisionFactor;
+              const accent = isQuarterNoteBeat && quarterNoteBeatIndex % beatsPerMeasure === 0;
+              playMetronomeClick(accent);
+              lastBeatIndexRef.current = currentTickIndex;
             }
           }
 
