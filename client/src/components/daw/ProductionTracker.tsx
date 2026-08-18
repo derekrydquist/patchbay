@@ -1044,8 +1044,18 @@ export function ProductionTracker({ songId }: { songId: string }) {
             {bucket.map((track) => (
               <ContextMenu key={track.id}>
                 <ContextMenuTrigger asChild>
-                  <div className="sticky top-0 z-10 border-l border-white/5 px-4 py-4 bg-[#0c0c0e]">
-                    <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate">{track.name}</div>
+                  <div className="sticky top-0 z-10 border-l border-white/5 px-4 py-4 bg-[#0c0c0e] flex items-center justify-between gap-2 group/instrument">
+                    <div className="text-xs font-bold uppercase tracking-widest text-muted-foreground truncate min-w-0">{track.name}</div>
+                    <button
+                      className="opacity-0 group-hover/instrument:opacity-100 transition-opacity shrink-0 cursor-pointer"
+                      onClick={(e) => { e.stopPropagation(); setRemoveTrackId(track.id); }}
+                      onContextMenu={(e) => e.stopPropagation()}
+                      aria-label={`Remove instrument ${track.name}`}
+                    >
+                      <div className="w-[22px] h-[22px] rounded-md bg-red-500/15 hover:bg-red-500/25 flex items-center justify-center transition-colors">
+                        <Minus size={14} className="text-red-500" />
+                      </div>
+                    </button>
                   </div>
                 </ContextMenuTrigger>
                 <ContextMenuContent className="bg-popover border-border">
