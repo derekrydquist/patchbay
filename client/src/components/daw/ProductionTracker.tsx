@@ -827,6 +827,13 @@ export function ProductionTracker({ songId }: { songId: string }) {
       setRemoveTrackId(null);
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
     },
+    onError: (msg) => {
+      toast({
+        title: 'Failed to remove instrument',
+        description: msg,
+        variant: 'destructive',
+      });
+    },
   });
 
   const restoreTrackMutation = useRestoreTrack(songId, {
