@@ -2078,14 +2078,16 @@ export default function Dashboard() {
                               >
                                 <MessageSquare size={13} className="text-white/50" /> Add Note
                               </ContextMenuItem>
-                              <ContextMenuItem
-                                onClick={() => markFinalMutation.mutate(clip.id)}
-                                disabled={clip.isFinal}
-                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
-                              >
-                                <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
-                                {clip.isFinal ? 'Already Final' : 'Mark as Final'}
-                              </ContextMenuItem>
+                              {selectedFile?.type !== 'idea' && (
+                                <ContextMenuItem
+                                  onClick={() => markFinalMutation.mutate(clip.id)}
+                                  disabled={clip.isFinal}
+                                  className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
+                                >
+                                  <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
+                                  {clip.isFinal ? 'Already Final' : 'Mark as Final'}
+                                </ContextMenuItem>
+                              )}
                               <ContextMenuItem
                                 onClick={() => setAddToSongClip(clip)}
                                 className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
