@@ -1227,14 +1227,19 @@ export async function registerRoutes(
     // Create the production task for this instrument + section.
     // useAddSection fires this route in a Promise.all across all active tracks,
     // so each call independently creates its own task row.
+    // Idea-type songs have no Timeline surface to reconcile task status, so a
+    // task created here would be permanently orphaned — skip it for those.
     if (ideaTrack && idea.sectionName) {
       try {
-        insertProductionTaskForSection({
-          songId: ideaTrack.songId,
-          trackId: ideaTrack.id,
-          instrument: ideaTrack.name,
-          sectionName: idea.sectionName,
-        });
+        const parentSong = await storage.getSongById(ideaTrack.songId);
+        if (parentSong?.type !== 'idea') {
+          insertProductionTaskForSection({
+            songId: ideaTrack.songId,
+            trackId: ideaTrack.id,
+            instrument: ideaTrack.name,
+            sectionName: idea.sectionName,
+          });
+        }
       } catch (err) {
         console.error('[ideas] failed to create production task:', err);
       }
