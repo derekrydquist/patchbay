@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
@@ -166,6 +166,26 @@ function timeAgo(ms: number): string {
 
 function truncateAnchor(text: string, max = 60): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+// Shared by both click-to-highlight and position-based sorting. `anchorOffset`
+// is checked first (fast path — lyrics haven't changed since the comment was
+// made); falls back to a plain indexOf scan (first match) if the lyrics were
+// edited and the original offset no longer lines up. Returns null when the
+// anchor text isn't found anywhere in the current lyrics at all (deleted) —
+// callers treat that as "unresolved": no highlight, sorts to the end.
+function resolveCommentAnchor(
+  lyrics: string,
+  anchorText: string,
+  anchorOffset: number
+): { start: number; end: number } | null {
+  if (!anchorText) return null;
+  if (lyrics.slice(anchorOffset, anchorOffset + anchorText.length) === anchorText) {
+    return { start: anchorOffset, end: anchorOffset + anchorText.length };
+  }
+  const idx = lyrics.indexOf(anchorText);
+  if (idx === -1) return null;
+  return { start: idx, end: idx + anchorText.length };
 }
 
 // ─── Review helpers ───────────────────────────────────────────────────────────
@@ -1061,6 +1081,15 @@ interface ScreenPoint {
   y: number;
 }
 
+// Trigger point the composer anchors to. bottomY is the point the composer's
+// own bottom edge aligns to (the pill's bottom edge, or the right-click point
+// for a single-point trigger) — the composer always grows upward from there,
+// however tall its content makes it.
+interface ComposerAnchor {
+  x: number;
+  bottomY: number;
+}
+
 function LyricsTab({ songId, song }: { songId: string; song: Song | undefined }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -1121,9 +1150,33 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     queryKey: ['lyrics-comments', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}/lyrics-comments`).then(r => r.json()),
   });
-  const sortedComments = [...lyricsComments].sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
+  // Resolved once per comment per lyrics change, reused by both the sidebar's
+  // position-based ordering and click-to-highlight (avoids recomputing the
+  // same anchor scan twice for the same render).
+  const resolvedAnchors = useMemo(() => {
+    const map = new Map<string, { start: number; end: number } | null>();
+    for (const c of lyricsComments) {
+      map.set(c.id, resolveCommentAnchor(lyricsDraft, c.anchorText, c.anchorOffset));
+    }
+    return map;
+  }, [lyricsComments, lyricsDraft]);
+
+  // Top-of-document first, matching reading order (Google Docs convention) —
+  // not creation time. Unresolved comments (anchor text no longer found in the
+  // lyrics at all) sort to the end, keeping the prior most-recent-first order
+  // among themselves since exact tiebreak order there isn't load-bearing.
+  const sortedComments = useMemo(() => {
+    return [...lyricsComments].sort((a, b) => {
+      const posA = resolvedAnchors.get(a.id)?.start ?? null;
+      const posB = resolvedAnchors.get(b.id)?.start ?? null;
+      if (posA === null && posB === null) {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      }
+      if (posA === null) return 1;
+      if (posB === null) return -1;
+      return posA - posB;
+    });
+  }, [lyricsComments, resolvedAnchors]);
 
   // The captured character-offset selection driving the pending comment, plus
   // where to render the floating icon / context menu / composer for it. All
@@ -1134,7 +1187,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   const [iconPos, setIconPos] = useState<ScreenPoint | null>(null);
   const [contextMenuPos, setContextMenuPos] = useState<ScreenPoint | null>(null);
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composerPos, setComposerPos] = useState<ScreenPoint | null>(null);
+  const [composerAnchor, setComposerAnchor] = useState<ComposerAnchor | null>(null);
   const [composerText, setComposerText] = useState('');
 
   // Refs to the three floating elements that can steal focus from the textarea
@@ -1145,6 +1198,11 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   const pillButtonRef = useRef<HTMLButtonElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const composerContainerRef = useRef<HTMLDivElement>(null);
+  // For measuring where the pill should sit — the same document-flow wrapper
+  // the highlight overlay lives in, and the mirror span for the current
+  // selection within it. See the iconPos-computing effect below.
+  const lyricsWrapperRef = useRef<HTMLDivElement>(null);
+  const selectionMirrorSpanRef = useRef<HTMLSpanElement>(null);
   // Clicking the pill replaces it with the composer in the SAME React commit
   // (iconPos -> null, composerOpen -> true together). The composer's textarea
   // autoFocuses, which blurs this textarea synchronously during React's
@@ -1156,18 +1214,99 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   // textarea is the one actually about to lose focus.
   const suppressNextBlurResetRef = useRef(false);
 
+  // Auto-grow: no internal scrollbar, no manual resize handle — the textarea
+  // always sizes to exactly fit its content, like Google Docs. Runs on every
+  // lyricsDraft change, which covers typing, paste, cut, AND the one-shot
+  // programmatic init from the loaded song (so the initial height already
+  // fits saved lyrics on first render, not just after the first keystroke).
+  // useLayoutEffect (not useEffect) so the resize happens before the browser
+  // paints — otherwise a stale height would flash before snapping to the
+  // correct one. Reset to 'auto' first: scrollHeight only reports the height
+  // needed to fit content at the CURRENT height, so shrinking (e.g. after
+  // deleting a line) would otherwise never be detected — collapsing back to
+  // 'auto' forces the browser to recompute scrollHeight from scratch. The
+  // CSS min-h-[640px] class still provides the floor: setting an inline
+  // height shorter than that has no visible effect since min-height always
+  // wins over a smaller height.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [lyricsDraft]);
+
+  // Pill position — derived from the mirror span's real document-flow position,
+  // not a one-time viewport snapshot. The old approach stored e.clientX/clientY
+  // (viewport-relative) and rendered the pill `position: fixed`, so it stayed
+  // put on screen while the underlying text scrolled out from under it. This
+  // effect instead measures selectionMirrorSpanRef — the same always-rendered
+  // mirror the highlight overlay uses — relative to lyricsWrapperRef (a normal,
+  // in-flow ancestor), and the pill renders `position: absolute` inside that
+  // same wrapper. An absolute offset from an in-flow ancestor scrolls with the
+  // page automatically, so this needs no scroll listener to stay correct.
+  // getClientRects() (not getBoundingClientRect()) because a wrapped selection
+  // spans multiple line boxes; the LAST one approximates "near the end of the
+  // selection," matching where the old mouseup-coordinate approach landed.
+  // Gated on contextMenuPos/composerOpen because handleTextareaContextMenu and
+  // openComposer both also touch selectionRange, but neither should show the
+  // pill — this must stay in sync with the same gates those two use.
+  useLayoutEffect(() => {
+    if (!selectionRange || contextMenuPos || composerOpen) {
+      setIconPos(null);
+      return;
+    }
+    const span = selectionMirrorSpanRef.current;
+    const wrapper = lyricsWrapperRef.current;
+    if (!span || !wrapper) {
+      setIconPos(null);
+      return;
+    }
+    const rects = span.getClientRects();
+    console.log('[LYRICS-DEBUG][iconPos effect] rects:', Array.from(rects).map(r => ({
+      top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height,
+    })));
+    if (rects.length === 0) {
+      console.log('[LYRICS-DEBUG][iconPos effect] no rects — setting iconPos null');
+      setIconPos(null);
+      return;
+    }
+    const lastRect = rects[rects.length - 1];
+    console.log('[LYRICS-DEBUG][iconPos effect] using lastRect (index', rects.length - 1, '):', {
+      top: lastRect.top, bottom: lastRect.bottom, left: lastRect.left, right: lastRect.right,
+      width: lastRect.width, height: lastRect.height,
+    });
+    const wrapperRect = wrapper.getBoundingClientRect();
+    const computed = { x: lastRect.right - wrapperRect.left, y: lastRect.top - wrapperRect.top };
+    console.log('[LYRICS-DEBUG][iconPos effect] wrapperRect:', { top: wrapperRect.top, left: wrapperRect.left }, 'computed iconPos:', computed);
+    setIconPos(computed);
+  }, [selectionRange, contextMenuPos, composerOpen]);
+
   const resetSelectionUi = () => {
     setSelectionRange(null);
     setIconPos(null);
     setContextMenuPos(null);
     setComposerOpen(false);
-    setComposerPos(null);
+    setComposerAnchor(null);
     setComposerText('');
+  };
+
+  // iconPos (the floating pill) is otherwise only ever recalculated inside
+  // handleTextareaMouseUp — but deleting a selection via Delete/Backspace, or
+  // typing a character over one, never fires mouseup, so nothing else tells
+  // the pill its tracked selection just collapsed (confirmed via trace: after
+  // Delete, selectionStart/End correctly collapse but the pill stayed
+  // rendered at its old position). The composer is deliberately left out of
+  // this check — while it's open, edits happen in ITS OWN textarea, not this
+  // one, so this handler doesn't fire during that flow and can't interfere.
+  const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setLyricsDraft(e.target.value);
+    if (e.target.selectionStart === e.target.selectionEnd && (iconPos || selectionRange)) {
+      resetSelectionUi();
+    }
   };
 
   const handleTextareaMouseUp = (e: React.MouseEvent<HTMLTextAreaElement>) => {
     if (e.button !== 0) return; // right-click's own contextmenu handler owns the menu; ignore its trailing mouseup
-    const clickPos = { x: e.clientX, y: e.clientY };
     // Deferred by a tick: when this click also restores focus after the
     // textarea was blurred elsewhere (switching tabs/apps/windows) while a
     // selection was active, Chromium does not collapse/recompute the caret to
@@ -1189,7 +1328,10 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
         return;
       }
       setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
-      setIconPos(clickPos);
+      // iconPos is no longer set directly here — the layout effect above
+      // derives it from the mirror span once this selectionRange change
+      // re-renders it, so the pill's position is document-flow-relative
+      // instead of a one-time viewport snapshot.
       setContextMenuPos(null);
       setComposerOpen(false);
       setComposerText('');
@@ -1201,7 +1343,6 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     if (el.selectionStart === el.selectionEnd) return; // no selection — let the native menu show
     e.preventDefault();
     setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
-    setIconPos(null);
     setComposerOpen(false);
     setComposerText('');
     setContextMenuPos({ x: e.clientX, y: e.clientY });
@@ -1237,7 +1378,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     resetSelectionUi();
   };
 
-  const openComposer = (pos: ScreenPoint) => {
+  const openComposer = (anchor: ComposerAnchor) => {
     // Only the pill path needs this: the textarea is still focused right up
     // until this same commit unmounts the pill and mounts the composer. The
     // context-menu path already lost focus earlier (to the menu button), so
@@ -1246,11 +1387,20 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     if (document.activeElement === textareaRef.current) {
       suppressNextBlurResetRef.current = true;
     }
-    setComposerPos(pos);
-    setIconPos(null);
+    setComposerAnchor(anchor);
     setContextMenuPos(null);
     setComposerOpen(true);
   };
+
+  // Composer vertical placement — the composer's own bottom edge anchors
+  // directly to composerAnchor.bottomY (the pill's bottom edge, or the
+  // right-click point), and it grows upward from there as its content
+  // changes height. No JS measurement needed: this is a pure CSS trick
+  // (top: bottomY + transform: translateY(-100%), applied inline in the JSX
+  // below) rather than a layout effect, so there's no measure-then-correct
+  // step and no "not enough room above" case to detect — if that pushes the
+  // composer up over the header for a selection near the top of the page,
+  // that's accepted, not a bug.
 
   // Dismiss the right-click menu on outside click or Escape — same pattern as
   // Timeline's background context menu.
@@ -1309,6 +1459,21 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     });
   };
 
+  // Click a comment card -> highlight its anchor text as a real native
+  // selection (setSelectionRange + focus, not a CSS overlay). Takes priority
+  // over any in-progress pill/menu/composer/own-selection state — cleared via
+  // resetSelectionUi before applying the new selection. Unresolved comments
+  // (anchor text no longer found anywhere in the lyrics) fail silently.
+  const handleCommentClick = (comment: LyricsComment) => {
+    const resolved = resolvedAnchors.get(comment.id);
+    if (!resolved) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    resetSelectionUi();
+    el.setSelectionRange(resolved.start, resolved.end);
+    el.focus();
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
 
@@ -1326,16 +1491,83 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
           )}
         </div>
         <div className="p-5">
-          <textarea
-            ref={textareaRef}
-            value={lyricsDraft}
-            onChange={(e) => setLyricsDraft(e.target.value)}
-            onBlur={handleTextareaBlur}
-            onMouseUp={handleTextareaMouseUp}
-            onContextMenu={handleTextareaContextMenu}
-            placeholder="No lyrics yet — start typing..."
-            className="w-full min-h-[640px] bg-transparent text-sm text-white/90 leading-relaxed resize-y outline-none placeholder:text-muted-foreground placeholder:italic"
-          />
+          <div ref={lyricsWrapperRef} className="relative">
+            {/* Selection mirror — always rendered whenever there's an active selectionRange
+                (pill-showing OR composing), not just while composing. Two jobs:
+                1. Highlight overlay while composing — a blurred <textarea> renders NO selection
+                   indicator at all once focus moves to another element in the same document
+                   (confirmed via screenshot: this is different from the muted "inactive"
+                   highlight browsers show when the whole window loses focus, which IS visible —
+                   see the Known browser-timing gotchas note). The composer's own autoFocus is
+                   exactly that case, so the original selection needs to be reproduced here since
+                   the real native one won't render while the composer has focus. Sits behind the
+                   textarea (z-0 vs textarea's z-10) with fully transparent text — only the
+                   highlighted span's background shows (bg-primary/30, composing state only —
+                   plain transparent otherwise), through the textarea's own transparent
+                   background, with the textarea's real (visible) text painted on top of it.
+                2. Position source for the floating pill — see the iconPos-computing effect
+                   above. selectionMirrorSpanRef points at the middle (selected-range) span;
+                   its getClientRects() relative to lyricsWrapperRef gives the pill a
+                   document-flow-relative position that scrolls with the page naturally,
+                   instead of the one-time viewport snapshot (clientX/clientY + position:fixed)
+                   this used to use, which is what left the pill behind when the page scrolled.
+                This inner wrapper carries no padding of its own (the padding is on the OUTER
+                div) — inset-0 on an absolutely-positioned child aligns to its nearest
+                positioned ancestor's *padding* box, so nesting it inside the padded div
+                directly would offset it by the full padding amount from the textarea's own
+                (padding-respecting, normal-flow) position. */}
+            {selectionRange && (
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 z-0 pointer-events-none whitespace-pre-wrap break-words font-sans text-sm leading-relaxed overflow-hidden"
+              >
+                <span className="text-transparent">{lyricsDraft.slice(0, selectionRange.start)}</span>
+                <span
+                  ref={selectionMirrorSpanRef}
+                  className={cn('text-transparent', composerOpen && 'bg-primary/30')}
+                >
+                  {lyricsDraft.slice(selectionRange.start, selectionRange.end)}
+                </span>
+                <span className="text-transparent">{lyricsDraft.slice(selectionRange.end)}</span>
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={lyricsDraft}
+              onChange={handleTextareaChange}
+              onBlur={handleTextareaBlur}
+              onMouseUp={handleTextareaMouseUp}
+              onContextMenu={handleTextareaContextMenu}
+              placeholder="No lyrics yet — start typing..."
+              className="relative z-10 w-full min-h-[640px] bg-transparent text-sm text-white/90 leading-relaxed resize-none overflow-hidden outline-none placeholder:text-muted-foreground placeholder:italic"
+            />
+            {/* Floating "Add comment" pill — shown after a mouseup selection, hidden once the
+                composer opens. position: absolute (not fixed) inside this same in-flow wrapper,
+                using the wrapper-relative offset the effect above computed, so it scrolls with
+                the page instead of staying pinned to a stale viewport position. */}
+            {iconPos && !composerOpen && (
+              <button
+                ref={pillButtonRef}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  // The composer still renders position: fixed (viewport-relative, untouched by
+                  // the earlier scroll-tracking fix), so it needs a fresh viewport point — read
+                  // live from the pill's own rect at click time rather than reusing iconPos,
+                  // which is wrapper-relative and would be the wrong coordinate space for a
+                  // fixed-positioned element. bottomY (the pill's real bottom edge) is the point
+                  // the composer's own bottom edge anchors to.
+                  const rect = pillButtonRef.current?.getBoundingClientRect();
+                  const anchor = rect ? { x: rect.left, bottomY: rect.bottom } : { x: 0, bottomY: 0 };
+                  openComposer(anchor);
+                }}
+                className="absolute z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-black text-[10px] font-bold shadow-xl hover:bg-primary/90 transition-colors cursor-pointer whitespace-nowrap"
+                style={{ left: iconPos.x, top: iconPos.y - 36 }}
+              >
+                <MessageCircle size={12} />
+                Add comment
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1354,7 +1586,11 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
             style={{ height: 640, scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
           >
             {sortedComments.map((c) => (
-              <div key={c.id} className="px-4 py-3">
+              <div
+                key={c.id}
+                onClick={() => handleCommentClick(c)}
+                className="px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer"
+              >
                 <p className="text-[10px] text-muted-foreground italic truncate mb-1">
                   on: "{truncateAnchor(c.anchorText)}"
                 </p>
@@ -1369,20 +1605,6 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
         )}
       </div>
 
-      {/* Floating "Add comment" icon — shown after a mouseup selection, hidden once the composer opens */}
-      {iconPos && !composerOpen && (
-        <button
-          ref={pillButtonRef}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => openComposer(iconPos)}
-          className="fixed z-[9999] flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-primary text-black text-[10px] font-bold shadow-xl hover:bg-primary/90 transition-colors cursor-pointer"
-          style={{ left: iconPos.x, top: iconPos.y - 36 }}
-        >
-          <MessageCircle size={12} />
-          Add comment
-        </button>
-      )}
-
       {/* Right-click menu — only ever shown when a selection was active on right-click */}
       {contextMenuPos && (
         <div
@@ -1393,19 +1615,27 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
         >
           <button
             className="w-full px-3 py-1.5 text-left text-xs font-semibold text-white/80 hover:bg-white/5 transition-colors cursor-pointer"
-            onClick={() => openComposer(contextMenuPos)}
+            onClick={() => openComposer({ x: contextMenuPos.x, bottomY: contextMenuPos.y })}
           >
             Add comment
           </button>
         </div>
       )}
 
-      {/* Inline comment composer */}
-      {composerOpen && composerPos && selectionRange && (
+      {/* Inline comment composer. Anchored purely in CSS: `top` is set to the
+          trigger's bottomY and `translateY(-100%)` pulls the element's own
+          bottom edge up to sit exactly there, so it grows upward from the
+          pill/right-click point as content height changes — no JS
+          measurement, no effect, no flip logic. */}
+      {composerOpen && composerAnchor && selectionRange && (
         <div
           ref={composerContainerRef}
           className="fixed z-[9999] bg-[#181C26] border border-white/10 rounded-lg shadow-xl p-3 w-72"
-          style={{ left: Math.min(composerPos.x, window.innerWidth - 300), top: composerPos.y }}
+          style={{
+            left: Math.min(composerAnchor.x, window.innerWidth - 300),
+            top: composerAnchor.bottomY,
+            transform: 'translateY(-100%)',
+          }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <p className="text-[10px] text-muted-foreground italic truncate mb-2">
