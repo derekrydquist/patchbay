@@ -2,14 +2,16 @@ import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiRequest } from '@/lib/queryClient';
 import { DndContext } from '@dnd-kit/core';
 import {
   ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
-  CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp,
+  CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp, MessageCircle,
 } from 'lucide-react';
 import { AppHeader } from '@/components/AppHeader';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/hooks/use-toast';
 import { MediaBucket } from '@/components/daw/MediaBucket';
 import type { ProductionTask } from '@shared/schema';
 
@@ -19,6 +21,7 @@ interface Song {
   id: string;
   name: string;
   bpm: number | null;
+  lyrics: string | null;
 }
 
 interface LastSession {
@@ -63,6 +66,19 @@ interface ReviewComment {
   resolved?: boolean;
   editedAt?: string | null;
   replies?: ReviewComment[];
+}
+
+interface LyricsComment {
+  id: string;
+  songId: string;
+  parentId: string | null;
+  author: string;
+  text: string;
+  anchorText: string;
+  anchorOffset: number;
+  resolved: boolean;
+  createdAt: string;
+  replies?: LyricsComment[];
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,6 +162,10 @@ function timeAgo(ms: number): string {
   const days = Math.floor(hrs / 24);
   if (days === 1) return 'yesterday';
   return `${days}d ago`;
+}
+
+function truncateAnchor(text: string, max = 60): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 // ─── Review helpers ───────────────────────────────────────────────────────────
@@ -1029,6 +1049,404 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
   );
 }
 
+// ─── LyricsTab ────────────────────────────────────────────────────────────────
+
+interface SelectionRange {
+  start: number;
+  end: number;
+}
+
+interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
+function LyricsTab({ songId, song }: { songId: string; song: Song | undefined }) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+
+  const [lyricsDraft, setLyricsDraft] = useState('');
+  const [lastSavedLyrics, setLastSavedLyrics] = useState('');
+  const [justSaved, setJustSaved] = useState(false);
+  const initialized = useRef(false);
+
+  // One-shot init from the fetched song — same pattern as MediaBucket's session
+  // restore ref, so a later refetch (e.g. after another user's edit) never clobbers
+  // an in-progress draft. Gated on `song` (not just its lyrics field) so a direct
+  // deep link to ?tab=lyrics can't init from an still-loading placeholder before
+  // the song query resolves.
+  useEffect(() => {
+    if (initialized.current || !song) return;
+    initialized.current = true;
+    setLyricsDraft(song.lyrics ?? '');
+    setLastSavedLyrics(song.lyrics ?? '');
+  }, [song]);
+
+  const saveLyrics = useMutation({
+    mutationFn: async (lyrics: string) => {
+      const r = await fetch(`/api/songs/${songId}/lyrics`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lyrics }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to save lyrics');
+      }
+      return r.json();
+    },
+    onSuccess: (_data, lyrics) => {
+      setLastSavedLyrics(lyrics);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 1500);
+      queryClient.invalidateQueries({ queryKey: ['song', songId] });
+    },
+    onError: (err) => {
+      toast({
+        title: 'Failed to save lyrics',
+        description: err instanceof Error ? err.message : 'An error occurred.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const handleBlur = () => {
+    if (lyricsDraft === lastSavedLyrics) return;
+    saveLyrics.mutate(lyricsDraft);
+  };
+
+  // ── Comments ──────────────────────────────────────────────────────────────
+
+  const { data: lyricsComments = [] } = useQuery<LyricsComment[]>({
+    queryKey: ['lyrics-comments', songId],
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}/lyrics-comments`).then(r => r.json()),
+  });
+  const sortedComments = [...lyricsComments].sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  );
+
+  // The captured character-offset selection driving the pending comment, plus
+  // where to render the floating icon / context menu / composer for it. All
+  // three are `fixed`-positioned using raw clientX/clientY, matching Timeline's
+  // existing background-right-click context menu pattern — no relative-wrapper
+  // coordinate math needed.
+  const [selectionRange, setSelectionRange] = useState<SelectionRange | null>(null);
+  const [iconPos, setIconPos] = useState<ScreenPoint | null>(null);
+  const [contextMenuPos, setContextMenuPos] = useState<ScreenPoint | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerPos, setComposerPos] = useState<ScreenPoint | null>(null);
+  const [composerText, setComposerText] = useState('');
+
+  // Refs to the three floating elements that can steal focus from the textarea
+  // as part of their own intended click flow (pill → composer, context menu →
+  // composer). handleTextareaBlur must not treat focus moving to any of these
+  // as an "outside click" — see handleTextareaBlur below for why.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pillButtonRef = useRef<HTMLButtonElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const composerContainerRef = useRef<HTMLDivElement>(null);
+  // Clicking the pill replaces it with the composer in the SAME React commit
+  // (iconPos -> null, composerOpen -> true together). The composer's textarea
+  // autoFocuses, which blurs this textarea synchronously during React's
+  // mutation phase — before composerContainerRef gets attached in the later
+  // layout phase, and after pillButtonRef is already nulled from the pill's
+  // own unmount. So at blur time both refs are null and the relatedTarget
+  // check below can't recognize the composer. This ref-free flag is the fix:
+  // it's set synchronously (no commit-timing dependency) only when the
+  // textarea is the one actually about to lose focus.
+  const suppressNextBlurResetRef = useRef(false);
+
+  const resetSelectionUi = () => {
+    setSelectionRange(null);
+    setIconPos(null);
+    setContextMenuPos(null);
+    setComposerOpen(false);
+    setComposerPos(null);
+    setComposerText('');
+  };
+
+  const handleTextareaMouseUp = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (e.button !== 0) return; // right-click's own contextmenu handler owns the menu; ignore its trailing mouseup
+    const clickPos = { x: e.clientX, y: e.clientY };
+    // Deferred by a tick: when this click also restores focus after the
+    // textarea was blurred elsewhere (switching tabs/apps/windows) while a
+    // selection was active, Chromium does not collapse/recompute the caret to
+    // the click position synchronously with mousedown/mouseup/click — it does
+    // so on a later task (confirmed via native event tracing: sync mouseup,
+    // a queued microtask, and the click event all still read the OLD,
+    // pre-blur selection; only a read deferred past this task sees the real,
+    // settled one). Reading synchronously here would show a phantom selection
+    // that's about to collapse, making the pill appear over text that isn't
+    // actually highlighted anymore. A plain click on an already-focused
+    // textarea is unaffected — its selection is already settled by the time
+    // mouseup fires, so deferring doesn't change that value, only its timing
+    // by under a frame.
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      if (el.selectionStart === el.selectionEnd) {
+        resetSelectionUi();
+        return;
+      }
+      setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
+      setIconPos(clickPos);
+      setContextMenuPos(null);
+      setComposerOpen(false);
+      setComposerText('');
+    }, 0);
+  };
+
+  const handleTextareaContextMenu = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    if (el.selectionStart === el.selectionEnd) return; // no selection — let the native menu show
+    e.preventDefault();
+    setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
+    setIconPos(null);
+    setComposerOpen(false);
+    setComposerText('');
+    setContextMenuPos({ x: e.clientX, y: e.clientY });
+  };
+
+  // Native selection is cleared the moment the textarea loses focus, but our
+  // own pill/menu/composer state is independent React state and won't clear
+  // itself — this is what leaves the pill stuck after clicking away. The catch:
+  // clicking the pill (composer opens), clicking "Add comment" in the right-click
+  // menu (composer opens), and the composer's own autoFocus stealing focus the
+  // instant it opens ALL fire a real blur on this textarea too, with
+  // relatedTarget pointing at that respective element — so a blanket
+  // "clear on any blur" would wipe selectionRange out from under the composer
+  // before it can render (composer's render guard requires selectionRange).
+  // suppressNextBlurResetRef handles the pill's same-commit race (see its
+  // declaration above); the relatedTarget check below still covers the
+  // context-menu path, whose ref is already attached from an earlier commit
+  // by the time its "Add comment" click fires. Only a genuine focus move to
+  // somewhere outside all of these should reset.
+  const handleTextareaBlur = (e: React.FocusEvent<HTMLTextAreaElement>) => {
+    handleBlur();
+    if (suppressNextBlurResetRef.current) {
+      suppressNextBlurResetRef.current = false;
+      return;
+    }
+    const related = e.relatedTarget as Node | null;
+    const movingToFloatingUi =
+      !!related &&
+      (pillButtonRef.current?.contains(related) ||
+        contextMenuRef.current?.contains(related) ||
+        composerContainerRef.current?.contains(related));
+    if (movingToFloatingUi) return;
+    resetSelectionUi();
+  };
+
+  const openComposer = (pos: ScreenPoint) => {
+    // Only the pill path needs this: the textarea is still focused right up
+    // until this same commit unmounts the pill and mounts the composer. The
+    // context-menu path already lost focus earlier (to the menu button), so
+    // this textarea won't blur again here — leaving the flag unset for that
+    // path avoids it going stale and swallowing some later, unrelated blur.
+    if (document.activeElement === textareaRef.current) {
+      suppressNextBlurResetRef.current = true;
+    }
+    setComposerPos(pos);
+    setIconPos(null);
+    setContextMenuPos(null);
+    setComposerOpen(true);
+  };
+
+  // Dismiss the right-click menu on outside click or Escape — same pattern as
+  // Timeline's background context menu.
+  useEffect(() => {
+    if (!contextMenuPos) return;
+    const dismiss = () => setContextMenuPos(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setContextMenuPos(null); };
+    document.addEventListener('mousedown', dismiss);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', dismiss);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenuPos]);
+
+  // Escape closes the composer too.
+  useEffect(() => {
+    if (!composerOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') resetSelectionUi(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [composerOpen]);
+
+  const addComment = useMutation({
+    mutationFn: async (payload: { text: string; anchorText: string; anchorOffset: number }) => {
+      const r = await fetch(`/api/songs/${songId}/lyrics-comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to add comment');
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['lyrics-comments', songId] });
+      resetSelectionUi();
+    },
+    onError: (err) => {
+      toast({
+        title: 'Failed to add comment',
+        description: err instanceof Error ? err.message : 'An error occurred.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const handleSubmitComment = () => {
+    if (!selectionRange || !composerText.trim() || addComment.isPending) return;
+    addComment.mutate({
+      text: composerText.trim(),
+      anchorText: lyricsDraft.slice(selectionRange.start, selectionRange.end),
+      anchorOffset: selectionRange.start,
+    });
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+
+      {/* Left column — Lyrics */}
+      <div className="lg:col-span-2 bg-[#181C26] rounded-xl border border-white/5">
+        <div className="px-5 py-3 border-b border-white/5 flex items-center justify-between">
+          <p className="text-[10px] font-bold tracking-widest uppercase text-white/40">Lyrics</p>
+          {(saveLyrics.isPending || justSaved) && (
+            <span className={cn(
+              'text-[10px] font-semibold uppercase tracking-widest',
+              saveLyrics.isPending ? 'text-white/40' : 'text-primary'
+            )}>
+              {saveLyrics.isPending ? 'Saving…' : 'Saved'}
+            </span>
+          )}
+        </div>
+        <div className="p-5">
+          <textarea
+            ref={textareaRef}
+            value={lyricsDraft}
+            onChange={(e) => setLyricsDraft(e.target.value)}
+            onBlur={handleTextareaBlur}
+            onMouseUp={handleTextareaMouseUp}
+            onContextMenu={handleTextareaContextMenu}
+            placeholder="No lyrics yet — start typing..."
+            className="w-full min-h-[640px] bg-transparent text-sm text-white/90 leading-relaxed resize-y outline-none placeholder:text-muted-foreground placeholder:italic"
+          />
+        </div>
+      </div>
+
+      {/* Right column — Comments sidebar */}
+      <div className="lg:col-span-1">
+        <h3 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Comments</h3>
+        {sortedComments.length === 0 ? (
+          <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
+            <p className="text-xs text-muted-foreground">
+              No comments yet — highlight text and add a comment to start the conversation.
+            </p>
+          </div>
+        ) : (
+          <div
+            className="bg-[#181C26] rounded-xl border border-white/5 divide-y divide-white/5 overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent"
+            style={{ height: 640, scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
+          >
+            {sortedComments.map((c) => (
+              <div key={c.id} className="px-4 py-3">
+                <p className="text-[10px] text-muted-foreground italic truncate mb-1">
+                  on: "{truncateAnchor(c.anchorText)}"
+                </p>
+                <p className="text-sm text-white/80 leading-snug">{c.text}</p>
+                <div className="flex items-center justify-between mt-1.5 gap-3">
+                  <span className="text-[11px] font-semibold text-white/50">{capitalize(c.author)}</span>
+                  <span className="text-[10px] text-muted-foreground shrink-0">{timeAgo(new Date(c.createdAt).getTime())}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Floating "Add comment" icon — shown after a mouseup selection, hidden once the composer opens */}
+      {iconPos && !composerOpen && (
+        <button
+          ref={pillButtonRef}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => openComposer(iconPos)}
+          className="fixed z-[9999] flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-primary text-black text-[10px] font-bold shadow-xl hover:bg-primary/90 transition-colors cursor-pointer"
+          style={{ left: iconPos.x, top: iconPos.y - 36 }}
+        >
+          <MessageCircle size={12} />
+          Add comment
+        </button>
+      )}
+
+      {/* Right-click menu — only ever shown when a selection was active on right-click */}
+      {contextMenuPos && (
+        <div
+          ref={contextMenuRef}
+          className="fixed z-[9999] bg-popover border border-border rounded-md shadow-xl py-1 min-w-[160px]"
+          style={{ left: contextMenuPos.x, top: contextMenuPos.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full px-3 py-1.5 text-left text-xs font-semibold text-white/80 hover:bg-white/5 transition-colors cursor-pointer"
+            onClick={() => openComposer(contextMenuPos)}
+          >
+            Add comment
+          </button>
+        </div>
+      )}
+
+      {/* Inline comment composer */}
+      {composerOpen && composerPos && selectionRange && (
+        <div
+          ref={composerContainerRef}
+          className="fixed z-[9999] bg-[#181C26] border border-white/10 rounded-lg shadow-xl p-3 w-72"
+          style={{ left: Math.min(composerPos.x, window.innerWidth - 300), top: composerPos.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <p className="text-[10px] text-muted-foreground italic truncate mb-2">
+            on: "{truncateAnchor(lyricsDraft.slice(selectionRange.start, selectionRange.end))}"
+          </p>
+          <textarea
+            autoFocus
+            value={composerText}
+            onChange={(e) => setComposerText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                handleSubmitComment();
+              }
+            }}
+            placeholder="Add a comment…"
+            rows={3}
+            className="w-full bg-white/5 rounded-md p-2 text-sm text-white placeholder:text-white/30 outline-none resize-none"
+          />
+          <div className="flex justify-end gap-3 mt-2">
+            <button
+              onClick={resetSelectionUi}
+              className="text-[10px] font-bold text-white/50 hover:text-white/80 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSubmitComment}
+              disabled={!composerText.trim() || addComment.isPending}
+              className="text-[10px] font-bold text-primary hover:text-primary/80 disabled:opacity-40 disabled:hover:text-primary transition-colors"
+            >
+              Comment
+            </button>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
 // ─── SongHome ─────────────────────────────────────────────────────────────────
 
 export default function SongHome() {
@@ -1038,7 +1456,7 @@ export default function SongHome() {
   const search = useSearch();
   const searchParams = new URLSearchParams(search);
   const tabParam = searchParams.get('tab');
-  const activeTab = (tabParam === 'review' || tabParam === 'files') ? tabParam : 'overview';
+  const activeTab = (tabParam === 'review' || tabParam === 'files' || tabParam === 'lyrics') ? tabParam : 'overview';
   const autoReviewId = searchParams.get('reviewId');
   const autoCommentId = searchParams.get('commentId');
 
@@ -1046,17 +1464,17 @@ export default function SongHome() {
 
   const { data: song } = useQuery<Song>({
     queryKey: ['song', songId],
-    queryFn: () => fetch(`/api/songs/${songId}`).then(r => r.json()),
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
 
   const { data: tasks = [] } = useQuery<ProductionTask[]>({
     queryKey: ['production-tasks', songId],
-    queryFn: () => fetch(`/api/songs/${songId}/production-tasks`).then(r => r.json()),
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}/production-tasks`).then(r => r.json()),
   });
 
   const { data: reviews = [] } = useQuery<ReviewType[]>({
     queryKey: ['reviews', songId],
-    queryFn: () => fetch(`/api/songs/${songId}/reviews`).then(r => r.json()),
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}/reviews`).then(r => r.json()),
   });
 
   const [showAllTasks, setShowAllTasks] = useState(false);
@@ -1066,7 +1484,7 @@ export default function SongHome() {
 
   const { data: activityEvents = [] } = useQuery<ActivityEvent[]>({
     queryKey: ['activity', songId],
-    queryFn: () => fetch(`/api/songs/${songId}/activity`).then(r => r.json()),
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}/activity`).then(r => r.json()),
     refetchInterval: 10000,
   });
 
@@ -1120,7 +1538,7 @@ export default function SongHome() {
 
         {/* ── Tab bar ──────────────────────────────────────────────────────── */}
         <div className="flex gap-1 bg-white/[0.03] p-1 rounded-lg border border-white/5 self-start w-fit">
-          {(['overview', 'files', 'review'] as const).map(tab => (
+          {(['overview', 'files', 'lyrics', 'review'] as const).map(tab => (
             <button
               key={tab}
               onClick={() => {
@@ -1137,7 +1555,7 @@ export default function SongHome() {
                   : 'text-white/40 hover:text-white/70'
               )}
             >
-              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Song Files' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
+              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Song Files' : tab === 'lyrics' ? 'Lyrics' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
             </button>
           ))}
         </div>
@@ -1307,6 +1725,11 @@ export default function SongHome() {
               </DndContext>
             </div>
           </div>
+        )}
+
+        {/* ── Lyrics tab ───────────────────────────────────────────────────── */}
+        {activeTab === 'lyrics' && (
+          <LyricsTab songId={songId} song={song} />
         )}
 
         {/* ── Review tab ───────────────────────────────────────────────────── */}

@@ -43,6 +43,7 @@ export const songs = sqliteTable("songs", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   bandId: text("band_id").references(() => bands.id),
+  lyrics: text("lyrics"), // nullable, plain text
 });
 
 export const insertSongSchema = createInsertSchema(songs, {
@@ -263,6 +264,24 @@ export const songReviewComments = sqliteTable("song_review_comments", {
 export const insertSongReviewCommentSchema = createInsertSchema(songReviewComments).omit({ createdAt: true });
 export type InsertSongReviewComment = z.infer<typeof insertSongReviewCommentSchema>;
 export type SongReviewComment = typeof songReviewComments.$inferSelect;
+
+// ─── Lyrics Comments ──────────────────────────────────────────────────────────
+
+export const lyricsComments = sqliteTable("lyrics_comments", {
+  id: text("id").primaryKey(),
+  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  parentId: text("parent_id"), // nullable self-reference, no FK — one level of replies, same pattern as clip_comments/task_comments/song_review_comments
+  author: text("author").notNull(),
+  text: text("text").notNull(),
+  anchorText: text("anchor_text").notNull(),
+  anchorOffset: integer("anchor_offset").notNull(),
+  resolved: integer("resolved", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertLyricsCommentSchema = createInsertSchema(lyricsComments).omit({ createdAt: true });
+export type InsertLyricsComment = z.infer<typeof insertLyricsCommentSchema>;
+export type LyricsComment = typeof lyricsComments.$inferSelect;
 
 // ─── Activity Log ─────────────────────────────────────────────────────────────
 // Song-structure events that don't belong to a specific task (sections, tracks).

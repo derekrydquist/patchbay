@@ -172,6 +172,9 @@ in route handlers.
 | `song_review_comments` | Timestamped comments on a review; `parentId` (nullable self-reference) supports one level of replies; `resolved` boolean; `editedAt` nullable ISO timestamp |
 | `activity_log` | Dedicated log store for song-scoped events. No FK dependencies — `songId` is a plain text column so events survive even if associated rows are deleted. `type` and `description` are stored verbatim; `getActivity()` passes them through without text parsing. `author` is a nullable text column (retrofitted — pre-existing rows have `author=null`); populated at every `logActivity()` call site by resolving `req.session.userId → storage.getUser()?.username`. `author` is the key input to `getSongsWithLastActive`, which sorts the Dashboard "Your Songs" list by `MAX(activity_log.timestamp WHERE author = session username)` per song, falling back to `createdAt`. Optional `review_id` and `comment_id` columns support deep-link routing for review-comment and review-reply events. |
 | `global_settings` | Single-row config table (PK = `'global'`). Stores `defaultInstruments` (JSON string[]), `defaultSections` (JSON string[]), and `defaultBpm` (integer). `getSettings()` auto-inserts the factory row on first read so the row always exists. Used by the New Project modal to pre-populate instruments/sections/BPM. |
+| `lyrics_comments` | Timestamped comments on song lyrics, anchored to a text selection (linked to `songs`); `anchorText` + `anchorOffset` store the selected substring and its offset for re-anchoring on render — if the anchor text can't be found (lyrics were edited), the comment is preserved and shown unanchored rather than deleted; `resolved` boolean supports a Google-Docs-style resolve/unresolve flow; `parentId` (nullable self-reference, no FK) supports one level of replies, same pattern as `clip_comments`/`task_comments`/`song_review_comments`. |
+
+`songs.lyrics` — nullable plain-text column holding the song's lyrics. Edited via a dedicated `PATCH /api/songs/:id/lyrics` route (not the general song PATCH), following the same "dedicated route for a single frequently-written field" pattern as `timeline_clips.trimStart`/`trimEnd`.
 
 **`timeline_clips` vs `clips`:** These are intentionally separate tables. `clips` holds the uploaded source material (versions inside bucket ideas). `timeline_clips` holds the arranged instances placed on the timeline with a `start` time. Dragging from the bucket to the timeline creates a new `timeline_clips` row — it does not move the source clip.
 
@@ -335,6 +338,80 @@ interface UploadModalProps {
 
 ---
 
+## Lyrics Feature
+
+A dedicated "Lyrics" tab on Song Home, alongside Overview / Song Files / Review.
+Always-editable, no separate view/edit mode — anyone with song access can see
+and edit directly.
+
+### Data model
+- `songs.lyrics` — plain text, nullable, no rich formatting.
+- `lyrics_comments` — see Tables entry above. Comments are select-to-comment,
+  anchored via `anchorText` + `anchorOffset`, with `resolved` state.
+
+### Textarea behavior
+- Single `<textarea>`, autosave on blur via `PATCH /api/songs/:id/lyrics`.
+- If the blurred value matches the last-saved value exactly, no PATCH fires
+  (no-op save) — this includes the case where a net-zero edit (e.g. add then
+  delete a character) results in the same final string.
+- Placeholder text ("No lyrics yet — start typing...") is native `placeholder`
+  attribute, never persisted as real content.
+- Losing all unsaved edits on a hard page refresh is expected/intentional —
+  this feature does autosave-on-blur, not live keystroke sync or draft
+  persistence across reloads.
+
+### Comment system — selection and creation
+- Selection is captured via the textarea's native `selectionStart`/`selectionEnd`
+  (not a DOM Range — a plain `<textarea>` has no rich DOM to select within).
+- Two comment-creation triggers, both opening the same inline composer:
+  1. A floating "Add comment" pill appears near the mouseup position when a
+     real (non-collapsed) selection exists.
+  2. Right-clicking an active selection shows a custom context menu with a
+     single "Add comment" item (native menu is suppressed only when a
+     selection exists; a right-click with no selection shows the normal
+     browser menu).
+- The comments sidebar (always visible, matches the Activity panel's card
+  styling/proportions from Overview) shows each top-level comment with its
+  quoted `anchorText` as a truncated caption (~60 chars), author, relative
+  timestamp, ordered most-recent-first. Replies are fetched but not yet
+  rendered (see "On the horizon").
+
+### Known browser-timing gotchas (all fixed, documented for future reference)
+- **Right-click event order**: in Chromium/Firefox, a right-click's native
+  event order is `mousedown` → `contextmenu` → `mouseup` — the trailing
+  `mouseup` fires AFTER `contextmenu`, not before. A mouseup handler that
+  doesn't check `e.button` will clobber state set by the contextmenu handler
+  moments earlier. Fix: `handleTextareaMouseUp` bails immediately on
+  `e.button !== 0`.
+- **Same-commit ref-nulling race**: clicking the pill unmounts the pill and
+  mounts the composer in the same React commit. The composer's `autoFocus`
+  fires a synchronous blur on the textarea during React's mutation phase —
+  before the composer's ref attaches in the later layout phase — while the
+  pill's own ref is already `null` from unmounting. A blur handler relying on
+  `e.relatedTarget` matching a ref will fail in this exact window. Fix: a
+  plain synchronous ref flag (`suppressNextBlurResetRef`), set by
+  `openComposer` only when `document.activeElement === textareaRef.current`
+  (true for the pill path; false for the right-click path, which doesn't need
+  it since focus already moved to the menu in an earlier, separate commit).
+- **Stale selection after OS-level focus loss**: if the browser window loses
+  OS-level focus entirely (switching to a different app/window — NOT just
+  switching browser tabs, which doesn't blur the element at all) while text
+  is selected, Chromium does not synchronously settle the caret position on
+  the refocusing click's `mouseup` — `mousedown`, `focus`, `mouseup`, and even
+  the immediately-following microtask all report the stale pre-blur selection.
+  Only a read deferred via `setTimeout(0)` (or the native `selectionchange`
+  event) sees the real, settled value. Fix: `handleTextareaMouseUp` reads
+  selection state one tick later via `setTimeout(0)`, reading from
+  `textareaRef.current` rather than the synthetic event's `currentTarget`.
+  Confirmed to be a no-op for the normal (already-focused) case.
+
+### On the horizon
+- Replies (`parentId`), resolved/unresolved toggle, and @ mention autocomplete
+  are designed (schema and API already support them) but not yet built in the
+  UI — a deliberate follow-up prompt, not an oversight.
+
+---
+
 ## Auth Architecture
 
 Session-based auth using `express-session` (server-side sessions, cookie transport) and `bcrypt` (password hashing, cost 10).
@@ -420,7 +497,18 @@ Both bands and all seven users are seeded automatically on every server boot —
 
 ### Author fields throughout the app
 
-- **Client** — all components read `user?.username ?? 'Unknown'` from `useAuth()` and send it as `author` in POST/PATCH bodies (clip comments, task comments, review comments, mark-final actions).
+- **Client** — most comment/mark-final flows send author-adjacent data from
+  `useAuth()`, but author resolution is inconsistent across comment types.
+  **`task_comments` and `song_review_comments`** resolve `author` server-side
+  from `req.session.userId` and structurally ignore any `author` in the
+  request body (the type annotation marks it `author?: string` but it's never
+  read). **`clip_comments` is the current exception** — its POST route still
+  reads `author` verbatim from `req.body`, using session resolution only for
+  the activity-log actor string, not the stored comment. This is a known gap
+  (see "On the horizon") — any authenticated user can currently post a clip
+  comment attributed to someone else's name. **`lyrics_comments`** (new)
+  follows the hardened pattern — author always resolved server-side, never
+  trusted from the body.
 - **Server** — `uploadedBy` (file upload) and `createdBy` (review upload) are resolved server-side via `req.session.userId → storage.getUser()`, falling back to `'Unknown'`. Never trust `author` from the request body for these two fields.
 - **System comments** (status changes, clip-final events) use `author: 'System'` — never the request body author.
 
@@ -720,6 +808,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **`deleteTrackMutation` (instrument removal) had no error handling — failed removals were silent** — The confirmation dialog would simply not close and the instrument wouldn't disappear, with no feedback telling the user why. `useDeleteTrack`'s hook already supported an `onError` callback; the call site in `ProductionTracker.tsx` just never passed one. Added `onError` showing a destructive toast ("Failed to remove instrument" + error message), mirroring the pattern already used by `hideSectionMutation`. Verified via real-browser test (dev server stopped, removal attempted, toast confirmed, instrument remained visible).
 - **Idea-type songs no longer create orphaned `production_tasks` rows** — Creating a Part in the Ideas-shelf (`POST /api/tracks/:trackId/ideas`) previously called `insertProductionTaskForSection` unconditionally, the same as it does for real songs — but idea-type songs have no Timeline surface, so `reconcileSectionTaskStatus` can never advance these tasks past `todo`/`in-progress`; they sat orphaned forever. Fixed by looking up the parent song's `type` via `storage.getSongById` and skipping task creation when `type === 'idea'`. Real-song task creation (one task per existing section, fanned out on new-instrument creation) is unchanged. Verified via direct SQLite query: creating a Part produces zero new `production_tasks` rows; adding an instrument to a real song still produces the full per-section set as before.
 - **"Mark as Final" hidden in the Ideas-shelf context menu** — `isFinal` has no coherent meaning for idea-type song clips — there's no production task for it to affect (see above), and even before that fix, `reconcileSectionTaskStatus` was only a no-op by accident of the Ideas-shelf never producing `timeline_clips` rows, not by an explicit `song.type` guard anywhere in the isFinal cascade. Hid the menu item specifically in the Ideas-shelf's own Files-column context menu (a separate render site from the real-song Media Bucket's menu) via `selectedFile?.type !== 'idea'`. Real-song "Mark as Final" behavior is untouched.
+- **`SongHome.tsx` crash on stale/inaccessible song IDs** — four `useQuery` calls used raw `fetch(url).then(r => r.json())` instead of the shared `apiRequest` helper, which correctly throws on non-2xx responses. Plain `fetch()` only rejects on network failure — a 404/500 still resolves normally, so when pointed at a stale/deleted song ID, the client treated the `{"message":"Not found"}` error body as real data, and a downstream `tasks.filter(...)` call threw because `tasks` was an object, not an array. That uncaught exception is what tore down `npm run dev` — the Node server itself was healthy throughout. Fixed for the four `SongHome.tsx` queries. **This exact anti-pattern is confirmed present elsewhere app-wide** (`Dashboard.tsx`, `Clip.tsx`, `ProductionTracker.tsx`, `Timeline.tsx`, and the primary `['song', songId]` query itself) — see "On the horizon" for the planned full sweep.
 
 ---
 
@@ -731,3 +820,6 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - ~~**Activity feed feed-worthiness audit (not started)**~~ **Resolved 2026-08-12.** Every Tier 2 event type was audited and classified feed-visible vs. sort-only, and that classification is now enforced server-side via a `notInArray` filter in `getActivity()` — previously it was documentation intent only, and every sort-only type leaked through as a visible feed row. Full per-type classification and rationale: see "Tier 2 event types — full reference" in `.claude/skills/activity-feed/SKILL.md`.
 - **Media Bucket clip name truncation not working** — `WaveformPlayerCard`'s clip name text never truncates with an ellipsis regardless of available width or name length; full text always renders. Not yet investigated — likely a `min-w-0` missing on a flex ancestor between the name `<span>` and the outer card container, but unconfirmed. Surfaced while testing the CornerBadge unification (Aug 2026); may be pre-existing and unrelated to that change.
 - ~~**Idea Shelf: instrument-assigned but not song-assigned ideas**~~ **Resolved — already built, under a different name.** The Library "Ideas" tab implements this via a three-level hierarchy: Ideas → Parts → Files. "Ideas" are `songs` rows with `type = 'idea'` (`Dashboard.tsx` filters `songs.filter(s => s.type === 'idea')`) — not a separate `ideas`-table row. "Parts" are `instrument_tracks` rows scoped to that idea-song; the Part name lives authoritatively in `instrumentTracks.name`. Creating a Part (`addPartMutation`) does two things: `POST /api/songs/:songId/tracks` creates the track, then `POST /api/tracks/:trackId/ideas` creates exactly one paired `ideas` row with `sectionName` set to the same string as the track name — a deliberate one-idea-per-track constraint, not a bug. "Files" are `clips` rows read via `selectedInstrument.ideas[0].clips` — hardcoded to the first (only) idea slot; a second `ideas` row on the same track would silently break the Files column. No dedicated parts table or column exists — the whole hierarchy is a UI-level repurposing of the same Song/InstrumentFolder/Idea tables used for real songs, constrained by convention. **Known follow-up risk:** `instrumentTracks.name` and `ideas.sectionName` are two independently-writable copies of the same string, kept in sync only by convention at creation time. If a Part-rename feature is added, it must update both fields (or the read path must be changed to stop relying on `sectionName` for display) — otherwise the two will silently drift after a rename. The right-click context menu on a shelf file shows More Info, Add Note, Add to Song, Promote to Song — it does not include Mark as Final (see Recently fixed bugs — the concept doesn't apply to idea-type songs). `Add to Song` (`handleAddToSong`, `Dashboard.tsx`) fully copies the clip: a new `clips` row with a new id, a physically re-uploaded/duplicated audio file, and `isFinal: false` on the copy always, regardless of the source clip's state. The two rows (original shelf clip, new song-bucket copy) are fully independent afterward — no live link, no shared cascade. The "belongs to song X" badge on the original shelf clip is a denormalized JSON snapshot (`clips.addedToSongs`: `{songId, songName, instrument, section}`), not a live join — it will silently show a stale name if the destination song/instrument/section is later renamed.
+- **App-wide `fetch(...).then(r => r.json())` sweep** — see "Recently fixed bugs" above. Plan: a recon prompt to enumerate every remaining call site, then one implementation pass converting them all to `apiRequest`. Includes the `['song', songId]` query in `SongHome.tsx`, which has a related, unfixed symptom: a Band B user opening a Band A song URL directly gets a silent 404-as-fake-data render (a broken/empty Song Home) rather than a clean error — fixing the fetch will surface a `useQuery` error state, but `SongHome.tsx` has no UI branch for it yet. A "This song isn't available" state needs to be added alongside the fetch fix. Not started.
+- **`clip_comments` author-trust gap** — see corrected "Author fields" section above. Small, isolated fix (resolve `author` server-side, matching `task_comments`/`song_review_comments`) but not yet scoped as its own session. Not started.
+- **Lyrics: replies, resolved toggle, @ mentions** — schema and API already support all three; UI is the next Lyrics prompt. Not started.

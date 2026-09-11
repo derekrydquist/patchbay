@@ -155,3 +155,33 @@ if (!hasBucketFolderViews) {
   `);
   console.log("[PatchBay] Created bucket_folder_views table and backfilled existing users × ideas.");
 }
+
+// Add lyrics to songs table if missing.
+const hasSongsLyrics = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('songs') WHERE name='lyrics'"
+).get() as { c: number }).c;
+if (!hasSongsLyrics) {
+  sqlite.exec("ALTER TABLE songs ADD COLUMN lyrics TEXT");
+  console.log("[PatchBay] Added lyrics column to songs table.");
+}
+
+// Create lyrics_comments table if not exists.
+const hasLyricsComments = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='lyrics_comments'"
+).get() as { c: number }).c;
+if (!hasLyricsComments) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS lyrics_comments (
+      id TEXT PRIMARY KEY,
+      song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+      parent_id TEXT,
+      author TEXT NOT NULL,
+      text TEXT NOT NULL,
+      anchor_text TEXT NOT NULL,
+      anchor_offset INTEGER NOT NULL,
+      resolved INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+  `);
+  console.log("[PatchBay] Created lyrics_comments table.");
+}

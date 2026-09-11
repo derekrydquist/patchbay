@@ -36,6 +36,7 @@ import {
   clipComments,
   songReviewComments,
   songReviews,
+  lyricsComments,
   activityLog,
   bands,
   albums,
@@ -188,6 +189,10 @@ function reviewCommentSongId(commentId: string): string | null {
     .innerJoin(songReviews, eq(songReviewComments.reviewId, songReviews.id))
     .where(eq(songReviewComments.id, commentId)).get();
   return row?.songId ?? null;
+}
+function lyricsCommentSongId(commentId: string): string | null {
+  return db.select({ songId: lyricsComments.songId }).from(lyricsComments)
+    .where(eq(lyricsComments.id, commentId)).get()?.songId ?? null;
 }
 
 // ─── reconcileSectionTaskStatus ───────────────────────────────────────────────
@@ -442,6 +447,131 @@ export async function registerRoutes(
     const song = await storage.updateSong(id, parsed.data);
     if (!song) return res.status(404).json({ message: "Song not found" });
     res.json(song);
+  });
+
+  // ─── Lyrics ─────────────────────────────────────────────────────────────────
+
+  app.patch("/api/songs/:id/lyrics", requireBand, async (req, res) => {
+    const id = req.params.id as string;
+    if (!assertSongOwned(req, res, id)) return;
+    const { lyrics } = req.body as { lyrics: string };
+    if (typeof lyrics !== 'string') {
+      return res.status(400).json({ message: "lyrics must be a string" });
+    }
+    const song = await storage.updateSong(id, { lyrics });
+    if (!song) return res.status(404).json({ message: "Song not found" });
+
+    const lyricsActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId: id,
+      type: 'lyrics-edited',
+      description: `${lyricsActor} edited the lyrics for ${song.name}`,
+      timestamp: Date.now(),
+      author: lyricsActor,
+    }).catch(console.error);
+
+    res.json(song);
+  });
+
+  app.get("/api/songs/:songId/lyrics-comments", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const comments = await storage.getLyricsComments(songId);
+    res.json(comments);
+  });
+
+  app.post("/api/songs/:songId/lyrics-comments", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const { text, anchorText, anchorOffset, parentId } = req.body as {
+      author?: string; text: string; anchorText: string; anchorOffset: number; parentId?: string;
+    };
+    if (parentId) {
+      const parent = db.select().from(lyricsComments).where(eq(lyricsComments.id, parentId)).get();
+      if (!parent || parent.parentId || parent.songId !== songId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment on this song" });
+      }
+    }
+
+    const lyricsCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    const comment = await storage.addLyricsComment({
+      id: randomUUID(),
+      songId,
+      author: lyricsCommentActor,
+      text,
+      anchorText,
+      anchorOffset,
+      parentId: parentId ?? null,
+    });
+
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: parentId ? 'lyrics-comment-reply' : 'lyrics-comment-added',
+      description: parentId
+        ? `${lyricsCommentActor} replied to a comment on the lyrics`
+        : `${lyricsCommentActor} commented on the lyrics`,
+      timestamp: Date.now(),
+      author: lyricsCommentActor,
+    }).catch(console.error);
+
+    res.status(201).json(comment);
+  });
+
+  app.patch("/api/lyrics-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const songId = lyricsCommentSongId(commentId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    const { text, resolved } = req.body as { text?: string; resolved?: boolean };
+    const updates: { text?: string; resolved?: boolean } = {};
+    if (text !== undefined) updates.text = text;
+    if (resolved !== undefined) updates.resolved = resolved;
+    const comment = await storage.updateLyricsComment(commentId, updates);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+
+    const editLyricsCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    if (text !== undefined) {
+      storage.logActivity({
+        id: randomUUID(), songId,
+        type: 'lyrics-comment-edited',
+        description: `${editLyricsCommentActor} edited a comment on the lyrics`,
+        timestamp: Date.now(), author: editLyricsCommentActor,
+      }).catch(console.error);
+    } else if (resolved !== undefined) {
+      storage.logActivity({
+        id: randomUUID(), songId,
+        type: resolved ? 'lyrics-comment-resolved' : 'lyrics-comment-unresolved',
+        description: `${editLyricsCommentActor} ${resolved ? 'resolved' : 'unresolved'} a comment on the lyrics`,
+        timestamp: Date.now(), author: editLyricsCommentActor,
+      }).catch(console.error);
+    }
+
+    res.json(comment);
+  });
+
+  app.delete("/api/lyrics-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const songId = lyricsCommentSongId(commentId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    const deleteLyricsCommentActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(), songId,
+      type: 'lyrics-comment-deleted',
+      description: `${deleteLyricsCommentActor} deleted a comment on the lyrics`,
+      timestamp: Date.now(), author: deleteLyricsCommentActor,
+    }).catch(console.error);
+    await storage.deleteLyricsComment(commentId);
+    res.status(204).send();
   });
 
   // ─── Tracks ─────────────────────────────────────────────────────────────────

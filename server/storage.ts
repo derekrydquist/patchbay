@@ -14,12 +14,13 @@ import {
   type ClipComment, type InsertClipComment,
   type SongReview, type InsertSongReview,
   type SongReviewComment, type InsertSongReviewComment,
+  type LyricsComment, type InsertLyricsComment,
   type Album,
   type Band,
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
-  activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
+  lyricsComments, activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
 } from "@shared/schema";
 
 export const DEFAULT_SONG_ID = "patchbay-default";
@@ -56,6 +57,7 @@ const DEFAULT_SONG: Song = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
   bandId: null,
+  lyrics: null,
 };
 
 const DEFAULT_TRACKS: (typeof instrumentTracks.$inferInsert)[] = [
@@ -101,7 +103,10 @@ export interface ActivityEvent {
       | 'clip-comment-deleted' | 'task-status-change' | 'task-comment-added'
       | 'task-comment-reply' | 'task-comment-edited' | 'task-comment-deleted'
       | 'review-comment-edited' | 'review-comment-deleted' | 'review-comment-resolved'
-      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album';
+      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album'
+      | 'lyrics-edited' | 'lyrics-comment-added' | 'lyrics-comment-reply'
+      | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
+      | 'lyrics-comment-unresolved';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -205,6 +210,12 @@ export interface IStorage {
   updateReviewComment(id: string, updates: { text?: string; resolved?: boolean; editedAt?: string | null }): Promise<SongReviewComment | undefined>;
   deleteReviewComment(id: string): Promise<void>;
 
+  // Lyrics Comments
+  getLyricsComments(songId: string): Promise<LyricsCommentWithReplies[]>;
+  addLyricsComment(data: InsertLyricsComment): Promise<LyricsComment>;
+  updateLyricsComment(id: string, updates: { text?: string; resolved?: boolean }): Promise<LyricsComment | undefined>;
+  deleteLyricsComment(id: string): Promise<void>;
+
   // Bands
   getBands(): Promise<Band[]>;
   createBand(name: string): Promise<Band>;
@@ -233,6 +244,7 @@ export type ReviewCommentWithReplies = SongReviewComment & {
 
 export type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
 export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
+export type LyricsCommentWithReplies = LyricsComment & { replies: LyricsComment[] };
 export type AlbumWithCount = Album & { songCount: number };
 export type AlbumMembership = { albumId: string; albumName: string; songId: string };
 
@@ -379,7 +391,7 @@ export class SQLiteStorage implements IStorage {
 
   async createSong(data: InsertSong, bandId: string): Promise<Song> {
     const now = new Date().toISOString();
-    const song: Song = { bpm: null, timeSignature: "4/4", type: "song", ...data, bandId, id: randomUUID(), createdAt: now, updatedAt: now };
+    const song: Song = { bpm: null, timeSignature: "4/4", type: "song", lyrics: null, ...data, bandId, id: randomUUID(), createdAt: now, updatedAt: now };
     db.insert(songs).values(song).run();
     return song;
   }
@@ -1049,6 +1061,10 @@ export class SQLiteStorage implements IStorage {
       'review-comment-edited',
       'review-comment-deleted',
       'album-song-reordered',
+      'lyrics-edited',
+      'lyrics-comment-reply',
+      'lyrics-comment-edited',
+      'lyrics-comment-deleted',
     ]);
     const logCond = songId
       ? and(eq(activityLog.songId, songId), bandCond, sortOnlyCond)
@@ -1317,6 +1333,45 @@ export class SQLiteStorage implements IStorage {
     // Delete replies first (no cascade FK since parentId has no .references())
     db.delete(songReviewComments).where(eq(songReviewComments.parentId, id)).run();
     db.delete(songReviewComments).where(eq(songReviewComments.id, id)).run();
+  }
+
+  // ── Lyrics Comments ────────────────────────────────────────────────────────
+
+  async getLyricsComments(songId: string): Promise<LyricsCommentWithReplies[]> {
+    const all = db.select().from(lyricsComments).where(eq(lyricsComments.songId, songId)).orderBy(asc(lyricsComments.createdAt)).all();
+    const topLevel = all.filter(c => !c.parentId);
+    const replyMap = new Map<string, LyricsComment[]>();
+    for (const c of all) {
+      if (!c.parentId) continue;
+      const bucket = replyMap.get(c.parentId) ?? [];
+      bucket.push(c);
+      replyMap.set(c.parentId, bucket);
+    }
+    return topLevel.map(c => ({
+      ...c,
+      replies: (replyMap.get(c.id) ?? []).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      ),
+    }));
+  }
+
+  async addLyricsComment(data: InsertLyricsComment): Promise<LyricsComment> {
+    const now = new Date().toISOString();
+    const comment: LyricsComment = { ...data, id: data.id ?? randomUUID(), parentId: data.parentId ?? null, resolved: false, createdAt: now };
+    db.insert(lyricsComments).values(comment).run();
+    return db.select().from(lyricsComments).where(eq(lyricsComments.id, comment.id)).get()!;
+  }
+
+  async updateLyricsComment(id: string, updates: { text?: string; resolved?: boolean }): Promise<LyricsComment | undefined> {
+    const existing = db.select().from(lyricsComments).where(eq(lyricsComments.id, id)).get();
+    if (!existing) return undefined;
+    db.update(lyricsComments).set(updates).where(eq(lyricsComments.id, id)).run();
+    return db.select().from(lyricsComments).where(eq(lyricsComments.id, id)).get();
+  }
+
+  async deleteLyricsComment(id: string): Promise<void> {
+    db.delete(lyricsComments).where(eq(lyricsComments.parentId, id)).run();
+    db.delete(lyricsComments).where(eq(lyricsComments.id, id)).run();
   }
 
   // ── Albums ─────────────────────────────────────────────────────────────────
