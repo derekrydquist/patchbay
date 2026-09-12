@@ -1291,8 +1291,9 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   };
 
   // iconPos (the floating pill) is otherwise only ever recalculated inside
-  // handleTextareaMouseUp — but deleting a selection via Delete/Backspace, or
-  // typing a character over one, never fires mouseup, so nothing else tells
+  // the document-level mouseup handler below — but deleting a selection via
+  // Delete/Backspace, or typing a character over one, never fires mouseup,
+  // so nothing else tells
   // the pill its tracked selection just collapsed (confirmed via trace: after
   // Delete, selectionStart/End correctly collapse but the pill stayed
   // rendered at its old position). The composer is deliberately left out of
@@ -1305,38 +1306,76 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     }
   };
 
-  const handleTextareaMouseUp = (e: React.MouseEvent<HTMLTextAreaElement>) => {
-    if (e.button !== 0) return; // right-click's own contextmenu handler owns the menu; ignore its trailing mouseup
-    // Deferred by a tick: when this click also restores focus after the
-    // textarea was blurred elsewhere (switching tabs/apps/windows) while a
-    // selection was active, Chromium does not collapse/recompute the caret to
-    // the click position synchronously with mousedown/mouseup/click — it does
-    // so on a later task (confirmed via native event tracing: sync mouseup,
-    // a queued microtask, and the click event all still read the OLD,
-    // pre-blur selection; only a read deferred past this task sees the real,
-    // settled one). Reading synchronously here would show a phantom selection
-    // that's about to collapse, making the pill appear over text that isn't
-    // actually highlighted anymore. A plain click on an already-focused
-    // textarea is unaffected — its selection is already settled by the time
-    // mouseup fires, so deferring doesn't change that value, only its timing
-    // by under a frame.
-    setTimeout(() => {
-      const el = textareaRef.current;
-      if (!el) return;
-      if (el.selectionStart === el.selectionEnd) {
-        resetSelectionUi();
-        return;
-      }
-      setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
-      // iconPos is no longer set directly here — the layout effect above
-      // derives it from the mirror span once this selectionRange change
-      // re-renders it, so the pill's position is document-flow-relative
-      // instead of a one-time viewport snapshot.
-      setContextMenuPos(null);
-      setComposerOpen(false);
-      setComposerText('');
-    }, 0);
+  // A mouseup bound directly to the textarea only fires when the release
+  // itself lands inside the textarea's own rendered box — but word-wrapped
+  // lines rarely span its full width, so releasing in the blank space to the
+  // right of a short line (still visually "in the textarea" to the user) missed
+  // the event entirely and the pill never appeared, even though a real
+  // selection existed. Fix: mousedown on the textarea attaches a ONE-SHOT
+  // listener on `document` itself instead, which sees a mouseup no matter
+  // where on the page it lands (anywhere in the browser window — a release
+  // that leaves the window entirely, e.g. onto the OS desktop or another
+  // app, can never be observed by any JS in the page; that's a platform
+  // limit, not a bug). The listener removes itself the first time it fires
+  // so it's never left attached past the drag it was meant to catch; the
+  // cleanup effect below is a backstop for the case where a mousedown starts
+  // but this component unmounts before any mouseup follows.
+  const documentMouseUpHandlerRef = useRef<((e: MouseEvent) => void) | null>(null);
+
+  const handleTextareaMouseDown = () => {
+    if (documentMouseUpHandlerRef.current) {
+      document.removeEventListener('mouseup', documentMouseUpHandlerRef.current);
+    }
+    const handleDocumentMouseUp = (e: MouseEvent) => {
+      document.removeEventListener('mouseup', handleDocumentMouseUp);
+      documentMouseUpHandlerRef.current = null;
+      // Same guard as before, just moved from the textarea's own mouseup to
+      // this document-level one: right-click's native event order is
+      // mousedown -> contextmenu -> mouseup, so this still-attached listener
+      // (armed by right-click's own mousedown) would otherwise see that
+      // trailing mouseup and clobber state the contextmenu handler just set.
+      if (e.button !== 0) return;
+      // Deferred by a tick: when this click also restores focus after the
+      // textarea was blurred elsewhere (switching tabs/apps/windows) while a
+      // selection was active, Chromium does not collapse/recompute the caret to
+      // the click position synchronously with mousedown/mouseup/click — it does
+      // so on a later task (confirmed via native event tracing: sync mouseup,
+      // a queued microtask, and the click event all still read the OLD,
+      // pre-blur selection; only a read deferred past this task sees the real,
+      // settled one). Reading synchronously here would show a phantom selection
+      // that's about to collapse, making the pill appear over text that isn't
+      // actually highlighted anymore. A plain click on an already-focused
+      // textarea is unaffected — its selection is already settled by the time
+      // mouseup fires, so deferring doesn't change that value, only its timing
+      // by under a frame.
+      setTimeout(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        if (el.selectionStart === el.selectionEnd) {
+          resetSelectionUi();
+          return;
+        }
+        setSelectionRange({ start: el.selectionStart, end: el.selectionEnd });
+        // iconPos is no longer set directly here — the layout effect above
+        // derives it from the mirror span once this selectionRange change
+        // re-renders it, so the pill's position is document-flow-relative
+        // instead of a one-time viewport snapshot.
+        setContextMenuPos(null);
+        setComposerOpen(false);
+        setComposerText('');
+      }, 0);
+    };
+    documentMouseUpHandlerRef.current = handleDocumentMouseUp;
+    document.addEventListener('mouseup', handleDocumentMouseUp);
   };
+
+  useEffect(() => {
+    return () => {
+      if (documentMouseUpHandlerRef.current) {
+        document.removeEventListener('mouseup', documentMouseUpHandlerRef.current);
+      }
+    };
+  }, []);
 
   const handleTextareaContextMenu = (e: React.MouseEvent<HTMLTextAreaElement>) => {
     const el = e.currentTarget;
@@ -1536,7 +1575,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
               value={lyricsDraft}
               onChange={handleTextareaChange}
               onBlur={handleTextareaBlur}
-              onMouseUp={handleTextareaMouseUp}
+              onMouseDown={handleTextareaMouseDown}
               onContextMenu={handleTextareaContextMenu}
               placeholder="No lyrics yet — start typing..."
               className="relative z-10 w-full min-h-[640px] bg-transparent text-sm text-white/90 leading-relaxed resize-none overflow-hidden outline-none placeholder:text-muted-foreground placeholder:italic"
