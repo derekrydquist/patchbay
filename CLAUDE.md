@@ -373,9 +373,10 @@ and edit directly.
 - The comments sidebar (always visible, matches the Activity panel's card
   styling/proportions from Overview) shows each top-level comment with its
   quoted `anchorText` as a truncated caption (~60 chars), author, relative
-  timestamp. Replies are fetched but not yet rendered (see "On the horizon").
-  Ordering is position-based — see "Click-to-highlight and position-based
-  ordering" below, not creation timestamp.
+  timestamp. Ordering is position-based — see "Click-to-highlight and
+  position-based ordering" below, not creation timestamp. Replies, the
+  resolved/unresolved toggle, and @ mentions are fully built — see "Replies,
+  resolved state, and @ mentions" below.
 
 ### Click-to-highlight and position-based ordering
 - Clicking a comment card selects and highlights its anchored text in the
@@ -399,6 +400,55 @@ and edit directly.
   open composer for a different selection, an unrelated active user
   selection) — it clears whatever was active and switches to the clicked
   comment's highlight.
+
+### Replies, resolved state, and @ mentions
+- **Replies**: one level of nesting only (matches the schema's `parentId`
+  design — a reply cannot itself be replied to). Each top-level comment has
+  a "Reply" action that opens an inline composer nested directly under it,
+  posting to the same `POST /api/songs/:songId/lyrics-comments` route with
+  `parentId` set. Since `anchorText`/`anchorOffset` are `NOT NULL` with no
+  server-side inheritance, the client explicitly forwards the parent's
+  anchor values on a reply (same trick `ReviewPlayer` uses for `timestamp`).
+- **Resolved/unresolved toggle**: matches the `song_review_comments`
+  convention exactly — resolved comments are hidden by default behind a
+  "Show resolved (N)" toggle in the sidebar header, not shown-but-faded. The
+  count only reflects top-level resolved comments, not replies (deliberate).
+  Reopening a resolved comment is an explicit "Unresolve" action — replying
+  does NOT implicitly reopen it (a deliberate choice, discussed and kept for
+  is-it-worth-it reasons: an explicit toggle handles the "resolved by
+  accident" case without forcing a reply just to undo it).
+- **"Show resolved" state is persisted per-song via localStorage**, key
+  `patchbay-lyrics-show-resolved-${songId}` — matches the existing
+  `patchbay-{feature}-${songId}` convention (e.g. `patchbay-loop-${songId}`
+  in `Transport.tsx`). Lazy-initialized from localStorage on mount, same
+  pattern as `Transport.tsx`'s `isLooping`/`isMetronomeOn` — correct on
+  first paint, no post-mount correction effect.
+- **@ mention autocomplete**: same trigger/dropdown/insertion pattern as
+  `ClipInfoWindow`/`ReviewPlayer` (`@(\w*)$` regex, arrow-key nav, plain-text
+  `@username` insertion via `GET /api/users`). Works in both the top-level
+  composer and reply composers. Purely cosmetic — no backend parsing,
+  notification, or structured storage; mentions are stored as plain text,
+  same as every other comment surface in the app.
+- **Mention display**: submitted comments render real `@username` mentions
+  in bold + the app's gold accent color, via a shared `MentionText`
+  component (`client/src/components/MentionText.tsx`). This is NOT
+  Lyrics-specific — the same component is used by `ClipInfoWindow`,
+  `ReviewPlayer`, and `ProductionTracker`'s task comments, since all four
+  had the identical gap (autocomplete on input, but plain-text display with
+  no visual distinction). `MentionText` only styles a match if it's a real
+  username in the surface's own scoped user list — a literal "@something"
+  that isn't an actual band member stays plain text.
+- **Active-comment glow**: clicking a comment card (or its "Reply" action)
+  marks it as the active comment, shown via a subtle gold ring (`ring-1
+  ring-inset ring-primary/40 bg-primary/5`, reusing `ReviewPlayer`'s existing
+  `highlightedCommentId` treatment verbatim) around the ENTIRE card — the
+  parent comment plus all its nested replies and an open reply composer, as
+  one continuous unit, not just the top line. Only one comment can be active
+  at a time. Clears on outside-click, a new manual text selection, or typing
+  in the textarea; does NOT clear when collapsing an expanded reply thread
+  (a view toggle, not a selection-loss event). Never applies to a comment
+  whose anchor text can't be resolved (nothing was actually highlighted, so
+  nothing should glow).
 
 ### Textarea auto-grow
 - The lyrics textarea has no manual resize handle and no internal scrollbar
@@ -446,6 +496,23 @@ and edit directly.
   different `position` values (composer is `fixed`; the pill's containing
   wrapper is `absolute` inside normal document flow) — do not let one leak
   into the other.
+
+### Reload race condition (fixed)
+On a hard page reload (not ordinary SPA navigation — the in-memory React
+Query cache with `staleTime: Infinity` and no persister means a reload is a
+genuine cold start), two independent one-frame races could occur before
+being fixed:
+- The lyrics textarea's placeholder briefly flashed even when real lyrics
+  existed, because the one-shot seed effect was a plain `useEffect` (runs
+  after paint) — fixed by switching it to `useLayoutEffect`, same pattern
+  already used for the auto-grow effect in this file.
+- The comments sidebar briefly showed "No comments yet" or the wrong sort
+  order (newest-first instead of position-based), because `resolvedAnchors`
+  depends on `lyricsDraft`, and the comments query could resolve before the
+  song query — resolving every anchor against empty lyrics and falling back
+  to the "unresolved" tiebreak. Fixed by gating the sidebar's render on BOTH
+  queries having loaded (`song !== undefined && !commentsLoading`), not
+  whichever resolves first.
 
 ### Known browser-timing gotchas (all fixed, documented for future reference)
 - **Right-click event order**: in Chromium/Firefox, a right-click's native
@@ -499,9 +566,6 @@ and edit directly.
   `resetSelectionUi()`.
 
 ### On the horizon
-- Replies (`parentId`), resolved/unresolved toggle, and @ mention autocomplete
-  are designed (schema and API already support them) but not yet built in the
-  UI — a deliberate follow-up prompt, not an oversight.
 - **Pill fails to appear on selections that include (but don't start at) the
   first or last character of a wrapped line.** Confirmed via real testing: if
   a selection *starts* at that boundary character, the pill works fine; if
@@ -631,7 +695,9 @@ Both bands and all seven users are seeded automatically on every server boot —
 
 ### Dynamic user list
 
-`GET /api/users` is fetched via `useQuery(['users'])` in any component that needs a member list (assignee dropdowns in ProductionTracker, @ mention autocomplete in ClipInfoWindow and ReviewPlayer). TanStack Query deduplicates the request — all components share one network call per query key.
+`GET /api/users` is fetched via `useQuery(['users'])` in any component that needs a member list (assignee dropdowns in ProductionTracker, @ mention autocomplete in ClipInfoWindow, ReviewPlayer, ProductionTracker task comments, and Lyrics comments). TanStack Query deduplicates the request — all components share one network call per query key. The route is `requireBand`-scoped via `storage.getUsersByBand(req.bandId!)` (fixed Sept 2026 — previously returned every user across all bands, a real cross-tenant data leak; see "Recently fixed bugs") and sorted alphabetically by username (`orderBy(asc(users.username))`, also added Sept 2026) — every consumer gets a correctly-scoped, alphabetically-ordered list with no client-side filtering or sorting needed.
+
+Submitted comments containing a real `@username` render it in bold + gold via the shared `MentionText` component (`client/src/components/MentionText.tsx`), used identically by ClipInfoWindow, ReviewPlayer, ProductionTracker task comments, and Lyrics comments — see "Replies, resolved state, and @ mentions" under the Lyrics Feature section for detail.
 
 The `avatarColor(name)` helper in ProductionTracker and Clip.tsx uses a djb2-style hash of the username string to deterministically pick a color from a fixed palette — works for any username, not just members of a hardcoded array:
 ```ts
@@ -929,6 +995,9 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Lyrics comment composer positioning — full redesign after two failed attempts.** See "Composer positioning" under the Lyrics Feature section above for the full mechanism and reasoning. Notable process lesson: Playwright-based verification reported "all checks passing" on two separate occasions where real manual browser testing showed the composer rendering in the wrong place (once disconnected with a large gap, once landing near the top-left of the page unrelated to the trigger). Real human verification in an actual browser caught both; automated screenshot-based checks did not. Treat this as a standing caution for any future fix to floating/positioned UI in this codebase — automated verification is not sufficient proof for this class of bug.
 - **Lyrics floating pill didn't track page scroll** — see "Known browser-timing gotchas" under the Lyrics Feature section above.
 - **Lyrics floating pill survived a Delete/Backspace keypress** — see "Known browser-timing gotchas" under the Lyrics Feature section above.
+- **`GET /api/users` leaked all bands' users, not just the requester's own band** — a real cross-tenant data exposure (violates the same band-scoping rule as `isFinal`). Surfaced via the Lyrics @ mention dropdown showing a Band B user while testing as Band A. Fixed: the route now uses `requireBand` + `storage.getUsersByBand(req.bandId!)` instead of an unscoped `getUsers()`. This was a pre-existing, app-wide bug — Lyrics didn't introduce it, just surfaced it first. All four consumers (ProductionTracker assignee dropdown, ClipInfoWindow/ReviewPlayer/ProductionTracker/Lyrics @ mentions) share the one route and were fixed together.
+- **@ mentions had no visual distinction once displayed** — typing `@username` in a composer correctly autocompleted, but the submitted comment rendered it as indistinguishable plain text on all four comment surfaces (ClipInfoWindow, ReviewPlayer, ProductionTracker task comments, Lyrics). Fixed via a shared `MentionText` component that bolds + colors real `@username` matches (checked against the surface's actual user list, so a literal non-mention "@something" stays plain).
+- **Lyrics reload race condition** (textarea placeholder flash, comments sidebar empty/wrong-order flash) — see "Reload race condition (fixed)" under the Lyrics Feature section above for full detail.
 
 ---
 

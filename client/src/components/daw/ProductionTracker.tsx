@@ -14,6 +14,7 @@ import {
 } from '@/hooks/use-bucket-mutations';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
+import { MentionText } from '@/components/MentionText';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -541,7 +542,7 @@ function CellModal({
                                       </button>
                                     </div>
                                   </div>
-                                  <p className="text-xs text-foreground/80 leading-relaxed">{c.text}</p>
+                                  <p className="text-xs text-foreground/80 leading-relaxed"><MentionText text={c.text} usernames={assignees} /></p>
                                   <div className="mt-1.5">
                                     {replyCount > 0 ? (
                                       <button onClick={() => toggleThread(c.id)} className="text-[10px] font-bold text-white/30 hover:text-primary/80 transition-colors flex items-center gap-1">
@@ -597,7 +598,7 @@ function CellModal({
                                                 </button>
                                               </div>
                                             </div>
-                                            <p className="text-xs text-foreground/70 leading-relaxed">{reply.text}</p>
+                                            <p className="text-xs text-foreground/70 leading-relaxed"><MentionText text={reply.text} usernames={assignees} /></p>
                                           </div>
                                         </div>
                                       )}

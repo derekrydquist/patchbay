@@ -124,7 +124,6 @@ export interface ActivityEvent {
 
 export interface IStorage {
   // Users
-  getUsers(): Promise<User[]>;
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
@@ -295,10 +294,6 @@ export function insertProductionTaskForSection({
 export class SQLiteStorage implements IStorage {
 
   // ── Users ──────────────────────────────────────────────────────────────────
-
-  async getUsers(): Promise<User[]> {
-    return db.select().from(users).all();
-  }
 
   async getUser(id: string): Promise<User | undefined> {
     return db.select().from(users).where(eq(users.id, id)).get();
@@ -1477,7 +1472,7 @@ export class SQLiteStorage implements IStorage {
   }
 
   async getUsersByBand(bandId: string): Promise<User[]> {
-    return db.select().from(users).where(eq(users.bandId, bandId)).all();
+    return db.select().from(users).where(eq(users.bandId, bandId)).orderBy(asc(users.username)).all();
   }
 
   async backfillBands(): Promise<void> {

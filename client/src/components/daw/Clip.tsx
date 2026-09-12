@@ -10,6 +10,7 @@ import { bucketKeys } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
+import { MentionText } from '@/components/MentionText';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -718,7 +719,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                 <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-7 px-2 text-[10px]">Cancel</Button>
                               </div>
                             ) : (
-                              <p className="text-xs text-foreground/80 leading-relaxed">{c.text}</p>
+                              <p className="text-xs text-foreground/80 leading-relaxed"><MentionText text={c.text} usernames={bandMembers} /></p>
                             )}
                             {/* Reply controls */}
                             <div className="flex items-center gap-3 mt-1.5">
@@ -795,7 +796,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                       <Button size="sm" variant="ghost" onClick={() => setEditingId(null)} className="h-6 px-2 text-[10px]">Cancel</Button>
                                     </div>
                                   ) : (
-                                    <p className="text-xs text-foreground/70 leading-relaxed">{r.text}</p>
+                                    <p className="text-xs text-foreground/70 leading-relaxed"><MentionText text={r.text} usernames={bandMembers} /></p>
                                   )}
                                 </div>
                               ))}

@@ -10,6 +10,7 @@ import {
   CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp, MessageCircle,
 } from 'lucide-react';
 import { AppHeader } from '@/components/AppHeader';
+import { MentionText } from '@/components/MentionText';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { MediaBucket } from '@/components/daw/MediaBucket';
@@ -814,7 +815,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                         </div>
                       ) : (
                         <p className={cn('text-sm text-white/80 break-words', isResolved && 'line-through text-white/40')}>
-                          {comment.text}
+                          <MentionText text={comment.text} usernames={bandMembers} />
                         </p>
                       )}
                       {/* Reply / thread toggle */}
@@ -938,7 +939,7 @@ function ReviewPlayer({ review, autoCommentId }: { review: ReviewType; autoComme
                                   <button onClick={() => setEditingId(null)} className="text-[10px] font-bold text-white/30 hover:text-white/60 shrink-0">Cancel</button>
                                 </div>
                               ) : (
-                                <span className="text-sm text-white/80 break-words">{reply.text}</span>
+                                <span className="text-sm text-white/80 break-words"><MentionText text={reply.text} usernames={bandMembers} /></span>
                               )}
                             </div>
                             {/* ••• menu for replies */}
@@ -1104,7 +1105,14 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   // an in-progress draft. Gated on `song` (not just its lyrics field) so a direct
   // deep link to ?tab=lyrics can't init from an still-loading placeholder before
   // the song query resolves.
-  useEffect(() => {
+  // useLayoutEffect (not useEffect) — on a hard reload, `song` transitions from
+  // undefined to loaded in a render triggered by the query resolving, at which
+  // point `lyricsDraft` is still '' from initial state. A plain useEffect runs
+  // AFTER that render paints, so the browser visibly flashes the empty/placeholder
+  // textarea for a frame before this effect corrects it. useLayoutEffect runs
+  // before paint, so the correction happens in the same commit the browser
+  // actually shows — same reasoning as the auto-grow effect below.
+  useLayoutEffect(() => {
     if (initialized.current || !song) return;
     initialized.current = true;
     setLyricsDraft(song.lyrics ?? '');
@@ -1146,10 +1154,18 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
 
   // ── Comments ──────────────────────────────────────────────────────────────
 
-  const { data: lyricsComments = [] } = useQuery<LyricsComment[]>({
+  const { data: lyricsComments = [], isLoading: commentsLoading } = useQuery<LyricsComment[]>({
     queryKey: ['lyrics-comments', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}/lyrics-comments`).then(r => r.json()),
   });
+  // Gates the sidebar's rendering below. On a hard reload this query and the
+  // song query race independently — if comments resolve first, `lyricsDraft`
+  // is still '' (song not loaded/seeded yet), so resolveCommentAnchor can't
+  // match any anchorText against real content and every comment falls back
+  // to the unresolved/newest-first sort order for a frame. Requiring `song`
+  // to be loaded too (not just comments) means resolvedAnchors below is only
+  // ever rendered once it's computed against real lyrics content.
+  const commentsDataReady = song !== undefined && !commentsLoading;
   // Resolved once per comment per lyrics change, reused by both the sidebar's
   // position-based ordering and click-to-highlight (avoids recomputing the
   // same anchor scan twice for the same render).
@@ -1178,6 +1194,58 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     });
   }, [lyricsComments, resolvedAnchors]);
 
+  // Resolved comments are hidden by default behind a "Show resolved" toggle,
+  // same convention as ReviewPlayer's `showResolved`/`visibleComments` — they
+  // don't just fade in place. Filtering happens after the position-based sort
+  // above, so resolving a comment never changes its place in the list.
+  // Persisted per-song to localStorage — personal UI state, same convention
+  // as zoom/scroll/loop in Timeline.tsx/Transport.tsx. Lazy-initialized so
+  // the first paint is already correct (no post-mount effect correction).
+  const [showResolved, setShowResolved] = useState(() => localStorage.getItem(`patchbay-lyrics-show-resolved-${songId}`) === 'true');
+  useEffect(() => {
+    localStorage.setItem(`patchbay-lyrics-show-resolved-${songId}`, String(showResolved));
+  }, [showResolved, songId]);
+  const resolvedCount = lyricsComments.filter(c => c.resolved).length;
+  const visibleComments = showResolved ? sortedComments : sortedComments.filter(c => !c.resolved);
+
+  // @ mention autocomplete — same pattern as ReviewPlayer/ClipInfoWindow:
+  // plain-text `@username` insertion, no structured mention format, no
+  // backend parsing/notification.
+  const { data: usersData = [] } = useQuery<{ id: string; username: string }[]>({
+    queryKey: ['users'],
+    queryFn: () => fetch('/api/users').then(r => r.json()),
+  });
+  const bandMembers = usersData.map(u => u.username);
+  const [composerMentionQuery, setComposerMentionQuery] = useState<string | null>(null);
+  const [composerMentionIndex, setComposerMentionIndex] = useState(0);
+  const composerMentionResults = composerMentionQuery !== null
+    ? bandMembers.filter(m => m.toLowerCase().startsWith(composerMentionQuery.toLowerCase()))
+    : [];
+  const [replyMentionQuery, setReplyMentionQuery] = useState<string | null>(null);
+  const [replyMentionIndex, setReplyMentionIndex] = useState(0);
+  const replyMentionResults = replyMentionQuery !== null
+    ? bandMembers.filter(m => m.toLowerCase().startsWith(replyMentionQuery.toLowerCase()))
+    : [];
+
+  // Replies — one level of nesting, same as ReviewPlayer's expandedThreadId
+  // (only one thread open at a time).
+  const [expandedThreadId, setExpandedThreadId] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState('');
+  const replyInputRef = useRef<HTMLInputElement>(null);
+
+  const toggleThread = (commentId: string) => {
+    const opening = expandedThreadId !== commentId;
+    setExpandedThreadId(opening ? commentId : null);
+    setReplyText('');
+    setReplyMentionQuery(null);
+    // Opening a thread (via "Reply" or "N replies") makes it the active/glowing
+    // comment too — the user is now clearly interacting with it, same as a
+    // click-to-highlight, even though this doesn't touch the textarea
+    // selection at all. Collapsing does not clear the glow — that's not a
+    // "selection cleared" event, just hiding the thread view.
+    if (opening) setActiveCommentId(commentId);
+  };
+
   // The captured character-offset selection driving the pending comment, plus
   // where to render the floating icon / context menu / composer for it. All
   // three are `fixed`-positioned using raw clientX/clientY, matching Timeline's
@@ -1189,6 +1257,12 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerAnchor, setComposerAnchor] = useState<ComposerAnchor | null>(null);
   const [composerText, setComposerText] = useState('');
+  // Which comment card (if any) is showing the "active" glow — set only when
+  // a click-to-highlight actually lands a real selection, cleared whenever
+  // that selection stops being current for any reason (see the clear sites
+  // below: resetSelectionUi, a fresh manual selection, and selection collapse
+  // on typing).
+  const [activeCommentId, setActiveCommentId] = useState<string | null>(null);
 
   // Refs to the three floating elements that can steal focus from the textarea
   // as part of their own intended click flow (pill → composer, context menu →
@@ -1278,6 +1352,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     setComposerOpen(false);
     setComposerAnchor(null);
     setComposerText('');
+    setActiveCommentId(null);
   };
 
   // iconPos (the floating pill) is otherwise only ever recalculated inside
@@ -1291,8 +1366,13 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
   // one, so this handler doesn't fire during that flow and can't interfere.
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setLyricsDraft(e.target.value);
-    if (e.target.selectionStart === e.target.selectionEnd && (iconPos || selectionRange)) {
-      resetSelectionUi();
+    if (e.target.selectionStart === e.target.selectionEnd) {
+      if (iconPos || selectionRange) resetSelectionUi();
+      // A comment-click highlight isn't tracked via `selectionRange` (it's a
+      // real native selection set directly on the element), so it isn't
+      // caught by the branch above — clear it separately whenever typing
+      // collapses whatever was selected, comment-driven or not.
+      else if (activeCommentId) setActiveCommentId(null);
     }
   };
 
@@ -1353,6 +1433,8 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
         setContextMenuPos(null);
         setComposerOpen(false);
         setComposerText('');
+        // A fresh manual selection always supersedes a comment-click highlight.
+        setActiveCommentId(null);
       }, 0);
     };
     documentMouseUpHandlerRef.current = handleDocumentMouseUp;
@@ -1453,8 +1535,13 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     return () => document.removeEventListener('keydown', onKey);
   }, [composerOpen]);
 
+  // Shared by both the top-level composer and replies — a reply is just a
+  // comment with `parentId` set. `anchorText`/`anchorOffset` are NOT NULL
+  // columns with no server-side inherit-from-parent logic (confirmed against
+  // routes.ts), so a reply must carry the parent's anchor values explicitly —
+  // same pattern ReviewPlayer.submitReply uses for `timestamp`.
   const addComment = useMutation({
-    mutationFn: async (payload: { text: string; anchorText: string; anchorOffset: number }) => {
+    mutationFn: async (payload: { text: string; anchorText: string; anchorOffset: number; parentId?: string }) => {
       const r = await fetch(`/api/songs/${songId}/lyrics-comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1466,9 +1553,14 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
       }
       return r.json();
     },
-    onSuccess: () => {
+    onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['lyrics-comments', songId] });
-      resetSelectionUi();
+      if (variables.parentId) {
+        setReplyText('');
+        setReplyMentionQuery(null);
+      } else {
+        resetSelectionUi();
+      }
     },
     onError: (err) => {
       toast({
@@ -1488,6 +1580,94 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     });
   };
 
+  const submitReply = (parent: LyricsComment) => {
+    if (!replyText.trim() || addComment.isPending) return;
+    addComment.mutate({
+      text: replyText.trim(),
+      anchorText: parent.anchorText,
+      anchorOffset: parent.anchorOffset,
+      parentId: parent.id,
+    });
+  };
+
+  const toggleResolved = useMutation({
+    mutationFn: async (comment: LyricsComment) => {
+      const r = await fetch(`/api/lyrics-comments/${comment.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resolved: !comment.resolved }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to update comment');
+      }
+      return r.json();
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['lyrics-comments', songId] }),
+    onError: (err) => {
+      toast({
+        title: 'Failed to update comment',
+        description: err instanceof Error ? err.message : 'An error occurred.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Composer @ mention handlers — mirrors ReviewPlayer's handleMainChange /
+  // handleMainKeyDown / insertMainMention exactly, adapted for a <textarea>.
+  const handleComposerTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setComposerText(val);
+    const m = /@(\w*)$/.exec(val);
+    setComposerMentionQuery(m ? m[1] : null);
+    setComposerMentionIndex(0);
+  };
+
+  const insertComposerMention = (name: string) => {
+    setComposerText(prev => prev.replace(/@\w*$/, `@${name} `));
+    setComposerMentionQuery(null);
+  };
+
+  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (composerMentionResults.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setComposerMentionIndex(i => Math.min(i + 1, composerMentionResults.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setComposerMentionIndex(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); insertComposerMention(composerMentionResults[composerMentionIndex]); return; }
+      if (e.key === 'Escape') { e.stopPropagation(); setComposerMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      handleSubmitComment();
+    }
+  };
+
+  // Reply @ mention handlers — mirrors ReviewPlayer's handleReplyChange /
+  // handleReplyKeyDown / insertReplyMention exactly.
+  const handleReplyChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setReplyText(val);
+    const m = /@(\w*)$/.exec(val);
+    setReplyMentionQuery(m ? m[1] : null);
+    setReplyMentionIndex(0);
+  };
+
+  const insertReplyMention = (name: string) => {
+    setReplyText(prev => prev.replace(/@\w*$/, `@${name} `));
+    setReplyMentionQuery(null);
+    setTimeout(() => replyInputRef.current?.focus(), 0);
+  };
+
+  const handleReplyKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, parent: LyricsComment) => {
+    if (replyMentionResults.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setReplyMentionIndex(i => Math.min(i + 1, replyMentionResults.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setReplyMentionIndex(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Enter') { e.preventDefault(); insertReplyMention(replyMentionResults[replyMentionIndex]); return; }
+      if (e.key === 'Escape') { setReplyMentionQuery(null); return; }
+    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitReply(parent); return; }
+    if (e.key === 'Escape') { setExpandedThreadId(null); setReplyText(''); setReplyMentionQuery(null); }
+  };
+
   // Click a comment card -> highlight its anchor text as a real native
   // selection (setSelectionRange + focus, not a CSS overlay). Takes priority
   // over any in-progress pill/menu/composer/own-selection state — cleared via
@@ -1501,6 +1681,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     resetSelectionUi();
     el.setSelectionRange(resolved.start, resolved.end);
     el.focus();
+    setActiveCommentId(comment.id);
   };
 
   return (
@@ -1567,7 +1748,7 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
               onBlur={handleTextareaBlur}
               onMouseDown={handleTextareaMouseDown}
               onContextMenu={handleTextareaContextMenu}
-              placeholder="No lyrics yet — start typing..."
+              placeholder={song !== undefined && lyricsDraft === '' ? 'No lyrics yet — start typing...' : undefined}
               className="relative z-10 w-full min-h-[640px] bg-transparent text-sm text-white/90 leading-relaxed resize-none overflow-hidden outline-none placeholder:text-muted-foreground placeholder:italic"
             />
             {/* Floating "Add comment" pill — shown after a mouseup selection, hidden once the
@@ -1603,33 +1784,147 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
       {/* Right column — Comments sidebar */}
       <div className="lg:col-span-1">
         <h3 className="text-xs font-bold uppercase tracking-widest text-white/80 mb-4">Comments</h3>
-        {sortedComments.length === 0 ? (
+        {!commentsDataReady ? null : sortedComments.length === 0 ? (
           <div className="bg-[#181C26]/60 rounded-xl border border-white/5 px-5 py-8 text-center">
             <p className="text-xs text-muted-foreground">
               No comments yet — highlight text and add a comment to start the conversation.
             </p>
           </div>
         ) : (
-          <div
-            className="bg-[#181C26] rounded-xl border border-white/5 divide-y divide-white/5 overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent"
-            style={{ height: 640, scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
-          >
-            {sortedComments.map((c) => (
-              <div
-                key={c.id}
-                onClick={() => handleCommentClick(c)}
-                className="px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer"
-              >
-                <p className="text-[10px] text-muted-foreground italic truncate mb-1">
-                  on: "{truncateAnchor(c.anchorText)}"
-                </p>
-                <p className="text-sm text-white/80 leading-snug">{c.text}</p>
-                <div className="flex items-center justify-between mt-1.5 gap-3">
-                  <span className="text-[11px] font-semibold text-white/50">{capitalize(c.author)}</span>
-                  <span className="text-[10px] text-muted-foreground shrink-0">{timeAgo(new Date(c.createdAt).getTime())}</span>
-                </div>
+          <div className="bg-[#181C26] rounded-xl border border-white/5 flex flex-col" style={{ height: 640 }}>
+            {/* Show/hide resolved — same convention as ReviewPlayer's toggle;
+                resolved comments are hidden by default, not just faded. */}
+            {resolvedCount > 0 && (
+              <div className="px-4 py-2 border-b border-white/5 flex items-center justify-end shrink-0">
+                <button
+                  onClick={() => setShowResolved(v => !v)}
+                  className="text-[10px] font-bold text-white/30 hover:text-white/60 transition-colors flex items-center gap-1"
+                >
+                  <CheckCircle2 size={11} className="text-green-500/60" />
+                  {showResolved ? 'Hide' : 'Show'} resolved ({resolvedCount})
+                </button>
               </div>
-            ))}
+            )}
+            <div
+              className="flex-1 min-h-0 overflow-y-auto divide-y divide-white/5 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent"
+              style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.1) transparent' }}
+            >
+              {visibleComments.length === 0 ? (
+                <p className="px-4 py-8 text-center text-xs text-muted-foreground">All comments resolved.</p>
+              ) : visibleComments.map((c) => {
+                const isResolved = c.resolved;
+                const replies = c.replies ?? [];
+                const isExpanded = expandedThreadId === c.id;
+                return (
+                  <div
+                    key={c.id}
+                    className={cn(
+                      'rounded-lg',
+                      activeCommentId === c.id && 'ring-1 ring-inset ring-primary/40 bg-primary/5',
+                    )}
+                  >
+                    <div
+                      onClick={() => handleCommentClick(c)}
+                      className={cn(
+                        'px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer',
+                        isResolved && 'opacity-50',
+                      )}
+                    >
+                      <p className="text-[10px] text-muted-foreground italic truncate mb-1">
+                        on: "{truncateAnchor(c.anchorText)}"
+                      </p>
+                      <p className={cn('text-sm text-white/80 leading-snug', isResolved && 'line-through text-white/40')}>
+                        <MentionText text={c.text} usernames={bandMembers} />
+                      </p>
+                      <div className="flex items-center justify-between mt-1.5 gap-3">
+                        <span className="text-[11px] font-semibold text-white/50 flex items-center gap-1">
+                          {capitalize(c.author)}
+                          {isResolved && <CheckCircle2 size={11} className="text-green-500/70" />}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground shrink-0">{timeAgo(new Date(c.createdAt).getTime())}</span>
+                      </div>
+                      {/* Reply / resolve actions */}
+                      <div className="flex items-center gap-3 mt-1.5" onClick={e => e.stopPropagation()}>
+                        {replies.length > 0 ? (
+                          <button
+                            onClick={() => toggleThread(c.id)}
+                            className="text-[10px] font-bold text-white/30 hover:text-primary/80 transition-colors flex items-center gap-1"
+                          >
+                            {isExpanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+                            {isExpanded ? 'Hide' : `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}`}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => toggleThread(c.id)}
+                            className="text-[10px] font-bold text-white/30 hover:text-primary/80 transition-colors"
+                          >
+                            {isExpanded ? 'Cancel' : 'Reply'}
+                          </button>
+                        )}
+                        <button
+                          onClick={() => toggleResolved.mutate(c)}
+                          className="text-[10px] font-bold text-white/30 hover:text-white/60 transition-colors flex items-center gap-1"
+                        >
+                          <CheckCircle2 size={11} className={isResolved ? 'text-white/30' : 'text-green-500/70'} />
+                          {isResolved ? 'Unresolve' : 'Resolve'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Expanded thread — replies (one level only) + reply composer */}
+                    {isExpanded && (
+                      <div onClick={e => e.stopPropagation()}>
+                        {replies.map(reply => (
+                          <div key={reply.id} className="pl-8 pr-4 py-2 border-t border-white/[0.03] hover:bg-white/[0.02] transition-colors">
+                            <span className="text-[11px] font-semibold text-white/50">{capitalize(reply.author)}</span>
+                            <p className="text-sm text-white/80 leading-snug break-words"><MentionText text={reply.text} usernames={bandMembers} /></p>
+                          </div>
+                        ))}
+                        <div className="pl-8 pr-4 py-2 border-t border-white/[0.03] relative bg-white/[0.01]">
+                          <div className="flex items-center gap-2">
+                            <input
+                              ref={replyInputRef}
+                              type="text"
+                              value={replyText}
+                              onChange={handleReplyChange}
+                              onKeyDown={e => handleReplyKeyDown(e, c)}
+                              placeholder="Reply…"
+                              className="flex-1 bg-transparent text-sm text-white placeholder:text-white/20 outline-none min-w-0"
+                              autoFocus
+                            />
+                            {replyText.trim() && (
+                              <button
+                                onClick={() => submitReply(c)}
+                                disabled={addComment.isPending}
+                                className="text-[10px] font-bold text-primary hover:text-primary/80 transition-colors shrink-0"
+                              >
+                                Post
+                              </button>
+                            )}
+                          </div>
+                          {replyMentionResults.length > 0 && (
+                            <div className="absolute left-8 right-4 top-full mt-1 bg-[#09090b] border border-white/10 rounded-md overflow-hidden shadow-lg z-50">
+                              {replyMentionResults.map((name, i) => (
+                                <div
+                                  key={name}
+                                  className={cn('flex items-center gap-2 px-3 py-1.5 cursor-pointer', i === replyMentionIndex ? 'bg-primary/10' : 'hover:bg-white/5')}
+                                  onMouseDown={(e) => { e.preventDefault(); insertReplyMention(name); }}
+                                >
+                                  <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0" style={{ backgroundColor: memberAvatarColor(name), color: '#000' }}>
+                                    {memberInitials(name)}
+                                  </div>
+                                  <span className="text-sm text-white/80">{capitalize(name)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -1670,20 +1965,33 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
           <p className="text-[10px] text-muted-foreground italic truncate mb-2">
             on: "{truncateAnchor(lyricsDraft.slice(selectionRange.start, selectionRange.end))}"
           </p>
-          <textarea
-            autoFocus
-            value={composerText}
-            onChange={(e) => setComposerText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                handleSubmitComment();
-              }
-            }}
-            placeholder="Add a comment…"
-            rows={3}
-            className="w-full bg-white/5 rounded-md p-2 text-sm text-white placeholder:text-white/30 outline-none resize-none"
-          />
+          <div className="relative">
+            <textarea
+              autoFocus
+              value={composerText}
+              onChange={handleComposerTextChange}
+              onKeyDown={handleComposerKeyDown}
+              placeholder="Add a comment…"
+              rows={3}
+              className="w-full bg-white/5 rounded-md p-2 text-sm text-white placeholder:text-white/30 outline-none resize-none"
+            />
+            {composerMentionResults.length > 0 && (
+              <div className="absolute left-0 right-0 top-full mt-1 bg-[#09090b] border border-white/10 rounded-md overflow-hidden shadow-lg z-50">
+                {composerMentionResults.map((name, i) => (
+                  <div
+                    key={name}
+                    className={cn('flex items-center gap-2 px-3 py-1.5 cursor-pointer', i === composerMentionIndex ? 'bg-primary/10' : 'hover:bg-white/5')}
+                    onMouseDown={(e) => { e.preventDefault(); insertComposerMention(name); }}
+                  >
+                    <div className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0" style={{ backgroundColor: memberAvatarColor(name), color: '#000' }}>
+                      {memberInitials(name)}
+                    </div>
+                    <span className="text-sm text-white/80">{capitalize(name)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="flex justify-end gap-3 mt-2">
             <button
               onClick={resetSelectionUi}

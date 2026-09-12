@@ -276,9 +276,9 @@ export async function registerRoutes(
 
   // ─── Users ──────────────────────────────────────────────────────────────────
 
-  app.get("/api/users", async (_req, res) => {
-    const allUsers = await storage.getUsers();
-    res.json(allUsers.map(u => ({ id: u.id, username: u.username })));
+  app.get("/api/users", requireBand, async (req, res) => {
+    const bandUsers = await storage.getUsersByBand(req.bandId!);
+    res.json(bandUsers.map(u => ({ id: u.id, username: u.username })));
   });
 
   // ─── Auth ───────────────────────────────────────────────────────────────────
