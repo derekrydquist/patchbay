@@ -95,10 +95,11 @@ The `parentId` guard on comment creation routes must verify three things, in ord
 3. `parent.clipId / taskId / reviewId` matches the URL's entity ID — a top-level comment from a
    *different* entity is not a valid parent
 
-Omitting check 3 silently attaches a reply to the wrong entity's comment thread. All three comment
+Omitting check 3 silently attaches a reply to the wrong entity's comment thread. All four comment
 routes (`POST /api/clips/:clipId/comments`, `POST /api/production-tasks/:id/comments`,
-`POST /api/reviews/:reviewId/comments`) enforce all three. Use 400 for `parentId` violations
-(malformed-parent case, not an ownership violation — 404 is reserved for missing entities).
+`POST /api/reviews/:reviewId/comments`, `POST /api/songs/:songId/lyrics-comments`) enforce all
+three. Use 400 for `parentId` violations (malformed-parent case, not an ownership violation — 404
+is reserved for missing entities).
 
 ### What is NOT done yet (Phase 3)
 

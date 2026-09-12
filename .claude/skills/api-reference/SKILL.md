@@ -15,8 +15,11 @@ Always return JSON. Use standard HTTP status codes. Wrap errors as:
 ### Implemented endpoints
 
 ```
-GET    /api/users                        — list all users; returns [{ id, username }] (password omitted);
-                                           used by assignee dropdowns and @ mention autocomplete
+GET    /api/users                        — list users in the caller's own band (requireBand +
+                                           storage.getUsersByBand(req.bandId!)); returns
+                                           [{ id, username }] (password omitted), sorted
+                                           alphabetically by username; used by assignee dropdowns
+                                           and @ mention autocomplete
 
 POST   /api/auth/login                   — body: { username, password }; normalizes username to lowercase;
                                            validates against users table via bcrypt.compare; sets
@@ -44,6 +47,24 @@ POST   /api/songs                        — create a song; body: { name, bpm?, 
                                            event with the session-resolved username
 PATCH  /api/songs/:id                    — partial update of song metadata
 DELETE /api/songs/:id                    — delete a song and all associated data
+
+PATCH  /api/songs/:id/lyrics             — body: { lyrics: string }; 400 if not a string;
+                                           logs a `lyrics-edited` activity event with the
+                                           session-resolved username
+GET    /api/songs/:songId/lyrics-comments — list lyrics comments for a song (top-level + replies)
+POST   /api/songs/:songId/lyrics-comments — add a comment; body: { text, anchorText, anchorOffset,
+                                           parentId? }; author always resolved server-side from
+                                           the session, never trusted from the body; if parentId
+                                           is set, validates it references an existing top-level
+                                           comment on this song (400 otherwise); logs
+                                           `lyrics-comment-added` or `lyrics-comment-reply`
+PATCH  /api/lyrics-comments/:id          — partial update; body accepts { text?, resolved? };
+                                           logs `lyrics-comment-edited` or
+                                           `lyrics-comment-resolved`/`lyrics-comment-unresolved`
+DELETE /api/lyrics-comments/:id          — author-only: 403 if the requester's session username
+                                           doesn't match the comment's stored author; deletes
+                                           child replies first (no FK cascade on parentId), then
+                                           the parent → 204; logs `lyrics-comment-deleted`
 
 GET    /api/tasks                        — list all production tasks across all songs; includes
                                            songId and songName fields for cross-song context;
