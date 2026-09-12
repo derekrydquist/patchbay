@@ -561,9 +561,13 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const songId = lyricsCommentSongId(commentId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
-    const deleteLyricsCommentActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
+    const comment = db.select().from(lyricsComments).where(eq(lyricsComments.id, commentId)).get();
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+    const requester = req.session.userId ? await storage.getUser(req.session.userId) : undefined;
+    if (!requester || comment.author !== requester.username) {
+      return res.status(403).json({ message: "You can only delete your own comments." });
+    }
+    const deleteLyricsCommentActor = requester.username;
     storage.logActivity({
       id: randomUUID(), songId,
       type: 'lyrics-comment-deleted',

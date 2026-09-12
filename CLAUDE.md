@@ -449,6 +449,26 @@ and edit directly.
   (a view toggle, not a selection-loss event). Never applies to a comment
   whose anchor text can't be resolved (nothing was actually highlighted, so
   nothing should glow).
+- **Delete**: author-only — a comment or reply only shows a "Delete" action
+  to the user who wrote it (`author === user?.username` via `useAuth()`),
+  matching the same client-side gating pattern used elsewhere, but ALSO
+  enforced server-side: `DELETE /api/lyrics-comments/:id` checks the
+  requester's session against the comment's stored author and returns 403 if
+  they don't match (verified via direct testing — a same-band, different-
+  author request is blocked and the row is confirmed untouched in the DB,
+  not just rejected at the HTTP layer). Deleting a top-level comment cascades
+  to all its replies regardless of who wrote them — the original comment's
+  author has full authority over the thread they started, a deliberate
+  choice, not an oversight. Deleting a reply only removes that one reply.
+  Confirmation dialog only appears when deleting a top-level comment that
+  has replies to lose (matches ProductionTracker's Remove Instrument/Section
+  AlertDialog pattern exactly, including `trapDialogTab`); deleting a
+  comment/reply with nothing else attached happens immediately, no dialog.
+  **Note**: `clip_comments`, `task_comments`, and `song_review_comments`
+  DELETE routes do NOT have this same server-side author check yet — this is
+  a known, pre-existing gap across those three older comment types (see
+  "On the horizon" in the main to-do list), not something this session's
+  scope covered.
 
 ### Textarea auto-grow
 - The lyrics textarea has no manual resize handle and no internal scrollbar

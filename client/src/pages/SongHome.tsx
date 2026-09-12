@@ -11,9 +11,13 @@ import {
 } from 'lucide-react';
 import { AppHeader } from '@/components/AppHeader';
 import { MentionText } from '@/components/MentionText';
-import { cn } from '@/lib/utils';
+import { cn, trapDialogTab } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { MediaBucket } from '@/components/daw/MediaBucket';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import type { ProductionTask } from '@shared/schema';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1094,6 +1098,7 @@ interface ComposerAnchor {
 function LyricsTab({ songId, song }: { songId: string; song: Song | undefined }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user } = useAuth();
 
   const [lyricsDraft, setLyricsDraft] = useState('');
   const [lastSavedLyrics, setLastSavedLyrics] = useState('');
@@ -1613,6 +1618,44 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
     },
   });
 
+  // Delete — the same route/storage method handles both a top-level comment
+  // (deleteLyricsComment explicitly deletes rows where parentId = id first,
+  // then the comment itself — cascade is storage-layer, not a DB FK) and a
+  // single reply (no rows match parentId = replyId, so only that row goes).
+  // Server enforces author-only delete (403 otherwise) — this mutation
+  // doesn't duplicate that check, it just surfaces the server's error.
+  const [deleteConfirmComment, setDeleteConfirmComment] = useState<LyricsComment | null>(null);
+  const deleteCommentButtonRef = useRef<HTMLButtonElement>(null);
+
+  const deleteComment = useMutation({
+    mutationFn: async (commentId: string) => {
+      const r = await fetch(`/api/lyrics-comments/${commentId}`, { method: 'DELETE' });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to delete comment');
+      }
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['lyrics-comments', songId] }),
+    onError: (err) => {
+      toast({
+        title: 'Failed to delete comment',
+        description: err instanceof Error ? err.message : 'An error occurred.',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  // Top-level comment with replies needs confirmation (irreversible, affects
+  // other people's replies); zero-reply comments and single replies delete
+  // immediately — same low-stakes tier.
+  const handleDeleteComment = (comment: LyricsComment) => {
+    if ((comment.replies ?? []).length > 0) {
+      setDeleteConfirmComment(comment);
+    } else {
+      deleteComment.mutate(comment.id);
+    }
+  };
+
   // Composer @ mention handlers — mirrors ReviewPlayer's handleMainChange /
   // handleMainKeyDown / insertMainMention exactly, adapted for a <textarea>.
   const handleComposerTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1868,6 +1911,14 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
                           <CheckCircle2 size={11} className={isResolved ? 'text-white/30' : 'text-green-500/70'} />
                           {isResolved ? 'Unresolve' : 'Resolve'}
                         </button>
+                        {c.author === user?.username && (
+                          <button
+                            onClick={() => handleDeleteComment(c)}
+                            className="text-[10px] font-bold text-white/30 hover:text-red-400 transition-colors"
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     </div>
 
@@ -1876,7 +1927,17 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
                       <div onClick={e => e.stopPropagation()}>
                         {replies.map(reply => (
                           <div key={reply.id} className="pl-8 pr-4 py-2 border-t border-white/[0.03] hover:bg-white/[0.02] transition-colors">
-                            <span className="text-[11px] font-semibold text-white/50">{capitalize(reply.author)}</span>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[11px] font-semibold text-white/50">{capitalize(reply.author)}</span>
+                              {reply.author === user?.username && (
+                                <button
+                                  onClick={() => deleteComment.mutate(reply.id)}
+                                  className="text-[10px] font-bold text-white/30 hover:text-red-400 transition-colors"
+                                >
+                                  Delete
+                                </button>
+                              )}
+                            </div>
                             <p className="text-sm text-white/80 leading-snug break-words"><MentionText text={reply.text} usernames={bandMembers} /></p>
                           </div>
                         ))}
@@ -2009,6 +2070,40 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
           </div>
         </div>
       )}
+
+      <AlertDialog open={!!deleteConfirmComment} onOpenChange={(v) => !v && setDeleteConfirmComment(null)}>
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            deleteCommentButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Comment?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {(() => {
+                const n = deleteConfirmComment?.replies?.length ?? 0;
+                return `Delete this comment and its ${n} ${n === 1 ? 'reply' : 'replies'}? This can't be undone.`;
+              })()}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              ref={deleteCommentButtonRef}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={() => {
+                if (deleteConfirmComment) deleteComment.mutate(deleteConfirmComment.id);
+                setDeleteConfirmComment(null);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
     </div>
   );
