@@ -1262,23 +1262,13 @@ function LyricsTab({ songId, song }: { songId: string; song: Song | undefined })
       return;
     }
     const rects = span.getClientRects();
-    console.log('[LYRICS-DEBUG][iconPos effect] rects:', Array.from(rects).map(r => ({
-      top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height,
-    })));
     if (rects.length === 0) {
-      console.log('[LYRICS-DEBUG][iconPos effect] no rects — setting iconPos null');
       setIconPos(null);
       return;
     }
     const lastRect = rects[rects.length - 1];
-    console.log('[LYRICS-DEBUG][iconPos effect] using lastRect (index', rects.length - 1, '):', {
-      top: lastRect.top, bottom: lastRect.bottom, left: lastRect.left, right: lastRect.right,
-      width: lastRect.width, height: lastRect.height,
-    });
     const wrapperRect = wrapper.getBoundingClientRect();
-    const computed = { x: lastRect.right - wrapperRect.left, y: lastRect.top - wrapperRect.top };
-    console.log('[LYRICS-DEBUG][iconPos effect] wrapperRect:', { top: wrapperRect.top, left: wrapperRect.left }, 'computed iconPos:', computed);
-    setIconPos(computed);
+    setIconPos({ x: lastRect.right - wrapperRect.left, y: lastRect.top - wrapperRect.top });
   }, [selectionRange, contextMenuPos, composerOpen]);
 
   const resetSelectionUi = () => {
