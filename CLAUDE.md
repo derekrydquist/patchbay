@@ -373,8 +373,79 @@ and edit directly.
 - The comments sidebar (always visible, matches the Activity panel's card
   styling/proportions from Overview) shows each top-level comment with its
   quoted `anchorText` as a truncated caption (~60 chars), author, relative
-  timestamp, ordered most-recent-first. Replies are fetched but not yet
-  rendered (see "On the horizon").
+  timestamp. Replies are fetched but not yet rendered (see "On the horizon").
+  Ordering is position-based — see "Click-to-highlight and position-based
+  ordering" below, not creation timestamp.
+
+### Click-to-highlight and position-based ordering
+- Clicking a comment card selects and highlights its anchored text in the
+  textarea using the browser's native selection
+  (`textarea.setSelectionRange(start, end)` + `.focus()`) — a real selection,
+  not a CSS overlay.
+- `resolveCommentAnchor(lyrics, anchorText, anchorOffset)` is the single
+  shared function used by both click-to-highlight and sidebar ordering — do
+  not duplicate this logic. Resolution order: (1) exact match at the stored
+  `anchorOffset`, the fast path when lyrics haven't changed since the comment
+  was made; (2) fall back to `indexOf(anchorText)` across the full current
+  lyrics if the exact offset no longer matches (lyrics were edited) — first
+  match wins, no fancier disambiguation; (3) if the anchor text isn't found
+  anywhere, the comment is "unresolved" — clicking it does nothing (fails
+  silently, no toast, no error), and it sorts to the end of the sidebar list.
+- The comments sidebar sorts by each comment's *resolved* position in the
+  document (reading order, top to bottom) — not creation timestamp. This
+  means ordering stays correct even after lyrics are edited, since it's
+  recomputed from the same shared resolver, not the raw stored `anchorOffset`.
+- Clicking a comment card takes priority over any other active state (an
+  open composer for a different selection, an unrelated active user
+  selection) — it clears whatever was active and switches to the clicked
+  comment's highlight.
+
+### Textarea auto-grow
+- The lyrics textarea has no manual resize handle and no internal scrollbar
+  — it auto-grows to fit its content via a `useLayoutEffect` keyed on the
+  lyrics value, which resets height to `'auto'` then sets it to `scrollHeight`.
+  The reset-to-`auto` step is required — `scrollHeight` alone won't detect
+  that the textarea should *shrink* after content is deleted, only that it
+  needs to grow.
+- `min-h-[640px]` sets the floor; there is no max — the textarea grows
+  indefinitely and the page scrolls, not the textarea internally.
+- Because the effect is keyed on the lyrics value (not just user input
+  events), it also correctly sizes to fit content loaded from the server on
+  initial page load, not just after the user's first keystroke.
+- This also simplified the selection-highlight overlay (see gotchas below)
+  by removing a whole category of scroll-sync risk — the overlay only ever
+  needed to match the wrapper's height, and since there's no separate
+  internal scroll position to track, it works correctly with zero scroll-
+  aware code.
+
+### Composer positioning
+- The comment composer is positioned with pure CSS, not JS measurement:
+  `top: composerAnchor.bottomY` plus `transform: translateY(-100%)`. This
+  anchors the composer's bottom edge exactly to the pill's (or right-click
+  point's) position and grows upward — no gap, no height-based calculation,
+  no "flip to below" logic of any kind.
+- **This is a deliberate simplification, not an oversight.** An earlier
+  version calculated position as `topY - height - gap` with a "flip to below
+  if not enough room above" branch. That approach required measuring the
+  composer's own rendered height via `getBoundingClientRect()` inside a
+  `useLayoutEffect`, which proved fragile across several rounds of real-
+  browser bugs (composer rendering disconnected from its trigger with a
+  large empty gap; the flip logic never correctly triggering; automated
+  Playwright verification repeatedly reporting success on a fix that was
+  visibly broken in a real browser). The whole flip branch — and the
+  `COMPOSER_GAP`/`COMPOSER_VIEWPORT_MARGIN` constants it used — was deleted
+  outright rather than debugged further.
+- **Accepted tradeoff**: for a selection very close to the top of the
+  visible viewport, the composer can render up over the header/nav. This is
+  intentional, confirmed acceptable by product decision — not a bug to fix.
+- `composerAnchor` is `{x, bottomY}` (viewport-relative, captured live via
+  `getBoundingClientRect()`/`clientX`/`clientY` at the moment the composer
+  opens) — do not confuse this with `iconPos` (the pill's position), which
+  is intentionally wrapper-relative/document-flow-relative so it scrolls
+  naturally with the page. These are two different coordinate spaces for two
+  different `position` values (composer is `fixed`; the pill's containing
+  wrapper is `absolute` inside normal document flow) — do not let one leak
+  into the other.
 
 ### Known browser-timing gotchas (all fixed, documented for future reference)
 - **Right-click event order**: in Chromium/Firefox, a right-click's native
@@ -404,11 +475,57 @@ and edit directly.
   selection state one tick later via `setTimeout(0)`, reading from
   `textareaRef.current` rather than the synthetic event's `currentTarget`.
   Confirmed to be a no-op for the normal (already-focused) case.
+- **Pill position must be document-flow-relative, not viewport-fixed**: an
+  earlier version of the floating "Add comment" pill used `position: fixed`
+  with `left`/`top` set once from `e.clientX`/`e.clientY` at mouseup — this
+  broke as soon as the page scrolled, since nothing recalculated the fixed
+  coordinates. Fixed by moving the pill to `position: absolute` inside the
+  same in-flow wrapper used by the selection-highlight overlay, with its
+  position derived reactively (via `useLayoutEffect`, keyed on
+  `[selectionRange, contextMenuPos, composerOpen]`) from `getClientRects()`
+  on a mirrored selection span, measured relative to that wrapper. Because
+  the wrapper is a normal in-flow element, this offset now scrolls with the
+  page automatically — no scroll listener needed. The composer itself
+  deliberately does NOT use this same wrapper-relative value (see "Composer
+  positioning" above) since it needs viewport-relative coordinates instead —
+  reusing `iconPos` for the composer was tried and was wrong.
+- **Delete/Backspace doesn't fire `mouseup`**: the floating pill's
+  visibility was originally only recalculated inside `handleTextareaMouseUp`,
+  so deleting a selected range via keyboard (which collapses the selection
+  without any mouse event) left the pill incorrectly visible, pointing at
+  now-deleted text. Fixed by adding a check inside the textarea's `onChange`
+  handler: after updating the lyrics draft, if the selection is now
+  collapsed while pill/selection state is still tracking something, call
+  `resetSelectionUi()`.
 
 ### On the horizon
 - Replies (`parentId`), resolved/unresolved toggle, and @ mention autocomplete
   are designed (schema and API already support them) but not yet built in the
   UI — a deliberate follow-up prompt, not an oversight.
+- **Pill fails to appear on selections that include (but don't start at) the
+  first or last character of a wrapped line.** Confirmed via real testing: if
+  a selection *starts* at that boundary character, the pill works fine; if
+  the selection merely *includes* it (e.g. drag ends on/past the wrap
+  boundary), the pill silently fails to appear and nothing is logged —
+  meaning whatever's wrong happens upstream of the pill's own positioning
+  logic, most likely inside `handleTextareaMouseUp`'s selection-collapse
+  check. Instrumentation for this was added but the exact repro was never
+  captured before this session ended — pick this up first in the next Lyrics
+  session, instrumentation may still be in place.
+- **Cut/paste can break highlighting for comments after the affected text.**
+  Repro: cut a stretch of lyrics with an existing comment anchored to it,
+  paste it back in elsewhere near a different commented string — comments
+  positioned after the pasted text stop highlighting when clicked. Not yet
+  reproduced reliably enough to diagnose; needs a tighter repro (exact
+  selection method, exact paste location, which specific comments break)
+  before another investigation attempt.
+- **Copy/cut/paste not yet added to the custom right-click menu** (currently
+  only has "Add comment"). Needs its own investigation before implementation
+  — browser clipboard permissions are non-trivial, particularly
+  programmatic Paste, which is heavily restricted by browsers for security
+  reasons and may require a permission prompt or simply not work reliably
+  cross-browser. Investigate `document.execCommand` vs. the Clipboard API
+  and report real constraints before implementing. Not started.
 
 ---
 
@@ -809,6 +926,9 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Idea-type songs no longer create orphaned `production_tasks` rows** — Creating a Part in the Ideas-shelf (`POST /api/tracks/:trackId/ideas`) previously called `insertProductionTaskForSection` unconditionally, the same as it does for real songs — but idea-type songs have no Timeline surface, so `reconcileSectionTaskStatus` can never advance these tasks past `todo`/`in-progress`; they sat orphaned forever. Fixed by looking up the parent song's `type` via `storage.getSongById` and skipping task creation when `type === 'idea'`. Real-song task creation (one task per existing section, fanned out on new-instrument creation) is unchanged. Verified via direct SQLite query: creating a Part produces zero new `production_tasks` rows; adding an instrument to a real song still produces the full per-section set as before.
 - **"Mark as Final" hidden in the Ideas-shelf context menu** — `isFinal` has no coherent meaning for idea-type song clips — there's no production task for it to affect (see above), and even before that fix, `reconcileSectionTaskStatus` was only a no-op by accident of the Ideas-shelf never producing `timeline_clips` rows, not by an explicit `song.type` guard anywhere in the isFinal cascade. Hid the menu item specifically in the Ideas-shelf's own Files-column context menu (a separate render site from the real-song Media Bucket's menu) via `selectedFile?.type !== 'idea'`. Real-song "Mark as Final" behavior is untouched.
 - **`SongHome.tsx` crash on stale/inaccessible song IDs** — four `useQuery` calls used raw `fetch(url).then(r => r.json())` instead of the shared `apiRequest` helper, which correctly throws on non-2xx responses. Plain `fetch()` only rejects on network failure — a 404/500 still resolves normally, so when pointed at a stale/deleted song ID, the client treated the `{"message":"Not found"}` error body as real data, and a downstream `tasks.filter(...)` call threw because `tasks` was an object, not an array. That uncaught exception is what tore down `npm run dev` — the Node server itself was healthy throughout. Fixed for the four `SongHome.tsx` queries. **This exact anti-pattern is confirmed present elsewhere app-wide** (`Dashboard.tsx`, `Clip.tsx`, `ProductionTracker.tsx`, `Timeline.tsx`, and the primary `['song', songId]` query itself) — see "On the horizon" for the planned full sweep.
+- **Lyrics comment composer positioning — full redesign after two failed attempts.** See "Composer positioning" under the Lyrics Feature section above for the full mechanism and reasoning. Notable process lesson: Playwright-based verification reported "all checks passing" on two separate occasions where real manual browser testing showed the composer rendering in the wrong place (once disconnected with a large gap, once landing near the top-left of the page unrelated to the trigger). Real human verification in an actual browser caught both; automated screenshot-based checks did not. Treat this as a standing caution for any future fix to floating/positioned UI in this codebase — automated verification is not sufficient proof for this class of bug.
+- **Lyrics floating pill didn't track page scroll** — see "Known browser-timing gotchas" under the Lyrics Feature section above.
+- **Lyrics floating pill survived a Delete/Backspace keypress** — see "Known browser-timing gotchas" under the Lyrics Feature section above.
 
 ---
 
