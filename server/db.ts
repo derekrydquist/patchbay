@@ -185,3 +185,25 @@ if (!hasLyricsComments) {
   `);
   console.log("[PatchBay] Created lyrics_comments table.");
 }
+
+// Create loose_files table if not exists.
+const hasLooseFiles = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='loose_files'"
+).get() as { c: number }).c;
+if (!hasLooseFiles) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS loose_files (
+      id TEXT PRIMARY KEY,
+      song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      color TEXT NOT NULL,
+      duration REAL NOT NULL,
+      src TEXT,
+      metadata TEXT,
+      uploaded_by TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  console.log("[PatchBay] Created loose_files table.");
+}

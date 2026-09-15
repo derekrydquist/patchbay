@@ -17,13 +17,15 @@ import multer from "multer";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError } from "./storage";
 import {
+  type InstrumentTrack,
   insertSongSchema,
   insertInstrumentTrackSchema,
   insertTimelineClipSchema,
   insertIdeaSchema,
   insertClipSchema,
+  insertLooseFileSchema,
   insertProductionTaskSchema,
   insertTaskCommentSchema,
   songs,
@@ -265,6 +267,20 @@ async function reconcileSectionTaskStatus(
   } else if (task.status === 'todo') {
     await storage.updateTask(task.id, { status: 'in-progress' });
   }
+}
+
+// ─── advanceTaskOnClipAdded ────────────────────────────────────────────────────
+// Shared by POST /api/ideas/:ideaId/clips (bucket upload) and the loose-file
+// organize/place-on-timeline routes: advances the matching production task from
+// "todo" to "in-progress" when a clip first lands in a section, then reconciles
+// full section status (handles the case where clips already exist and this one
+// completes the set).
+async function advanceTaskOnClipAdded(track: InstrumentTrack, sectionName: string, actor: string): Promise<void> {
+  const task = await storage.getTaskByInstrumentSection(track.songId, track.name, sectionName);
+  if (task?.status === "todo") {
+    await storage.updateTask(task.id, { status: "in-progress" });
+  }
+  await reconcileSectionTaskStatus(track.id, sectionName, actor, actor);
 }
 
 export async function registerRoutes(
@@ -1592,12 +1608,6 @@ export async function registerRoutes(
       if (idea?.sectionName && idea.trackId) {
         const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
         if (track) {
-          const task = await storage.getTaskByInstrumentSection(track.songId, track.name, idea.sectionName);
-          // Keep direct todo→in-progress for bucket-only uploads (reconcile returns early
-          // when there are zero timeline clips, so this is the only path that fires then)
-          if (task?.status === "todo") {
-            await storage.updateTask(task.id, { status: "in-progress" });
-          }
           storage.logActivity({
             id: randomUUID(), songId,
             type: 'file-uploaded',
@@ -1607,13 +1617,10 @@ export async function registerRoutes(
             sectionName: idea.sectionName,
             author: uploadActor,
           }).catch(console.error);
-          // Also reconcile in case timeline clips already exist for this section
-          await reconcileSectionTaskStatus(
-            idea.trackId,
-            idea.sectionName,
-            uploadActor,
-            uploadActor,
-          );
+          // Keep direct todo→in-progress for bucket-only uploads (reconcile returns early
+          // when there are zero timeline clips, so this is the only path that fires then),
+          // and also reconcile in case timeline clips already exist for this section.
+          await advanceTaskOnClipAdded(track, idea.sectionName, uploadActor);
         }
       }
     } catch (err) {
@@ -1621,6 +1628,195 @@ export async function registerRoutes(
     }
 
     res.status(201).json(clip);
+  });
+
+  // ─── Loose Files (song-scoped, unplaced uploads) ──────────────────────────────
+
+  /** GET /api/songs/:songId/loose-files — list unplaced files for a song */
+  app.get("/api/songs/:songId/loose-files", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const files = await storage.getLooseFilesBySong(songId);
+    res.json(files);
+  });
+
+  /**
+   * POST /api/songs/:songId/loose-files — record an uploaded-but-unplaced file.
+   * Body carries the same fields POST /api/upload already returns (url, duration,
+   * format, originalFileName, sampleRate, bitDepth, channels, uploadedDate), plus
+   * name/type/color chosen by the client. uploadedBy is always resolved server-side
+   * from the session — never trusted from the body.
+   */
+  app.post("/api/songs/:songId/loose-files", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+
+    const {
+      url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
+      name, type, color,
+    } = req.body as {
+      url?: string; duration?: number; format?: string; originalFileName?: string;
+      sampleRate?: string; bitDepth?: string; channels?: string; uploadedDate?: string;
+      name?: string; type?: string; color?: string;
+    };
+
+    const looseFileActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
+      : 'Unknown';
+
+    const parsed = insertLooseFileSchema.safeParse({
+      id: randomUUID(),
+      songId,
+      name,
+      type,
+      color,
+      duration,
+      src: url ?? null,
+      metadata: {
+        format: format ?? '',
+        originalFileName: originalFileName ?? '',
+        uploadedBy: looseFileActor,
+        uploadedDate: uploadedDate ?? new Date().toISOString().split('T')[0],
+        sampleRate: sampleRate ?? '',
+        bitDepth: bitDepth ?? '',
+        channels: channels === 'Mono' || channels === '5.1' ? channels : 'Stereo',
+        peakLevel: '',
+        timeSignature: '',
+        key: '',
+        bpm: 0,
+        description: '',
+        tags: [],
+      },
+      uploadedBy: looseFileActor,
+    });
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0].message });
+    }
+
+    const looseFile = await storage.createLooseFile(parsed.data);
+
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'loose-file-uploaded',
+      description: `${looseFileActor} uploaded ${looseFile.name} (unplaced)`,
+      timestamp: Date.now(),
+      author: looseFileActor,
+    }).catch(console.error);
+
+    res.status(201).json(looseFile);
+  });
+
+  /**
+   * POST /api/loose-files/:id/organize — materialize a loose file into a real
+   * clips row under the given track/section idea. Two-ID route: the loose file's
+   * songId and the destination track's songId are asserted independently.
+   */
+  app.post("/api/loose-files/:id/organize", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertSongOwned(req, res, looseFile.songId)) return;
+
+    const { trackId, sectionName } = req.body as { trackId?: string; sectionName?: string };
+    if (!trackId || !sectionName) {
+      return res.status(400).json({ message: "trackId and sectionName are required." });
+    }
+    const destSongId = trackSongId(trackId);
+    if (!destSongId || !assertSongOwned(req, res, destSongId)) return;
+
+    const organizeActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    let clip;
+    try {
+      clip = await storage.materializeLooseFile(looseFileId, trackId, sectionName);
+    } catch (err) {
+      if (err instanceof LooseFileNotFoundError) {
+        return res.status(404).json({ message: "Loose file not found." });
+      }
+      console.error("[loose-files/:id/organize] materialize failed:", err);
+      return res.status(500).json({ message: "Failed to organize loose file." });
+    }
+
+    const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
+    if (track) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: destSongId,
+        type: 'loose-file-organized',
+        description: `${organizeActor} organized ${clip.name} into ${track.name} → ${sectionName}`,
+        timestamp: Date.now(),
+        instrument: track.name,
+        sectionName,
+        author: organizeActor,
+      }).catch(console.error);
+      await advanceTaskOnClipAdded(track, sectionName, organizeActor);
+    }
+
+    res.status(201).json(clip);
+  });
+
+  /**
+   * POST /api/loose-files/:id/place-on-timeline — materialize a loose file into a
+   * clips row AND a timeline_clips row in the same transaction. Same two-ID
+   * ownership assertion as organize.
+   */
+  app.post("/api/loose-files/:id/place-on-timeline", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertSongOwned(req, res, looseFile.songId)) return;
+
+    const { trackId, sectionName } = req.body as { trackId?: string; sectionName?: string };
+    if (!trackId || !sectionName) {
+      return res.status(400).json({ message: "trackId and sectionName are required." });
+    }
+    const destSongId = trackSongId(trackId);
+    if (!destSongId || !assertSongOwned(req, res, destSongId)) return;
+
+    const placeActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    let result;
+    try {
+      result = await storage.materializeLooseFileToTimeline(looseFileId, trackId, sectionName);
+    } catch (err) {
+      if (err instanceof LooseFileNotFoundError) {
+        return res.status(404).json({ message: "Loose file not found." });
+      }
+      console.error("[loose-files/:id/place-on-timeline] materialize failed:", err);
+      return res.status(500).json({ message: "Failed to place loose file on the timeline." });
+    }
+
+    const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
+    if (track) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: destSongId,
+        type: 'loose-file-placed',
+        description: `${placeActor} placed ${result.clip.name} on the timeline in ${track.name} → ${sectionName}`,
+        timestamp: Date.now(),
+        instrument: track.name,
+        sectionName,
+        author: placeActor,
+      }).catch(console.error);
+      await advanceTaskOnClipAdded(track, sectionName, placeActor);
+    }
+
+    res.status(201).json(result);
+  });
+
+  /** DELETE /api/loose-files/:id — discard an unplaced upload (no soft-delete; nothing references it yet) */
+  app.delete("/api/loose-files/:id", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertSongOwned(req, res, looseFile.songId)) return;
+    await storage.deleteLooseFile(looseFileId);
+    res.status(204).send();
   });
 
   // ─── Clip Comments ────────────────────────────────────────────────────────────

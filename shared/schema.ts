@@ -133,6 +133,28 @@ export const insertClipSchema = createInsertSchema(clips).omit({ createdAt: true
 export type InsertClip = z.infer<typeof insertClipSchema>;
 export type Clip = typeof clips.$inferSelect;
 
+// ─── Loose Files (song-scoped, unplaced uploads) ─────────────────────────────
+// Files uploaded before being assigned to a Track/Section. Materialized into a
+// real `clips` row (see storage.materializeLooseFile) once organized — this
+// table only ever holds unplaced files, so it has no isFinal/active/sectionName.
+
+export const looseFiles = sqliteTable("loose_files", {
+  id: text("id").primaryKey(),
+  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  type: text("type", { enum: ["audio", "midi", "drums", "vocal", "custom-audio"] }).notNull(),
+  color: text("color").notNull(),
+  duration: real("duration").notNull(),
+  src: text("src"),
+  metadata: text("metadata", { mode: "json" }).$type<ClipMetadata>(),
+  uploadedBy: text("uploaded_by"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertLooseFileSchema = createInsertSchema(looseFiles).omit({ createdAt: true });
+export type InsertLooseFile = z.infer<typeof insertLooseFileSchema>;
+export type LooseFile = typeof looseFiles.$inferSelect;
+
 // ─── Clip Comments ────────────────────────────────────────────────────────────
 
 export const clipComments = sqliteTable("clip_comments", {

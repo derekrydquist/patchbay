@@ -8,6 +8,7 @@ import {
   type InstrumentTrack, type InsertInstrumentTrack,
   type Idea, type InsertIdea,
   type Clip, type InsertClip,
+  type LooseFile, type InsertLooseFile,
   type TimelineClip, type InsertTimelineClip,
   type ProductionTask, type InsertProductionTask,
   type TaskComment, type InsertTaskComment,
@@ -18,10 +19,20 @@ import {
   type Album,
   type Band,
   type InsertActivityLog,
-  users, songs, instrumentTracks, ideas, clips, timelineClips, deletedSections,
+  users, songs, instrumentTracks, ideas, clips, looseFiles, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, songReviews, songReviewComments,
   lyricsComments, activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
 } from "@shared/schema";
+
+// Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
+// id doesn't resolve — callers translate this to a 404, as distinct from the
+// "idea missing" case below, which is a genuine invariant violation (500).
+export class LooseFileNotFoundError extends Error {
+  constructor(id: string) {
+    super(`Loose file not found: ${id}`);
+    this.name = "LooseFileNotFoundError";
+  }
+}
 
 export const DEFAULT_SONG_ID = "patchbay-default";
 
@@ -174,6 +185,18 @@ export interface IStorage {
   timelineHasFinals(songId: string): Promise<boolean>;
   deleteNonFinalTimelineClips(songId: string): Promise<void>;
 
+  // Loose Files (song-scoped, unplaced uploads)
+  createLooseFile(data: InsertLooseFile): Promise<LooseFile>;
+  getLooseFilesBySong(songId: string): Promise<LooseFile[]>;
+  getLooseFile(id: string): Promise<LooseFile | undefined>;
+  deleteLooseFile(id: string): Promise<void>;
+  materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
+  materializeLooseFileToTimeline(
+    looseFileId: string,
+    trackId: string,
+    sectionName: string
+  ): Promise<{ clip: Clip; timelineClip: TimelineClip }>;
+
   // Activity
   getActivity(bandId: string, songId?: string): Promise<ActivityEvent[]>;
   logActivity(entry: InsertActivityLog): Promise<void>;
@@ -262,6 +285,53 @@ export type AlbumMembership = { albumId: string; albumName: string; songId: stri
 //
 // onConflictDoNothing is always applied — safe for all callers and makes
 // the function fully idempotent regardless of ID scheme.
+// Shared core for materializeLooseFile / materializeLooseFileToTimeline — the single
+// write path for turning a loose file into a real `clips` row. Runs inside the caller's
+// transaction so the clip-insert and loose-file-delete are always atomic together, and
+// (for the timeline variant) atomic with the timeline_clips insert too.
+type DrizzleTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+function materializeLooseFileCore(
+  tx: DrizzleTx,
+  looseFileId: string,
+  trackId: string,
+  sectionName: string
+): Clip {
+  const looseFile = tx.select().from(looseFiles).where(eq(looseFiles.id, looseFileId)).get();
+  if (!looseFile) throw new LooseFileNotFoundError(looseFileId);
+
+  // This idea row is expected to always exist (default bootstrap or a prior section-add)
+  // — if it's missing, that's a genuine invariant violation, not a normal 404. Error loudly
+  // rather than silently creating one, per the loose-files spec.
+  const idea = tx.select().from(ideas)
+    .where(and(eq(ideas.trackId, trackId), eq(ideas.sectionName, sectionName)))
+    .get();
+  if (!idea) {
+    const msg = `[materializeLooseFile] No idea found for trackId=${trackId} sectionName=${JSON.stringify(sectionName)} — expected to always exist from bootstrap or section-add.`;
+    console.error(msg);
+    throw new Error(msg);
+  }
+
+  const clip: Clip = {
+    id: randomUUID(),
+    ideaId: idea.id,
+    name: looseFile.name,
+    type: looseFile.type,
+    color: looseFile.color,
+    start: 0,
+    duration: looseFile.duration,
+    src: looseFile.src,
+    isFinal: false,
+    active: true,
+    sectionName,
+    metadata: looseFile.metadata,
+    addedToSongs: null,
+    createdAt: new Date().toISOString(),
+  };
+  tx.insert(clips).values(clip).run();
+  tx.delete(looseFiles).where(eq(looseFiles.id, looseFileId)).run();
+  return clip;
+}
+
 export function insertProductionTaskForSection({
   songId,
   trackId,
@@ -839,6 +909,78 @@ export class SQLiteStorage implements IStorage {
         }
       }
     }
+  }
+
+  // ── Loose Files (song-scoped, unplaced uploads) ──────────────────────────────
+
+  async createLooseFile(data: InsertLooseFile): Promise<LooseFile> {
+    const now = new Date().toISOString();
+    const looseFile: LooseFile = {
+      src: null,
+      metadata: null,
+      uploadedBy: null,
+      ...data,
+      id: data.id ?? randomUUID(),
+      createdAt: now,
+    };
+    db.insert(looseFiles).values(looseFile).run();
+    return db.select().from(looseFiles).where(eq(looseFiles.id, looseFile.id)).get()!;
+  }
+
+  async getLooseFilesBySong(songId: string): Promise<LooseFile[]> {
+    return db.select().from(looseFiles).where(eq(looseFiles.songId, songId)).orderBy(asc(looseFiles.name)).all();
+  }
+
+  async getLooseFile(id: string): Promise<LooseFile | undefined> {
+    return db.select().from(looseFiles).where(eq(looseFiles.id, id)).get();
+  }
+
+  async deleteLooseFile(id: string): Promise<void> {
+    db.delete(looseFiles).where(eq(looseFiles.id, id)).run();
+  }
+
+  async materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip> {
+    return db.transaction((tx) => materializeLooseFileCore(tx, looseFileId, trackId, sectionName));
+  }
+
+  async materializeLooseFileToTimeline(
+    looseFileId: string,
+    trackId: string,
+    sectionName: string
+  ): Promise<{ clip: Clip; timelineClip: TimelineClip }> {
+    return db.transaction((tx) => {
+      const clip = materializeLooseFileCore(tx, looseFileId, trackId, sectionName);
+
+      // Append after the last existing clip in this track's section — mirrors the
+      // client's insertClipInSection append behavior, scoped to this one track/section
+      // (not a full cross-track recalcAllStarts, which is a client-side concern).
+      const sectionClips = tx.select().from(timelineClips)
+        .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.sectionName, sectionName)))
+        .all();
+      const start = sectionClips.length
+        ? Math.max(...sectionClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart))
+        : 0;
+
+      const timelineClip: TimelineClip = {
+        id: randomUUID(),
+        trackId,
+        name: clip.name,
+        type: clip.type,
+        color: clip.color,
+        start,
+        duration: clip.duration,
+        src: clip.src,
+        sectionName,
+        isFinal: false,
+        trimStart: 0,
+        trimEnd: null,
+        bucketClipId: clip.id,
+        isFullTake: false,
+      };
+      tx.insert(timelineClips).values(timelineClip).run();
+
+      return { clip, timelineClip };
+    });
   }
 
   // ── Production Tasks ───────────────────────────────────────────────────────
