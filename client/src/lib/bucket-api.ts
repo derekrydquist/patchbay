@@ -50,7 +50,39 @@ export interface ApiTrack {
   ideas: ApiIdea[];
 }
 
-// ─── Fetch helper ─────────────────────────────────────────────────────────────
+// Song-scoped file uploaded before being assigned to a Track/Section.
+export interface ApiLooseFile {
+  id: string;
+  songId: string;
+  name: string;
+  type: string;
+  color: string;
+  duration: number;
+  src: string | null;
+  metadata: DawClip['metadata'] | null;
+  uploadedBy: string | null;
+  createdAt: string;
+}
+
+// Returned by POST /api/loose-files/:id/place-on-timeline alongside the clip.
+export interface ApiTimelineClip {
+  id: string;
+  trackId: string;
+  name: string;
+  type: string;
+  color: string;
+  start: number;
+  duration: number;
+  src: string | null;
+  sectionName: string | null;
+  isFinal: boolean;
+  trimStart: number;
+  trimEnd: number | null;
+  bucketClipId: string | null;
+  isFullTake: boolean;
+}
+
+// ─── Fetch helpers ────────────────────────────────────────────────────────────
 
 export async function fetchBucket(songId: string): Promise<ApiTrack[]> {
   const res = await fetch(`/api/songs/${songId}/bucket`);
@@ -58,12 +90,22 @@ export async function fetchBucket(songId: string): Promise<ApiTrack[]> {
   return res.json();
 }
 
-// ─── Query key factory ────────────────────────────────────────────────────────
-// Invalidation keys must exactly match fetch keys (CLAUDE.md rule). Using this
-// factory everywhere makes drift impossible.
+export async function fetchLooseFiles(songId: string): Promise<ApiLooseFile[]> {
+  const res = await fetch(`/api/songs/${songId}/loose-files`);
+  if (!res.ok) throw new Error('Failed to load loose files');
+  return res.json();
+}
+
+// ─── Query key factories ──────────────────────────────────────────────────────
+// Invalidation keys must exactly match fetch keys (CLAUDE.md rule). Using these
+// factories everywhere makes drift impossible.
 
 export const bucketKeys = {
   bucket: (songId: string | undefined) => ['bucket', songId] as const,
   hiddenIdeas: (trackId: string | undefined) => ['hidden-ideas', trackId] as const,
   hiddenTracks: (songId: string | undefined) => ['hidden-tracks', songId] as const,
+};
+
+export const looseFileKeys = {
+  list: (songId: string | undefined) => ['loose-files', songId] as const,
 };

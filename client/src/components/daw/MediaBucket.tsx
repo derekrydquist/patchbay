@@ -1,14 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
+import { useDroppable } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
-import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
+import {
+  type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
+  fetchBucket, bucketKeys, fetchLooseFiles, looseFileKeys,
+} from '@/lib/bucket-api';
 import {
   useAddInstrument, useAddSection, useAddFullTake,
   useDeleteTrack, useRestoreTrack,
   useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
 import { BucketClip } from './Clip';
+import { LooseFileRow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
 import { AddInstrumentModal } from './modals/AddInstrumentModal';
 import { AddSectionModal } from './modals/AddSectionModal';
@@ -45,6 +50,83 @@ function toClip(apiClip: ApiClip): Clip {
   };
 }
 
+// ─── Section row — Sections column ─────────────────────────────────────────────
+// Extracted so useDroppable can be called once per row. Doubles as the organize
+// drop target for a dragged loose file (id: `bucket-section||${idea.id}`, data
+// carries trackId/sectionName directly — read by Timeline.tsx's handleDragEnd,
+// since MediaBucket is rendered inside Timeline's own DndContext and does not
+// own drag-end handling itself). Native onDragOver/onDragLeave/onDrop handlers
+// (OS file drag) are unrelated and untouched.
+
+interface SectionFolderRowProps {
+  idea: ApiIdea;
+  isSelected: boolean;
+  onSelect: () => void;
+  onFileDrop: (e: React.DragEvent) => void;
+  onRemove: () => void;
+  buttonRef?: React.RefObject<HTMLButtonElement | null>;
+}
+
+function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef }: SectionFolderRowProps) {
+  const hasFiles = idea.clips.length > 0;
+  const { setNodeRef, isOver } = useDroppable({
+    id: `bucket-section||${idea.id}`,
+    data: { trackId: idea.trackId, sectionName: idea.sectionName },
+  });
+  const combinedRef = (node: HTMLButtonElement | null) => {
+    setNodeRef(node);
+    if (buttonRef) (buttonRef as React.MutableRefObject<HTMLButtonElement | null>).current = node;
+  };
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          ref={combinedRef}
+          onClick={onSelect}
+          onDragOver={(e) => {
+            e.preventDefault();
+            e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
+          }}
+          onDragLeave={(e) => {
+            e.preventDefault();
+            e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
+          }}
+          onDrop={onFileDrop}
+          className={cn(
+            "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
+            isSelected
+              ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
+              : "text-muted-foreground hover:bg-white/5 hover:text-white",
+            isOver && "bg-primary/10 border-primary/50"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Folder
+              size={14}
+              className={isSelected ? "text-primary" : "text-muted-foreground"}
+              fill={hasFiles ? "currentColor" : "none"}
+            />
+            <span className="font-bold tracking-tight">{idea.sectionName}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {idea.hasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
+            <ChevronRight size={12} className="opacity-40" />
+          </div>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={onRemove}
+        >
+          Remove Section
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface MediaBucketProps {
@@ -71,6 +153,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
   const [autoOpenClipId, setAutoOpenClipId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [uploadMode, setUploadMode] = useState<'placed' | 'loose'>('placed');
   const [uploadInitialIdeaId, setUploadInitialIdeaId] = useState('');
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -92,6 +175,11 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const { data: tracks = [], isLoading, isError } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetchBucket(songId),
+  });
+
+  const { data: looseFiles = [] } = useQuery<ApiLooseFile[]>({
+    queryKey: looseFileKeys.list(songId),
+    queryFn: () => fetchLooseFiles(songId),
   });
 
 
@@ -312,6 +400,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     if (!e.dataTransfer.files?.length) return;
     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
     if (!audioFiles.length) return;
+    setUploadMode('placed');
     setUploadInitialFiles(audioFiles);
     setUploadInitialIdeaId(idea.id);
     setIsUploadOpen(true);
@@ -347,6 +436,18 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
       })
     : [];
 
+  // Versions column organize drop target — same (trackId, sectionName) pair as the
+  // Section row one level out (one-idea-per-section), so this is a second entry point
+  // onto the identical organize call, not a new backend concept. Distinct id prefix
+  // from the Section row's `bucket-section||` (a real DOM node can't be registered
+  // under the same dnd-kit id twice) — see trackFirstCollision in Timeline.tsx for the
+  // matching precise-bounds collision pass.
+  const { setNodeRef: setVersionsDroppableRef, isOver: isVersionsDropTarget } = useDroppable({
+    id: selectedIdea ? `bucket-versions||${selectedIdea.id}` : 'bucket-versions||none',
+    disabled: !selectedIdea,
+    data: selectedIdea ? { trackId: selectedIdea.trackId, sectionName: selectedIdea.sectionName } : undefined,
+  });
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
@@ -368,7 +469,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
           <Button
             size="sm"
             className="h-8 text-[10px] uppercase tracking-widest font-bold"
-            onClick={() => { setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
+            onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
           >
             <Upload size={14} className="mr-2" /> Upload
           </Button>
@@ -382,12 +483,27 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         <div className="w-1/4 flex flex-col">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Instruments</span>
-            <button
-              className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5"
-              onClick={() => setIsAddInstrumentOpen(true)}
-            >
-              <Plus size={12} />
-            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
+                  <Plus size={12} />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="bg-popover border-border min-w-[160px]">
+                <DropdownMenuItem
+                  className="text-xs cursor-pointer"
+                  onClick={() => setIsAddInstrumentOpen(true)}
+                >
+                  Add Track
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="text-xs cursor-pointer"
+                  onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
+                >
+                  Add Files
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
@@ -455,6 +571,9 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                     </ContextMenu>
                   );
                 })}
+              {looseFiles.map(lf => (
+                <LooseFileRow key={lf.id} looseFile={lf} songId={songId} />
+              ))}
             </div>
           </ScrollArea>
         </div>
@@ -488,55 +607,17 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {selectedTrack ? filteredIdeas.map(idea => {
-                const hasFiles = idea.clips.length > 0;
-                return (
-                  <ContextMenu key={idea.id}>
-                    <ContextMenuTrigger asChild>
-                      <button
-                        ref={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
-                        onClick={() => setSelectedIdea(idea)}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
-                        }}
-                        onDragLeave={(e) => {
-                          e.preventDefault();
-                          e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
-                        }}
-                        onDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
-                        className={cn(
-                          "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
-                          selectedIdea?.id === idea.id
-                            ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
-                            : "text-muted-foreground hover:bg-white/5 hover:text-white"
-                        )}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Folder
-                            size={14}
-                            className={selectedIdea?.id === idea.id ? "text-primary" : "text-muted-foreground"}
-                            fill={hasFiles ? "currentColor" : "none"}
-                          />
-                          <span className="font-bold tracking-tight">{idea.sectionName}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          {idea.hasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
-                          <ChevronRight size={12} className="opacity-40" />
-                        </div>
-                      </button>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className="bg-popover border-border">
-                      <ContextMenuItem
-                        className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-                        onClick={() => hideIdeaMutation.mutate(idea.id)}
-                      >
-                        Remove Section
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                );
-              }) : (
+              {selectedTrack ? filteredIdeas.map(idea => (
+                <SectionFolderRow
+                  key={idea.id}
+                  idea={idea}
+                  isSelected={selectedIdea?.id === idea.id}
+                  onSelect={() => setSelectedIdea(idea)}
+                  onFileDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
+                  onRemove={() => hideIdeaMutation.mutate(idea.id)}
+                  buttonRef={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
+                />
+              )) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
                   Select an instrument to view sections
                 </div>
@@ -547,7 +628,8 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
 
         {/* ── Versions column ── */}
         <div
-          className="flex-1 flex flex-col bg-black/20"
+          ref={setVersionsDroppableRef}
+          className={cn('flex-1 flex flex-col bg-black/20 transition-colors', isVersionsDropTarget && 'bg-primary/5')}
           onDragOver={(e) => {
             if (!selectedIdea || !selectedTrack) return;
             e.preventDefault();
@@ -617,6 +699,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         open={isUploadOpen}
         onOpenChange={setIsUploadOpen}
         songId={songId}
+        mode={uploadMode}
         defaultIdeaId={uploadInitialIdeaId || undefined}
         defaultInstrumentName={uploadInitialIdeaId ? tracks.find(t => t.ideas.some(i => i.id === uploadInitialIdeaId))?.name : undefined}
         defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}

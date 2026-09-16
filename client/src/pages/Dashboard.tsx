@@ -46,10 +46,15 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ClipInfoWindow } from '@/components/daw/Clip';
 import { UploadModal } from '@/components/daw/UploadModal';
+import { LooseFileRow } from '@/components/daw/LooseFileRow';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
-import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection } from '@/hooks/use-bucket-mutations';
+import {
+  type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
+  fetchBucket, bucketKeys, fetchLooseFiles, looseFileKeys,
+} from '@/lib/bucket-api';
+import { useAddInstrument, useAddSection, useOrganizeLooseFile } from '@/hooks/use-bucket-mutations';
+import { DndContext, useDroppable, useSensor, useSensors, PointerSensor, type DragEndEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
@@ -265,6 +270,48 @@ function EditableTagList({ label, items, onChange }: EditableTagListProps) {
 }
 
 
+// ─── Idea Folder row (Ideas browser, Column 2) ────────────────────────────────
+// One Folder = one instrument_tracks row + its single paired ideas row (see
+// addPartMutation). Extracted so useDroppable can be called once per row — this
+// is the organize drop target for a dragged loose file: trackId/sectionName are
+// read directly from the folder's own data (idea = track.ideas[0]), not derived.
+
+interface IdeaFolderRowProps {
+  track: ApiTrack;
+  isSelected: boolean;
+  onSelect: () => void;
+}
+
+function IdeaFolderRow({ track, isSelected, onSelect }: IdeaFolderRowProps) {
+  const hasFiles = track.ideas.some(i => i.clips.length > 0);
+  const idea = track.ideas[0];
+  const { setNodeRef, isOver } = useDroppable({
+    id: `bucket-section||${idea?.id ?? track.id}`,
+    disabled: !idea,
+    data: idea ? { trackId: track.id, sectionName: idea.sectionName } : undefined,
+  });
+
+  return (
+    <button
+      ref={setNodeRef}
+      onClick={onSelect}
+      className={cn(
+        'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
+        isSelected
+          ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+          : 'text-muted-foreground hover:bg-white/5 hover:text-white',
+        isOver && 'bg-primary/10 border-primary/50'
+      )}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <Folder size={13} className="shrink-0" fill={hasFiles ? 'currentColor' : 'none'} />
+        <span className="font-bold tracking-tight truncate">{track.name}</span>
+      </div>
+      <ChevronRight size={12} className="opacity-40 shrink-0" />
+    </button>
+  );
+}
+
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const search = useSearch();
@@ -309,6 +356,7 @@ export default function Dashboard() {
   const [selectedSection, setSelectedSection] = useState<ApiIdea | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [uploadMode, setUploadMode] = useState<'placed' | 'loose'>('placed');
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClip | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
@@ -374,6 +422,40 @@ export default function Dashboard() {
     queryFn: () => fetchBucket(selectedFile!.id),
     enabled: !!selectedFile && activeTab === 'files',
   });
+
+  const { data: ideaLooseFiles = [] } = useQuery<ApiLooseFile[]>({
+    queryKey: looseFileKeys.list(selectedFile?.id),
+    queryFn: () => fetchLooseFiles(selectedFile!.id),
+    enabled: !!selectedFile && activeTab === 'files' && filesFilter === 'ideas',
+  });
+
+  const organizeLooseFileMutation = useOrganizeLooseFile(selectedFile?.id, {
+    onError: (msg) => console.error('[organizeLooseFile] error:', msg),
+  });
+
+  // Distance threshold so a plain click on a Folder button doesn't get swallowed as a
+  // micro-drag — same constraint Timeline.tsx uses for the identical click-vs-drag conflict.
+  const ideaDragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  const handleIdeaFolderDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over) return;
+    const activeType = active.data.current?.type;
+    if (activeType !== 'loose-file') return;
+    const dropData = over.data.current as { trackId?: string; sectionName?: string } | undefined;
+    const looseFileId = active.data.current?.clip?.id;
+    if (!dropData?.trackId || !dropData?.sectionName || !looseFileId) {
+      console.warn('[LooseFileDrop] missing trackId/sectionName on folder drop target', dropData);
+      return;
+    }
+    organizeLooseFileMutation.mutate({
+      looseFileId,
+      trackId: dropData.trackId,
+      sectionName: dropData.sectionName,
+    });
+  };
 
   const { data: destBucket = [] } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(destSongId),
@@ -1819,7 +1901,7 @@ export default function Dashboard() {
                   setIsDragOver(false);
                   if (selectedSection && e.dataTransfer.files.length > 0) {
                     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) { setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                    if (audioFiles.length > 0) { setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
                   }
                 }}
               >
@@ -1836,7 +1918,7 @@ export default function Dashboard() {
                         </button>
                       )}
                       <button
-                        onClick={() => { setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                        onClick={() => { setUploadMode('placed'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
                         className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                       >
                         <Upload size={10} />
@@ -1907,6 +1989,7 @@ export default function Dashboard() {
             </div>
             ) : filesFilter === 'ideas' ? (
             /* Ideas — 3-column browser */
+            <DndContext sensors={ideaDragSensors} onDragEnd={handleIdeaFolderDragEnd}>
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
               {/* Column 1 — Ideas list */}
@@ -1948,51 +2031,61 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Column 2 — Parts (instrument_tracks) */}
+              {/* Column 2 — Folders (instrument_tracks, one paired ideas row each) */}
               <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/10">
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/partsheader">
-                  <span>Parts</span>
+                  <span>Folders</span>
                   {selectedFile && (
-                    <button
-                      onClick={() => { setNewPartName(''); setIsAddPartOpen(true); }}
-                      className="opacity-0 group-hover/partsheader:opacity-100 hover:text-primary transition-all p-0.5"
-                    >
-                      <Plus size={12} />
-                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="opacity-0 group-hover/partsheader:opacity-100 hover:text-primary transition-all p-0.5">
+                          <Plus size={12} />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="bg-popover border-border min-w-[160px]">
+                        <DropdownMenuItem
+                          className="text-xs cursor-pointer"
+                          onClick={() => { setNewPartName(''); setIsAddPartOpen(true); }}
+                        >
+                          Add Folder
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-xs cursor-pointer"
+                          onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                        >
+                          Add Files
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   )}
                 </div>
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select an idea</p>
-                  ) : fileBucket.length === 0 ? (
-                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 leading-relaxed">No parts yet. Add a part to get started.</p>
-                  ) : fileBucket.map(track => {
-                    const hasFiles = track.ideas.some(i => i.clips.length > 0);
-                    return (
-                      <button
-                        key={track.id}
-                        onClick={() => {
-                          setSelectedInstrument(track); setSelectedSection(track.ideas[0] ?? null);
-                          if (selectedFile) {
-                            const s = `tab=files&filter=ideas&ideaId=${selectedFile.id}&partId=${track.id}`;
-                            appliedSearchRef.current = s; setLocation(`/?${s}`);
-                          }
-                        }}
-                        className={cn(
-                          'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
-                          selectedInstrument?.id === track.id
-                            ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-                            : 'text-muted-foreground hover:bg-white/5 hover:text-white'
-                        )}
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Folder size={13} className="shrink-0" fill={hasFiles ? 'currentColor' : 'none'} />
-                          <span className="font-bold tracking-tight truncate">{track.name}</span>
-                        </div>
-                        <ChevronRight size={12} className="opacity-40 shrink-0" />
-                      </button>
-                    );
-                  })}
+                  ) : (
+                    <>
+                      {fileBucket.length === 0 && ideaLooseFiles.length === 0 && (
+                        <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 leading-relaxed">No folders yet. Add a folder to get started.</p>
+                      )}
+                      {fileBucket.map(track => (
+                        <IdeaFolderRow
+                          key={track.id}
+                          track={track}
+                          isSelected={selectedInstrument?.id === track.id}
+                          onSelect={() => {
+                            setSelectedInstrument(track); setSelectedSection(track.ideas[0] ?? null);
+                            if (selectedFile) {
+                              const s = `tab=files&filter=ideas&ideaId=${selectedFile.id}&partId=${track.id}`;
+                              appliedSearchRef.current = s; setLocation(`/?${s}`);
+                            }
+                          }}
+                        />
+                      ))}
+                      {ideaLooseFiles.map(lf => (
+                        <LooseFileRow key={lf.id} looseFile={lf} songId={selectedFile.id} />
+                      ))}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -2006,7 +2099,7 @@ export default function Dashboard() {
                   setIsDragOver(false);
                   if (selectedSection && e.dataTransfer.files.length > 0) {
                     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) { setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                    if (audioFiles.length > 0) { setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
                   }
                 }}
               >
@@ -2014,7 +2107,7 @@ export default function Dashboard() {
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
                   {selectedSection && (
                     <button
-                      onClick={() => { setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                      onClick={() => { setUploadMode('placed'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
                       className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                     >
                       <Upload size={10} />
@@ -2025,7 +2118,7 @@ export default function Dashboard() {
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
-                      Select a part to view files
+                      Select a folder to view files
                     </p>
                   ) : (() => {
                     const clips = selectedInstrument.ideas[0]?.clips ?? [];
@@ -2116,6 +2209,7 @@ export default function Dashboard() {
               </div>
 
             </div>
+            </DndContext>
             ) : (
             /* Albums — 2-column browser */
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px]">
@@ -2443,15 +2537,17 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* Upload Modal */}
-      {selectedSection && (
+      {/* Upload Modal — mounted whenever an idea/song is selected, not just a destination
+          section, so the loose (destination-free) upload flow has somewhere to attach to. */}
+      {selectedFile && (
         <UploadModal
           open={isUploadOpen}
           onOpenChange={setIsUploadOpen}
-          songId={selectedFile?.id ?? ''}
-          defaultIdeaId={selectedSection.id}
+          songId={selectedFile.id}
+          mode={uploadMode}
+          defaultIdeaId={selectedSection?.id}
           defaultInstrumentName={filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? '')}
-          defaultSectionName={filesFilter === 'ideas' ? (selectedInstrument?.name ?? '') : selectedSection.sectionName}
+          defaultSectionName={filesFilter === 'ideas' ? (selectedInstrument?.name ?? '') : selectedSection?.sectionName}
           songType={filesFilter === 'ideas' ? 'idea' : 'song'}
           initialFiles={uploadInitialFiles}
           onUploadSuccess={() => {
@@ -2763,17 +2859,17 @@ export default function Dashboard() {
         error={addSectionError}
       />
 
-      {/* Add Part Modal */}
+      {/* Add Folder Modal */}
       <Dialog open={isAddPartOpen} onOpenChange={open => { if (!open) { setIsAddPartOpen(false); setNewPartName(''); } }}>
         <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
           <DialogHeader>
             <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
-              Add Part
+              Add Folder
             </DialogTitle>
           </DialogHeader>
           <form onSubmit={e => { e.preventDefault(); if (newPartName.trim()) addPartMutation.mutate(newPartName.trim()); }} className="space-y-4 pt-2">
             <div className="space-y-2">
-              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Part Name</Label>
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Folder Name</Label>
               <Input
                 autoFocus
                 placeholder="e.g. Guitar"
@@ -2785,7 +2881,7 @@ export default function Dashboard() {
             <DialogFooter className="pt-2">
               <Button type="button" variant="outline" className="border-white/10 hover:bg-white/5 text-xs" onClick={() => { setIsAddPartOpen(false); setNewPartName(''); }}>Cancel</Button>
               <Button type="submit" disabled={!newPartName.trim() || addPartMutation.isPending} className="bg-primary text-black hover:bg-primary/90 font-bold text-xs">
-                {addPartMutation.isPending ? 'Adding…' : 'Add Part'}
+                {addPartMutation.isPending ? 'Adding…' : 'Add Folder'}
               </Button>
             </DialogFooter>
           </form>

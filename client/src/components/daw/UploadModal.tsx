@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { nanoid } from 'nanoid';
-import { type ApiClip, type ApiIdea, type ApiTrack, fetchBucket, bucketKeys } from '@/lib/bucket-api';
+import { type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile, fetchBucket, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
 import { Upload, FileAudio, Video, X, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -28,6 +28,31 @@ async function uploadFile(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: 'Upload failed' }));
     throw new Error(err.message ?? 'Upload failed');
+  }
+  return res.json();
+}
+
+async function createLooseFile(songId: string, payload: {
+  name: string;
+  type: string;
+  color: string;
+  duration: number;
+  src: string;
+  format: string;
+  originalFileName: string;
+  sampleRate: string;
+  bitDepth: string;
+  channels: string;
+  uploadedDate: string;
+}): Promise<ApiLooseFile> {
+  const res = await fetch(`/api/songs/${songId}/loose-files`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, url: payload.src }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: 'Failed to save file' }));
+    throw new Error(err.message ?? 'Failed to save file');
   }
   return res.json();
 }
@@ -73,13 +98,14 @@ export interface UploadModalProps {
   defaultSectionName?: string;
   initialFiles?: File[];
   songType?: 'song' | 'idea';
+  mode?: 'placed' | 'loose'; // 'loose' skips destination resolution — files land in loose_files (default: 'placed')
   onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
 }
 
 export function UploadModal({
   open, onOpenChange, songId,
   defaultIdeaId, defaultInstrumentName, defaultSectionName,
-  initialFiles, songType = 'song', onUploadSuccess,
+  initialFiles, songType = 'song', mode = 'placed', onUploadSuccess,
 }: UploadModalProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -171,10 +197,30 @@ export function UploadModal({
   const hasExtracting = uploadFiles.some(f => f.status === 'extracting');
 
   const uploadMutation = useMutation({
-    mutationFn: async () => {
-      const destId = uploadDestination;
-      if (!destId || uploadFiles.length === 0) return;
+    mutationFn: async (): Promise<{ destTrackId: string; destIdeaId: string } | { loose: true } | undefined> => {
+      if (uploadFiles.length === 0) return;
       setUploadError(null);
+
+      // ── Loose mode: no destination — every file lands in loose_files instead
+      // of a real clips row. Reuses uploadFile() for the multipart POST /api/upload
+      // call; the only thing that differs from placed mode is the second call. ──
+      if (mode === 'loose') {
+        for (const { file, status } of uploadFiles) {
+          if (status !== 'ready') continue;
+          const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
+            await uploadFile(file, 'loose', 'unplaced', '');
+          await createLooseFile(songId, {
+            name: originalFileName || file.name,
+            type: 'audio',
+            color: 'hsl(var(--primary))',
+            duration, src: url, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
+          });
+        }
+        return { loose: true };
+      }
+
+      const destId = uploadDestination;
+      if (!destId) return;
       let destTrack: ApiTrack | null = null;
       let destIdea: ApiIdea | null = null;
       for (const t of tracks) {
@@ -212,6 +258,7 @@ export function UploadModal({
     onSuccess: (result) => {
       if (!result) return;
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
@@ -219,7 +266,7 @@ export function UploadModal({
       onOpenChange(false);
       setUploadFiles([]);
       setUploadDestination('');
-      onUploadSuccess?.(result);
+      if ('destTrackId' in result) onUploadSuccess?.(result);
     },
     onError: (err: Error) => setUploadError(err.message),
   });
@@ -232,10 +279,12 @@ export function UploadModal({
       <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-xl p-0 overflow-hidden">
         <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
           <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
-          <p className="text-[10px] text-muted-foreground mt-1 uppercase">Drop files to add them to the project</p>
+          <p className="text-[10px] text-muted-foreground mt-1 uppercase">
+            {mode === 'loose' ? 'Files are added without a destination — organize them later' : 'Drop files to add them to the project'}
+          </p>
         </div>
         <div className="p-6 space-y-6">
-          {songType === 'idea' ? (
+          {mode !== 'loose' && (songType === 'idea' ? (
             defaultInstrumentName && (
               <div className="space-y-1.5">
                 <label className="text-[10px] uppercase font-bold text-muted-foreground">Uploading to</label>
@@ -262,7 +311,7 @@ export function UploadModal({
                 </SelectContent>
               </Select>
             </div>
-          )}
+          ))}
           <div
             onDragOver={e => e.preventDefault()}
             onDrop={handleFileDrop}
@@ -330,7 +379,7 @@ export function UploadModal({
                   <Button
                     className="h-9 uppercase tracking-widest text-[10px] font-bold"
                     onClick={() => uploadMutation.mutate()}
-                    disabled={!uploadDestination || uploadFiles.length === 0 || uploadMutation.isPending || hasExtracting}
+                    disabled={(mode !== 'loose' && !uploadDestination) || uploadFiles.length === 0 || uploadMutation.isPending || hasExtracting}
                   >
                     {uploadMutation.isPending
                       ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>

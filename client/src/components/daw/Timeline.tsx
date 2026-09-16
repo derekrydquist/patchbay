@@ -31,13 +31,22 @@ import {
 import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
-import { bucketKeys } from '@/lib/bucket-api';
+import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack } from '@/lib/bucket-api';
+import { useOrganizeLooseFile, usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DawScrollbar } from './DawScrollbar';
 import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from '@/components/ui/dialog';
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
 
 const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 const TRACK_PANEL_WIDTH = 256;
@@ -185,6 +194,15 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
   return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
 }
 
+// MediaBucket organize drop targets — a Section row (Sections column) and its Versions
+// column both resolve to the identical (trackId, sectionName) pair (one-idea-per-section),
+// so a loose file dropped on either fires the same organize call. Two distinct id prefixes
+// because a DOM node can't be registered under the same dnd-kit id twice.
+function isBucketOrganizeDropId(id: string | number): boolean {
+  const s = String(id);
+  return s.startsWith('bucket-section||') || s.startsWith('bucket-versions||');
+}
+
 // Custom collision detection: gap zones require precise pointer intersection (they are narrow);
 // track rows match by vertical overlap only — any X position on the row resolves to that track.
 // Gap zones read live getBoundingClientRect() directly so freshly-mounted zones are never skipped
@@ -204,9 +222,22 @@ const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppabl
     }
   }
 
-  // Second pass — track rows, vertical band only (X is irrelevant).
+  // Second pass — MediaBucket organize drop targets (Section row, Versions column),
+  // live bounds check. These are narrow rows/panels in a side column, not full-width
+  // bands, so the vertical-band-only heuristic below would wrongly match any X
+  // position at the same row height (e.g. hovering over an unrelated column).
   for (const container of droppableContainers) {
-    if (String(container.id).startsWith('gap||')) continue;
+    if (!isBucketOrganizeDropId(container.id)) continue;
+    const rect = container.node.current?.getBoundingClientRect() ?? droppableRects.get(container.id);
+    if (!rect) continue;
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      return [{ id: container.id }];
+    }
+  }
+
+  // Third pass — track rows, vertical band only (X is irrelevant).
+  for (const container of droppableContainers) {
+    if (String(container.id).startsWith('gap||') || isBucketOrganizeDropId(container.id)) continue;
     const rect = droppableRects.get(container.id);
     if (!rect) continue;
     if (y >= rect.top && y <= rect.bottom) {
@@ -271,6 +302,33 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 export function Timeline({ songId }: { songId: string }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
+
+  const organizeLooseFileMutation = useOrganizeLooseFile(songId, {
+    onError: (msg) => console.error('[organizeLooseFile] error:', msg),
+  });
+  const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
+    onError: (msg) => console.error('[placeLooseFileOnTimeline] error:', msg),
+  });
+
+  // Backs the Place-on-Timeline modal's Track/Section dropdowns. Same query key
+  // MediaBucket's Instruments column uses — already warm, no extra network cost.
+  // Deliberately NOT songs.sections: that column is only ever written at song
+  // creation (confirmed via routes.ts — POST /api/songs/:songId/sections, the
+  // Add Section route, never updates it), so it goes stale the moment a section
+  // is added later and would silently omit real options. The live, song-wide
+  // section list is the union of active idea sectionNames across all active
+  // tracks — same data MediaBucket's Sections column is ultimately built from,
+  // just not filtered down to one selected track.
+  const { data: bucketTracksForPlacement = [] } = useQuery<ApiBucketTrack[]>({
+    queryKey: bucketKeys.bucket(songId),
+    queryFn: () => fetchBucket(songId),
+  });
+  const songSectionNames = React.useMemo(
+    () => Array.from(new Set(
+      bucketTracksForPlacement.flatMap((t) => t.ideas.filter((i) => i.active).map((i) => i.sectionName))
+    )),
+    [bucketTracksForPlacement]
+  );
 
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${songId}/timeline`],
@@ -374,7 +432,13 @@ export function Timeline({ songId }: { songId: string }) {
     setSectionOrder((prev) => prev.filter((s) => activeSections.has(s)));
   }, [tracks]);
 
-  const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string } | null>(null);
+  const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string; songId?: string } | null>(null);
+  // Place-on-Timeline modal state. trackId/sectionName are '' when unresolved —
+  // pre-filled from the drop point where possible, otherwise picked manually via
+  // the modal's own Track/Section dropdowns (see the cascading-picker rework).
+  const [loosePlacementModal, setLoosePlacementModal] = useState<{
+    looseFileId: string; trackId: string; sectionName: string;
+  } | null>(null);
   const [playheadTimeSecs, setPlayheadTimeState] = useState(() => {
     const saved = localStorage.getItem(`patchbay-playhead-${songId}`);
     if (saved) {
@@ -1882,6 +1946,7 @@ export function Timeline({ songId }: { songId: string }) {
     const clip = event.active.data.current?.clip as Clip;
     const type = event.active.data.current?.type as string;
     const dragTrackId = event.active.data.current?.trackId as string | undefined;
+    const dragSongId = event.active.data.current?.songId as string | undefined;
     if (clip && type) {
       let enrichedClip = { ...clip };
       if (type === 'bucket-clip' && !clip.sectionName) {
@@ -1896,7 +1961,7 @@ export function Timeline({ songId }: { songId: string }) {
           }
         }
       }
-      setActiveDragData({ clip: enrichedClip, type, trackId: dragTrackId });
+      setActiveDragData({ clip: enrichedClip, type, trackId: dragTrackId, songId: dragSongId });
     }
     setInsertionPoint(null);
   };
@@ -2052,6 +2117,27 @@ export function Timeline({ songId }: { songId: string }) {
     const activeType = active.data.current?.type;
     const clip = active.data.current?.clip as Clip;
     const overId = over.id as string;
+
+    // ── MediaBucket Section-row / Versions-column drop: organize a loose file directly
+    // (no confirmation — only place-on-timeline requires one). trackId/sectionName are
+    // read directly from the drop target's own data, not derived/guessed. ────────────
+    if (isBucketOrganizeDropId(overId)) {
+      setInsertionPoint(null);
+      if (activeType !== 'loose-file') return;
+      const dropData = over.data.current as { trackId?: string; sectionName?: string } | undefined;
+      const looseFileId = dragData?.clip?.id ?? clip?.id;
+      if (!dropData?.trackId || !dropData?.sectionName || !looseFileId) {
+        console.warn('[LooseFileDrop] missing trackId/sectionName on bucket organize drop target', dropData);
+        return;
+      }
+      organizeLooseFileMutation.mutate({
+        looseFileId,
+        trackId: dropData.trackId,
+        sectionName: dropData.sectionName,
+      });
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // ── Gap drop: insert clip at exact gapIndex position within its section ──────
     if (overId.startsWith('gap||')) {
@@ -2264,6 +2350,44 @@ export function Timeline({ songId }: { songId: string }) {
       });
 
       setInsertionPoint(null);
+    } else if (activeType === 'loose-file') {
+      // Loose files carry no sectionName of their own (they aren't instrument-locked
+      // yet — see isInvalidDrop below). The drop point's Y resolves targetTrack (already
+      // guaranteed above); its X is tried against the current section layout as a
+      // pre-fill suggestion only — if it doesn't land in any section (empty timeline,
+      // or dropped past/before the rendered sections), the modal still opens with
+      // Section left for the user to pick, rather than dead-ending silently.
+      const looseFileId = dragData?.clip?.id ?? clip?.id;
+      setInsertionPoint(null);
+      if (!looseFileId) return;
+
+      // Genuinely unrecoverable case (distinct from the two above): the song has no
+      // sections at all to choose from anywhere. Narrow toast, no modal — there is
+      // nothing for the picker to offer.
+      if (songSectionNames.length === 0) {
+        toast({
+          title: 'No sections yet',
+          description: 'This song has no sections yet — add one first, then place the file on the timeline.',
+          variant: 'destructive',
+        });
+        return;
+      }
+
+      const el = timelineRef.current;
+      const activatorEvent = event.activatorEvent as MouseEvent;
+      const scrollLeft = el?.scrollLeft ?? 0;
+      const containerLeft = el?.getBoundingClientRect().left ?? 0;
+      const releaseClientX = activatorEvent.clientX + event.delta.x;
+      const dropTimeSec = (releaseClientX - containerLeft + scrollLeft - 256) / zoom;
+      const targetSection = sectionLayout.find(
+        (s) => dropTimeSec >= s.start && dropTimeSec < s.start + s.duration
+      );
+
+      setLoosePlacementModal({
+        looseFileId,
+        trackId: targetTrack.id,
+        sectionName: targetSection?.name ?? '',
+      });
     }
   };
 
@@ -2908,8 +3032,14 @@ export function Timeline({ songId }: { songId: string }) {
                     }
                   }
                   if (type === 'clip' && sourceTrack && sourceTrack.id !== track.id) isInvalidDrop = true;
+                  if (type === 'loose-file') {
+                    // Loose files aren't instrument-locked yet — every track is a
+                    // valid target. No instrument-identity check applies.
+                  }
 
                   // Per-section visual grayout — clip must land in its own section column.
+                  // Loose files have no sectionName, so this never fires for them —
+                  // every section stays fully visible/valid during a loose-file drag.
                   if (clip.sectionName) {
                     sectionLayout.forEach(({ name: sectionName }) => {
                       if (clip.sectionName !== sectionName) invalidSectionsForTrack.add(sectionName);
@@ -3078,6 +3208,86 @@ export function Timeline({ songId }: { songId: string }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Loose-file → timeline placement picker — cascading Track → Section, same
+          interaction shape as Dashboard's "Add to Song" modal (own component, own
+          data sourcing: this targets place-on-timeline, not the ideas/clips copy flow). */}
+      <Dialog
+        open={loosePlacementModal !== null}
+        onOpenChange={(open) => { if (!open) setLoosePlacementModal(null); }}
+      >
+        <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white">
+              Place on Timeline
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Track</Label>
+              <Select
+                value={loosePlacementModal?.trackId ?? ''}
+                onValueChange={(v) => setLoosePlacementModal((prev) => prev ? { ...prev, trackId: v } : prev)}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder="Select a track…" />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {bucketTracksForPlacement.map((t) => (
+                    <SelectItem key={t.id} value={t.id} className="text-xs focus:bg-white/8 focus:text-white">
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section</Label>
+              <Select
+                value={loosePlacementModal?.sectionName ?? ''}
+                onValueChange={(v) => setLoosePlacementModal((prev) => prev ? { ...prev, sectionName: v } : prev)}
+                disabled={!loosePlacementModal?.trackId}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue placeholder={loosePlacementModal?.trackId ? 'Select a section…' : 'Select a track first'} />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {songSectionNames.map((name) => (
+                    <SelectItem key={name} value={name} className="text-xs focus:bg-white/8 focus:text-white">
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={() => setLoosePlacementModal(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!loosePlacementModal?.trackId || !loosePlacementModal?.sectionName) return;
+                placeLooseFileOnTimelineMutation.mutate({
+                  looseFileId: loosePlacementModal.looseFileId,
+                  trackId: loosePlacementModal.trackId,
+                  sectionName: loosePlacementModal.sectionName,
+                });
+                setLoosePlacementModal(null);
+              }}
+              disabled={!loosePlacementModal?.trackId || !loosePlacementModal?.sectionName || placeLooseFileOnTimelineMutation.isPending}
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+            >
+              {placeLooseFileOnTimelineMutation.isPending ? 'Placing…' : 'Place Clip'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </DndContext>
   );
 }

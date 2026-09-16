@@ -170,7 +170,7 @@ export function TimelineTrack({
   const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
 
   return (
-    <div className="relative flex w-full h-16 bg-card/20 group">
+    <div className={cn('relative flex w-full h-16 bg-card/20 group', isInvalidTarget && 'cursor-not-allowed')}>
       {/* Gold border on the valid drop target — explicit inline positioning for scrollable container reliability */}
       {isValidTarget && (
         <div

@@ -1,5 +1,22 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { type ApiIdea, type ApiTrack, bucketKeys } from '@/lib/bucket-api';
+import {
+  type ApiIdea, type ApiTrack, type ApiClip, type ApiTimelineClip,
+  bucketKeys, looseFileKeys,
+} from '@/lib/bucket-api';
+
+// Shared by organize/place-on-timeline: invalidate the same set the loose-file
+// upload flow also invalidates, so all three actions keep every surface in sync.
+function invalidateAfterLooseFilePlacement(
+  queryClient: ReturnType<typeof useQueryClient>,
+  songId: string | undefined
+) {
+  queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+  queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
+  queryClient.invalidateQueries({ queryKey: ['activity'] });
+  queryClient.invalidateQueries({ queryKey: ['songs'] });
+  queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+  queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+}
 
 export function useAddInstrument(
   songId: string | undefined,
@@ -201,5 +218,60 @@ export function useRestoreSection(
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
+  });
+}
+
+// ─── Loose files (song-scoped, unplaced uploads) ─────────────────────────────
+
+export function useOrganizeLooseFile(
+  songId: string | undefined,
+  opts?: { onSuccess?: (clip: ApiClip) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { looseFileId: string; trackId: string; sectionName: string }) => {
+      const res = await fetch(`/api/loose-files/${vars.looseFileId}/organize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId: vars.trackId, sectionName: vars.sectionName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to organize file' }));
+        throw new Error(err.message ?? 'Failed to organize file');
+      }
+      return res.json() as Promise<ApiClip>;
+    },
+    onSuccess: (clip) => {
+      invalidateAfterLooseFilePlacement(queryClient, songId);
+      opts?.onSuccess?.(clip);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+export function usePlaceLooseFileOnTimeline(
+  songId: string | undefined,
+  opts?: { onSuccess?: (result: { clip: ApiClip; timelineClip: ApiTimelineClip }) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { looseFileId: string; trackId: string; sectionName: string }) => {
+      const res = await fetch(`/api/loose-files/${vars.looseFileId}/place-on-timeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId: vars.trackId, sectionName: vars.sectionName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to place file on the timeline' }));
+        throw new Error(err.message ?? 'Failed to place file on the timeline');
+      }
+      return res.json() as Promise<{ clip: ApiClip; timelineClip: ApiTimelineClip }>;
+    },
+    onSuccess: (result) => {
+      invalidateAfterLooseFilePlacement(queryClient, songId);
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      opts?.onSuccess?.(result);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
   });
 }
