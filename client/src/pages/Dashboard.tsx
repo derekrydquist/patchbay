@@ -500,6 +500,12 @@ export default function Dashboard() {
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrack | null>(null);
   const [selectedSection, setSelectedSection] = useState<ApiIdea | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  // Native OS file drop (Finder drag) onto the Tracks column (Songs quick-browser)
+  // and the Ideas shelf's Column 1 (Ideas list) — separate state from isDragOver
+  // above since both a Files column and one of these can be visible at once within
+  // the same view, and they must highlight independently.
+  const [isTracksColumnDragOver, setIsTracksColumnDragOver] = useState(false);
+  const [isIdeasColumnDragOver, setIsIdeasColumnDragOver] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [uploadMode, setUploadMode] = useState<'placed' | 'loose' | 'band-loose'>('placed');
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
@@ -531,6 +537,56 @@ export default function Dashboard() {
   const appliedAlbumSearchRef = useRef<string | null>(null);
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
+
+  // Native OS file drop (Finder drag) onto the Songs quick-browser's Tracks column
+  // (Column 2) — no destination section, so this routes through 'loose' mode
+  // (song-scoped loose file), same as that column's "Add Files" dropdown item.
+  const handleTracksColumnFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsTracksColumnDragOver(false);
+    if (!e.dataTransfer.files?.length) return;
+    if (!selectedFile) {
+      toast({
+        title: 'Select a song first',
+        description: 'Choose a song in the browser before dropping files.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
+    if (!audioFiles.length) {
+      toast({
+        title: 'Unsupported file type',
+        description: 'Only audio files can be uploaded here.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setUploadMode('loose');
+    setUploadInitialFiles(audioFiles);
+    setIsUploadOpen(true);
+  };
+
+  // Native OS file drop onto the Ideas shelf's Column 1 (Ideas list) — no Idea
+  // target, so this routes through 'band-loose' mode (band-wide unassigned loose
+  // file), same as that column's "Upload Files" dropdown item.
+  const handleIdeasColumnFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsIdeasColumnDragOver(false);
+    if (!e.dataTransfer.files?.length) return;
+    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
+    if (!audioFiles.length) {
+      toast({
+        title: 'Unsupported file type',
+        description: 'Only audio files can be uploaded here.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setUploadMode('band-loose');
+    setUploadInitialFiles(audioFiles);
+    setIsUploadOpen(true);
+  };
 
   const [selectedAlbum, setSelectedAlbum] = useState<AlbumWithCount | null>(null);
   const [isAddAlbumOpen, setIsAddAlbumOpen] = useState(false);
@@ -1916,7 +1972,15 @@ export default function Dashboard() {
               </div>
 
               {/* Column 2 — Instruments / Folders */}
-              <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/10">
+              <div
+                className={cn(
+                  'w-44 shrink-0 border-r border-white/5 flex flex-col transition-colors',
+                  isTracksColumnDragOver ? 'bg-primary/5' : 'bg-black/10'
+                )}
+                onDragOver={(e) => { e.preventDefault(); if (selectedFile) setIsTracksColumnDragOver(true); }}
+                onDragLeave={(e) => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsTracksColumnDragOver(false); }}
+                onDrop={handleTracksColumnFileDrop}
+              >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/instrheader">
                   <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Tracks'}</span>
                   {selectedFile && selectedFile.type !== 'idea' && (
@@ -1952,6 +2016,11 @@ export default function Dashboard() {
                         <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                           No {selectedFile.type === 'idea' ? 'folders' : 'tracks'}
                         </p>
+                      )}
+                      {isTracksColumnDragOver && (
+                        <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
+                          <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
+                        </div>
                       )}
                       {fileBucket.map(track => {
                         const hasFiles = track.ideas.some(i => i.clips.length > 0);
@@ -2039,7 +2108,15 @@ export default function Dashboard() {
                   setIsDragOver(false);
                   if (selectedSection && e.dataTransfer.files.length > 0) {
                     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) { setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                    if (audioFiles.length > 0) {
+                      setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
+                    } else {
+                      toast({
+                        title: 'Unsupported file type',
+                        description: 'Only audio files can be uploaded here.',
+                        variant: 'destructive',
+                      });
+                    }
                   }
                 }}
               >
@@ -2140,7 +2217,12 @@ export default function Dashboard() {
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
               {/* Column 1 — Ideas list */}
-              <div className="w-52 shrink-0 border-r border-white/5 flex flex-col">
+              <div
+                className={cn('w-52 shrink-0 border-r border-white/5 flex flex-col transition-colors', isIdeasColumnDragOver && 'bg-primary/5')}
+                onDragOver={(e) => { e.preventDefault(); setIsIdeasColumnDragOver(true); }}
+                onDragLeave={(e) => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsIdeasColumnDragOver(false); }}
+                onDrop={handleIdeasColumnFileDrop}
+              >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/ideasheader">
                   <span>Ideas</span>
                   <DropdownMenu>
@@ -2168,6 +2250,11 @@ export default function Dashboard() {
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 && unassignedLooseFiles.length === 0 && (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No ideas yet — create one</p>
+                  )}
+                  {isIdeasColumnDragOver && (
+                    <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
+                      <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
+                    </div>
                   )}
                   {filteredFiles.map(idea => (
                     <IdeaListRow
@@ -2205,7 +2292,15 @@ export default function Dashboard() {
                   setIsDragOver(false);
                   if (selectedFile && e.dataTransfer.files.length > 0) {
                     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) { setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true); }
+                    if (audioFiles.length > 0) {
+                      setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
+                    } else {
+                      toast({
+                        title: 'Unsupported file type',
+                        description: 'Only audio files can be uploaded here.',
+                        variant: 'destructive',
+                      });
+                    }
                   }
                 }}
               >

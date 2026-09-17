@@ -32,6 +32,7 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/hooks/use-toast';
 
 // ─── Convert ApiClip → daw-data Clip (for BucketClip component) ──────────────
 
@@ -140,6 +141,7 @@ interface MediaBucketProps {
 
 export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const queryClient = useQueryClient();
+  const { toast } = useToast();
 
   const viewIdeaMutation = useMutation({
     mutationFn: (ideaId: string) =>
@@ -166,6 +168,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
   const [isVersionsDragOver, setIsVersionsDragOver] = useState(false);
+  const [isTracksDragOver, setIsTracksDragOver] = useState(false);
   const sessionRestored = useRef(false);
   const tracksRef = useRef<ApiTrack[]>([]);
   const selectedTrackRef = useRef<HTMLButtonElement | null>(null);
@@ -401,13 +404,45 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
     if (!e.dataTransfer.files?.length) return;
     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    if (!audioFiles.length) return;
+    if (!audioFiles.length) {
+      toast({
+        title: 'Unsupported file type',
+        description: 'Only audio files can be uploaded here.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setUploadMode('placed');
     setUploadInitialFiles(audioFiles);
     setUploadInitialIdeaId(idea.id);
     setIsUploadOpen(true);
     setSelectedTrack(track);
     setSelectedIdea(idea);
+  };
+
+  // Native OS file drop (Finder drag) onto the Tracks column — no destination idea,
+  // so this always routes through 'loose' mode, same as the header Upload button /
+  // "Add Files" dropdown item. Coexists with dnd-kit's own drag interactions
+  // elsewhere in this file the same way SectionFolderRow/Versions column already do
+  // (native browser drag events and dnd-kit's pointer-sensor-driven drags are
+  // independent mechanisms that never intercept each other — see CLAUDE.md).
+  const handleTracksFileDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsTracksDragOver(false);
+    if (!e.dataTransfer.files?.length) return;
+    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
+    if (!audioFiles.length) {
+      toast({
+        title: 'Unsupported file type',
+        description: 'Only audio files can be uploaded here.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setUploadMode('loose');
+    setUploadInitialFiles(audioFiles);
+    setUploadInitialIdeaId('');
+    setIsUploadOpen(true);
   };
 
   // ── Derived data ─────────────────────────────────────────────────────────────
@@ -497,7 +532,12 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
       <div className="flex-1 flex overflow-hidden divide-x divide-white/5">
 
         {/* ── Instruments column ── */}
-        <div className="w-1/4 flex flex-col">
+        <div
+          className={cn('w-1/4 flex flex-col transition-colors', isTracksDragOver && 'bg-primary/5')}
+          onDragOver={(e) => { e.preventDefault(); setIsTracksDragOver(true); }}
+          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsTracksDragOver(false); }}
+          onDrop={handleTracksFileDrop}
+        >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Tracks</span>
             <DropdownMenu>
@@ -532,6 +572,11 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
               {isError && (
                 <div className="flex items-center justify-center mt-10 gap-2 text-[10px] text-red-400">
                   <AlertCircle size={12} /> Failed to load
+                </div>
+              )}
+              {isTracksDragOver && (
+                <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
+                  <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
                 </div>
               )}
               {tracks
