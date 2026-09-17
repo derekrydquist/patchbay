@@ -659,8 +659,8 @@ export async function registerRoutes(
       )).get();
     if (existingAny) {
       const hint = existingAny.active
-        ? `An instrument named "${parsed.data.name}" already exists in this song.`
-        : `An instrument named "${parsed.data.name}" already exists. It's currently hidden — you can restore it from the Add Instrument dialog's restore option.`;
+        ? `A track named "${parsed.data.name}" already exists in this song.`
+        : `A track named "${parsed.data.name}" already exists. It's currently hidden — you can restore it from the Add Track dialog's restore option.`;
       return res.status(409).json({ message: hint });
     }
     const track = await storage.createTrack(parsed.data);
@@ -671,7 +671,7 @@ export async function registerRoutes(
     const trackAddedSong = await storage.getSongById(songId);
     const trackAddedDesc = trackAddedSong?.type === 'idea'
       ? `${trackAddedActor} added a part — ${track.name}`
-      : `${trackAddedActor} added an instrument — ${track.name}`;
+      : `${trackAddedActor} added a track — ${track.name}`;
 
     storage.logActivity({
       id: randomUUID(),
@@ -700,7 +700,7 @@ export async function registerRoutes(
         id: randomUUID(),
         songId: trackToDelete.songId,
         type: 'track-deleted',
-        description: `${trackDeletedActor} deleted an instrument — ${trackToDelete.name}`,
+        description: `${trackDeletedActor} deleted a track — ${trackToDelete.name}`,
         timestamp: Date.now(),
         instrument: trackToDelete.name,
         author: trackDeletedActor,
@@ -723,7 +723,7 @@ export async function registerRoutes(
       id: randomUUID(),
       songId: trackToRestore.songId,
       type: 'track-restored',
-      description: `${restoreTrackActor} restored instrument — ${trackToRestore.name}`,
+      description: `${restoreTrackActor} restored track — ${trackToRestore.name}`,
       timestamp: Date.now(),
       instrument: trackToRestore.name,
       author: restoreTrackActor,
@@ -1362,7 +1362,7 @@ export async function registerRoutes(
 
     if (existing) {
       if (existing.active) {
-        return res.status(409).json({ message: "A Full Takes section already exists for this instrument." });
+        return res.status(409).json({ message: "A Full Takes section already exists for this track." });
       }
       // Hidden — restore it rather than creating a duplicate.
       db.update(ideas).set({ active: true }).where(eq(ideas.id, existing.id)).run();
@@ -2217,7 +2217,7 @@ export async function registerRoutes(
         .get();
 
       if (!completeTrack) {
-        return res.status(400).json({ message: "Cannot mark as complete — instrument track not found." });
+        return res.status(400).json({ message: "Cannot mark as complete — track not found." });
       }
 
       // Guard: at least one timeline clip must exist for this section
@@ -2230,7 +2230,7 @@ export async function registerRoutes(
 
       if (allSectionClips.length === 0) {
         return res.status(400).json({
-          message: "Cannot mark as complete — no clip in the timeline for this instrument and section.",
+          message: "Cannot mark as complete — no clip in the timeline for this track and section.",
         });
       }
 

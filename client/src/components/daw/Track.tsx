@@ -319,7 +319,7 @@ export function TimelineTrack({
           className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
           onClick={() => setShowDeleteConfirm(true)}
         >
-          Remove Instrument
+          Remove Track
         </ContextMenuItem>
       </ContextMenuContent>
       </ContextMenu>
@@ -382,9 +382,9 @@ export function TimelineTrack({
           onKeyDown={trapDialogTab}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Instrument</AlertDialogTitle>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Track</AlertDialogTitle>
             <AlertDialogDescription>
-              Removing this instrument will delete it from the project and permanently delete any files uploaded to it. Would you like to proceed?
+              Removing this track will delete it from the project and permanently delete any files uploaded to it. Would you like to proceed?
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

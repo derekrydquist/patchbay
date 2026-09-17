@@ -437,7 +437,7 @@ export function AppHeader({ preLogoSlot, activeNav, postLogoSlot, actionSlot, pr
 
             {/* Default Instruments */}
             <div className="space-y-2">
-              <Label className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold border-b border-white/5 pb-2 block">Default Instruments</Label>
+              <Label className="text-[10px] uppercase tracking-[0.2em] text-primary/70 font-bold border-b border-white/5 pb-2 block">Default Tracks</Label>
               <div className="min-h-[44px] rounded-md border border-white/10 bg-black/40 px-2 py-1.5 flex flex-wrap gap-1.5 items-center">
                 {draftInstruments.map((item, i) => (
                   <span key={i} className="inline-flex items-center gap-1 bg-white/8 border border-white/10 rounded px-2 py-0.5 text-xs font-medium text-white/80">

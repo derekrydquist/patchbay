@@ -830,7 +830,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
     },
     onError: (msg) => {
       toast({
-        title: 'Failed to remove instrument',
+        title: 'Failed to remove track',
         description: msg,
         variant: 'destructive',
       });
@@ -909,12 +909,12 @@ export function ProductionTracker({ songId }: { songId: string }) {
     const trimmed = newInstrumentName.trim();
     if (!trimmed) return;
     if (bucket.some(t => t.name.toLowerCase() === trimmed.toLowerCase())) {
-      setAddInstrumentError('An instrument with this name already exists');
+      setAddInstrumentError('A track with this name already exists');
       return;
     }
     const hiddenMatch = hiddenTracks.find(t => t.name.toLowerCase() === trimmed.toLowerCase());
     if (hiddenMatch) {
-      setAddInstrumentError(`An instrument named "${trimmed}" already exists. It's currently hidden — restore it using the option below.`);
+      setAddInstrumentError(`A track named "${trimmed}" already exists. It's currently hidden — restore it using the option below.`);
       return;
     }
     setAddInstrumentError(null);
@@ -1012,7 +1012,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
             </div>
             <h2 className="text-sm font-heading font-bold uppercase tracking-[0.2em] text-white">Production Whiteboard</h2>
           </div>
-          <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each instrument against the song structure</p>
+          <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each track against the song structure</p>
         </div>
       </div>
 
@@ -1040,7 +1040,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
               role="button"
               tabIndex={0}
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setIsAddChoiceOpen(true); }}
-              aria-label="Add section or instrument"
+              aria-label="Add section or track"
             >
               <div className="flex-1 flex items-center gap-2 bg-primary/10 border border-primary/35 rounded-md px-3 py-1.5 group-hover:bg-primary/[0.15] group-hover:border-primary/60 transition-colors">
                 <div className="w-[22px] h-[22px] rounded-md bg-primary/15 flex items-center justify-center shrink-0 group-hover:bg-primary/25 transition-colors">
@@ -1058,7 +1058,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
                       className="opacity-0 group-hover/instrument:opacity-100 transition-opacity shrink-0 cursor-pointer"
                       onClick={(e) => { e.stopPropagation(); setRemoveTrackId(track.id); }}
                       onContextMenu={(e) => e.stopPropagation()}
-                      aria-label={`Remove instrument ${track.name}`}
+                      aria-label={`Remove track ${track.name}`}
                     >
                       <div className="w-[22px] h-[22px] rounded-md bg-red-500/15 hover:bg-red-500/25 flex items-center justify-center transition-colors">
                         <Minus size={14} className="text-red-500" />
@@ -1071,7 +1071,7 @@ export function ProductionTracker({ songId }: { songId: string }) {
                     className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs cursor-pointer"
                     onClick={() => setRemoveTrackId(track.id)}
                   >
-                    Remove Instrument
+                    Remove Track
                   </ContextMenuItem>
                 </ContextMenuContent>
               </ContextMenu>
@@ -1290,8 +1290,8 @@ export function ProductionTracker({ songId }: { songId: string }) {
                 <Music2 size={20} className="text-primary/70" />
               </div>
               <div>
-                <p className="text-sm font-bold text-white text-center mb-1">Instrument</p>
-                <p className="text-[11px] text-muted-foreground text-center leading-snug">Add a new instrument track to record and arrange</p>
+                <p className="text-sm font-bold text-white text-center mb-1">Track</p>
+                <p className="text-[11px] text-muted-foreground text-center leading-snug">Add a new track to record and arrange</p>
               </div>
             </button>
           </div>
@@ -1308,9 +1308,9 @@ export function ProductionTracker({ songId }: { songId: string }) {
           onKeyDown={trapDialogTab}
         >
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove Instrument?</AlertDialogTitle>
+            <AlertDialogTitle>Remove Track?</AlertDialogTitle>
             <AlertDialogDescription>
-              {bucket.find(t => t.id === removeTrackId)?.name} will be hidden from the production board. You can restore it via Add Instrument.
+              {bucket.find(t => t.id === removeTrackId)?.name} will be hidden from the production board. You can restore it via Add Track.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

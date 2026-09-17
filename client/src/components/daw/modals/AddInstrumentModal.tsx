@@ -30,8 +30,8 @@ export function AddInstrumentModal({
   open, onOpenChange,
   value, onChange, onSubmit,
   isPending, error, onClearError,
-  title = 'Add Instrument',
-  helperText = 'This instrument will be added across all sections.',
+  title = 'Add Track',
+  helperText = 'This track will be added across all sections.',
   placeholder = 'e.g. Keys',
   hiddenTracks, onRestoreTrack, isRestoring,
 }: AddInstrumentModalProps) {
@@ -45,7 +45,7 @@ export function AddInstrumentModal({
         </DialogHeader>
         <div className="space-y-4 pt-2">
           <div className="space-y-2">
-            <label className="text-[10px] uppercase font-bold text-muted-foreground">Instrument Name</label>
+            <label className="text-[10px] uppercase font-bold text-muted-foreground">Track Name</label>
             <Input
               placeholder={placeholder}
               value={value}
@@ -65,11 +65,11 @@ export function AddInstrumentModal({
           )}
           {!!hiddenTracks?.length && (
             <div className="space-y-2 pt-2 border-t border-white/10">
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed instrument</label>
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Restore a removed track</label>
               <div className="flex gap-2">
                 <Select value={selectedHiddenTrackId} onValueChange={setSelectedHiddenTrackId}>
                   <SelectTrigger className="bg-black/40 border-white/5 text-xs h-9 flex-1">
-                    <SelectValue placeholder="Select instrument…" />
+                    <SelectValue placeholder="Select track…" />
                   </SelectTrigger>
                   <SelectContent className="bg-popover border-border max-h-48 overflow-y-auto">
                     {hiddenTracks.map(track => (

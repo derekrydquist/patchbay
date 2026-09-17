@@ -35,8 +35,8 @@ export function useAddInstrument(
         body: JSON.stringify({ name }),
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed to create instrument' }));
-        throw new Error(err.message ?? 'Failed to create instrument');
+        const err = await res.json().catch(() => ({ message: 'Failed to create track' }));
+        throw new Error(err.message ?? 'Failed to create track');
       }
       return res.json() as Promise<ApiTrack>;
     },
@@ -144,8 +144,8 @@ export function useRestoreTrack(
     mutationFn: async (trackId: string) => {
       const res = await fetch(`/api/tracks/${trackId}/restore`, { method: 'POST' });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: 'Failed to restore instrument' }));
-        throw new Error(err.message ?? 'Failed to restore instrument');
+        const err = await res.json().catch(() => ({ message: 'Failed to restore track' }));
+        throw new Error(err.message ?? 'Failed to restore track');
       }
     },
     onSuccess: () => {

@@ -51,7 +51,7 @@ export function AddSectionModal({
               autoFocus
             />
             <p className="text-[9px] text-muted-foreground">
-              This section will be added to all instrument tracks simultaneously.
+              This section will be added to all tracks simultaneously.
             </p>
           </div>
           {error && (

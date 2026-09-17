@@ -1918,7 +1918,7 @@ export default function Dashboard() {
               {/* Column 2 — Instruments / Folders */}
               <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/10">
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/instrheader">
-                  <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Instruments'}</span>
+                  <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Tracks'}</span>
                   {selectedFile && selectedFile.type !== 'idea' && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -1931,7 +1931,7 @@ export default function Dashboard() {
                           className="text-xs cursor-pointer"
                           onClick={() => { setNewInstrumentName(''); setIsAddInstrumentOpen(true); }}
                         >
-                          Add Instrument
+                          Add Track
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           className="text-xs cursor-pointer"
@@ -1950,7 +1950,7 @@ export default function Dashboard() {
                     <>
                       {fileBucket.length === 0 && selectedFileLooseFiles.length === 0 && (
                         <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
-                          No {selectedFile.type === 'idea' ? 'folders' : 'instruments'}
+                          No {selectedFile.type === 'idea' ? 'folders' : 'tracks'}
                         </p>
                       )}
                       {fileBucket.map(track => {
@@ -2004,7 +2004,7 @@ export default function Dashboard() {
                 <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
-                      Select {selectedFile?.type === 'idea' ? 'a folder' : 'an instrument'}
+                      Select {selectedFile?.type === 'idea' ? 'a folder' : 'a track'}
                     </p>
                   ) : selectedInstrument.ideas.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">No sections</p>
@@ -2069,7 +2069,7 @@ export default function Dashboard() {
                   {!selectedSection ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       {!selectedInstrument
-                        ? 'Select an instrument to browse sections'
+                        ? 'Select a track to browse sections'
                         : `Select a ${selectedFile?.type === 'idea' ? 'subfolder' : 'section'} to view files`}
                     </p>
                   ) : selectedSection.clips.length === 0 ? (
@@ -2541,14 +2541,14 @@ export default function Dashboard() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Instrument</Label>
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Track</Label>
               <Select
                 value={destInstrumentId}
                 onValueChange={v => { setDestInstrumentId(v); setDestSectionId(''); setAddToSongDuplicateError(null); }}
                 disabled={!destSongId || destBucket.length === 0}
               >
                 <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
-                  <SelectValue placeholder={destSongId ? 'Select an instrument…' : 'Select a song first'} />
+                  <SelectValue placeholder={destSongId ? 'Select a track…' : 'Select a song first'} />
                 </SelectTrigger>
                 <SelectContent className="bg-[#0c0c0e] border-white/10">
                   {destBucket.map(t => (
@@ -2567,7 +2567,7 @@ export default function Dashboard() {
                 disabled={!destInstrumentId}
               >
                 <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
-                  <SelectValue placeholder={destInstrumentId ? 'Select a section…' : 'Select an instrument first'} />
+                  <SelectValue placeholder={destInstrumentId ? 'Select a section…' : 'Select a track first'} />
                 </SelectTrigger>
                 <SelectContent className="bg-[#0c0c0e] border-white/10">
                   {(destBucket.find(t => t.id === destInstrumentId)?.ideas ?? []).map(idea => (
@@ -2629,10 +2629,10 @@ export default function Dashboard() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Place in Instrument</Label>
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Place in Track</Label>
               <Select value={promoteInstrument} onValueChange={setPromoteInstrument}>
                 <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
-                  <SelectValue placeholder="Select an instrument…" />
+                  <SelectValue placeholder="Select a track…" />
                 </SelectTrigger>
                 <SelectContent className="bg-[#0c0c0e] border-white/10">
                   {(settings?.defaultInstruments ?? DEFAULT_INSTRUMENTS).map((instr: string) => (
@@ -2912,7 +2912,7 @@ export default function Dashboard() {
             </div>
 
             <EditableTagList
-              label="Instruments"
+              label="Tracks"
               items={newInstruments}
               onChange={setNewInstruments}
             />
@@ -2956,12 +2956,12 @@ export default function Dashboard() {
         onSubmit={() => {
           const name = newInstrumentName.trim();
           if (fileBucket.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) {
-            setAddInstrumentError('An instrument with this name already exists');
+            setAddInstrumentError('A track with this name already exists');
             return;
           }
           const hiddenMatch = dashboardHiddenTracks.find(t => t.name.trim().toLowerCase() === name.toLowerCase());
           if (hiddenMatch) {
-            setAddInstrumentError(`An instrument named "${name}" already exists. It's currently hidden — restore it using the option below.`);
+            setAddInstrumentError(`A track named "${name}" already exists. It's currently hidden — restore it using the option below.`);
             return;
           }
           setAddInstrumentError(null);

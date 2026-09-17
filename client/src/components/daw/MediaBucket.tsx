@@ -499,7 +499,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         {/* ── Instruments column ── */}
         <div className="w-1/4 flex flex-col">
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
-            <span>Instruments</span>
+            <span>Tracks</span>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="opacity-0 group-hover/header:opacity-100 hover:text-primary transition-all p-0.5">
@@ -582,7 +582,7 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
                           className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
                           onClick={() => deleteTrackMutation.mutate(track.id)}
                         >
-                          Remove Instrument
+                          Remove Track
                         </ContextMenuItem>
                       </ContextMenuContent>
                     </ContextMenu>
@@ -745,12 +745,12 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
         onSubmit={() => {
           const name = newInstrumentName.trim();
           if (tracks.some(t => t.name.trim().toLowerCase() === name.toLowerCase())) {
-            setAddInstrumentError('An instrument with this name already exists');
+            setAddInstrumentError('A track with this name already exists');
             return;
           }
           const hiddenMatch = hiddenTracks.find(t => t.name.trim().toLowerCase() === name.toLowerCase());
           if (hiddenMatch) {
-            setAddInstrumentError(`An instrument named "${name}" already exists. It's currently hidden — restore it using the option below.`);
+            setAddInstrumentError(`A track named "${name}" already exists. It's currently hidden — restore it using the option below.`);
             return;
           }
           setAddInstrumentError(null);
