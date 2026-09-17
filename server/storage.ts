@@ -161,6 +161,7 @@ export interface IStorage {
   // Bucket
   getBucket(songId: string, userId?: string): Promise<BucketTrack[]>;
   upsertFolderView(userId: string, ideaId: string): void;
+  ensureIdeaDefaultFolder(songId: string): Promise<{ trackId: string; sectionName: string } | undefined>;
 
   // Tracks
   createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack>;
@@ -188,6 +189,7 @@ export interface IStorage {
   // Loose Files (song-scoped, unplaced uploads)
   createLooseFile(data: InsertLooseFile): Promise<LooseFile>;
   getLooseFilesBySong(songId: string): Promise<LooseFile[]>;
+  getLooseFilesByBand(bandId: string): Promise<LooseFile[]>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
@@ -657,6 +659,53 @@ export class SQLiteStorage implements IStorage {
       .run();
   }
 
+  // Idea-type songs have no Folder/Instrument concept in the UI — every Idea
+  // gets exactly one instrument_tracks + ideas row, created automatically and
+  // never surfaced, so its clips have somewhere to live. Called at idea
+  // creation and defensively on every bucket fetch so a legacy idea (created
+  // before this existed) is backfilled lazily rather than needing a migration.
+  async ensureIdeaDefaultFolder(songId: string): Promise<{ trackId: string; sectionName: string } | undefined> {
+    const song = db.select().from(songs).where(eq(songs.id, songId)).get();
+    if (!song || song.type !== 'idea') return undefined;
+
+    let track = db.select().from(instrumentTracks)
+      .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+      .orderBy(asc(instrumentTracks.sortOrder))
+      .get();
+    if (!track) {
+      const trackId = randomUUID();
+      db.insert(instrumentTracks).values({
+        id: trackId,
+        songId,
+        name: 'Files',
+        type: 'audio',
+        color: 'hsl(var(--chart-1))',
+        sortOrder: 0,
+        active: true,
+      }).run();
+      track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get()!;
+    }
+
+    let idea = db.select().from(ideas)
+      .where(and(eq(ideas.trackId, track.id), eq(ideas.active, true)))
+      .orderBy(asc(ideas.sortOrder))
+      .get();
+    if (!idea) {
+      const ideaId = randomUUID();
+      db.insert(ideas).values({
+        id: ideaId,
+        trackId: track.id,
+        name: 'Files',
+        sectionName: 'Files',
+        sortOrder: 0,
+        active: true,
+      }).run();
+      idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get()!;
+    }
+
+    return { trackId: track.id, sectionName: idea.sectionName };
+  }
+
   // ── Tracks ─────────────────────────────────────────────────────────────────
 
   async createTrack(data: InsertInstrumentTrack): Promise<InstrumentTrack> {
@@ -916,6 +965,8 @@ export class SQLiteStorage implements IStorage {
   async createLooseFile(data: InsertLooseFile): Promise<LooseFile> {
     const now = new Date().toISOString();
     const looseFile: LooseFile = {
+      songId: null,
+      bandId: null,
       src: null,
       metadata: null,
       uploadedBy: null,
@@ -929,6 +980,14 @@ export class SQLiteStorage implements IStorage {
 
   async getLooseFilesBySong(songId: string): Promise<LooseFile[]> {
     return db.select().from(looseFiles).where(eq(looseFiles.songId, songId)).orderBy(asc(looseFiles.name)).all();
+  }
+
+  // Band-wide, unassigned loose files (songId IS NULL) — Ideas shelf Column 1's
+  // "Upload Files". Never assigned to a song until a user drags one onto an Idea.
+  async getLooseFilesByBand(bandId: string): Promise<LooseFile[]> {
+    return db.select().from(looseFiles)
+      .where(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)))
+      .orderBy(asc(looseFiles.name)).all();
   }
 
   async getLooseFile(id: string): Promise<LooseFile | undefined> {

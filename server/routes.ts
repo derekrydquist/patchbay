@@ -135,6 +135,21 @@ function assertAlbumOwned(req: Request, res: Response, rawId: string | string[])
   return true;
 }
 
+// Returns true if the given loose file belongs to req.bandId, whether it's
+// song-scoped (assert via its songId, same as any other song-owned entity) or
+// band-wide/unassigned (songId null — assert its own bandId directly instead,
+// since there's no song to chain-walk through). Otherwise sends 404.
+function assertLooseFileOwned(req: Request, res: Response, looseFile: { songId: string | null; bandId: string | null }): boolean {
+  if (looseFile.songId !== null) {
+    return assertSongOwned(req, res, looseFile.songId);
+  }
+  if (looseFile.bandId !== req.bandId) {
+    res.status(404).json({ message: "Not found" });
+    return false;
+  }
+  return true;
+}
+
 // Chain-walk helpers: return songId or null.
 function trackSongId(trackId: string): string | null {
   return db.select({ songId: instrumentTracks.songId }).from(instrumentTracks)
@@ -384,7 +399,27 @@ export async function registerRoutes(
       .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
       .all();
     const hasFilesSet = new Set(rows.map(r => r.songId));
-    res.json(result.map(s => ({ ...s, hasFiles: hasFilesSet.has(s.id) })));
+
+    // Idea-type songs have a single default track+idea (see ensureIdeaDefaultFolder)
+    // that the UI never shows as a Folder step — exposed here as defaultTrackId/
+    // defaultSectionName so an Idea row in the Ideas-shelf list can act as a
+    // drag-and-drop organize target without first being opened/selected.
+    const ideaDefaults = new Map<string, { trackId: string; sectionName: string }>();
+    for (const s of result) {
+      if (s.type === 'idea') {
+        const def = await storage.ensureIdeaDefaultFolder(s.id);
+        if (def) ideaDefaults.set(s.id, def);
+      }
+    }
+
+    res.json(result.map(s => ({
+      ...s,
+      hasFiles: hasFilesSet.has(s.id),
+      ...(ideaDefaults.has(s.id) ? {
+        defaultTrackId: ideaDefaults.get(s.id)!.trackId,
+        defaultSectionName: ideaDefaults.get(s.id)!.sectionName,
+      } : {}),
+    })));
   });
 
   app.get("/api/songs/:id", requireBand, async (req, res) => {
@@ -414,6 +449,8 @@ export async function registerRoutes(
     const song = await storage.createSong(parsed.data, req.bandId!);
     if (song.type !== 'idea') {
       await storage.seedSong(song.id, instruments, song.sections);
+    } else {
+      await storage.ensureIdeaDefaultFolder(song.id);
     }
 
     const songCreatedActor = req.session.userId
@@ -1294,6 +1331,7 @@ export async function registerRoutes(
     const id = req.params.id as string;
     if (!assertSongOwned(req, res, id)) return;
     await storage.bootstrapDefaultSong();
+    await storage.ensureIdeaDefaultFolder(id);
     const bucket = await storage.getBucket(id, req.session.userId);
     res.json(bucket);
   });
@@ -1707,6 +1745,71 @@ export async function registerRoutes(
     res.status(201).json(looseFile);
   });
 
+  // ─── Loose Files (band-wide, unassigned) ──────────────────────────────────────
+  // Ideas shelf Column 1's "Upload Files" — never scoped to whichever Idea happens
+  // to be selected. songId is null; bandId is resolved server-side from the
+  // session, same as every other band-scoped write in this app.
+
+  /** GET /api/loose-files/unassigned — list this band's unassigned loose files */
+  app.get("/api/loose-files/unassigned", requireBand, async (req, res) => {
+    const files = await storage.getLooseFilesByBand(req.bandId!);
+    res.json(files);
+  });
+
+  /**
+   * POST /api/loose-files/unassigned — record an uploaded file with no song/Idea
+   * association at all. Same body shape and server-side uploadedBy resolution as
+   * POST /api/songs/:songId/loose-files above — the only difference is songId is
+   * never read from a URL param (there isn't one) and bandId is stamped instead.
+   */
+  app.post("/api/loose-files/unassigned", requireBand, async (req, res) => {
+    const {
+      url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
+      name, type, color,
+    } = req.body as {
+      url?: string; duration?: number; format?: string; originalFileName?: string;
+      sampleRate?: string; bitDepth?: string; channels?: string; uploadedDate?: string;
+      name?: string; type?: string; color?: string;
+    };
+
+    const looseFileActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
+      : 'Unknown';
+
+    const parsed = insertLooseFileSchema.safeParse({
+      id: randomUUID(),
+      songId: null,
+      bandId: req.bandId,
+      name,
+      type,
+      color,
+      duration,
+      src: url ?? null,
+      metadata: {
+        format: format ?? '',
+        originalFileName: originalFileName ?? '',
+        uploadedBy: looseFileActor,
+        uploadedDate: uploadedDate ?? new Date().toISOString().split('T')[0],
+        sampleRate: sampleRate ?? '',
+        bitDepth: bitDepth ?? '',
+        channels: channels === 'Mono' || channels === '5.1' ? channels : 'Stereo',
+        peakLevel: '',
+        timeSignature: '',
+        key: '',
+        bpm: 0,
+        description: '',
+        tags: [],
+      },
+      uploadedBy: looseFileActor,
+    });
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0].message });
+    }
+
+    const looseFile = await storage.createLooseFile(parsed.data);
+    res.status(201).json(looseFile);
+  });
+
   /**
    * POST /api/loose-files/:id/organize — materialize a loose file into a real
    * clips row under the given track/section idea. Two-ID route: the loose file's
@@ -1716,7 +1819,7 @@ export async function registerRoutes(
     const looseFileId = req.params.id as string;
     const looseFile = await storage.getLooseFile(looseFileId);
     if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
-    if (!assertSongOwned(req, res, looseFile.songId)) return;
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
 
     const { trackId, sectionName } = req.body as { trackId?: string; sectionName?: string };
     if (!trackId || !sectionName) {
@@ -1767,7 +1870,7 @@ export async function registerRoutes(
     const looseFileId = req.params.id as string;
     const looseFile = await storage.getLooseFile(looseFileId);
     if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
-    if (!assertSongOwned(req, res, looseFile.songId)) return;
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
 
     const { trackId, sectionName } = req.body as { trackId?: string; sectionName?: string };
     if (!trackId || !sectionName) {
@@ -1814,7 +1917,7 @@ export async function registerRoutes(
     const looseFileId = req.params.id as string;
     const looseFile = await storage.getLooseFile(looseFileId);
     if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
-    if (!assertSongOwned(req, res, looseFile.songId)) return;
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
     await storage.deleteLooseFile(looseFileId);
     res.status(204).send();
   });

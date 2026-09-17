@@ -5,6 +5,8 @@ import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { DndContext } from '@dnd-kit/core';
+import { useLooseFileOrganizeDnd } from '@/hooks/use-loose-file-organize-dnd';
+import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
 import {
   ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
   CheckCircle2, MoreHorizontal, ChevronDown, ChevronUp, MessageCircle,
@@ -2124,6 +2126,16 @@ export default function SongHome() {
 
   const lastSession = useMemo(() => readLastSession(songId), [songId]);
 
+  // Song Files tab loose-file organize drag interaction — same shared hook Workspace/
+  // MediaBucket, the Dashboard Ideas shelf, and the Songs quick-browser all use. This
+  // route needs its own DndContext (a separate mount from Workspace's), but MediaBucket
+  // itself already implements the loose-files list, the loose-mode Upload entry point,
+  // and both the Section-row and Versions-column droppables — nothing else to build here
+  // beyond wiring sensors/collisionDetection/handlers into the DndContext below.
+  const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId, {
+    onError: (msg) => console.error('[organizeLooseFile] error:', msg),
+  });
+
   const { data: song } = useQuery<Song>({
     queryKey: ['song', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
@@ -2382,8 +2394,14 @@ export default function SongHome() {
         {activeTab === 'files' && (
           <div className="p-6">
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden">
-              <DndContext>
+              <DndContext
+                sensors={looseFileOrganizeDnd.sensors}
+                collisionDetection={looseFileOrganizeDnd.collisionDetection}
+                onDragStart={looseFileOrganizeDnd.handleDragStart}
+                onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+              >
                 <MediaBucket songId={songId} />
+                <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
               </DndContext>
             </div>
           </div>

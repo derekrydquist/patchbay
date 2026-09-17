@@ -57,6 +57,32 @@ async function createLooseFile(songId: string, payload: {
   return res.json();
 }
 
+// Band-wide, unassigned — no songId at all (Ideas shelf Column 1's "Upload Files").
+async function createBandLooseFile(payload: {
+  name: string;
+  type: string;
+  color: string;
+  duration: number;
+  src: string;
+  format: string;
+  originalFileName: string;
+  sampleRate: string;
+  bitDepth: string;
+  channels: string;
+  uploadedDate: string;
+}): Promise<ApiLooseFile> {
+  const res = await fetch('/api/loose-files/unassigned', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, url: payload.src }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ message: 'Failed to save file' }));
+    throw new Error(err.message ?? 'Failed to save file');
+  }
+  return res.json();
+}
+
 async function createClip(ideaId: string, payload: {
   id: string;
   name: string;
@@ -92,13 +118,19 @@ type PendingFile = {
 export interface UploadModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  songId: string;
+  // Required for 'placed'/'loose' modes; omitted entirely for 'band-loose', which
+  // has no song/Idea association at all — see the mode doc below.
+  songId?: string;
   defaultIdeaId?: string;
   defaultInstrumentName?: string;
   defaultSectionName?: string;
   initialFiles?: File[];
   songType?: 'song' | 'idea';
-  mode?: 'placed' | 'loose'; // 'loose' skips destination resolution — files land in loose_files (default: 'placed')
+  // 'loose' skips destination resolution — files land in loose_files, scoped to
+  // songId (default: 'placed'). 'band-loose' also skips destination resolution
+  // but has no songId at all — files land in loose_files with songId: null,
+  // scoped to the session's band instead. Never pass songId with 'band-loose'.
+  mode?: 'placed' | 'loose' | 'band-loose';
   onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
 }
 
@@ -116,8 +148,8 @@ export function UploadModal({
 
   const { data: tracks = [] } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(songId),
-    queryFn: () => fetchBucket(songId),
-    enabled: open,
+    queryFn: () => fetchBucket(songId!),
+    enabled: open && mode !== 'band-loose' && !!songId,
   });
 
   // Process newly selected/dropped files. Audio files go straight to the pending
@@ -197,9 +229,27 @@ export function UploadModal({
   const hasExtracting = uploadFiles.some(f => f.status === 'extracting');
 
   const uploadMutation = useMutation({
-    mutationFn: async (): Promise<{ destTrackId: string; destIdeaId: string } | { loose: true } | undefined> => {
+    mutationFn: async (): Promise<{ destTrackId: string; destIdeaId: string } | { loose: true } | { bandLoose: true } | undefined> => {
       if (uploadFiles.length === 0) return;
       setUploadError(null);
+
+      // ── Band-loose mode: no destination AND no songId — every file lands in
+      // loose_files with songId: null, scoped only to the session's band. Never
+      // reads songId/uploadDestination/tracks; selection state is irrelevant. ──
+      if (mode === 'band-loose') {
+        for (const { file, status } of uploadFiles) {
+          if (status !== 'ready') continue;
+          const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
+            await uploadFile(file, 'loose', 'unplaced', '');
+          await createBandLooseFile({
+            name: originalFileName || file.name,
+            type: 'audio',
+            color: 'hsl(var(--primary))',
+            duration, src: url, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
+          });
+        }
+        return { bandLoose: true };
+      }
 
       // ── Loose mode: no destination — every file lands in loose_files instead
       // of a real clips row. Reuses uploadFile() for the multipart POST /api/upload
@@ -209,7 +259,7 @@ export function UploadModal({
           if (status !== 'ready') continue;
           const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
             await uploadFile(file, 'loose', 'unplaced', '');
-          await createLooseFile(songId, {
+          await createLooseFile(songId!, {
             name: originalFileName || file.name,
             type: 'audio',
             color: 'hsl(var(--primary))',
@@ -257,6 +307,13 @@ export function UploadModal({
     },
     onSuccess: (result) => {
       if (!result) return;
+      if ('bandLoose' in result) {
+        queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
+        onOpenChange(false);
+        setUploadFiles([]);
+        setUploadDestination('');
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
@@ -280,11 +337,11 @@ export function UploadModal({
         <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
           <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
           <p className="text-[10px] text-muted-foreground mt-1 uppercase">
-            {mode === 'loose' ? 'Files are added without a destination — organize them later' : 'Drop files to add them to the project'}
+            {mode === 'loose' || mode === 'band-loose' ? 'Files are added without a destination — organize them later' : 'Drop files to add them to the project'}
           </p>
         </div>
         <div className="p-6 space-y-6">
-          {mode !== 'loose' && (songType === 'idea' ? (
+          {mode !== 'loose' && mode !== 'band-loose' && (songType === 'idea' ? (
             defaultInstrumentName && (
               <div className="space-y-1.5">
                 <label className="text-[10px] uppercase font-bold text-muted-foreground">Uploading to</label>
@@ -379,7 +436,7 @@ export function UploadModal({
                   <Button
                     className="h-9 uppercase tracking-widest text-[10px] font-bold"
                     onClick={() => uploadMutation.mutate()}
-                    disabled={(mode !== 'loose' && !uploadDestination) || uploadFiles.length === 0 || uploadMutation.isPending || hasExtracting}
+                    disabled={(mode === 'placed' && !uploadDestination) || uploadFiles.length === 0 || uploadMutation.isPending || hasExtracting}
                   >
                     {uploadMutation.isPending
                       ? <><Loader2 size={14} className="mr-2 animate-spin" />Uploading…</>

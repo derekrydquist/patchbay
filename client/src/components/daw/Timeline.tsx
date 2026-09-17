@@ -32,7 +32,12 @@ import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifi
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack } from '@/lib/bucket-api';
-import { useOrganizeLooseFile, usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
+import { usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
+import {
+  useLooseFileOrganizeDnd,
+  isBucketOrganizeDropId,
+  matchOrganizeDropTarget,
+} from '@/hooks/use-loose-file-organize-dnd';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
@@ -194,15 +199,6 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
   return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
 }
 
-// MediaBucket organize drop targets — a Section row (Sections column) and its Versions
-// column both resolve to the identical (trackId, sectionName) pair (one-idea-per-section),
-// so a loose file dropped on either fires the same organize call. Two distinct id prefixes
-// because a DOM node can't be registered under the same dnd-kit id twice.
-function isBucketOrganizeDropId(id: string | number): boolean {
-  const s = String(id);
-  return s.startsWith('bucket-section||') || s.startsWith('bucket-versions||');
-}
-
 // Custom collision detection: gap zones require precise pointer intersection (they are narrow);
 // track rows match by vertical overlap only — any X position on the row resolves to that track.
 // Gap zones read live getBoundingClientRect() directly so freshly-mounted zones are never skipped
@@ -225,15 +221,10 @@ const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppabl
   // Second pass — MediaBucket organize drop targets (Section row, Versions column),
   // live bounds check. These are narrow rows/panels in a side column, not full-width
   // bands, so the vertical-band-only heuristic below would wrongly match any X
-  // position at the same row height (e.g. hovering over an unrelated column).
-  for (const container of droppableContainers) {
-    if (!isBucketOrganizeDropId(container.id)) continue;
-    const rect = container.node.current?.getBoundingClientRect() ?? droppableRects.get(container.id);
-    if (!rect) continue;
-    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
-      return [{ id: container.id }];
-    }
-  }
+  // position at the same row height (e.g. hovering over an unrelated column). Shared
+  // with Dashboard's Ideas shelf / Songs quick-browser via use-loose-file-organize-dnd.
+  const organizeMatch = matchOrganizeDropTarget(droppableContainers, droppableRects, x, y);
+  if (organizeMatch) return [organizeMatch];
 
   // Third pass — track rows, vertical band only (X is irrelevant).
   for (const container of droppableContainers) {
@@ -303,9 +294,7 @@ export function Timeline({ songId }: { songId: string }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const organizeLooseFileMutation = useOrganizeLooseFile(songId, {
-    onError: (msg) => console.error('[organizeLooseFile] error:', msg),
-  });
+  const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId);
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
     onError: (msg) => console.error('[placeLooseFileOnTimeline] error:', msg),
   });
@@ -2119,22 +2108,12 @@ export function Timeline({ songId }: { songId: string }) {
     const overId = over.id as string;
 
     // ── MediaBucket Section-row / Versions-column drop: organize a loose file directly
-    // (no confirmation — only place-on-timeline requires one). trackId/sectionName are
-    // read directly from the drop target's own data, not derived/guessed. ────────────
+    // (no confirmation — only place-on-timeline requires one). Delegated to the shared
+    // hook (use-loose-file-organize-dnd) — same handler Dashboard's Ideas shelf and
+    // Songs quick-browser use. ────────────────────────────────────────────────────
     if (isBucketOrganizeDropId(overId)) {
       setInsertionPoint(null);
-      if (activeType !== 'loose-file') return;
-      const dropData = over.data.current as { trackId?: string; sectionName?: string } | undefined;
-      const looseFileId = dragData?.clip?.id ?? clip?.id;
-      if (!dropData?.trackId || !dropData?.sectionName || !looseFileId) {
-        console.warn('[LooseFileDrop] missing trackId/sectionName on bucket organize drop target', dropData);
-        return;
-      }
-      organizeLooseFileMutation.mutate({
-        looseFileId,
-        trackId: dropData.trackId,
-        sectionName: dropData.sectionName,
-      });
+      looseFileOrganizeDnd.handleDragEnd(event);
       return;
     }
     // ─────────────────────────────────────────────────────────────────────────

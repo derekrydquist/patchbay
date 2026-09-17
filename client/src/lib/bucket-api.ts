@@ -50,10 +50,13 @@ export interface ApiTrack {
   ideas: ApiIdea[];
 }
 
-// Song-scoped file uploaded before being assigned to a Track/Section.
+// File uploaded before being assigned to a Track/Section. songId is null for a
+// band-wide, unassigned file (Ideas shelf Column 1's "Upload Files") — otherwise
+// it's scoped to the song/Idea it was uploaded into (Column 2's "Add Files" and
+// every other loose-file upload entry point in the app).
 export interface ApiLooseFile {
   id: string;
-  songId: string;
+  songId: string | null;
   name: string;
   type: string;
   color: string;
@@ -96,6 +99,13 @@ export async function fetchLooseFiles(songId: string): Promise<ApiLooseFile[]> {
   return res.json();
 }
 
+// Band-wide, unassigned loose files — Ideas shelf Column 1's "Upload Files".
+export async function fetchUnassignedLooseFiles(): Promise<ApiLooseFile[]> {
+  const res = await fetch('/api/loose-files/unassigned');
+  if (!res.ok) throw new Error('Failed to load unassigned loose files');
+  return res.json();
+}
+
 // ─── Query key factories ──────────────────────────────────────────────────────
 // Invalidation keys must exactly match fetch keys (CLAUDE.md rule). Using these
 // factories everywhere makes drift impossible.
@@ -108,4 +118,5 @@ export const bucketKeys = {
 
 export const looseFileKeys = {
   list: (songId: string | undefined) => ['loose-files', songId] as const,
+  unassigned: () => ['loose-files', 'unassigned'] as const,
 };

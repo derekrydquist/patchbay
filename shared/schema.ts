@@ -140,7 +140,12 @@ export type Clip = typeof clips.$inferSelect;
 
 export const looseFiles = sqliteTable("loose_files", {
   id: text("id").primaryKey(),
-  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  // Nullable: null = band-wide, unassigned (uploaded via the Ideas shelf's Column 1
+  // "Upload Files", not scoped to any Idea/song). bandId is set whenever songId is
+  // null so the file can still be scoped/authorized; it is not needed (and not set)
+  // for song-scoped rows, which are scoped via songId -> songs.bandId instead.
+  songId: text("song_id").references(() => songs.id, { onDelete: "cascade" }),
+  bandId: text("band_id").references(() => bands.id),
   name: text("name").notNull(),
   type: text("type", { enum: ["audio", "midi", "drums", "vocal", "custom-audio"] }).notNull(),
   color: text("color").notNull(),

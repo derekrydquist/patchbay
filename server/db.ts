@@ -186,7 +186,9 @@ if (!hasLyricsComments) {
   console.log("[PatchBay] Created lyrics_comments table.");
 }
 
-// Create loose_files table if not exists.
+// Create loose_files table if not exists. song_id is nullable — null means a
+// band-wide, unassigned loose file (Ideas shelf Column 1's "Upload Files"),
+// scoped instead via band_id.
 const hasLooseFiles = (sqlite.prepare(
   "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='loose_files'"
 ).get() as { c: number }).c;
@@ -194,7 +196,8 @@ if (!hasLooseFiles) {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS loose_files (
       id TEXT PRIMARY KEY,
-      song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+      song_id TEXT REFERENCES songs(id) ON DELETE CASCADE,
+      band_id TEXT REFERENCES bands(id),
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       color TEXT NOT NULL,
@@ -206,4 +209,40 @@ if (!hasLooseFiles) {
     );
   `);
   console.log("[PatchBay] Created loose_files table.");
+}
+
+// Migrate a pre-existing loose_files table: song_id was originally NOT NULL with
+// no band_id column. SQLite has no ALTER COLUMN, so dropping a NOT NULL
+// constraint requires the full rebuild-and-swap pattern below — safe here
+// because foreign_keys is toggled OFF at the top level (outside any
+// transaction; see the drizzle-kit incident in .claude/skills/deploy/SKILL.md
+// for why that distinction matters) and nothing else has an FK into
+// loose_files, so there's no cascade risk during the rebuild.
+const looseFilesSongIdInfo = sqlite.prepare(
+  "SELECT \"notnull\" as nn FROM pragma_table_info('loose_files') WHERE name='song_id'"
+).get() as { nn: number } | undefined;
+if (looseFilesSongIdInfo && looseFilesSongIdInfo.nn === 1) {
+  sqlite.pragma("foreign_keys = OFF");
+  sqlite.exec(`
+    ALTER TABLE loose_files RENAME TO loose_files_old;
+    CREATE TABLE loose_files (
+      id TEXT PRIMARY KEY,
+      song_id TEXT REFERENCES songs(id) ON DELETE CASCADE,
+      band_id TEXT REFERENCES bands(id),
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      color TEXT NOT NULL,
+      duration REAL NOT NULL,
+      src TEXT,
+      metadata TEXT,
+      uploaded_by TEXT,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO loose_files (id, song_id, band_id, name, type, color, duration, src, metadata, uploaded_by, created_at)
+    SELECT id, song_id, NULL, name, type, color, duration, src, metadata, uploaded_by, created_at
+    FROM loose_files_old;
+    DROP TABLE loose_files_old;
+  `);
+  sqlite.pragma("foreign_keys = ON");
+  console.log("[PatchBay] Migrated loose_files: song_id is now nullable, added band_id column.");
 }

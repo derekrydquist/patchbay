@@ -12,6 +12,7 @@ import {
   useDeleteTrack, useRestoreTrack,
   useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
+import { bucketSectionDropId, bucketVersionsDropId } from '@/hooks/use-loose-file-organize-dnd';
 import { BucketClip } from './Clip';
 import { LooseFileRow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -52,11 +53,12 @@ function toClip(apiClip: ApiClip): Clip {
 
 // ─── Section row — Sections column ─────────────────────────────────────────────
 // Extracted so useDroppable can be called once per row. Doubles as the organize
-// drop target for a dragged loose file (id: `bucket-section||${idea.id}`, data
-// carries trackId/sectionName directly — read by Timeline.tsx's handleDragEnd,
-// since MediaBucket is rendered inside Timeline's own DndContext and does not
-// own drag-end handling itself). Native onDragOver/onDragLeave/onDrop handlers
-// (OS file drag) are unrelated and untouched.
+// drop target for a dragged loose file (id from bucketSectionDropId, data carries
+// trackId/sectionName directly — read by the shared use-loose-file-organize-dnd
+// hook's handleDragEnd, called from Timeline.tsx's own handleDragEnd since
+// MediaBucket is rendered inside Timeline's DndContext and does not own drag-end
+// handling itself). Native onDragOver/onDragLeave/onDrop handlers (OS file drag)
+// are unrelated and untouched.
 
 interface SectionFolderRowProps {
   idea: ApiIdea;
@@ -70,7 +72,7 @@ interface SectionFolderRowProps {
 function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef }: SectionFolderRowProps) {
   const hasFiles = idea.clips.length > 0;
   const { setNodeRef, isOver } = useDroppable({
-    id: `bucket-section||${idea.id}`,
+    id: bucketSectionDropId(idea.id),
     data: { trackId: idea.trackId, sectionName: idea.sectionName },
   });
   const combinedRef = (node: HTMLButtonElement | null) => {
@@ -439,11 +441,26 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
   // Versions column organize drop target — same (trackId, sectionName) pair as the
   // Section row one level out (one-idea-per-section), so this is a second entry point
   // onto the identical organize call, not a new backend concept. Distinct id prefix
-  // from the Section row's `bucket-section||` (a real DOM node can't be registered
-  // under the same dnd-kit id twice) — see trackFirstCollision in Timeline.tsx for the
-  // matching precise-bounds collision pass.
+  // from the Section row's bucketSectionDropId (a real DOM node can't be registered
+  // under the same dnd-kit id twice) — see matchOrganizeDropTarget in
+  // use-loose-file-organize-dnd.ts (used by Timeline.tsx's trackFirstCollision) for
+  // the matching precise-bounds collision pass, which matches on this id's prefix,
+  // not the full id, so a stable suffix is safe.
+  //
+  // Suffix ('media-bucket-files-column') is a fixed constant, NOT derived from
+  // selectedIdea.id. The organize handler reads over.data.current for
+  // trackId/sectionName, never over.id, so the id string itself carries no meaning
+  // beyond being a stable dnd-kit registry key. Deriving it from selectedIdea.id (as
+  // this used to) re-keys the registration on every idea/section switch — dnd-kit's
+  // registration effect is keyed off `[id]` and tears down + re-registers on change,
+  // independently of the disabled/data reactivity (those update in place by design,
+  // via useLatestValue). The default collision algorithm looks up droppableRects by
+  // the CURRENT id and silently skips this droppable if no rect is on record for it —
+  // so switching sections and then dragging could land on a fresh id with no measured
+  // rect yet, and the drop would silently miss. Found and fixed this exact bug in
+  // Dashboard.tsx's Songs quick-browser equivalent first; same root cause here.
   const { setNodeRef: setVersionsDroppableRef, isOver: isVersionsDropTarget } = useDroppable({
-    id: selectedIdea ? `bucket-versions||${selectedIdea.id}` : 'bucket-versions||none',
+    id: bucketVersionsDropId('media-bucket-files-column'),
     disabled: !selectedIdea,
     data: selectedIdea ? { trackId: selectedIdea.trackId, sectionName: selectedIdea.sectionName } : undefined,
   });

@@ -12,6 +12,10 @@ function invalidateAfterLooseFilePlacement(
 ) {
   queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
   queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
+  // Always invalidated, regardless of songId: the organized file may have come
+  // from the band-wide unassigned list (Ideas shelf Column 1), which needs to
+  // drop it the same way a song-scoped list drops an organized file.
+  queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
   queryClient.invalidateQueries({ queryKey: ['activity'] });
   queryClient.invalidateQueries({ queryKey: ['songs'] });
   queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
