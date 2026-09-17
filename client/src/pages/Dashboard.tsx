@@ -1471,14 +1471,6 @@ export default function Dashboard() {
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30">
       <AppHeader
         activeNav={activeTab === 'files' ? 'library' : 'home'}
-        actionSlot={
-          <Button
-            onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
-            className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2"
-          >
-            <Plus size={14} /> Create New
-          </Button>
-        }
       />
 
       <main className="max-w-5xl mx-auto px-6 py-12">
@@ -1486,13 +1478,21 @@ export default function Dashboard() {
         {activeTab === 'dashboard' && (
         <>
         {/* Personalized greeting */}
-        <div className="mb-4">
-          <h1 className="text-2xl font-heading font-black tracking-tight text-white">
-            {greetingMain}
-          </h1>
-          <p className={cn('text-sm mt-1', statusSublineNode ? 'text-white/70' : 'text-muted-foreground')}>
-            {statusSublineNode ?? greetingFlavor}
-          </p>
+        <div className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-heading font-black tracking-tight text-white">
+              {greetingMain}
+            </h1>
+            <p className={cn('text-sm mt-1', statusSublineNode ? 'text-white/70' : 'text-muted-foreground')}>
+              {statusSublineNode ?? greetingFlavor}
+            </p>
+          </div>
+          <Button
+            onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
+            className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2 shrink-0"
+          >
+            <Plus size={14} /> Create New
+          </Button>
         </div>
 
         {isNewBand ? (
@@ -1805,16 +1805,24 @@ export default function Dashboard() {
         {activeTab === 'files' && (
           <div>
             {/* Library header */}
-            <div className="mb-4">
-              <h1 className="text-2xl font-heading font-black tracking-tight text-white">Library</h1>
-              <p className="text-sm mt-1 text-white/70">
-                {(() => {
-                  const sc = songs.filter(s => s.type === 'song' || !s.type).length;
-                  const ic = songs.filter(s => s.type === 'idea').length;
-                  const ac = albumList.length;
-                  return `${sc} ${sc === 1 ? 'Song' : 'Songs'} · ${ic} ${ic === 1 ? 'Idea' : 'Ideas'} · ${ac} ${ac === 1 ? 'Album' : 'Albums'}`;
-                })()}
-              </p>
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <h1 className="text-2xl font-heading font-black tracking-tight text-white">Library</h1>
+                <p className="text-sm mt-1 text-white/70">
+                  {(() => {
+                    const sc = songs.filter(s => s.type === 'song' || !s.type).length;
+                    const ic = songs.filter(s => s.type === 'idea').length;
+                    const ac = albumList.length;
+                    return `${sc} ${sc === 1 ? 'Song' : 'Songs'} · ${ic} ${ic === 1 ? 'Idea' : 'Ideas'} · ${ac} ${ac === 1 ? 'Album' : 'Albums'}`;
+                  })()}
+                </p>
+              </div>
+              <Button
+                onClick={() => { setCreateSongSource('header'); setIsChoiceOpen(true); }}
+                className="h-9 px-4 bg-primary text-black hover:bg-primary/90 font-bold text-xs flex items-center gap-2 shrink-0"
+              >
+                <Plus size={14} /> Create New
+              </Button>
             </div>
             {/* Controls row — filter buttons + sort dropdown */}
             <div className="flex items-center justify-between mb-3">
