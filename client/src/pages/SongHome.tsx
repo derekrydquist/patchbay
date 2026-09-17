@@ -2198,40 +2198,40 @@ export default function SongHome() {
             <span className="text-sm font-semibold text-white/70 truncate max-w-[200px]">{song.name}</span>
           </>
         )}
-        actionSlot={
-          <button
-            onClick={() => goToWorkspace()}
-            className="h-8 px-4 rounded-md bg-primary text-black text-xs font-bold hover:bg-primary/90 transition-colors"
-          >
-            Open Workspace
-          </button>
-        }
       />
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-6 py-8 space-y-6">
 
         {/* ── Tab bar ──────────────────────────────────────────────────────── */}
-        <div className="flex gap-1 bg-white/[0.03] p-1 rounded-lg border border-white/5 self-start w-fit">
-          {(['overview', 'files', 'lyrics', 'review'] as const).map(tab => (
-            <button
-              key={tab}
-              onClick={() => {
-                const params = new URLSearchParams(search);
-                if (tab === 'overview') params.delete('tab');
-                else params.set('tab', tab);
-                const qs = params.toString();
-                setLocation(`/songs/${songId}${qs ? `?${qs}` : ''}`);
-              }}
-              className={cn(
-                'px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-widest transition-all cursor-pointer',
-                activeTab === tab
-                  ? 'bg-primary text-black'
-                  : 'text-white/40 hover:text-white/70'
-              )}
-            >
-              {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Song Files' : tab === 'lyrics' ? 'Lyrics' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
-            </button>
-          ))}
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex gap-1 bg-white/[0.03] p-1 rounded-lg border border-white/5 self-start w-fit">
+            {(['overview', 'files', 'lyrics', 'review'] as const).map(tab => (
+              <button
+                key={tab}
+                onClick={() => {
+                  const params = new URLSearchParams(search);
+                  if (tab === 'overview') params.delete('tab');
+                  else params.set('tab', tab);
+                  const qs = params.toString();
+                  setLocation(`/songs/${songId}${qs ? `?${qs}` : ''}`);
+                }}
+                className={cn(
+                  'px-4 py-1.5 rounded-md text-xs font-bold uppercase tracking-widest transition-all cursor-pointer',
+                  activeTab === tab
+                    ? 'bg-primary text-black'
+                    : 'text-white/40 hover:text-white/70'
+                )}
+              >
+                {tab === 'overview' ? 'Overview' : tab === 'files' ? 'Song Files' : tab === 'lyrics' ? 'Lyrics' : `Review${reviews.length > 0 ? ` (${reviews.length})` : ''}`}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => goToWorkspace()}
+            className="h-8 px-4 rounded-md bg-primary text-black text-xs font-bold hover:bg-primary/90 transition-colors shrink-0"
+          >
+            Open Workspace
+          </button>
         </div>
 
         {/* ── Overview tab ─────────────────────────────────────────────────── */}
