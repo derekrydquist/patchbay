@@ -60,7 +60,12 @@ A `/ {song name}` element is passed via `postLogoSlot`:
 
 ### Workspace mode tabs
 
-The **Arrangement | Production** tabs live in `Workspace.tsx`'s `preActionSlot` (right side of header, before the gear icon). They are **not** in `postLogoSlot`. Do not move them into the logo/breadcrumb area.
+The **Arrangement | Production** tabs are no longer in the top `AppHeader` at all. `Workspace.tsx` builds a single `modeTabs` node (state + `onValueChange` owned by `Workspace.tsx`) and passes it as a prop into each mode's own surface, left-aligned and horizontally level with that surface's toolbar:
+
+- **Arrangement** — threaded `Workspace.tsx` → `Timeline` (`modeTabs` prop) → `MediaBucket` (`modeTabs` prop), rendered left-aligned in `MediaBucket`'s header row, level with the "Search project assets..." input and the Upload button (that row's className switches from `justify-end` to `justify-between` when `modeTabs` is present, so `MediaBucket`'s other caller, `SongHome.tsx`'s Song Files tab — which passes no `modeTabs` — is unaffected).
+- **Production** — threaded `Workspace.tsx` → `ProductionTracker` (`modeTabs` prop), rendered left-aligned in `ProductionTracker`'s own header row, before the "Production Whiteboard" title block.
+
+The tabs are duplicated across the two call sites (not lifted into one always-mounted shared row) because Radix `TabsContent` only mounts the active panel — `Timeline`/`MediaBucket` and `ProductionTracker` are never both in the DOM at once, so the same `modeTabs` element reference is passed to both without ever rendering twice. This keeps the switcher visible and functional regardless of which mode is active. `TabsTrigger` styling is unchanged from its original spec (see below).
 
 ### Naming conventions
 

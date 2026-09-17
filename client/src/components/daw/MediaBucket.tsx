@@ -135,11 +135,13 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
 interface MediaBucketProps {
   songId: string;
   onAddToTimeline?: (clip: Clip, trackId?: string) => void;
+  /** Arrangement/Production mode tab switcher, rendered left-aligned in the toolbar row */
+  modeTabs?: React.ReactNode;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
+export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -506,7 +508,8 @@ export function MediaBucket({ songId, onAddToTimeline }: MediaBucketProps) {
     <div className="w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0">
 
       {/* Header */}
-      <div className="flex items-center justify-end px-6 h-14 border-b border-white/5 shrink-0">
+      <div className={cn('flex items-center px-6 h-14 border-b border-white/5 shrink-0', modeTabs ? 'justify-between' : 'justify-end')}>
+        {modeTabs}
         <div className="flex items-center gap-3">
           <div className="relative w-64">
             <Search size={14} className="absolute left-2.5 top-2.5 text-muted-foreground" />

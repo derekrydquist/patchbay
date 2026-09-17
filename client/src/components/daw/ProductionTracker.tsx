@@ -678,7 +678,7 @@ function CellModal({
 
 // ── ProductionTracker ─────────────────────────────────────────────────────────
 
-export function ProductionTracker({ songId }: { songId: string }) {
+export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTabs?: React.ReactNode }) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const taskIdFromUrl = new URLSearchParams(window.location.search).get('taskId');
   const { user } = useAuth();
@@ -1004,16 +1004,8 @@ export function ProductionTracker({ songId }: { songId: string }) {
     <div className="h-full flex flex-col bg-[#09090b] text-foreground overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="px-6 py-4 border-b border-white/5 flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-8 h-8 rounded-lg bg-primary/15 border border-primary/25 flex items-center justify-center">
-              <Music2 size={16} className="text-primary" />
-            </div>
-            <h2 className="text-sm font-heading font-bold uppercase tracking-[0.2em] text-white">Production Whiteboard</h2>
-          </div>
-          <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground">Track each track against the song structure</p>
-        </div>
+      <div className="px-6 border-b border-white/5 flex items-center">
+        {modeTabs}
       </div>
 
       {/* ── Grid ── */}

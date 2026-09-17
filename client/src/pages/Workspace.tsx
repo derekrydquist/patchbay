@@ -42,6 +42,28 @@ export default function Workspace() {
     setLocation(`/songs/${songId}/workspace?${params.toString()}`);
   };
 
+  // Arrangement/Production mode switcher — rendered left-aligned inside each mode's own
+  // toolbar row (MediaBucket's search/Upload row for Arrangement, ProductionTracker's header
+  // for Production) rather than the top AppHeader, so it stays visible and functional no
+  // matter which mode is active. See "Workspace mode tabs" in CLAUDE.md.
+  const modeTabs = (
+    <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full">
+      <TabsList className="bg-transparent border-none p-0 h-14 gap-1">
+        <TabsTrigger
+          value="timeline"
+          className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
+        >
+          <Layout size={14} className="mr-2" /> Arrangement
+        </TabsTrigger>
+        <TabsTrigger
+          value="tasks"
+          className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
+        >
+          <CheckSquare size={14} className="mr-2" /> Production
+        </TabsTrigger>
+      </TabsList>
+    </Tabs>
+  );
 
   return (
     <div className="h-screen flex flex-col bg-[#09090b] text-foreground overflow-hidden font-sans selection:bg-primary/30">
@@ -57,24 +79,6 @@ export default function Workspace() {
             </button>
           </>
         )}
-        preActionSlot={
-          <Tabs value={activeTab} onValueChange={handleTabChange} className="h-full">
-            <TabsList className="bg-transparent border-none p-0 h-14 gap-1">
-              <TabsTrigger
-                value="timeline"
-                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
-              >
-                <Layout size={14} className="mr-2" /> Arrangement
-              </TabsTrigger>
-              <TabsTrigger
-                value="tasks"
-                className="data-[state=active]:bg-white/5 data-[state=active]:text-primary rounded-none border-b-2 border-transparent data-[state=active]:border-primary px-4 h-14 text-[10px] uppercase tracking-[0.2em] font-bold transition-all cursor-pointer"
-              >
-                <CheckSquare size={14} className="mr-2" /> Production
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        }
       />
 
       <main className="flex-1 flex flex-col min-h-0 relative">
@@ -82,14 +86,14 @@ export default function Workspace() {
           <TabsContent value="timeline" className="m-0 h-full flex flex-col outline-none">
             <div className="flex-1 flex flex-col overflow-hidden">
                {/* Timeline now contains MediaBucket to ensure both share the same DndContext */}
-               <Timeline songId={songId} />
+               <Timeline songId={songId} modeTabs={modeTabs} />
             </div>
             <div className="p-4 bg-black/40 border-t border-white/5">
               <Transport songId={songId} />
             </div>
           </TabsContent>
           <TabsContent value="tasks" className="m-0 h-full outline-none">
-            <ProductionTracker songId={songId} />
+            <ProductionTracker songId={songId} modeTabs={modeTabs} />
           </TabsContent>
         </Tabs>
       </main>

@@ -290,7 +290,7 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
 }
 
 
-export function Timeline({ songId }: { songId: string }) {
+export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: React.ReactNode }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -2778,6 +2778,7 @@ export function Timeline({ songId }: { songId: string }) {
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <MediaBucket
           songId={songId}
+          modeTabs={modeTabs}
           onAddToTimeline={(clip, trackId) => {
             const targetTrack = tracks.find((t) => t.id === trackId);
             if (!targetTrack) {
