@@ -315,7 +315,7 @@ function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <Lightbulb size={13} className="shrink-0" fill={idea.hasFiles ? 'currentColor' : 'none'} />
+        <Folder size={13} className="shrink-0" fill={idea.hasFiles ? 'currentColor' : 'none'} />
         <span className="font-bold tracking-tight truncate">{idea.name}</span>
       </div>
       <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
