@@ -1060,6 +1060,7 @@ export class SQLiteStorage implements IStorage {
         trackName: instrumentTracks.name,
         songId: songs.id,
         songName: songs.name,
+        songType: songs.type,
         metadata: clips.metadata,
       })
       .from(clips)
@@ -1072,9 +1073,15 @@ export class SQLiteStorage implements IStorage {
     for (const row of clipRows) {
       const ts = new Date(row.createdAt).getTime();
       const uploader = row.metadata?.uploadedBy || 'Someone';
+      // Idea-type songs have exactly one hidden, auto-created track/section (both
+      // literally named "Files" — see ensureIdeaDefaultFolder). Naming it here would
+      // just read as "added X to Files — Files", which is meaningless to the user.
+      const description = row.songType === 'idea'
+        ? `${uploader} added ${row.clipName} to ${row.songName}`
+        : `${uploader} added ${row.clipName} to ${row.trackName}${row.sectionName ? ` — ${row.sectionName}` : ''}`;
       events.push({
         type: 'file-added',
-        description: `${uploader} added ${row.clipName} to ${row.trackName}${row.sectionName ? ` — ${row.sectionName}` : ''}`,
+        description,
         timestamp: ts,
         songId: row.songId,
         songName: row.songName,

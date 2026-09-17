@@ -1737,7 +1737,7 @@ export async function registerRoutes(
       id: randomUUID(),
       songId,
       type: 'loose-file-uploaded',
-      description: `${looseFileActor} uploaded ${looseFile.name} (unplaced)`,
+      description: `${looseFileActor} added ${looseFile.name}`,
       timestamp: Date.now(),
       author: looseFileActor,
     }).catch(console.error);
@@ -1845,11 +1845,18 @@ export async function registerRoutes(
 
     const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, trackId)).get();
     if (track) {
+      // Idea-type songs route every organize to the same hidden, auto-created
+      // track/section (both literally named "Files" — see ensureIdeaDefaultFolder).
+      // Naming that folder is meaningless to the user; name the Idea itself instead.
+      const destSong = await storage.getSongById(destSongId);
+      const organizeDesc = destSong?.type === 'idea'
+        ? `${organizeActor} organized ${clip.name} into ${destSong.name}`
+        : `${organizeActor} organized ${clip.name} into ${track.name} → ${sectionName}`;
       storage.logActivity({
         id: randomUUID(),
         songId: destSongId,
         type: 'loose-file-organized',
-        description: `${organizeActor} organized ${clip.name} into ${track.name} → ${sectionName}`,
+        description: organizeDesc,
         timestamp: Date.now(),
         instrument: track.name,
         sectionName,
