@@ -1,4 +1,6 @@
 import { randomUUID } from "crypto";
+import fs from "fs";
+import path from "path";
 import bcrypt from "bcrypt";
 import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min } from "drizzle-orm";
 import { db } from "./db";
@@ -33,6 +35,13 @@ export class LooseFileNotFoundError extends Error {
     this.name = "LooseFileNotFoundError";
   }
 }
+
+// Mirrors routes.ts's UPLOADS_DIR resolution exactly (same env override) — kept
+// as a separate constant rather than importing from routes.ts to avoid a
+// circular import (routes.ts imports `storage` from this file).
+const UPLOADS_DIR = process.env.UPLOADS_DIR
+  ? path.resolve(process.env.UPLOADS_DIR)
+  : path.resolve("uploads");
 
 export const DEFAULT_SONG_ID = "patchbay-default";
 
@@ -995,7 +1004,38 @@ export class SQLiteStorage implements IStorage {
   }
 
   async deleteLooseFile(id: string): Promise<void> {
+    const looseFile = db.select().from(looseFiles).where(eq(looseFiles.id, id)).get();
     db.delete(looseFiles).where(eq(looseFiles.id, id)).run();
+    // Best-effort: the DB row is the source of truth and is already gone above.
+    // A missing (or already-removed) physical file must never surface as an error.
+    if (!looseFile?.src) return;
+
+    // Guard against deleting a file another row still needs. This is not a
+    // theoretical case: every loose-file upload currently goes through
+    // POST /api/upload with a fixed instrument='loose'/section='unplaced' and no
+    // ideaId, so buildFilename always computes version 1 — same-extension loose
+    // uploads collide on one physical filename and silently overwrite each other
+    // on disk while their loose_files rows (and, once organized, their clips/
+    // timeline_clips rows, which copy `src` as-is in materializeLooseFileCore)
+    // remain distinct. Confirmed present in current data (many rows sharing one
+    // src). Until that upload-side collision is fixed, unlinking on the honor
+    // system would delete a file out from under any other row still pointing at
+    // the same path — so check for other referents first and skip the unlink
+    // (leaving the row's own reference to a shared file orphaned, not the file).
+    const [otherLooseFile] = db.select({ id: looseFiles.id }).from(looseFiles)
+      .where(eq(looseFiles.src, looseFile.src)).all();
+    const [clipRef] = db.select({ id: clips.id }).from(clips)
+      .where(eq(clips.src, looseFile.src)).all();
+    const [timelineClipRef] = db.select({ id: timelineClips.id }).from(timelineClips)
+      .where(eq(timelineClips.src, looseFile.src)).all();
+    if (otherLooseFile || clipRef || timelineClipRef) return;
+
+    const filePath = path.join(UPLOADS_DIR, path.basename(looseFile.src));
+    fs.unlink(filePath, (err) => {
+      if (err && err.code !== 'ENOENT') {
+        console.error('[deleteLooseFile] failed to remove uploaded file:', err);
+      }
+    });
   }
 
   async materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip> {

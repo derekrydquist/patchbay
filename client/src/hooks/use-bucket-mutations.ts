@@ -253,6 +253,31 @@ export function useOrganizeLooseFile(
   });
 }
 
+// Deletes a loose file that hasn't been organized/placed yet (no dependent rows
+// to worry about — see the file-organizer delete audit). `songId` comes from
+// the loose file itself (null for band-wide/unassigned), not an external param,
+// so one hook covers every surface regardless of which list the row lives in.
+export function useDeleteLooseFile(
+  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { looseFileId: string; songId: string | null }) => {
+      const res = await fetch(`/api/loose-files/${vars.looseFileId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to delete file' }));
+        throw new Error(err.message ?? 'Failed to delete file');
+      }
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.list(vars.songId ?? undefined) });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
+      opts?.onSuccess?.();
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
 export function usePlaceLooseFileOnTimeline(
   songId: string | undefined,
   opts?: { onSuccess?: (result: { clip: ApiClip; timelineClip: ApiTimelineClip }) => void; onError?: (message: string) => void }
