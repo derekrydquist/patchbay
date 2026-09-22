@@ -54,7 +54,7 @@ import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, looseFileKeys,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
   bucketSectionDropId,
@@ -280,6 +280,103 @@ function EditableTagList({ label, items, onChange }: EditableTagListProps) {
   );
 }
 
+
+// ─── Ideas shelf Column 2 — shared file context menu ──────────────────────────
+// One menu shape for every file rendered in an Idea's flat file list: More Info,
+// Add Note, Add to Song, Promote to Song, and (loose-file preview only) Delete.
+// Used by both the organized-clip cards (clips.map below) and the one-off loose-
+// file preview, so the two can never drift apart the way independently-styled
+// badges once did elsewhere in this app (see CornerBadge in the daw CLAUDE.md).
+interface IdeaFileContextMenuProps {
+  children: React.ReactNode;
+  onMoreInfo: () => void;
+  onAddNote: () => void;
+  // Disables More Info / Add Note — used for a loose file, which has no real
+  // `clips` row for comments (clip_comments.clipId is a hard FK to clips.id) or
+  // editable metadata (PATCH /api/clips/:clipId) to attach either feature to.
+  infoDisabled?: boolean;
+  onAddToSong: () => void;
+  onPromoteToSong: () => void;
+  // Present only for the loose-file preview variant — organized clips have no
+  // delete affordance here (a separate, undecided product question; see the
+  // paused Remove/Delete audit).
+  onDelete?: () => void;
+}
+
+function IdeaFileContextMenu({
+  children, onMoreInfo, onAddNote, infoDisabled, onAddToSong, onPromoteToSong, onDelete,
+}: IdeaFileContextMenuProps) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+        <ContextMenuItem
+          onClick={onMoreInfo}
+          disabled={infoDisabled}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Info size={13} className="text-white/50" /> More Info
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={onAddNote}
+          disabled={infoDisabled}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <MessageSquare size={13} className="text-white/50" /> Add Note
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={onAddToSong}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+        >
+          <Share2 size={13} className="text-white/50" /> Add to Song
+        </ContextMenuItem>
+        <ContextMenuSeparator className="bg-white/5" />
+        <ContextMenuItem
+          onClick={onPromoteToSong}
+          className="text-xs text-primary/80 focus:bg-white/8 focus:text-primary cursor-pointer flex items-center gap-2"
+        >
+          <Sparkles size={13} className="text-primary/50" /> Promote to Song
+        </ContextMenuItem>
+        {onDelete && (
+          <>
+            <ContextMenuSeparator className="bg-white/5" />
+            <ContextMenuItem
+              onClick={onDelete}
+              className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
+            >
+              <Trash2 size={13} /> Delete
+            </ContextMenuItem>
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+// Converts a loose file into the same ApiClip shape Add to Song / Promote to
+// Song already consume, so both flows run completely unmodified against a
+// loose-file source — they only ever read src/name/metadata/duration/id off
+// the object, all of which a loose file already has. `ideaId`/`sectionName`
+// are meaningless placeholders (never read by either flow); `addedToSongs` is
+// omitted since a loose file has no such history and neither flow's "mark
+// source as added" step runs for a loose source (see addToSongSourceIsLoose /
+// promoteSourceIsLoose in the component below).
+function looseFileAsApiClip(lf: ApiLooseFile): ApiClip {
+  return {
+    id: lf.id,
+    ideaId: '',
+    name: lf.name,
+    type: lf.type,
+    color: lf.color,
+    start: 0,
+    duration: lf.duration,
+    src: lf.src,
+    isFinal: false,
+    sectionName: null,
+    metadata: lf.metadata,
+    createdAt: lf.createdAt,
+  };
+}
 
 // ─── Idea list row (Ideas shelf, Column 1) ────────────────────────────────────
 // Ideas have no Folder-selection step — every idea-type song has exactly one
@@ -513,6 +610,10 @@ export default function Dashboard() {
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
 
   const [addToSongClip, setAddToSongClip] = useState<ApiClip | null>(null);
+  // True when addToSongClip was converted from a loose file (looseFileAsApiClip)
+  // rather than a real organized clip — see handleAddToSong's "mark source as
+  // added" step, which has no real clips row to PATCH back to in that case.
+  const [addToSongSourceIsLoose, setAddToSongSourceIsLoose] = useState(false);
   const [destSongId, setDestSongId] = useState('');
   const [destInstrumentId, setDestInstrumentId] = useState('');
   const [destSectionId, setDestSectionId] = useState('');
@@ -520,6 +621,8 @@ export default function Dashboard() {
   const [addToSongDuplicateError, setAddToSongDuplicateError] = useState<string | null>(null);
 
   const [promoteClip, setPromoteClip] = useState<ApiClip | null>(null);
+  // Same purpose as addToSongSourceIsLoose, for the Promote to Song flow.
+  const [promoteSourceIsLoose, setPromoteSourceIsLoose] = useState(false);
   const [promoteSongName, setPromoteSongName] = useState('');
   const [promoteInstrument, setPromoteInstrument] = useState('');
   const [promoteSection, setPromoteSection] = useState('');
@@ -1012,8 +1115,17 @@ export default function Dashboard() {
     onError: (msg) => setAddSectionError(msg),
   });
 
+  // Backs the loose-file preview's combined context menu Delete item (the
+  // preview isn't a LooseFileRow, so it can't use LooseFileDeleteMenu directly —
+  // Delete here is one item among several in IdeaFileContextMenu, not its own
+  // wrapping ContextMenu). Same mutation, same no-confirmation behavior.
+  const deletePreviewLooseFile = useDeleteLooseFile({
+    onError: (msg) => console.error('[deleteLooseFile] error:', msg),
+  });
+
   const closeAddToSongModal = () => {
     setAddToSongClip(null);
+    setAddToSongSourceIsLoose(false);
     setDestSongId('');
     setDestInstrumentId('');
     setDestSectionId('');
@@ -1023,6 +1135,7 @@ export default function Dashboard() {
 
   const closePromoteModal = () => {
     setPromoteClip(null);
+    setPromoteSourceIsLoose(false);
     setPromoteSongName('');
     setPromoteInstrument('');
     setPromoteSection('');
@@ -1094,31 +1207,35 @@ export default function Dashboard() {
       });
       if (!clipRes.ok) throw new Error('Failed to create clip record');
 
-      const currentAddedTo = promoteClip.addedToSongs ?? [];
-      const newAddedToSongs = [
-        ...currentAddedTo,
-        { songId: newSong.id, songName: newSong.name, instrument: destTrack.name, section: destIdea.sectionName },
-      ];
       const sourceClipId = promoteClip.id;
       const sourceFileId = selectedFile?.id;
-      await fetch(`/api/clips/${sourceClipId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addedToSongs: newAddedToSongs }),
-      });
+      // Same reasoning as handleAddToSong: a loose-file source has no real `clips`
+      // row for this PATCH to target, and no addedToSongs pill to update locally.
+      if (!promoteSourceIsLoose) {
+        const currentAddedTo = promoteClip.addedToSongs ?? [];
+        const newAddedToSongs = [
+          ...currentAddedTo,
+          { songId: newSong.id, songName: newSong.name, instrument: destTrack.name, section: destIdea.sectionName },
+        ];
+        await fetch(`/api/clips/${sourceClipId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addedToSongs: newAddedToSongs }),
+        });
 
-      setSelectedInstrument(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          ideas: prev.ideas.map(idea => ({
-            ...idea,
-            clips: idea.clips.map(c =>
-              c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
-            ),
-          })),
-        };
-      });
+        setSelectedInstrument(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            ideas: prev.ideas.map(idea => ({
+              ...idea,
+              clips: idea.clips.map(c =>
+                c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
+              ),
+            })),
+          };
+        });
+      }
 
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -1224,33 +1341,38 @@ export default function Dashboard() {
       });
       if (!clipRes.ok) throw new Error('Failed to create clip record');
 
-      // Track which songs this idea file has been added to, then update local state immediately
-      const currentAddedTo = addToSongClip.addedToSongs ?? [];
-      const newAddedToSongs = [
-        ...currentAddedTo,
-        { songId: destSongId, songName: destSong.name, instrument: destTrack.name, section: destIdea.sectionName },
-      ];
-      const patchRes = await fetch(`/api/clips/${sourceClipId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addedToSongs: newAddedToSongs }),
-      });
-      const patchBody = await patchRes.json().catch(() => null);
-      console.log('[AddToSong PATCH]', { ok: patchRes.ok, status: patchRes.status, body: patchBody });
-      if (patchRes.ok) {
-        // Update selectedInstrument immediately so pills appear without waiting for refetch
-        setSelectedInstrument(prev => {
-          if (!prev) return prev;
-          return {
-            ...prev,
-            ideas: prev.ideas.map(idea => ({
-              ...idea,
-              clips: idea.clips.map(c =>
-                c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
-              ),
-            })),
-          };
+      // Track which songs this idea file has been added to, then update local state immediately.
+      // Skipped entirely for a loose-file source: it has no real `clips` row for this PATCH
+      // to target (would 404), and the loose-file preview doesn't render an addedToSongs
+      // pill anyway, so there's nothing for the local-state update below to reflect.
+      if (!addToSongSourceIsLoose) {
+        const currentAddedTo = addToSongClip.addedToSongs ?? [];
+        const newAddedToSongs = [
+          ...currentAddedTo,
+          { songId: destSongId, songName: destSong.name, instrument: destTrack.name, section: destIdea.sectionName },
+        ];
+        const patchRes = await fetch(`/api/clips/${sourceClipId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ addedToSongs: newAddedToSongs }),
         });
+        const patchBody = await patchRes.json().catch(() => null);
+        console.log('[AddToSong PATCH]', { ok: patchRes.ok, status: patchRes.status, body: patchBody });
+        if (patchRes.ok) {
+          // Update selectedInstrument immediately so pills appear without waiting for refetch
+          setSelectedInstrument(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              ideas: prev.ideas.map(idea => ({
+                ...idea,
+                clips: idea.clips.map(c =>
+                  c.id === sourceClipId ? { ...c, addedToSongs: newAddedToSongs } : c
+                ),
+              })),
+            };
+          });
+        }
       }
 
       // Background refetch to keep cache consistent
@@ -2284,6 +2406,7 @@ export default function Dashboard() {
                       songId={null}
                       isSelected={previewLooseFile?.id === lf.id}
                       onClick={() => setPreviewLooseFile(lf)}
+                      onDeleted={() => setPreviewLooseFile(prev => (prev?.id === lf.id ? null : prev))}
                     />
                   ))}
                 </div>
@@ -2341,13 +2464,40 @@ export default function Dashboard() {
                           <X size={12} />
                         </button>
                       </div>
-                      <WaveformPlayerCard
-                        src={previewLooseFile.src}
-                        name={previewLooseFile.name}
-                        duration={previewLooseFile.duration}
-                        isFinal={false}
-                        waveformHeight={20}
-                      />
+                      <IdeaFileContextMenu
+                        infoDisabled
+                        onMoreInfo={() => {}}
+                        onAddNote={() => {}}
+                        onAddToSong={() => {
+                          setAddToSongClip(looseFileAsApiClip(previewLooseFile));
+                          setAddToSongSourceIsLoose(true);
+                        }}
+                        onPromoteToSong={() => {
+                          const clip = looseFileAsApiClip(previewLooseFile);
+                          setPromoteClip(clip);
+                          setPromoteSourceIsLoose(true);
+                          setPromoteSongName(clip.name.replace(/\.[^.]+$/, ''));
+                          setPromoteInstrument(settings?.defaultInstruments?.[0] ?? DEFAULT_INSTRUMENTS[0]);
+                          setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
+                        }}
+                        onDelete={() => {
+                          const deletedId = previewLooseFile.id;
+                          deletePreviewLooseFile.mutate(
+                            { looseFileId: deletedId, songId: previewLooseFile.songId },
+                            { onSuccess: () => setPreviewLooseFile(prev => (prev?.id === deletedId ? null : prev)) }
+                          );
+                        }}
+                      >
+                        <div>
+                          <WaveformPlayerCard
+                            src={previewLooseFile.src}
+                            name={previewLooseFile.name}
+                            duration={previewLooseFile.duration}
+                            isFinal={false}
+                            waveformHeight={20}
+                          />
+                        </div>
+                      </IdeaFileContextMenu>
                     </div>
                   ) : !selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
@@ -2383,68 +2533,41 @@ export default function Dashboard() {
                             in this column organizes it into the flat list, same drop
                             zone the column itself already is. */}
                         {selectedFileLooseFiles.map(lf => (
-                          <LooseFileRow key={lf.id} looseFile={lf} songId={selectedFile.id} onClick={() => setPreviewLooseFile(lf)} />
+                          <LooseFileRow
+                            key={lf.id}
+                            looseFile={lf}
+                            songId={selectedFile.id}
+                            onClick={() => setPreviewLooseFile(lf)}
+                            onDeleted={() => setPreviewLooseFile(prev => (prev?.id === lf.id ? null : prev))}
+                          />
                         ))}
                         {clips.map(clip => (
-                          <ContextMenu key={clip.id}>
-                            <ContextMenuTrigger asChild>
-                              <div>
-                                <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
-                                  {clip.addedToSongs && clip.addedToSongs.length > 0 && (
-                                    <div className="flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]">
-                                      {clip.addedToSongs.map((a, i) => (
-                                        <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
-                                          {a.songName}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-                                </WaveformPlayerCard>
-                              </div>
-                            </ContextMenuTrigger>
-                            <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
-                              <ContextMenuItem
-                                onClick={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
-                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-                              >
-                                <Info size={13} className="text-white/50" /> More Info
-                              </ContextMenuItem>
-                              <ContextMenuItem
-                                onClick={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
-                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-                              >
-                                <MessageSquare size={13} className="text-white/50" /> Add Note
-                              </ContextMenuItem>
-                              {selectedFile?.type !== 'idea' && (
-                                <ContextMenuItem
-                                  onClick={() => markFinalMutation.mutate(clip.id)}
-                                  disabled={clip.isFinal}
-                                  className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
-                                >
-                                  <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
-                                  {clip.isFinal ? 'Already Final' : 'Mark as Final'}
-                                </ContextMenuItem>
-                              )}
-                              <ContextMenuItem
-                                onClick={() => setAddToSongClip(clip)}
-                                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-                              >
-                                <Share2 size={13} className="text-white/50" /> Add to Song
-                              </ContextMenuItem>
-                              <ContextMenuSeparator className="bg-white/5" />
-                              <ContextMenuItem
-                                onClick={() => {
-                                  setPromoteClip(clip);
-                                  setPromoteSongName(clip.name.replace(/\.[^.]+$/, ''));
-                                  setPromoteInstrument(settings?.defaultInstruments?.[0] ?? DEFAULT_INSTRUMENTS[0]);
-                                  setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
-                                }}
-                                className="text-xs text-primary/80 focus:bg-white/8 focus:text-primary cursor-pointer flex items-center gap-2"
-                              >
-                                <Sparkles size={13} className="text-primary/50" /> Promote to Song
-                              </ContextMenuItem>
-                            </ContextMenuContent>
-                          </ContextMenu>
+                          <IdeaFileContextMenu
+                            key={clip.id}
+                            onMoreInfo={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
+                            onAddNote={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
+                            onAddToSong={() => setAddToSongClip(clip)}
+                            onPromoteToSong={() => {
+                              setPromoteClip(clip);
+                              setPromoteSongName(clip.name.replace(/\.[^.]+$/, ''));
+                              setPromoteInstrument(settings?.defaultInstruments?.[0] ?? DEFAULT_INSTRUMENTS[0]);
+                              setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
+                            }}
+                          >
+                            <div>
+                              <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+                                {clip.addedToSongs && clip.addedToSongs.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]">
+                                    {clip.addedToSongs.map((a, i) => (
+                                      <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
+                                        {a.songName}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                              </WaveformPlayerCard>
+                            </div>
+                          </IdeaFileContextMenu>
                         ))}
                       </>
                     );
