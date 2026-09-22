@@ -247,6 +247,21 @@ useEffect(() => {
 
 The `useEffect` must come after the `tasks` query declaration in the component body — placing it before causes a `"Cannot access uninitialized variable"` runtime error due to JavaScript's temporal dead zone for `const`.
 
+### Add to Song (Ideas file browser) — ✅ Built
+
+Right-clicking a clip in the IDEAS mode FILES column shows **"Add to Song"** (gold `Share2` icon). Copies the clip's audio into a chosen instrument + section of an existing song — a genuine copy (new `clips` row, re-uploaded file, `isFinal: false` always), never a live link back to the source.
+
+**Modal state (in `Dashboard.tsx`):** `addToSongClip: ApiClip | null`, `destSongId`/`destInstrumentId`/`destSectionId`, `isAddingToSong`, `addToSongDuplicateError`.
+
+**`handleAddToSong` — sequential async steps:**
+1. Duplicate check — rejects if the destination idea already has a clip whose `metadata.originalFileName` matches the source's.
+2. `fetch(addToSongClip.src)` → re-uploads via `POST /api/upload` with the destination's `instrument`/`section`/`ideaId`.
+3. `POST /api/ideas/:destIdeaId/clips` — creates the clip record at the destination. Clip name follows the Songs convention: `"{track} {section} V{n}"`.
+4. `PATCH /api/clips/:sourceClipId { addedToSongs: [...] }` — stamps the source clip so its "already added" gold pill shows up without a refetch; also updates `selectedInstrument` local state immediately. **Skipped for a loose-file source** — see "Loose-file source support" below.
+5. Invalidates `['bucket', sourceFileId]`, `['bucket', destSongId]`, `['songs']`, `['activity']`; closes the modal.
+
+**No backend changes** — reuses `/api/upload`, `/api/ideas/:id/clips`, and `/api/clips/:id`.
+
 ### Promote to Song (Ideas file browser) — ✅ Built
 
 Right-clicking a clip in the IDEAS mode FILES column shows **"Promote to Song"** (gold `Sparkles` icon, separated from "Add to Song" by a `ContextMenuSeparator`). This creates a brand-new song from the clip and places a copy of the audio in a chosen instrument + section of that new song.
@@ -272,11 +287,19 @@ const [isPromoting, setIsPromoting] = useState(false);
 2. `GET /api/songs/:newSongId/bucket` — fetches the freshly seeded bucket to resolve real `trackId`/`ideaId` for the selected instrument + section name.
 3. `fetch(promoteClip.src)` → re-uploads the audio via `POST /api/upload` with the correct `instrument`, `section`, `ideaId`.
 4. `POST /api/ideas/:ideaId/clips` — creates the clip record in the new song's bucket. Clip name follows the Songs convention: `"{instrument} {section} V1"`. Metadata is copied from the upload response.
-5. `PATCH /api/clips/:sourceClipId { addedToSongs: [...] }` — stamps the source clip with `{ songId, songName, instrument, section }` so a gold pill badge appears on the original clip without waiting for a refetch. Also calls `setSelectedInstrument(prev => ...)` for immediate local state update.
+5. `PATCH /api/clips/:sourceClipId { addedToSongs: [...] }` — stamps the source clip with `{ songId, songName, instrument, section }` so a gold pill badge appears on the original clip without waiting for a refetch. Also calls `setSelectedInstrument(prev => ...)` for immediate local state update. **Skipped for a loose-file source** — see "Loose-file source support" below.
 6. Invalidates `['bucket', sourceFileId]` and `['songs']`.
 7. `closePromoteModal()` then shows a toast: `"Promoted to {songName} — {instrument} · {section}"` with an **"Open Workspace →"** `ToastAction` that navigates to `/songs/:newSongId/workspace?instrument=...&section=...`.
 
 **No backend changes** — reuses `/api/songs`, `/api/songs/:id/bucket`, `/api/upload`, `/api/ideas/:id/clips`, and `/api/clips/:id`.
+
+### Loose-file source support (Sept 2026, loose-file delete rollout) — ✅ Built
+
+Both Add to Song and Promote to Song now also work from the Ideas-shelf's one-off loose-file preview card, not just an organized clip — triggered from the same shared `IdeaFileContextMenu` component (`Dashboard.tsx`; see the "Idea Shelf" entry in root `CLAUDE.md`'s "On the horizon" for the menu-level context, including why More Info/Add Note are disabled there).
+
+**`looseFileAsApiClip(lf: ApiLooseFile): ApiClip`** — a small adapter that converts the loose file into the exact `ApiClip` shape both `handleAddToSong` and `handlePromoteToSong` already consume (`id`, `name`, `type`, `color`, `duration`, `src`, `metadata`; `ideaId`/`sectionName` set to meaningless placeholders since neither flow reads them, `addedToSongs` omitted). This works cleanly because both flows only ever read `src`/`name`/`metadata`/`duration`/`id` off the source object to perform the actual copy (fetch the file → re-upload → create a new `clips` row at the destination) — none of that requires the source to already be backed by a real `clips` row, so the copy itself runs completely unmodified for a loose-file source.
+
+**The one real difference — the trailing "mark source as added" PATCH is skipped for a loose source.** Step 4 of Add to Song and step 5 of Promote to Song both PATCH the *source's own* `clips` row afterward (`addedToSongs`) so its "already added" pill shows up later. A loose file has no `clips` row for that PATCH to target — before this fix it would have silently 404'd (both call sites already tolerated a failed PATCH without throwing, so nothing broke, but a doomed network call on every use is bad practice). Fixed by two boolean flags, `addToSongSourceIsLoose`/`promoteSourceIsLoose` (set alongside `setAddToSongClip`/`setPromoteClip` at the loose-file call sites, reset in `closeAddToSongModal`/`closePromoteModal`), that skip the PATCH block entirely when the source is a loose file. Net effect: the copy is byte-for-byte identical either way; a loose-file source is simply left with no "added to song" history afterward, which is invisible anyway since the preview card doesn't render that badge. Both flows remain copies, not moves, exactly as for an organized clip — the loose file itself is untouched and stays exactly where it was (unassigned, or scoped to its Idea) after being added/promoted.
 
 ---
 
