@@ -1745,6 +1745,45 @@ export async function registerRoutes(
     res.status(201).json(looseFile);
   });
 
+  /**
+   * GET /api/tracks/:trackId/loose-files — list loose files resting in the
+   * Track-scoped tier for this track (dragged off the Tracks column onto this
+   * Track row, not yet organized into a section). Rendered in MediaBucket's
+   * Sections column, sorted below the Section list.
+   */
+  app.get("/api/tracks/:trackId/loose-files", requireBand, async (req, res) => {
+    const trackId = req.params.trackId as string;
+    const songId = trackSongId(trackId);
+    if (!songId || !assertSongOwned(req, res, songId)) return;
+    const files = await storage.getLooseFilesByTrack(trackId);
+    res.json(files);
+  });
+
+  /**
+   * POST /api/loose-files/:id/assign-track — move a song-scoped loose file into
+   * the Track-scoped resting tier (drag onto a Track row, not a Section row).
+   * Does not materialize anything — the row stays in loose_files with trackId now
+   * set, and stops appearing in the Tracks column (see storage.getLooseFilesBySong).
+   * Two-ID route: the loose file's own songId and the destination track's songId
+   * are asserted independently, same pattern as organize/place-on-timeline.
+   */
+  app.post("/api/loose-files/:id/assign-track", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+
+    const { trackId } = req.body as { trackId?: string };
+    if (!trackId) {
+      return res.status(400).json({ message: "trackId is required." });
+    }
+    const destSongId = trackSongId(trackId);
+    if (!destSongId || !assertSongOwned(req, res, destSongId)) return;
+
+    const updated = await storage.assignLooseFileTrack(looseFileId, trackId);
+    res.json(updated);
+  });
+
   // ─── Loose Files (band-wide, unassigned) ──────────────────────────────────────
   // Ideas shelf Column 1's "Upload Files" — never scoped to whichever Idea happens
   // to be selected. songId is null; bandId is resolved server-side from the

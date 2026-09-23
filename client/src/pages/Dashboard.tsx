@@ -799,8 +799,36 @@ export default function Dashboard() {
   // DndContext (unavoidable — they're different render trees) but sources
   // sensors/onDragStart/onDragEnd/collisionDetection from here instead of
   // reimplementing them. See use-loose-file-organize-dnd.ts.
+  // Auto-select the destination after a drag-driven organize, matching every other
+  // creation action's auto-select (Add Instrument, Add Section, new Idea, ...).
+  // assign-track never fires on this surface (no Track-row droppable exists in
+  // either the Songs quick-browser or the Ideas shelf), so only 'organize' is
+  // handled — the branch is guarded defensively rather than assumed away.
   const looseFileOrganizeDnd = useLooseFileOrganizeDnd(selectedFile?.id, {
     onError: (msg) => console.error('[organizeLooseFile] error:', msg),
+    onOrganized: (dest) => {
+      if (dest.action !== 'organize') return;
+      if (filesFilter === 'ideas') {
+        // Ideas are flat (one hidden track/section per idea) — the destination
+        // that actually needs selecting is the idea itself, not selectedInstrument/
+        // selectedSection (those auto-derive from selectedFile once its bucket
+        // loads — see the fileBucket effect above). Resolve which idea-type song
+        // owns this trackId from the already-loaded songs list.
+        const idea = songs.find(s => s.type === 'idea' && s.defaultTrackId === dest.trackId);
+        if (idea) {
+          setSelectedFile(idea);
+          setSelectedInstrument(null);
+          setSelectedSection(null);
+          setPreviewLooseFile(null);
+        }
+      } else {
+        // Songs quick-browser: same pendingInstrumentIdRef/pendingSectionNameRef
+        // mechanism Add Instrument/Add Section already use, picked up by the
+        // fileBucket effect once the organize's own invalidation refetches it.
+        pendingInstrumentIdRef.current = dest.trackId;
+        pendingSectionNameRef.current = dest.sectionName;
+      }
+    },
   });
 
   const { data: destBucket = [] } = useQuery<ApiTrack[]>({
@@ -851,6 +879,14 @@ export default function Dashboard() {
         if (pendingSectionIdRef.current) {
           const idea = found.ideas.find(i => i.id === pendingSectionIdRef.current);
           pendingSectionIdRef.current = null;
+          setSelectedSection(idea ?? null);
+        } else if (pendingSectionNameRef.current) {
+          // Organize's destination is a (trackId, sectionName) pair, not an idea
+          // id — resolve by name within the now-resolved track. Only reached when
+          // pendingSectionIdRef wasn't set, so this doesn't change behavior for the
+          // Add Section flow below (which always sets an id).
+          const idea = found.ideas.find(i => i.sectionName === pendingSectionNameRef.current);
+          pendingSectionNameRef.current = null;
           setSelectedSection(idea ?? null);
         } else {
           setSelectedSection(null);

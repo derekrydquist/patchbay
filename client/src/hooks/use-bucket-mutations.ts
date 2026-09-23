@@ -1,14 +1,18 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  type ApiIdea, type ApiTrack, type ApiClip, type ApiTimelineClip,
+  type ApiIdea, type ApiTrack, type ApiClip, type ApiTimelineClip, type ApiLooseFile,
   bucketKeys, looseFileKeys,
 } from '@/lib/bucket-api';
 
 // Shared by organize/place-on-timeline: invalidate the same set the loose-file
 // upload flow also invalidates, so all three actions keep every surface in sync.
+// `trackId` is optional and only relevant when the organized/placed file had
+// moved through the Track-scoped resting tier — passing it drops the file from
+// that Track's Sections-column list too (harmless no-op invalidation otherwise).
 function invalidateAfterLooseFilePlacement(
   queryClient: ReturnType<typeof useQueryClient>,
-  songId: string | undefined
+  songId: string | undefined,
+  trackId?: string
 ) {
   queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
   queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
@@ -16,6 +20,9 @@ function invalidateAfterLooseFilePlacement(
   // from the band-wide unassigned list (Ideas shelf Column 1), which needs to
   // drop it the same way a song-scoped list drops an organized file.
   queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
+  if (trackId) {
+    queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(trackId) });
+  }
   queryClient.invalidateQueries({ queryKey: ['activity'] });
   queryClient.invalidateQueries({ queryKey: ['songs'] });
   queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
@@ -245,9 +252,56 @@ export function useOrganizeLooseFile(
       }
       return res.json() as Promise<ApiClip>;
     },
-    onSuccess: (clip) => {
-      invalidateAfterLooseFilePlacement(queryClient, songId);
+    onSuccess: (clip, vars) => {
+      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId);
       opts?.onSuccess?.(clip);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+// Moves a song-scoped loose file into the Track-scoped resting tier — drag onto a
+// Track row (not a Section row) in the Tracks column. Does not materialize
+// anything; the file simply moves from the Tracks-column list to that Track's
+// own Sections-column list.
+export function useAssignLooseFileTrack(
+  songId: string | undefined,
+  opts?: { onSuccess?: (looseFile: ApiLooseFile) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // originTrackId (null for a plain Tracks-column file) is client-only bookkeeping
+    // for cache invalidation below — the server only needs the destination trackId.
+    mutationFn: async (vars: { looseFileId: string; trackId: string; originTrackId?: string | null }) => {
+      const res = await fetch(`/api/loose-files/${vars.looseFileId}/assign-track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId: vars.trackId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to move file to track' }));
+        throw new Error(err.message ?? 'Failed to move file to track');
+      }
+      return res.json() as Promise<ApiLooseFile>;
+    },
+    onSuccess: (looseFile, vars) => {
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.trackId) });
+      // A cross-track move must also clear the ORIGIN track's Sections-column list —
+      // otherwise the view the user just dragged out of keeps showing the file from
+      // its stale cache even though it moved. Only relevant when the origin was a
+      // real (different) track; a plain Tracks-column origin (null) has no
+      // byTrack query to invalidate, and a same-track drop is now unreachable via
+      // the UI (see TrackFolderRow's disabled guard) but is harmless here either way.
+      if (vars.originTrackId && vars.originTrackId !== vars.trackId) {
+        queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.originTrackId) });
+      }
+      // Newly assigning a loose file to a track can flip that track's hasLooseFiles
+      // to true (getBucket computes it fresh from loose_files) — without this, the
+      // Tracks-column folder icon stays outline until a manual reload.
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      opts?.onSuccess?.(looseFile);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
   });
@@ -257,12 +311,14 @@ export function useOrganizeLooseFile(
 // to worry about — see the file-organizer delete audit). `songId` comes from
 // the loose file itself (null for band-wide/unassigned), not an external param,
 // so one hook covers every surface regardless of which list the row lives in.
+// `trackId` is optional — pass it when deleting a file from the Track-scoped
+// Sections-column list so that list is invalidated too.
 export function useDeleteLooseFile(
   opts?: { onSuccess?: () => void; onError?: (message: string) => void }
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { looseFileId: string; songId: string | null }) => {
+    mutationFn: async (vars: { looseFileId: string; songId: string | null; trackId?: string | null }) => {
       const res = await fetch(`/api/loose-files/${vars.looseFileId}`, { method: 'DELETE' });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed to delete file' }));
@@ -272,6 +328,13 @@ export function useDeleteLooseFile(
     onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: looseFileKeys.list(vars.songId ?? undefined) });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
+      if (vars.trackId) {
+        queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.trackId) });
+      }
+      // Deleting a Track-scoped file can flip that track's hasLooseFiles back to
+      // false (getBucket computes it fresh from loose_files) — without this, the
+      // Tracks-column folder icon stays filled until a manual reload.
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId ?? undefined) });
       opts?.onSuccess?.();
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -296,8 +359,8 @@ export function usePlaceLooseFileOnTimeline(
       }
       return res.json() as Promise<{ clip: ApiClip; timelineClip: ApiTimelineClip }>;
     },
-    onSuccess: (result) => {
-      invalidateAfterLooseFilePlacement(queryClient, songId);
+    onSuccess: (result, vars) => {
+      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId);
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       opts?.onSuccess?.(result);
     },

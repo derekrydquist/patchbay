@@ -246,3 +246,15 @@ if (looseFilesSongIdInfo && looseFilesSongIdInfo.nn === 1) {
   sqlite.pragma("foreign_keys = ON");
   console.log("[PatchBay] Migrated loose_files: song_id is now nullable, added band_id column.");
 }
+
+// Add track_id to loose_files if missing — a simple nullable-column addition (unlike
+// the song_id rebuild-and-swap above, which was relaxing a NOT NULL constraint).
+// Set when a song-scoped loose file is dragged onto a specific Track row, so it can
+// rest in that Track's Sections column instead of the Tracks column.
+const hasLooseFilesTrackId = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('loose_files') WHERE name='track_id'"
+).get() as { c: number }).c;
+if (!hasLooseFilesTrackId) {
+  sqlite.exec("ALTER TABLE loose_files ADD COLUMN track_id TEXT REFERENCES instrument_tracks(id)");
+  console.log("[PatchBay] Added track_id column to loose_files table.");
+}

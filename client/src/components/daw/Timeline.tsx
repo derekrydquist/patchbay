@@ -294,7 +294,24 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
-  const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId);
+  // Auto-select the destination after a drag-driven organize/assign-track, matching
+  // every other creation action's auto-select (Add Instrument, Add Section, ...).
+  // MediaBucket owns selectedTrack/selectedIdea internally with no external props
+  // to control it, so this reuses the same `find-in-bucket` CustomEvent the
+  // "Show in File Browser" timeline-clip context menu item already dispatches
+  // (Clip.tsx) rather than inventing new prop plumbing between Timeline and
+  // MediaBucket. Omitting sectionName (assign-track's destination) selects the
+  // track and leaves the section blank, which is correct — assign-track doesn't
+  // specify one.
+  const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId, {
+    onOrganized: (dest) => {
+      window.dispatchEvent(new CustomEvent('find-in-bucket', {
+        detail: dest.action === 'organize'
+          ? { trackId: dest.trackId, sectionName: dest.sectionName }
+          : { trackId: dest.trackId },
+      }));
+    },
+  });
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
     onError: (msg) => console.error('[placeLooseFileOnTimeline] error:', msg),
   });

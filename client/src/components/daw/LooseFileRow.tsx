@@ -54,7 +54,7 @@ interface LooseFileRowProps {
 }
 
 interface LooseFileDeleteMenuProps {
-  looseFile: Pick<ApiLooseFile, 'id'>;
+  looseFile: Pick<ApiLooseFile, 'id' | 'trackId'>;
   songId: string | null;
   onDeleted?: () => void;
   children: ReactNode;
@@ -78,7 +78,7 @@ export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: 
       <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[140px]">
         <ContextMenuItem
           className="text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer text-xs flex items-center gap-2"
-          onClick={() => deleteMutation.mutate({ looseFileId: looseFile.id, songId })}
+          onClick={() => deleteMutation.mutate({ looseFileId: looseFile.id, songId, trackId: looseFile.trackId })}
         >
           <Trash2 size={13} /> Delete
         </ContextMenuItem>
@@ -96,7 +96,11 @@ export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: 
 export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted }: LooseFileRowProps) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `loose-${looseFile.id}`,
-    data: { clip: looseFileToClip(looseFile), type: 'loose-file', songId },
+    // trackId is carried alongside `clip` (not inside it — looseFileToClip's Clip
+    // shape has no such field) so drop targets can tell an already Track-scoped
+    // file apart from a plain Tracks-column one. See TrackFolderRow in
+    // MediaBucket.tsx, which disables itself when this equals its own track.
+    data: { clip: looseFileToClip(looseFile), type: 'loose-file', songId, trackId: looseFile.trackId },
   });
   const style = { transform: CSS.Translate.toString(transform) };
 

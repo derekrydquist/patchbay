@@ -146,6 +146,12 @@ export const looseFiles = sqliteTable("loose_files", {
   // for song-scoped rows, which are scoped via songId -> songs.bandId instead.
   songId: text("song_id").references(() => songs.id, { onDelete: "cascade" }),
   bandId: text("band_id").references(() => bands.id),
+  // Nullable: set once a song-scoped loose file is dragged onto a specific Track row
+  // in MediaBucket's Tracks column (an intermediate "I know the track, not yet the
+  // section" resting state). When set, the file displays only in that Track's
+  // Sections column, not the Tracks column, until it's organized into a real clip
+  // (which clears the loose_files row entirely — see materializeLooseFileCore).
+  trackId: text("track_id").references(() => instrumentTracks.id),
   name: text("name").notNull(),
   type: text("type", { enum: ["audio", "midi", "drums", "vocal", "custom-audio"] }).notNull(),
   color: text("color").notNull(),

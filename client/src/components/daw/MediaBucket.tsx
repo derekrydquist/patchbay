@@ -1,18 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { useDroppable } from '@dnd-kit/core';
+import { useDroppable, useDndContext } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
-  fetchBucket, bucketKeys, fetchLooseFiles, looseFileKeys,
+  fetchBucket, bucketKeys, fetchLooseFiles, fetchTrackLooseFiles, looseFileKeys,
 } from '@/lib/bucket-api';
 import {
   useAddInstrument, useAddSection, useAddFullTake,
   useDeleteTrack, useRestoreTrack,
   useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
-import { bucketSectionDropId, bucketVersionsDropId } from '@/hooks/use-loose-file-organize-dnd';
+import { bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId, bucketSectionsBackgroundDropId } from '@/hooks/use-loose-file-organize-dnd';
 import { BucketClip } from './Clip';
 import { LooseFileRow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -130,6 +130,91 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
   );
 }
 
+// ─── Track row — Tracks column ─────────────────────────────────────────────────
+// Extracted so useDroppable can be called once per row, mirroring SectionFolderRow
+// above. Doubles as the assign-track drop target for a dragged loose file (id from
+// bucketTrackDropId, data carries trackId only — read by the shared
+// use-loose-file-organize-dnd hook's handleDragEnd). Dropping a loose file here
+// moves it into the Track-scoped resting tier (trackId set, no sectionName yet)
+// rather than organizing it into a real clip — see loose_files in root CLAUDE.md.
+
+interface TrackFolderRowProps {
+  track: ApiTrack;
+  isSelected: boolean;
+  onSelect: () => void;
+  onRemove: () => void;
+  buttonRef?: React.RefObject<HTMLButtonElement | null>;
+}
+
+function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef }: TrackFolderRowProps) {
+  // Any content beneath the track counts — an organized clip in any of its ideas,
+  // OR a Track-scoped loose file resting below the Section list (not yet organized
+  // into a clip). See ApiTrack.hasLooseFiles / storage.getBucket.
+  const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
+  const trackHasNew = track.ideas.some(i => i.active && i.hasNew);
+  // Disabled (no highlight, not a valid collision match) when the active drag is a
+  // loose file already scoped to THIS track — re-dropping it on its own row is a
+  // true no-op server-side and was presenting as a silent failure. A plain
+  // Tracks-column file (trackId null) or one scoped to a DIFFERENT track remains a
+  // valid target. See use-loose-file-organize-dnd.ts's handleDragEnd for the
+  // corresponding origin-tracking on the drop side.
+  const { active } = useDndContext();
+  const activeDragData = active?.data.current as { type?: string; trackId?: string | null } | undefined;
+  const isSameTrackDrag = activeDragData?.type === 'loose-file' && activeDragData.trackId === track.id;
+  const { setNodeRef, isOver } = useDroppable({
+    id: bucketTrackDropId(track.id),
+    data: { trackId: track.id },
+    disabled: isSameTrackDrag,
+  });
+  const combinedRef = (node: HTMLButtonElement | null) => {
+    setNodeRef(node);
+    if (buttonRef) (buttonRef as React.MutableRefObject<HTMLButtonElement | null>).current = node;
+  };
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          ref={combinedRef}
+          onClick={onSelect}
+          className={cn(
+            "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
+            isSelected
+              ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
+              : "text-muted-foreground hover:bg-white/5 hover:text-white",
+            // dnd-kit's isOver is pure geometric hover — it doesn't know about
+            // `disabled`, so a disabled droppable can still report isOver: true.
+            // Gate on !isSameTrackDrag too so the highlight agrees with the actual
+            // (already-working) drop-blocking behavior.
+            isOver && !isSameTrackDrag && "bg-primary/10 border-primary/50"
+          )}
+        >
+          <div className="flex items-center gap-2">
+            <Folder
+              size={14}
+              className={isSelected ? "text-primary" : "text-muted-foreground"}
+              fill={hasFiles ? "currentColor" : "none"}
+            />
+            <span className="font-bold tracking-tight">{track.name}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {trackHasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
+            <ChevronRight size={12} className="opacity-40" />
+          </div>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={onRemove}
+        >
+          Remove Track
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 // ─── Props ────────────────────────────────────────────────────────────────────
 
 interface MediaBucketProps {
@@ -189,6 +274,14 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     queryFn: () => fetchLooseFiles(songId),
   });
 
+  // Track-scoped resting tier — files dragged off the Tracks column onto this
+  // specific Track row, not yet organized into a Section. Rendered below the
+  // Section list in Column 2.
+  const { data: trackLooseFiles = [] } = useQuery<ApiLooseFile[]>({
+    queryKey: looseFileKeys.byTrack(selectedTrack?.id),
+    queryFn: () => fetchTrackLooseFiles(selectedTrack!.id),
+    enabled: !!selectedTrack?.id,
+  });
 
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
     queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id),
@@ -502,6 +595,25 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     data: selectedIdea ? { trackId: selectedIdea.trackId, sectionName: selectedIdea.sectionName } : undefined,
   });
 
+  // Sections-column background organize drop target — a second entry point onto the
+  // exact same Track-scoped resting tier as a Track row's own droppable (identical
+  // { trackId } data, routed to the identical assign-track mutation in the shared
+  // hook). Scoped to whichever Track is currently selected, since that's the same
+  // Track whose Section rows/Sections-column list are visible here. Same stable-
+  // suffix-id fix as the Versions column above (not derived from selectedTrack.id) —
+  // deriving it from the selection would re-key the registration on every track
+  // switch and risk a drop silently missing on a freshly-selected track.
+  //
+  // Geometrically nests every Section row inside this same column, so a Section-row
+  // hit must always win over this one — handled in matchOrganizeDropTarget itself
+  // (background matches are remembered but not returned until every other organize
+  // target has been checked), not here.
+  const { setNodeRef: setSectionsBackgroundDroppableRef, isOver: isSectionsBackgroundDropTarget } = useDroppable({
+    id: bucketSectionsBackgroundDropId('media-bucket-sections-column'),
+    disabled: !selectedTrack,
+    data: selectedTrack ? { trackId: selectedTrack.id } : undefined,
+  });
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
@@ -595,47 +707,16 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                     })
                   );
                 })
-                .map(track => {
-                  const hasFiles = track.ideas.some(i => i.clips.length > 0);
-                  const trackHasNew = track.ideas.some(i => i.active && i.hasNew);
-                  return (
-                    <ContextMenu key={track.id}>
-                      <ContextMenuTrigger asChild>
-                        <button
-                          ref={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
-                          onClick={() => { setSelectedTrack(track); setSelectedIdea(null); }}
-                          className={cn(
-                            "w-full flex items-center justify-between p-2 rounded text-xs transition-all",
-                            selectedTrack?.id === track.id
-                              ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
-                              : "text-muted-foreground hover:bg-white/5 hover:text-white"
-                          )}
-                        >
-                          <div className="flex items-center gap-2">
-                            <Folder
-                              size={14}
-                              className={selectedTrack?.id === track.id ? "text-primary" : "text-muted-foreground"}
-                              fill={hasFiles ? "currentColor" : "none"}
-                            />
-                            <span className="font-bold tracking-tight">{track.name}</span>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            {trackHasNew && <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />}
-                            <ChevronRight size={12} className="opacity-40" />
-                          </div>
-                        </button>
-                      </ContextMenuTrigger>
-                      <ContextMenuContent className="bg-popover border-border">
-                        <ContextMenuItem
-                          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-                          onClick={() => deleteTrackMutation.mutate(track.id)}
-                        >
-                          Remove Track
-                        </ContextMenuItem>
-                      </ContextMenuContent>
-                    </ContextMenu>
-                  );
-                })}
+                .map(track => (
+                  <TrackFolderRow
+                    key={track.id}
+                    track={track}
+                    isSelected={selectedTrack?.id === track.id}
+                    onSelect={() => { setSelectedTrack(track); setSelectedIdea(null); }}
+                    onRemove={() => deleteTrackMutation.mutate(track.id)}
+                    buttonRef={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
+                  />
+                ))}
               {looseFiles.map(lf => (
                 <LooseFileRow key={lf.id} looseFile={lf} songId={songId} />
               ))}
@@ -644,7 +725,10 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         </div>
 
         {/* ── Sections column ── */}
-        <div className="w-1/4 flex flex-col bg-black/10">
+        <div
+          ref={setSectionsBackgroundDroppableRef}
+          className={cn('w-1/4 flex flex-col bg-black/10 transition-colors', isSectionsBackgroundDropTarget && 'bg-primary/5')}
+        >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Sections</span>
             <DropdownMenu>
@@ -672,17 +756,27 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
           </div>
           <ScrollArea className="flex-1">
             <div className="p-2 space-y-1">
-              {selectedTrack ? filteredIdeas.map(idea => (
-                <SectionFolderRow
-                  key={idea.id}
-                  idea={idea}
-                  isSelected={selectedIdea?.id === idea.id}
-                  onSelect={() => setSelectedIdea(idea)}
-                  onFileDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
-                  onRemove={() => hideIdeaMutation.mutate(idea.id)}
-                  buttonRef={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
-                />
-              )) : (
+              {selectedTrack ? (
+                <>
+                  {filteredIdeas.map(idea => (
+                    <SectionFolderRow
+                      key={idea.id}
+                      idea={idea}
+                      isSelected={selectedIdea?.id === idea.id}
+                      onSelect={() => setSelectedIdea(idea)}
+                      onFileDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
+                      onRemove={() => hideIdeaMutation.mutate(idea.id)}
+                      buttonRef={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
+                    />
+                  ))}
+                  {/* Track-scoped resting tier — dragged off the Tracks column onto this
+                      Track row, not yet organized into a Section. Always sorted below
+                      the Section list. */}
+                  {trackLooseFiles.map(lf => (
+                    <LooseFileRow key={lf.id} looseFile={lf} songId={songId} />
+                  ))}
+                </>
+              ) : (
                 <div className="h-full flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
                   Select an instrument to view sections
                 </div>

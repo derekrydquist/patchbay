@@ -2132,8 +2132,19 @@ export default function SongHome() {
   // itself already implements the loose-files list, the loose-mode Upload entry point,
   // and both the Section-row and Versions-column droppables — nothing else to build here
   // beyond wiring sensors/collisionDetection/handlers into the DndContext below.
+  // Auto-select the destination after a drag-driven organize/assign-track — same
+  // `find-in-bucket` mechanism Timeline.tsx/Workspace uses, since MediaBucket
+  // (mounted below, unmodified) owns its own selection state with no external
+  // props to set it directly.
   const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId, {
     onError: (msg) => console.error('[organizeLooseFile] error:', msg),
+    onOrganized: (dest) => {
+      window.dispatchEvent(new CustomEvent('find-in-bucket', {
+        detail: dest.action === 'organize'
+          ? { trackId: dest.trackId, sectionName: dest.sectionName }
+          : { trackId: dest.trackId },
+      }));
+    },
   });
 
   const { data: song } = useQuery<Song>({

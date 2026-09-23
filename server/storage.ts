@@ -101,6 +101,12 @@ export type TrackWithTimelineClips = InstrumentTrack & { timelineClips: Timeline
 /** The shape returned by GET /api/songs/:id/bucket */
 export type BucketTrack = InstrumentTrack & {
   ideas: (Idea & { clips: Clip[]; hasNew: boolean })[];
+  // True if this track has any content at all beneath it — an organized clip in
+  // any of its ideas, OR a Track-scoped loose file resting in loose_files (trackId
+  // set, not yet organized into a Section). Drives the Tracks-column folder icon's
+  // filled-vs-outline state; a track with only loose files still counts as "has
+  // content" even though `ideas[].clips` alone would be empty.
+  hasLooseFiles: boolean;
 };
 
 // ─── Interface ────────────────────────────────────────────────────────────────
@@ -199,6 +205,8 @@ export interface IStorage {
   createLooseFile(data: InsertLooseFile): Promise<LooseFile>;
   getLooseFilesBySong(songId: string): Promise<LooseFile[]>;
   getLooseFilesByBand(bandId: string): Promise<LooseFile[]>;
+  getLooseFilesByTrack(trackId: string): Promise<LooseFile[]>;
+  assignLooseFileTrack(id: string, trackId: string): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
@@ -637,8 +645,20 @@ export class SQLiteStorage implements IStorage {
       for (const row of viewRows) viewMap.set(row.ideaId, row.viewedAt);
     }
 
+    // Track-scoped loose files (trackId set, resting below the Section list — see
+    // loose_files in root CLAUDE.md) count toward "this track has content" for the
+    // Tracks-column folder icon, same as an organized clip does.
+    const trackIdsWithLooseFiles = new Set(
+      db.select({ trackId: looseFiles.trackId })
+        .from(looseFiles)
+        .where(inArray(looseFiles.trackId, tracks.map((t) => t.id)))
+        .all()
+        .map((row) => row.trackId)
+    );
+
     return tracks.map((track) => ({
       ...track,
+      hasLooseFiles: trackIdsWithLooseFiles.has(track.id),
       ideas: allIdeas
         .filter((idea) => idea.trackId === track.id)
         .map((idea) => {
@@ -976,6 +996,7 @@ export class SQLiteStorage implements IStorage {
     const looseFile: LooseFile = {
       songId: null,
       bandId: null,
+      trackId: null,
       src: null,
       metadata: null,
       uploadedBy: null,
@@ -987,8 +1008,12 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(looseFiles).where(eq(looseFiles.id, looseFile.id)).get()!;
   }
 
+  // Excludes files that have moved to the Track-scoped tier (trackId set) — those
+  // display only in that Track's Sections column now, via getLooseFilesByTrack.
   async getLooseFilesBySong(songId: string): Promise<LooseFile[]> {
-    return db.select().from(looseFiles).where(eq(looseFiles.songId, songId)).orderBy(asc(looseFiles.name)).all();
+    return db.select().from(looseFiles)
+      .where(and(eq(looseFiles.songId, songId), isNull(looseFiles.trackId)))
+      .orderBy(asc(looseFiles.name)).all();
   }
 
   // Band-wide, unassigned loose files (songId IS NULL) — Ideas shelf Column 1's
@@ -997,6 +1022,23 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(looseFiles)
       .where(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)))
       .orderBy(asc(looseFiles.name)).all();
+  }
+
+  // Track-scoped loose files — the "I know the track, not yet the section" resting
+  // state. Rendered in that Track's own Sections column, sorted below the Section
+  // list, until organized into a real clip (which clears the row entirely).
+  async getLooseFilesByTrack(trackId: string): Promise<LooseFile[]> {
+    return db.select().from(looseFiles)
+      .where(eq(looseFiles.trackId, trackId))
+      .orderBy(asc(looseFiles.name)).all();
+  }
+
+  // Moves a song-scoped loose file into the Track-scoped tier — drag onto a Track
+  // row (not a Section row) in MediaBucket's Tracks column. Does not materialize
+  // anything; the row stays in loose_files, just with trackId now set.
+  async assignLooseFileTrack(id: string, trackId: string): Promise<LooseFile> {
+    db.update(looseFiles).set({ trackId }).where(eq(looseFiles.id, id)).run();
+    return db.select().from(looseFiles).where(eq(looseFiles.id, id)).get()!;
   }
 
   async getLooseFile(id: string): Promise<LooseFile | undefined> {
