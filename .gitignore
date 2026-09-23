@@ -14,3 +14,4 @@ server/db.sqlite
 .local/
 patchbay.db
 .claude/settings.local.json
+server-crash.log

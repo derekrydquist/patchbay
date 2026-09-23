@@ -12,6 +12,28 @@ import { BetterSqlite3Store } from "./session-store";
 const app = express();
 const httpServer = createServer(app);
 
+// Crash diagnostics — logged here because console output from a
+// backgrounded `npm run dev` vanishes once the terminal/session that
+// launched it closes, leaving no record of why the server went down.
+const crashLogPath = path.resolve("server-crash.log");
+function logCrash(kind: string, err: unknown) {
+  const line = `[${new Date().toISOString()}] ${kind}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`;
+  console.error(line);
+  try {
+    fs.appendFileSync(crashLogPath, line);
+  } catch {
+    // best effort — don't let logging failures mask the original error
+  }
+}
+
+// A true uncaught exception leaves process state unverifiable, so exit
+// after logging rather than limping on — but now there's a record of what
+// happened for next time.
+process.on("uncaughtException", (err) => {
+  logCrash("uncaughtException", err);
+  process.exit(1);
+});
+
 declare module "http" {
   interface IncomingMessage {
     rawBody: unknown;
