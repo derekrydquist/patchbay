@@ -427,7 +427,9 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 - Duration display (shows total duration when stopped, current position when playing); shifts left (`mr-4`) when `isFinal` so it clears the corner badge
 - Waveform canvas: decoded once via `AudioContext.decodeAudioData`, drawn with gold playhead progress
 
-**Drag compatibility:** `BucketClip` wraps `WaveformPlayerCard` with `ContextMenuTrigger asChild` on the dnd-kit drag div. The play button and canvas both call `e.stopPropagation()` on `onPointerDown` so they do not accidentally activate drag. Right-click anywhere opens the context menu normally via `ContextMenu`.
+**Drag compatibility:** `BucketClip` wraps `WaveformPlayerCard` with `ContextMenuTrigger asChild` on the dnd-kit drag div. The play button and canvas both call `e.stopPropagation()` on `onPointerDown`, gated to the left button only (`e.button !== 2`), so they do not accidentally activate drag without also swallowing right-click's dismiss signal to other open menus — see "Platform and browser gotchas" below. Right-click anywhere opens the context menu normally via `ContextMenu`.
+
+**Reopening on a second right-click of the same trigger** — Radix's `ContextMenu` doesn't natively support re-firing when the same trigger is right-clicked again while its own menu is already open. Fixed via `use-reopenable-context-menu.ts` (a nonce-driven `key` remount on `ContextMenuContent`) paired with `modal={false}` on the `ContextMenu` root; wired into `BucketClip`, `IdeaFileContextMenu`, and `SongsClipContextMenuCard` (all in `Dashboard.tsx`/`Clip.tsx`). See "Platform and browser gotchas" below for why.
 
 **Context menu items (BucketClip):** More Info · Add Note · Mark as Final / Unmark Final · Add to Timeline · Download · **Remove** (red). Remove calls `PATCH /api/clips/:clipId { active: false }` (soft-delete) and invalidates `['bucket', songId]`. The `clips` table has an `active` column (boolean, default true); `getBucket` in `storage.ts` filters `eq(clips.active, true)`.
 
@@ -1019,6 +1021,11 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 - **Key architectural conflict:** `recalcAllStarts` recomputes every un-offset clip's `start` from scratch on every call. Trimming a clip triggers a recalc that immediately re-closes any gap the trim created — there is never a moment where trimmed space persists long enough to drag another clip into it. Any future free-position attempt must resolve this first: decide whether trim should stop triggering a section-wide recalc (leaving sibling `start` values untouched).
 - **Clamping gap:** the first wall-clamp implementation only checked section outer edges, not actual sibling clip positions, allowing real clip-to-clip overlap. Clamping must bound against per-drag sibling positions looked up from current track state.
 - **Investigation discipline:** this session required multiple compactions during a single "read and understand" prompt. Split future attempts into: (1) a no-changes trace prompt to confirm recalc behavior at specific file/line granularity, (2) a scoped implementation prompt referencing those findings. Avoid broad "read and understand the whole system" asks in one shot.
+
+## Platform and browser gotchas
+
+- A `stopPropagation()` added to block dnd-kit drag-on-click must gate to the left button only (`e.button !== 2`) — otherwise it silently blocks other open context menus from dismissing on right-click.
+- dnd-kit's `tabIndex={0}` side effect + Radix returning focus on Escape causes a stray focus-visible outline unless the trigger has `focus-visible:outline-none` (same fix as `TimelineClip`, now also on `BucketClip`).
 
 ---
 
