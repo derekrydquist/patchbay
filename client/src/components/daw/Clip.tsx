@@ -10,6 +10,7 @@ import { bucketKeys } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
+import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
 import {
   ContextMenu,
@@ -1769,6 +1770,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   const [location] = useLocation();
   const [isHighlighted, setIsHighlighted] = useState(false);
   const queryClient = useQueryClient();
+  const contextMenu = useReopenableContextMenu();
 
   const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
     queryKey: ['clip-comment-summary', songId],
@@ -1862,14 +1864,15 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
 
   return (
     <>
-      <ContextMenu>
+      <ContextMenu modal={false}>
         <ContextMenuTrigger asChild>
           <div
             ref={setNodeRef}
             style={style}
             {...listeners}
             {...attributes}
-            className="select-none touch-none cursor-grab active:cursor-grabbing"
+            onContextMenuCapture={contextMenu.onContextMenuCapture}
+            className="select-none touch-none cursor-grab active:cursor-grabbing focus-visible:outline-none"
           >
             <WaveformPlayerCard
               src={clip.src}
@@ -1893,7 +1896,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
             </WaveformPlayerCard>
           </div>
         </ContextMenuTrigger>
-        <ContextMenuContent className="bg-popover border-border min-w-[160px]">
+        <ContextMenuContent key={contextMenu.nonce} className="bg-popover border-border min-w-[160px]">
           <ContextMenuItem onClick={() => setShowInfo(true)} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Info size={14} className="text-primary" /> More Info
           </ContextMenuItem>

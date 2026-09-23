@@ -137,7 +137,7 @@ export function WaveformPlayerCard({
       {isFinal && <CornerBadge variant="final" corner="top-right" />}
       <div className="flex items-center gap-2 px-2.5 py-1.5">
         <button
-          onPointerDown={e => e.stopPropagation()}
+          onPointerDown={e => { if (e.button !== 2) e.stopPropagation(); }}
           onClick={toggle}
           className="relative z-10 w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 hover:bg-primary/30 transition-colors"
         >
@@ -160,7 +160,7 @@ export function WaveformPlayerCard({
             ref={canvasRef}
             className="w-full rounded relative z-10 cursor-pointer"
             style={{ height: waveformHeight }}
-            onPointerDown={e => e.stopPropagation()}
+            onPointerDown={e => { if (e.button !== 2) e.stopPropagation(); }}
             onClick={handleCanvasClick}
           />
         </div>

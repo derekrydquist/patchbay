@@ -5,6 +5,7 @@ import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
+import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { cn } from '@/lib/utils';
 import {
   Dialog,
@@ -306,10 +307,14 @@ interface IdeaFileContextMenuProps {
 function IdeaFileContextMenu({
   children, onMoreInfo, onAddNote, infoDisabled, onAddToSong, onPromoteToSong, onDelete,
 }: IdeaFileContextMenuProps) {
+  const contextMenu = useReopenableContextMenu();
+  const trigger = React.isValidElement(children)
+    ? React.cloneElement(children, { onContextMenuCapture: contextMenu.onContextMenuCapture } as any)
+    : children;
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+    <ContextMenu modal={false}>
+      <ContextMenuTrigger asChild>{trigger}</ContextMenuTrigger>
+      <ContextMenuContent key={contextMenu.nonce} className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
         <ContextMenuItem
           onClick={onMoreInfo}
           disabled={infoDisabled}
@@ -348,6 +353,51 @@ function IdeaFileContextMenu({
             </ContextMenuItem>
           </>
         )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+// Extracted out of the Songs-mode VERSIONS column's clips.map so the reopen
+// hook below can be called per-card, not once for the whole list (hooks
+// can't be called inside a .map callback).
+interface SongsClipContextMenuCardProps {
+  clip: ApiClip;
+  onMoreInfo: () => void;
+  onAddNote: () => void;
+  onMarkFinal: () => void;
+}
+
+function SongsClipContextMenuCard({ clip, onMoreInfo, onAddNote, onMarkFinal }: SongsClipContextMenuCardProps) {
+  const contextMenu = useReopenableContextMenu();
+  return (
+    <ContextMenu modal={false}>
+      <ContextMenuTrigger asChild>
+        <div onContextMenuCapture={contextMenu.onContextMenuCapture}>
+          <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} />
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent key={contextMenu.nonce} className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+        <ContextMenuItem
+          onClick={onMoreInfo}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+        >
+          <Info size={13} className="text-white/50" /> More Info
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={onAddNote}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+        >
+          <MessageSquare size={13} className="text-white/50" /> Add Note
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={onMarkFinal}
+          disabled={clip.isFinal}
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
+        >
+          <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
+          {clip.isFinal ? 'Already Final' : 'Mark as Final'}
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -2298,33 +2348,13 @@ export default function Dashboard() {
                         </div>
                       )}
                       {selectedSection.clips.map(clip => (
-                        <ContextMenu key={clip.id}>
-                          <ContextMenuTrigger asChild>
-                            <div><WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} /></div>
-                          </ContextMenuTrigger>
-                          <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
-                            <ContextMenuItem
-                              onClick={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
-                              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-                            >
-                              <Info size={13} className="text-white/50" /> More Info
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onClick={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
-                              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-                            >
-                              <MessageSquare size={13} className="text-white/50" /> Add Note
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onClick={() => markFinalMutation.mutate(clip.id)}
-                              disabled={clip.isFinal}
-                              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40"
-                            >
-                              <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
-                              {clip.isFinal ? 'Already Final' : 'Mark as Final'}
-                            </ContextMenuItem>
-                          </ContextMenuContent>
-                        </ContextMenu>
+                        <SongsClipContextMenuCard
+                          key={clip.id}
+                          clip={clip}
+                          onMoreInfo={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
+                          onAddNote={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
+                          onMarkFinal={() => markFinalMutation.mutate(clip.id)}
+                        />
                       ))}
                     </>
                   )}
