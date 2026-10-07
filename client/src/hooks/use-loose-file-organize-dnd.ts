@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import {
   useSensor,
   useSensors,
+  useDndMonitor,
   PointerSensor,
   MouseSensor,
   TouchSensor,
@@ -14,7 +15,7 @@ import {
   type UniqueIdentifier,
 } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
-import { useOrganizeLooseFile, useAssignLooseFileTrack } from '@/hooks/use-bucket-mutations';
+import { useOrganizeLooseFile, useAssignLooseFileTrack, useUnassignLooseFileTrack } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
 
 // Shared drag/organize interaction for loose files — a song-scoped upload with no
@@ -43,6 +44,13 @@ export const BUCKET_TRACK_DROP_PREFIX = 'bucket-track||';
 // so it needs lower priority than any other organize target — see the background-
 // match handling in matchOrganizeDropTarget below.
 export const BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX = 'bucket-sections-bg||';
+// The Tracks column's own open background — the reverse of a Track-row drop. Drop
+// a Track-scoped loose file here to clear its trackId and return it to the plain
+// song-scoped shelf in the Tracks column. Only enabled while the active drag is a
+// Track-scoped loose file (see MediaBucket). Nests every Track row the same way the
+// Sections background nests every Section row, so it gets the same fallback-only
+// priority in matchOrganizeDropTarget.
+export const BUCKET_TRACKS_BACKGROUND_DROP_PREFIX = 'bucket-tracks-bg||';
 
 export function bucketSectionDropId(ideaId: string): string {
   return `${BUCKET_SECTION_DROP_PREFIX}${ideaId}`;
@@ -60,13 +68,25 @@ export function bucketSectionsBackgroundDropId(suffix: string): string {
   return `${BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX}${suffix}`;
 }
 
+export function bucketTracksBackgroundDropId(suffix: string): string {
+  return `${BUCKET_TRACKS_BACKGROUND_DROP_PREFIX}${suffix}`;
+}
+
+// Column-background targets that geometrically contain other organize targets —
+// matched only as a fallback (see matchOrganizeDropTarget).
+function isBackgroundDropId(id: UniqueIdentifier): boolean {
+  const s = String(id);
+  return s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) || s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX);
+}
+
 export function isBucketOrganizeDropId(id: string | number): boolean {
   const s = String(id);
   return (
     s.startsWith(BUCKET_SECTION_DROP_PREFIX) ||
     s.startsWith(BUCKET_VERSIONS_DROP_PREFIX) ||
     s.startsWith(BUCKET_TRACK_DROP_PREFIX) ||
-    s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX)
+    s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) ||
+    s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX)
   );
 }
 
@@ -78,14 +98,22 @@ export function isBucketOrganizeDropId(id: string | number): boolean {
 // cached rect (see bucketVersionsDropId's stable-id fix — the bug this specifically
 // guards against).
 //
-// The Sections-column background (BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) is the one
-// prefix that geometrically CONTAINS another organize target (a Section row sits
-// inside it) — every other prefix pair occupies disjoint screen regions, so simple
+// The two column backgrounds (Sections: BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX,
+// Tracks: BUCKET_TRACKS_BACKGROUND_DROP_PREFIX) are the prefixes that geometrically
+// CONTAIN another organize target (a Section row / Track row sits inside them) —
+// every other prefix pair occupies disjoint screen regions, so simple
 // first-match-wins was safe for them. A background hit is remembered but not
 // returned immediately; the loop keeps looking for a more specific match (Section
 // row, Versions column, or Track row) and only falls back to the background if
 // nothing more specific matched anywhere in the full pass. This makes the priority
 // explicit rather than relying on dnd-kit's incidental container registration order.
+// The two backgrounds are different columns and never overlap each other, so
+// remembering whichever one matched is unambiguous.
+//
+// dnd-kit only passes ENABLED droppables to collision detection — which is why a
+// Track row stays enabled even for a drag of a file already scoped to it: a
+// disabled row would be invisible here and the drop would fall through to the
+// Tracks background (un-assign). handleDragEnd turns that own-row hit into a cancel.
 export function matchOrganizeDropTarget(
   droppableContainers: DroppableContainer[],
   droppableRects: Map<UniqueIdentifier, ClientRect>,
@@ -98,7 +126,7 @@ export function matchOrganizeDropTarget(
     const rect = container.node.current?.getBoundingClientRect() ?? droppableRects.get(container.id);
     if (!rect) continue;
     if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
-      if (String(container.id).startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX)) {
+      if (isBackgroundDropId(container.id)) {
         backgroundMatch = { id: container.id };
         continue;
       }
@@ -138,7 +166,30 @@ export function useLooseFileOrganizeSensors() {
 // into the Track-scoped resting tier (trackId alone, no section yet).
 export type OrganizeDestination =
   | { action: 'organize'; trackId: string; sectionName: string }
-  | { action: 'assign-track'; trackId: string };
+  | { action: 'assign-track'; trackId: string }
+  | { action: 'unassign-track'; originTrackId: string };
+
+// Narrow view of the active drag for droppables that only need to know "is a loose
+// file being dragged, and which Track (if any) is it scoped to?". Returns null when
+// no loose-file drag is active, otherwise { trackId } (null trackId = a plain
+// Tracks-column file). Uses useDndMonitor (drag start/end/cancel events only)
+// instead of useDndContext, whose value changes on every pointer move during a drag
+// and re-renders every consumer each frame. Must be called inside a DndContext.
+export function useActiveLooseFileDrag(): { trackId: string | null } | null {
+  const [drag, setDrag] = useState<{ trackId: string | null } | null>(null);
+  // Memoized so useDndMonitor's effect (keyed on the listener object) doesn't
+  // unsubscribe/resubscribe on every render.
+  const listener = useMemo(() => ({
+    onDragStart: ({ active }: DragStartEvent) => {
+      const data = active.data.current as { type?: string; trackId?: string | null } | undefined;
+      setDrag(data?.type === 'loose-file' ? { trackId: data.trackId ?? null } : null);
+    },
+    onDragEnd: () => setDrag(null),
+    onDragCancel: () => setDrag(null),
+  }), []);
+  useDndMonitor(listener);
+  return drag;
+}
 
 interface UseLooseFileOrganizeDndOptions {
   onError?: (message: string) => void;
@@ -160,6 +211,13 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     onError: (msg) => {
       console.error('[assignLooseFileTrack] error:', msg);
       toast({ title: 'Failed to move file to track', description: msg, variant: 'destructive' });
+      options?.onError?.(msg);
+    },
+  });
+  const unassignLooseFileTrackMutation = useUnassignLooseFileTrack(songId, {
+    onError: (msg) => {
+      console.error('[unassignLooseFileTrack] error:', msg);
+      toast({ title: 'Failed to move file to Tracks', description: msg, variant: 'destructive' });
       options?.onError?.(msg);
     },
   });
@@ -187,6 +245,23 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
       return true;
     }
 
+    // Tracks-column-background drop — un-assign a Track-scoped loose file back to
+    // the plain song-scoped shelf. MediaBucket only enables this droppable while a
+    // Track-scoped loose file is being dragged, but the origin is re-checked here
+    // since un-assigning a file with no track has nothing to do.
+    if (String(over.id).startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX)) {
+      const originTrackId = (active.data.current as { trackId?: string | null } | undefined)?.trackId ?? null;
+      if (!originTrackId) {
+        console.warn('[LooseFileDrop] Tracks-background drop on a file with no trackId — nothing to un-assign');
+        return true;
+      }
+      unassignLooseFileTrackMutation.mutate(
+        { looseFileId, originTrackId },
+        { onSuccess: () => options?.onOrganized?.({ action: 'unassign-track', originTrackId }) }
+      );
+      return true;
+    }
+
     // Track row and Sections-column-background drops both resolve to the identical
     // assign-track destination (trackId alone) — two entry points onto the same
     // mutation, not two mechanisms. Both carry the same { trackId } data shape.
@@ -202,12 +277,20 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
       // Origin trackId (null for a plain Tracks-column file) travels with the drag
       // payload itself — see LooseFileRow.tsx. Passed through so the mutation can
       // invalidate the ORIGIN track's Sections-column list too, not just the
-      // destination's; TrackFolderRow's own disabled-when-same-track guard means a
-      // same-track drop should no longer even reach here in normal use, but the
-      // origin is threaded through regardless so a genuine cross-track move never
-      // leaves the source view stale.
+      // destination's, so a genuine cross-track move never leaves the source view
+      // stale.
       const originTrackId = (active.data.current as { trackId?: string | null } | undefined)?.trackId ?? null;
       const destTrackId = trackDropData.trackId;
+      // Dropping a Track-scoped file back onto its OWN track — its own Track row, or
+      // the Sections-column background while that same track is selected — is a
+      // cancel: no mutation, no toast, no onOrganized, no invalidation. A plain
+      // Tracks-column file (originTrackId null) never equals a real destTrackId, so
+      // it still assigns normally. The own Track row is deliberately left enabled
+      // (unhighlighted) so it blocks the Tracks-background un-assign — see
+      // TrackFolderRow in MediaBucket.tsx.
+      if (originTrackId === destTrackId) {
+        return true;
+      }
       assignLooseFileTrackMutation.mutate(
         { looseFileId, trackId: destTrackId, originTrackId },
         { onSuccess: () => options?.onOrganized?.({ action: 'assign-track', trackId: destTrackId }) }
@@ -235,6 +318,9 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     handleDragStart,
     handleDragEnd,
     activeDrag,
-    isPending: organizeLooseFileMutation.isPending || assignLooseFileTrackMutation.isPending,
+    isPending:
+      organizeLooseFileMutation.isPending ||
+      assignLooseFileTrackMutation.isPending ||
+      unassignLooseFileTrackMutation.isPending,
   };
 }

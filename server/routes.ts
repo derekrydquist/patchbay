@@ -1766,6 +1766,12 @@ export async function registerRoutes(
    * set, and stops appearing in the Tracks column (see storage.getLooseFilesBySong).
    * Two-ID route: the loose file's own songId and the destination track's songId
    * are asserted independently, same pattern as organize/place-on-timeline.
+   *
+   * An explicit `trackId: null` un-assigns instead — clears trackId so the file
+   * returns to the plain song-scoped shelf in the Tracks column (drag from a
+   * Track's Sections column onto the Tracks column's open background). Only an
+   * explicit null counts; a missing trackId is still a 400. No destination track
+   * exists to assert in that case, so only the loose file's own ownership applies.
    */
   app.post("/api/loose-files/:id/assign-track", requireBand, async (req, res) => {
     const looseFileId = req.params.id as string;
@@ -1773,7 +1779,11 @@ export async function registerRoutes(
     if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
     if (!assertLooseFileOwned(req, res, looseFile)) return;
 
-    const { trackId } = req.body as { trackId?: string };
+    const { trackId } = req.body as { trackId?: string | null };
+    if (trackId === null) {
+      const updated = await storage.assignLooseFileTrack(looseFileId, null);
+      return res.json(updated);
+    }
     if (!trackId) {
       return res.status(400).json({ message: "trackId is required." });
     }

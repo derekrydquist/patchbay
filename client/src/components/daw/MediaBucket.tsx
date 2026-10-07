@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { useDroppable, useDndContext } from '@dnd-kit/core';
+import { useDroppable } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
@@ -12,7 +12,10 @@ import {
   useDeleteTrack, useRestoreTrack,
   useHideIdea, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
-import { bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId, bucketSectionsBackgroundDropId } from '@/hooks/use-loose-file-organize-dnd';
+import {
+  bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
+  bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveLooseFileDrag,
+} from '@/hooks/use-loose-file-organize-dnd';
 import { BucketClip } from './Clip';
 import { LooseFileRow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -144,27 +147,31 @@ interface TrackFolderRowProps {
   onSelect: () => void;
   onRemove: () => void;
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
+  /** From MediaBucket's useActiveLooseFileDrag — null when no loose-file drag is active. */
+  activeLooseFileDrag: { trackId: string | null } | null;
 }
 
-function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef }: TrackFolderRowProps) {
+function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef, activeLooseFileDrag }: TrackFolderRowProps) {
   // Any content beneath the track counts — an organized clip in any of its ideas,
   // OR a Track-scoped loose file resting below the Section list (not yet organized
   // into a clip). See ApiTrack.hasLooseFiles / storage.getBucket.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
   const trackHasNew = track.ideas.some(i => i.active && i.hasNew);
-  // Disabled (no highlight, not a valid collision match) when the active drag is a
-  // loose file already scoped to THIS track — re-dropping it on its own row is a
-  // true no-op server-side and was presenting as a silent failure. A plain
-  // Tracks-column file (trackId null) or one scoped to a DIFFERENT track remains a
-  // valid target. See use-loose-file-organize-dnd.ts's handleDragEnd for the
-  // corresponding origin-tracking on the drop side.
-  const { active } = useDndContext();
-  const activeDragData = active?.data.current as { type?: string; trackId?: string | null } | undefined;
-  const isSameTrackDrag = activeDragData?.type === 'loose-file' && activeDragData.trackId === track.id;
+  // When the active drag is a loose file already scoped to THIS track, the row stays
+  // an ENABLED droppable (so it still wins collision over the Tracks-column
+  // background, which would otherwise un-assign the file) but shows no highlight,
+  // and handleDragEnd in use-loose-file-organize-dnd.ts treats the drop as a cancel
+  // — no mutation, file stays put. Disabling it instead made dnd-kit skip the row
+  // and let the drop fall through to the background. A plain Tracks-column file
+  // (trackId null) or one scoped to a DIFFERENT track is a normal assign target.
+  //
+  // The active drag comes in as a prop (MediaBucket calls useActiveLooseFileDrag
+  // once) rather than via useDndContext here — useDndContext's value changes on every
+  // pointer move during any drag, which re-rendered every Track row each frame.
+  const isSameTrackDrag = activeLooseFileDrag !== null && activeLooseFileDrag.trackId === track.id;
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTrackDropId(track.id),
     data: { trackId: track.id },
-    disabled: isSameTrackDrag,
   });
   const combinedRef = (node: HTMLButtonElement | null) => {
     setNodeRef(node);
@@ -182,10 +189,8 @@ function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef }: Tr
             isSelected
               ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
               : "text-muted-foreground hover:bg-white/5 hover:text-white",
-            // dnd-kit's isOver is pure geometric hover — it doesn't know about
-            // `disabled`, so a disabled droppable can still report isOver: true.
-            // Gate on !isSameTrackDrag too so the highlight agrees with the actual
-            // (already-working) drop-blocking behavior.
+            // No glow for the own-track row — the drop there is a cancel (see
+            // handleDragEnd), so the highlight must not advertise it as a target.
             isOver && !isSameTrackDrag && "bg-primary/10 border-primary/50"
           )}
         >
@@ -608,11 +613,40 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // hit must always win over this one — handled in matchOrganizeDropTarget itself
   // (background matches are remembered but not returned until every other organize
   // target has been checked), not here.
-  const { setNodeRef: setSectionsBackgroundDroppableRef, isOver: isSectionsBackgroundDropTarget } = useDroppable({
+  const { setNodeRef: setSectionsBackgroundDroppableRef, isOver: isSectionsBackgroundOver } = useDroppable({
     id: bucketSectionsBackgroundDropId('media-bucket-sections-column'),
     disabled: !selectedTrack,
     data: selectedTrack ? { trackId: selectedTrack.id } : undefined,
   });
+
+  // Tracks-column background drop target — the reverse of a Track-row drop: a
+  // Track-scoped loose file dropped here has its trackId cleared and returns to the
+  // plain song-scoped shelf in this column (see useUnassignLooseFileTrack). Enabled
+  // ONLY while the active drag is a Track-scoped loose file — disabled for a plain
+  // Tracks-column file (already here, nothing to un-assign) and for every other drag
+  // type, including bucket-clip drags from the Versions column (dnd-kit excludes
+  // disabled droppables from collision detection entirely, so those drags can't be
+  // swallowed by this target). Stable id suffix, same reasoning as the Versions and
+  // Sections-background targets above.
+  //
+  // Nests every Track row; Track rows win via matchOrganizeDropTarget's background
+  // fallback, same as the Sections background vs. Section rows.
+  const activeLooseFileDrag = useActiveLooseFileDrag();
+  const isTracksBackgroundDisabled = !activeLooseFileDrag?.trackId;
+  const { setNodeRef: setTracksBackgroundDroppableRef, isOver: isTracksBackgroundOver } = useDroppable({
+    id: bucketTracksBackgroundDropId('media-bucket-tracks-column'),
+    disabled: isTracksBackgroundDisabled,
+    data: { unassign: true },
+  });
+  // isOver doesn't know about `disabled` — gate the highlight on both.
+  const isTracksBackgroundDropTarget = isTracksBackgroundOver && !isTracksBackgroundDisabled;
+
+  // Sections-background highlight: no glow when the dragged file is already scoped to
+  // the selected track — that drop is a cancel in handleDragEnd. Highlight-only; the
+  // droppable itself stays enabled so collision behavior is unchanged. A plain
+  // Tracks-column file (trackId null) never matches, so it still highlights.
+  const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrack?.id;
+  const isSectionsBackgroundDropTarget = isSectionsBackgroundOver && !isOwnTrackDrag;
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -648,7 +682,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
         {/* ── Instruments column ── */}
         <div
-          className={cn('w-1/4 flex flex-col transition-colors', isTracksDragOver && 'bg-primary/5')}
+          ref={setTracksBackgroundDroppableRef}
+          className={cn('w-1/4 flex flex-col transition-colors', (isTracksDragOver || isTracksBackgroundDropTarget) && 'bg-primary/5')}
           onDragOver={(e) => { e.preventDefault(); setIsTracksDragOver(true); }}
           onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsTracksDragOver(false); }}
           onDrop={handleTracksFileDrop}
@@ -715,6 +750,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                     onSelect={() => { setSelectedTrack(track); setSelectedIdea(null); }}
                     onRemove={() => deleteTrackMutation.mutate(track.id)}
                     buttonRef={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
+                    activeLooseFileDrag={activeLooseFileDrag}
                   />
                 ))}
               {looseFiles.map(lf => (

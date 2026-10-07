@@ -2139,6 +2139,8 @@ export default function SongHome() {
   const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId, {
     onError: (msg) => console.error('[organizeLooseFile] error:', msg),
     onOrganized: (dest) => {
+      // Un-assign back to the Tracks shelf leaves the current selection alone.
+      if (dest.action === 'unassign-track') return;
       window.dispatchEvent(new CustomEvent('find-in-bucket', {
         detail: dest.action === 'organize'
           ? { trackId: dest.trackId, sectionName: dest.sectionName }

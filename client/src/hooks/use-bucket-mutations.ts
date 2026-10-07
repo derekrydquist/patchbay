@@ -292,14 +292,50 @@ export function useAssignLooseFileTrack(
       // otherwise the view the user just dragged out of keeps showing the file from
       // its stale cache even though it moved. Only relevant when the origin was a
       // real (different) track; a plain Tracks-column origin (null) has no
-      // byTrack query to invalidate, and a same-track drop is now unreachable via
-      // the UI (see TrackFolderRow's disabled guard) but is harmless here either way.
+      // byTrack query to invalidate, and a same-track Track-row drop never reaches
+      // this mutation (handleDragEnd cancels it) but is harmless here either way.
       if (vars.originTrackId && vars.originTrackId !== vars.trackId) {
         queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.originTrackId) });
       }
       // Newly assigning a loose file to a track can flip that track's hasLooseFiles
       // to true (getBucket computes it fresh from loose_files) — without this, the
       // Tracks-column folder icon stays outline until a manual reload.
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      opts?.onSuccess?.(looseFile);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+// The reverse of useAssignLooseFileTrack — moves a Track-scoped loose file back to
+// the plain song-scoped shelf in the Tracks column (drag from a Track's Sections
+// column onto the Tracks column's open background). Same route, explicit
+// `trackId: null` body. Still a plain field update — nothing is materialized.
+export function useUnassignLooseFileTrack(
+  songId: string | undefined,
+  opts?: { onSuccess?: (looseFile: ApiLooseFile) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // originTrackId is client-only bookkeeping for cache invalidation — the
+    // server just clears whatever trackId the row currently has.
+    mutationFn: async (vars: { looseFileId: string; originTrackId: string }) => {
+      const res = await fetch(`/api/loose-files/${vars.looseFileId}/assign-track`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trackId: null }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to move file to Tracks' }));
+        throw new Error(err.message ?? 'Failed to move file to Tracks');
+      }
+      return res.json() as Promise<ApiLooseFile>;
+    },
+    onSuccess: (looseFile, vars) => {
+      // Destination: the Tracks-column list. Origin: that track's Sections-column
+      // list. Bucket: the origin track's hasLooseFiles may flip back to false.
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.originTrackId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       opts?.onSuccess?.(looseFile);
     },

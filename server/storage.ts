@@ -206,7 +206,7 @@ export interface IStorage {
   getLooseFilesBySong(songId: string): Promise<LooseFile[]>;
   getLooseFilesByBand(bandId: string): Promise<LooseFile[]>;
   getLooseFilesByTrack(trackId: string): Promise<LooseFile[]>;
-  assignLooseFileTrack(id: string, trackId: string): Promise<LooseFile>;
+  assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
@@ -1035,8 +1035,9 @@ export class SQLiteStorage implements IStorage {
 
   // Moves a song-scoped loose file into the Track-scoped tier — drag onto a Track
   // row (not a Section row) in MediaBucket's Tracks column. Does not materialize
-  // anything; the row stays in loose_files, just with trackId now set.
-  async assignLooseFileTrack(id: string, trackId: string): Promise<LooseFile> {
+  // anything; the row stays in loose_files, just with trackId now set. A null
+  // trackId un-assigns — the file drops back to the plain song-scoped tier.
+  async assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile> {
     db.update(looseFiles).set({ trackId }).where(eq(looseFiles.id, id)).run();
     return db.select().from(looseFiles).where(eq(looseFiles.id, id)).get()!;
   }

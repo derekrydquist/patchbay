@@ -305,6 +305,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // specify one.
   const looseFileOrganizeDnd = useLooseFileOrganizeDnd(songId, {
     onOrganized: (dest) => {
+      // Un-assign back to the Tracks shelf leaves the current selection alone.
+      if (dest.action === 'unassign-track') return;
       window.dispatchEvent(new CustomEvent('find-in-bucket', {
         detail: dest.action === 'organize'
           ? { trackId: dest.trackId, sectionName: dest.sectionName }
