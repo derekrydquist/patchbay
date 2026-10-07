@@ -53,13 +53,17 @@ import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
-  fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, looseFileKeys,
+  fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
 } from '@/lib/bucket-api';
 import { useAddInstrument, useAddSection, useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
+  useActiveLooseFileDrag,
   bucketSectionDropId,
   bucketVersionsDropId,
+  bucketTrackDropId,
+  bucketSectionsBackgroundDropId,
+  bucketTracksBackgroundDropId,
 } from '@/hooks/use-loose-file-organize-dnd';
 import { DndContext, useDroppable } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
@@ -515,6 +519,123 @@ function SongsSectionRow({ idea, isSelected, onSelect }: SongsSectionRowProps) {
   );
 }
 
+// ─── Songs quick-browser Track row (Column 2) ─────────────────────────────────
+// Assign-track drop target, same as MediaBucket's TrackFolderRow: a loose file
+// dropped here moves into this Track's Track-scoped resting tier (bucketTrackDropId,
+// { trackId } data). A child component so useDroppable runs inside the DndContext
+// (see SongsFilesColumnDropZone below for why that matters).
+//
+// Own-track rule: a file already scoped to THIS track keeps the row an ENABLED
+// droppable (so it still beats the Tracks-column background, which would otherwise
+// un-assign it) with no highlight — handleDragEnd in use-loose-file-organize-dnd
+// cancels that drop. isOver ignores disabled/own-track state, so the highlight is
+// gated explicitly. useActiveLooseFileDrag (useDndMonitor) rather than useDndContext
+// so rows re-render only on drag start/end, not every pointer move.
+interface SongsTrackRowProps {
+  track: ApiTrack;
+  isSelected: boolean;
+  onSelect: () => void;
+}
+
+function SongsTrackRow({ track, isSelected, onSelect }: SongsTrackRowProps) {
+  // Organized clips OR a Track-scoped loose file both count as content.
+  const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
+  const activeLooseFileDrag = useActiveLooseFileDrag();
+  const isSameTrackDrag = activeLooseFileDrag !== null && activeLooseFileDrag.trackId === track.id;
+  const { setNodeRef, isOver } = useDroppable({
+    id: bucketTrackDropId(track.id),
+    data: { trackId: track.id },
+  });
+
+  return (
+    <button
+      ref={setNodeRef}
+      onClick={onSelect}
+      className={cn(
+        'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
+        isSelected
+          ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
+          : 'text-muted-foreground hover:bg-white/5 hover:text-white',
+        isOver && !isSameTrackDrag && 'bg-primary/10 border-primary/50'
+      )}
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        <Folder size={13} className="shrink-0" fill={hasFiles ? 'currentColor' : 'none'} />
+        <span className="font-bold tracking-tight truncate">{track.name}</span>
+      </div>
+      <ChevronRight size={12} className="opacity-40 shrink-0" />
+    </button>
+  );
+}
+
+// ─── Songs quick-browser Column 2 (Tracks) background drop target ────────────
+// Un-assign target, same as MediaBucket's Tracks-column background: a Track-scoped
+// loose file dropped on open column space has its trackId cleared and returns to
+// the plain song-scoped shelf. Enabled ONLY while a Track-scoped loose file is
+// being dragged — disabled for plain Tracks-column files and every other drag
+// type. Nests every Track row; Track rows win via matchOrganizeDropTarget's
+// background-is-a-fallback rule. Stable id suffix. Native OS-file drop handlers
+// pass straight through (the existing "Drop to upload" flow).
+interface SongsTracksColumnDropZoneProps {
+  className?: string;
+  children: React.ReactNode;
+  onDragOver: (e: React.DragEvent) => void;
+  onDragLeave: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
+}
+
+function SongsTracksColumnDropZone({
+  className, children, onDragOver, onDragLeave, onDrop,
+}: SongsTracksColumnDropZoneProps) {
+  const activeLooseFileDrag = useActiveLooseFileDrag();
+  const disabled = !activeLooseFileDrag?.trackId;
+  const { setNodeRef, isOver } = useDroppable({
+    id: bucketTracksBackgroundDropId('songs-browser-tracks-column'),
+    disabled,
+    data: { unassign: true },
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      // isOver ignores disabled — gate the highlight on both.
+      className={cn(className, isOver && !disabled && 'bg-primary/5')}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      {children}
+    </div>
+  );
+}
+
+// ─── Songs quick-browser Column 3 (Sections) background drop target ──────────
+// Second assign-track entry point for the selected Track, same as MediaBucket's
+// Sections-column background. Disabled with no Track selected. Nests every Section
+// row (Section rows win — fallback-only in matchOrganizeDropTarget). Own-track
+// drags cancel in handleDragEnd, so the highlight is suppressed for them.
+interface SongsSectionsColumnDropZoneProps {
+  selectedTrackId: string | null;
+  className?: string;
+  children: React.ReactNode;
+}
+
+function SongsSectionsColumnDropZone({ selectedTrackId, className, children }: SongsSectionsColumnDropZoneProps) {
+  const activeLooseFileDrag = useActiveLooseFileDrag();
+  const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrackId;
+  const { setNodeRef, isOver } = useDroppable({
+    id: bucketSectionsBackgroundDropId('songs-browser-sections-column'),
+    disabled: !selectedTrackId,
+    data: selectedTrackId ? { trackId: selectedTrackId } : undefined,
+  });
+
+  return (
+    <div ref={setNodeRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')}>
+      {children}
+    </div>
+  );
+}
+
 // ─── Songs quick-browser Column 4 (Files) organize drop target ───────────────
 // Same (trackId, sectionName) pair as its Column 3 Section row above. This MUST be
 // its own component, not a useDroppable() call inlined in Dashboard's own function
@@ -687,6 +808,16 @@ export default function Dashboard() {
   const pendingSectionNameRef = useRef<string | null>(null);
   const pendingSectionIdRef = useRef<string | null>(null);
   const appliedSearchRef = useRef<string | null>(null);
+
+  // Songs quick-browser: select a Track (clearing the Section) and mirror it into
+  // the URL — shared by a Track-row click and an assign-track drop.
+  const selectSongsTrack = (track: ApiTrack) => {
+    setSelectedInstrument(track); setSelectedSection(null);
+    if (selectedFile) {
+      const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${track.id}`;
+      appliedSearchRef.current = s; setLocation(`/?${s}`);
+    }
+  };
   const appliedAlbumSearchRef = useRef<string | null>(null);
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
@@ -783,6 +914,14 @@ export default function Dashboard() {
     enabled: !!selectedFile && activeTab === 'files' && (filesFilter === 'ideas' || filesFilter === 'songs'),
   });
 
+  // Songs quick-browser: the selected Track's Track-scoped loose files, rendered
+  // below the Section list in Column 3 — same query MediaBucket's Sections column uses.
+  const { data: selectedTrackLooseFiles = [] } = useQuery<ApiLooseFile[]>({
+    queryKey: looseFileKeys.byTrack(selectedInstrument?.id),
+    queryFn: () => fetchTrackLooseFiles(selectedInstrument!.id),
+    enabled: !!selectedInstrument && activeTab === 'files' && filesFilter === 'songs',
+  });
+
   // Band-wide, unassigned loose files — Ideas shelf Column 1's "Upload Files".
   // Independent of any Idea selection: shown in Column 1 regardless of whether
   // selectedFile is set, since these files aren't scoped to any Idea at all.
@@ -801,13 +940,24 @@ export default function Dashboard() {
   // reimplementing them. See use-loose-file-organize-dnd.ts.
   // Auto-select the destination after a drag-driven organize, matching every other
   // creation action's auto-select (Add Instrument, Add Section, new Idea, ...).
-  // assign-track never fires on this surface (no Track-row droppable exists in
-  // either the Songs quick-browser or the Ideas shelf), so only 'organize' is
-  // handled — the branch is guarded defensively rather than assumed away.
+  // 'assign-track' (Songs quick-browser Track row / Sections background) selects the
+  // destination Track and clears the Section; 'unassign-track' leaves selection
+  // alone. Neither can fire from the Ideas shelf (it has no Track droppables).
   const looseFileOrganizeDnd = useLooseFileOrganizeDnd(selectedFile?.id, {
     onError: (msg) => console.error('[organizeLooseFile] error:', msg),
     onOrganized: (dest) => {
-      if (dest.action !== 'organize') return;
+      if (dest.action === 'unassign-track') return;
+      if (dest.action === 'assign-track') {
+        if (filesFilter !== 'songs') return;
+        // Selected directly from the loaded bucket rather than via
+        // pendingInstrumentIdRef: an assign-track can leave the bucket response
+        // structurally unchanged (e.g. hasLooseFiles was already true), in which
+        // case the fileBucket effect never re-runs to consume the pending ref.
+        // That effect still refreshes this snapshot whenever the bucket does change.
+        const track = fileBucket.find(t => t.id === dest.trackId);
+        if (track) selectSongsTrack(track);
+        return;
+      }
       if (filesFilter === 'ideas') {
         // Ideas are flat (one hidden track/section per idea) — the destination
         // that actually needs selecting is the idea itself, not selectedInstrument/
@@ -2188,7 +2338,7 @@ export default function Dashboard() {
               </div>
 
               {/* Column 2 — Instruments / Folders */}
-              <div
+              <SongsTracksColumnDropZone
                 className={cn(
                   'w-44 shrink-0 border-r border-white/5 flex flex-col transition-colors',
                   isTracksColumnDragOver ? 'bg-primary/5' : 'bg-black/10'
@@ -2238,43 +2388,27 @@ export default function Dashboard() {
                           <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
                         </div>
                       )}
-                      {fileBucket.map(track => {
-                        const hasFiles = track.ideas.some(i => i.clips.length > 0);
-                        return (
-                          <button
-                            key={track.id}
-                            onClick={() => {
-                              setSelectedInstrument(track); setSelectedSection(null);
-                              if (selectedFile) {
-                                const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${track.id}`;
-                                appliedSearchRef.current = s; setLocation(`/?${s}`);
-                              }
-                            }}
-                            className={cn(
-                              'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
-                              selectedInstrument?.id === track.id
-                                ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-                                : 'text-muted-foreground hover:bg-white/5 hover:text-white'
-                            )}
-                          >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <Folder size={13} className="shrink-0" fill={hasFiles ? 'currentColor' : 'none'} />
-                              <span className="font-bold tracking-tight truncate">{track.name}</span>
-                            </div>
-                            <ChevronRight size={12} className="opacity-40 shrink-0" />
-                          </button>
-                        );
-                      })}
+                      {fileBucket.map(track => (
+                        <SongsTrackRow
+                          key={track.id}
+                          track={track}
+                          isSelected={selectedInstrument?.id === track.id}
+                          onSelect={() => selectSongsTrack(track)}
+                        />
+                      ))}
                       {selectedFileLooseFiles.map(lf => (
                         <LooseFileRow key={lf.id} looseFile={lf} songId={selectedFile.id} />
                       ))}
                     </>
                   )}
                 </div>
-              </div>
+              </SongsTracksColumnDropZone>
 
               {/* Column 3 — Sections / Subfolders */}
-              <div className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15]">
+              <SongsSectionsColumnDropZone
+                selectedTrackId={selectedInstrument?.id ?? null}
+                className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15] transition-colors"
+              >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/sectheader">
                   <span>{selectedFile?.type === 'idea' ? 'Subfolders' : 'Sections'}</span>
                   {selectedInstrument && selectedFile?.type !== 'idea' && (
@@ -2291,24 +2425,34 @@ export default function Dashboard() {
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       Select {selectedFile?.type === 'idea' ? 'a folder' : 'a track'}
                     </p>
-                  ) : selectedInstrument.ideas.length === 0 ? (
-                    <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">No sections</p>
-                  ) : selectedInstrument.ideas.map(idea => (
-                    <SongsSectionRow
-                      key={idea.id}
-                      idea={idea}
-                      isSelected={selectedSection?.id === idea.id}
-                      onSelect={() => {
-                        setSelectedSection(idea);
-                        if (selectedFile && selectedInstrument) {
-                          const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${selectedInstrument.id}&sectionId=${idea.id}`;
-                          appliedSearchRef.current = s; setLocation(`/?${s}`);
-                        }
-                      }}
-                    />
-                  ))}
+                  ) : (
+                    <>
+                      {selectedInstrument.ideas.length === 0 && selectedTrackLooseFiles.length === 0 && (
+                        <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">No sections</p>
+                      )}
+                      {selectedInstrument.ideas.map(idea => (
+                        <SongsSectionRow
+                          key={idea.id}
+                          idea={idea}
+                          isSelected={selectedSection?.id === idea.id}
+                          onSelect={() => {
+                            setSelectedSection(idea);
+                            if (selectedFile && selectedInstrument) {
+                              const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${selectedInstrument.id}&sectionId=${idea.id}`;
+                              appliedSearchRef.current = s; setLocation(`/?${s}`);
+                            }
+                          }}
+                        />
+                      ))}
+                      {/* Track-scoped resting tier — always below the Section list,
+                          same as MediaBucket's Sections column. */}
+                      {selectedFile && selectedTrackLooseFiles.map(lf => (
+                        <LooseFileRow key={lf.id} looseFile={lf} songId={selectedFile.id} />
+                      ))}
+                    </>
+                  )}
                 </div>
-              </div>
+              </SongsSectionsColumnDropZone>
 
               {/* Column 4 — Files */}
               <SongsFilesColumnDropZone
