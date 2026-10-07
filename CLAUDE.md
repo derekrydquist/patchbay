@@ -504,6 +504,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Never omit `requireBand` from an API route** — every route under `/api/` must include `requireBand` as middleware. Routes without it bypass band scoping entirely and expose all bands' data. See the Route ownership rules section under Bands (multi-tenancy).
 - **Never spread a partial/request-body object into Drizzle `.values()` or an ON CONFLICT `set:`** — build a filtered object with only the defined keys first. See the "Partial updates" rule under Bands (multi-tenancy). Drizzle safely skips `undefined` in plain `.set()` UPDATEs, but JS spread in `.values()` + conflict upsert will overwrite NOT NULL columns with `undefined` before Drizzle sees the data.
 - **When adding a route that touches two independent entity IDs, assert ownership on both** — `assertSongOwned` / `assertAlbumOwned` only cover the single ID passed in; they say nothing about any other ID in the same request body or URL. See the "Two-ID routes" rule under Bands (multi-tenancy).
+- **Never apply the dnd-kit drag `transform` to a loose-file source row (`LooseFileRow`)** — every surface already renders a `DragOverlay` ghost; a translated source row grows its column's scroll width and dnd-kit auto-scroll shifts the column sideways.
 - **`instrument_tracks.pan` writes only go through `PATCH /api/tracks/:trackId`** — same single write path as `volume`; there is no separate pan-specific route. Do not add one.
 
 ---

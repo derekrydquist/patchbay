@@ -1,6 +1,5 @@
 import { type ReactNode } from 'react';
 import { useDraggable } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
 import { FileAudio, Trash2 } from 'lucide-react';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
@@ -94,21 +93,26 @@ export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: 
 // single, unconfirmed Delete via LooseFileDeleteMenu — a loose file has no
 // dependent rows yet, so there's nothing for a delete to cascade into.
 export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted }: LooseFileRowProps) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `loose-${looseFile.id}`,
     // trackId is carried alongside `clip` (not inside it — looseFileToClip's Clip
     // shape has no such field) so drop targets can tell an already Track-scoped
     // file apart from a plain Tracks-column one. See TrackFolderRow in
-    // MediaBucket.tsx, which disables itself when this equals its own track.
+    // MediaBucket.tsx, which suppresses its highlight (and handleDragEnd cancels the
+    // drop) when this equals its own track.
     data: { clip: looseFileToClip(looseFile), type: 'loose-file', songId, trackId: looseFile.trackId },
   });
-  const style = { transform: CSS.Translate.toString(transform) };
+  // No transform on the source row — every surface renders a floating DragOverlay
+  // ghost (LooseFileDragOverlay, or Timeline's own), so the row just stays in place
+  // as a dimmed placeholder. Translating it made the row slide inside its column's
+  // Radix ScrollArea, growing the column's scroll width; dnd-kit's default auto-scroll
+  // (which treats overflow-y: scroll as scrollable on both axes) then scrolled the
+  // column sideways, clipping the track names.
 
   return (
     <LooseFileDeleteMenu looseFile={looseFile} songId={songId} onDeleted={onDeleted}>
       <div
         ref={setNodeRef}
-        style={style}
         {...listeners}
         {...attributes}
         onClick={onClick}
