@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min } from "drizzle-orm";
+import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, type SQL } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -15,6 +15,7 @@ import {
   type ProductionTask, type InsertProductionTask,
   type TaskComment, type InsertTaskComment,
   type ClipComment, type InsertClipComment,
+  type LooseFileComment, type InsertLooseFileComment,
   type SongReview, type InsertSongReview,
   type SongReviewComment, type InsertSongReviewComment,
   type LyricsComment, type InsertLyricsComment,
@@ -22,7 +23,7 @@ import {
   type Band,
   type InsertActivityLog,
   users, songs, instrumentTracks, ideas, clips, looseFiles, timelineClips, deletedSections,
-  productionTasks, taskComments, clipComments, songReviews, songReviewComments,
+  productionTasks, taskComments, clipComments, looseFileComments, songReviews, songReviewComments,
   lyricsComments, activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
 } from "@shared/schema";
 
@@ -132,7 +133,8 @@ export interface ActivityEvent {
       | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album'
       | 'lyrics-edited' | 'lyrics-comment-added' | 'lyrics-comment-reply'
       | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
-      | 'lyrics-comment-unresolved';
+      | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
+      | 'loose-file-comment-edited' | 'loose-file-comment-deleted';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -203,9 +205,9 @@ export interface IStorage {
 
   // Loose Files (song-scoped, unplaced uploads)
   createLooseFile(data: InsertLooseFile): Promise<LooseFile>;
-  getLooseFilesBySong(songId: string): Promise<LooseFile[]>;
-  getLooseFilesByBand(bandId: string): Promise<LooseFile[]>;
-  getLooseFilesByTrack(trackId: string): Promise<LooseFile[]>;
+  getLooseFilesBySong(songId: string): Promise<LooseFileWithCommentCount[]>;
+  getLooseFilesByBand(bandId: string): Promise<LooseFileWithCommentCount[]>;
+  getLooseFilesByTrack(trackId: string): Promise<LooseFileWithCommentCount[]>;
   assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
@@ -238,6 +240,14 @@ export interface IStorage {
   addClipComment(data: InsertClipComment): Promise<ClipComment>;
   updateClipComment(id: string, text: string): Promise<ClipComment | undefined>;
   deleteClipComment(id: string): Promise<void>;
+  copyCommentsToClip(destClipId: string, source: { kind: 'clip' | 'loose'; id: string }): Promise<ClipComment[]>;
+
+  // Loose File Comments
+  getLooseFileComments(looseFileId: string): Promise<LooseFileCommentWithReplies[]>;
+  getLooseFileComment(id: string): Promise<LooseFileComment | undefined>;
+  addLooseFileComment(data: InsertLooseFileComment): Promise<LooseFileComment>;
+  updateLooseFileComment(id: string, text: string): Promise<LooseFileComment | undefined>;
+  deleteLooseFileComment(id: string): Promise<void>;
 
   // Reviews
   getReviewsForSong(songId: string): Promise<SongReview[]>;
@@ -284,6 +294,11 @@ export type ReviewCommentWithReplies = SongReviewComment & {
 };
 
 export type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
+export type LooseFileCommentWithReplies = LooseFileComment & { replies: LooseFileComment[] };
+// Loose-file list rows carry a comment aggregate for the (future) row badge — same
+// count/latestCommentAt shape as /api/songs/:songId/clip-comment-summary entries.
+// latestCommentAt is null when the file has no comments.
+export type LooseFileWithCommentCount = LooseFile & { commentCount: number; latestCommentAt: string | null };
 export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
 export type LyricsCommentWithReplies = LyricsComment & { replies: LyricsComment[] };
 export type AlbumWithCount = Album & { songCount: number };
@@ -330,8 +345,11 @@ function materializeLooseFileCore(
     throw new Error(msg);
   }
 
+  // The clip reuses the loose file's id — the file keeps one identity across the move,
+  // so client-side state keyed by id (e.g. the comment badge's last-viewed map) carries
+  // over. Safe: the loose_files row is deleted below in the same transaction.
   const clip: Clip = {
-    id: randomUUID(),
+    id: looseFile.id,
     ideaId: idea.id,
     name: looseFile.name,
     type: looseFile.type,
@@ -347,8 +365,50 @@ function materializeLooseFileCore(
     createdAt: new Date().toISOString(),
   };
   tx.insert(clips).values(clip).run();
+
+  // Notes travel with the file. Move them into clip_comments with the SAME ids, so
+  // reply parentIds stay valid without remapping, and mark them as carried so
+  // getActivity doesn't re-surface them as new feed rows. Must run before the
+  // loose_files delete below — its ON DELETE CASCADE would remove these rows.
+  const carried = tx.select().from(looseFileComments)
+    .where(eq(looseFileComments.looseFileId, looseFileId)).all();
+  if (carried.length) {
+    tx.insert(clipComments).values(carried.map((c) => ({
+      id: c.id,
+      clipId: clip.id,
+      parentId: c.parentId,
+      author: c.author,
+      text: c.text,
+      timestamp: c.timestamp,
+      createdAt: c.createdAt,
+      carriedFromCommentId: c.id,
+    }))).run();
+  }
+
   tx.delete(looseFiles).where(eq(looseFiles.id, looseFileId)).run();
   return clip;
+}
+
+// Shared by the three loose-file list methods: the filtered loose_files rows, each with a
+// LEFT JOIN aggregate over loose_file_comments (top-level comments and replies alike,
+// same as the clip-comment-summary endpoint counts them).
+function selectLooseFilesWithCommentCounts(where: SQL | undefined): LooseFileWithCommentCount[] {
+  const rows = db
+    .select({
+      ...getTableColumns(looseFiles),
+      commentCount: count(looseFileComments.id),
+      latestTimestamp: max(looseFileComments.timestamp),
+    })
+    .from(looseFiles)
+    .leftJoin(looseFileComments, eq(looseFileComments.looseFileId, looseFiles.id))
+    .where(where)
+    .groupBy(looseFiles.id)
+    .orderBy(asc(looseFiles.name))
+    .all();
+  return rows.map(({ latestTimestamp, ...row }) => ({
+    ...row,
+    latestCommentAt: latestTimestamp != null ? new Date(latestTimestamp).toISOString() : null,
+  }));
 }
 
 export function insertProductionTaskForSection({
@@ -1010,27 +1070,21 @@ export class SQLiteStorage implements IStorage {
 
   // Excludes files that have moved to the Track-scoped tier (trackId set) — those
   // display only in that Track's Sections column now, via getLooseFilesByTrack.
-  async getLooseFilesBySong(songId: string): Promise<LooseFile[]> {
-    return db.select().from(looseFiles)
-      .where(and(eq(looseFiles.songId, songId), isNull(looseFiles.trackId)))
-      .orderBy(asc(looseFiles.name)).all();
+  async getLooseFilesBySong(songId: string): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(and(eq(looseFiles.songId, songId), isNull(looseFiles.trackId)));
   }
 
   // Band-wide, unassigned loose files (songId IS NULL) — Ideas shelf Column 1's
   // "Upload Files". Never assigned to a song until a user drags one onto an Idea.
-  async getLooseFilesByBand(bandId: string): Promise<LooseFile[]> {
-    return db.select().from(looseFiles)
-      .where(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)))
-      .orderBy(asc(looseFiles.name)).all();
+  async getLooseFilesByBand(bandId: string): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)));
   }
 
   // Track-scoped loose files — the "I know the track, not yet the section" resting
   // state. Rendered in that Track's own Sections column, sorted below the Section
   // list, until organized into a real clip (which clears the row entirely).
-  async getLooseFilesByTrack(trackId: string): Promise<LooseFile[]> {
-    return db.select().from(looseFiles)
-      .where(eq(looseFiles.trackId, trackId))
-      .orderBy(asc(looseFiles.name)).all();
+  async getLooseFilesByTrack(trackId: string): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(eq(looseFiles.trackId, trackId));
   }
 
   // Moves a song-scoped loose file into the Track-scoped tier — drag onto a Track
@@ -1173,10 +1227,13 @@ export class SQLiteStorage implements IStorage {
       });
     }
 
-    // Clip comments (top-level only)
+    // Clip comments (top-level only). Carried rows (moved in on organize, or copied by
+    // copy-from) are skipped — they were already surfaced when first posted, and a copy
+    // would otherwise produce a duplicate "commented on" row per destination.
+    const clipCommentBaseCond = and(isNull(clipComments.parentId), isNull(clipComments.carriedFromCommentId));
     const clipCommentCond = songId
-      ? and(eq(songs.id, songId), bandCond, isNull(clipComments.parentId))
-      : and(bandCond, isNull(clipComments.parentId));
+      ? and(eq(songs.id, songId), bandCond, clipCommentBaseCond)
+      : and(bandCond, clipCommentBaseCond);
     const clipCommentRows = db
       .select({
         clipId: clipComments.clipId,
@@ -1351,6 +1408,9 @@ export class SQLiteStorage implements IStorage {
       'lyrics-comment-reply',
       'lyrics-comment-edited',
       'lyrics-comment-deleted',
+      'loose-file-comment-reply',
+      'loose-file-comment-edited',
+      'loose-file-comment-deleted',
     ]);
     const logCond = songId
       ? and(eq(activityLog.songId, songId), bandCond, sortOnlyCond)
@@ -1531,7 +1591,13 @@ export class SQLiteStorage implements IStorage {
 
   async addClipComment(data: InsertClipComment): Promise<ClipComment> {
     const now = new Date().toISOString();
-    const comment: ClipComment = { ...data, id: data.id ?? randomUUID(), parentId: data.parentId ?? null, createdAt: now };
+    const comment: ClipComment = {
+      ...data,
+      id: data.id ?? randomUUID(),
+      parentId: data.parentId ?? null,
+      carriedFromCommentId: data.carriedFromCommentId ?? null,
+      createdAt: now,
+    };
     db.insert(clipComments).values(comment).run();
     return db.select().from(clipComments).where(eq(clipComments.id, comment.id)).get()!;
   }
@@ -1546,6 +1612,97 @@ export class SQLiteStorage implements IStorage {
   async deleteClipComment(id: string): Promise<void> {
     db.delete(clipComments).where(eq(clipComments.parentId, id)).run();
     db.delete(clipComments).where(eq(clipComments.id, id)).run();
+  }
+
+  // Copies a source clip's or loose file's comments onto a destination clip — used after
+  // Add to Song / Promote to Song creates the copy's clip. New ids throughout, so
+  // top-level comments go first to build the old -> new id map, then replies are
+  // remapped onto it. Original author and timestamp are kept (it's the note's history);
+  // createdAt is the copy time. The source rows are only read, never changed.
+  async copyCommentsToClip(destClipId: string, source: { kind: 'clip' | 'loose'; id: string }): Promise<ClipComment[]> {
+    return db.transaction((tx) => {
+      const sourceRows: { id: string; parentId: string | null; author: string; text: string; timestamp: number }[] =
+        source.kind === 'clip'
+          ? tx.select().from(clipComments).where(eq(clipComments.clipId, source.id)).orderBy(asc(clipComments.timestamp)).all()
+          : tx.select().from(looseFileComments).where(eq(looseFileComments.looseFileId, source.id)).orderBy(asc(looseFileComments.timestamp)).all();
+      const now = new Date().toISOString();
+      const idMap = new Map<string, string>();
+      const copied: ClipComment[] = [];
+      const copyRow = (row: (typeof sourceRows)[number], parentId: string | null) => {
+        const newRow: ClipComment = {
+          id: randomUUID(),
+          clipId: destClipId,
+          parentId,
+          author: row.author,
+          text: row.text,
+          timestamp: row.timestamp,
+          createdAt: now,
+          carriedFromCommentId: row.id,
+        };
+        tx.insert(clipComments).values(newRow).run();
+        copied.push(newRow);
+        return newRow.id;
+      };
+      for (const row of sourceRows) {
+        if (!row.parentId) idMap.set(row.id, copyRow(row, null));
+      }
+      for (const row of sourceRows) {
+        if (!row.parentId) continue;
+        const newParentId = idMap.get(row.parentId);
+        // A reply whose parent is gone is already orphaned at the source — don't carry it.
+        if (newParentId) copyRow(row, newParentId);
+      }
+      return copied;
+    });
+  }
+
+  // ── Loose File Comments ──────────────────────────────────────────────────────
+
+  async getLooseFileComments(looseFileId: string): Promise<LooseFileCommentWithReplies[]> {
+    const all = db.select().from(looseFileComments)
+      .where(eq(looseFileComments.looseFileId, looseFileId))
+      .orderBy(asc(looseFileComments.timestamp)).all();
+    const topLevel = all.filter(c => !c.parentId);
+    const replyMap = new Map<string, LooseFileComment[]>();
+    for (const c of all) {
+      if (!c.parentId) continue;
+      const bucket = replyMap.get(c.parentId) ?? [];
+      bucket.push(c);
+      replyMap.set(c.parentId, bucket);
+    }
+    return topLevel.map(c => ({
+      ...c,
+      replies: (replyMap.get(c.id) ?? []).sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      ),
+    }));
+  }
+
+  async getLooseFileComment(id: string): Promise<LooseFileComment | undefined> {
+    return db.select().from(looseFileComments).where(eq(looseFileComments.id, id)).get();
+  }
+
+  async addLooseFileComment(data: InsertLooseFileComment): Promise<LooseFileComment> {
+    const comment: LooseFileComment = {
+      ...data,
+      id: data.id ?? randomUUID(),
+      parentId: data.parentId ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    db.insert(looseFileComments).values(comment).run();
+    return db.select().from(looseFileComments).where(eq(looseFileComments.id, comment.id)).get()!;
+  }
+
+  async updateLooseFileComment(id: string, text: string): Promise<LooseFileComment | undefined> {
+    const existing = db.select().from(looseFileComments).where(eq(looseFileComments.id, id)).get();
+    if (!existing) return undefined;
+    db.update(looseFileComments).set({ text }).where(eq(looseFileComments.id, id)).run();
+    return db.select().from(looseFileComments).where(eq(looseFileComments.id, id)).get();
+  }
+
+  async deleteLooseFileComment(id: string): Promise<void> {
+    db.delete(looseFileComments).where(eq(looseFileComments.parentId, id)).run();
+    db.delete(looseFileComments).where(eq(looseFileComments.id, id)).run();
   }
 
   // ── Reviews ────────────────────────────────────────────────────────────────

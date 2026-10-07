@@ -73,6 +73,12 @@ export interface ApiLooseFile {
   metadata: DawClip['metadata'] | null;
   uploadedBy: string | null;
   createdAt: string;
+  // Comment aggregate from the three list routes (unassigned, by song, by track) —
+  // same shape as /api/songs/:songId/clip-comment-summary entries. Optional because
+  // single-file responses (create, assign-track) don't carry it. latestCommentAt is
+  // null when the file has no comments.
+  commentCount?: number;
+  latestCommentAt?: string | null;
 }
 
 // Returned by POST /api/loose-files/:id/place-on-timeline alongside the clip.

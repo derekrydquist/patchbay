@@ -176,11 +176,35 @@ export const clipComments = sqliteTable("clip_comments", {
   text: text("text").notNull(),
   timestamp: real("timestamp").notNull(),
   createdAt: text("created_at").notNull(),
+  // Set on rows that arrived by carry-over rather than being posted here: moved in
+  // from loose_file_comments when a loose file is organized (equals the comment's own
+  // id, since moves keep ids), or copied from another clip/loose file by
+  // POST /api/clips/:clipId/comments/copy-from (the source comment's id). getActivity
+  // skips these so a carried note never surfaces as a new "commented on" feed row.
+  carriedFromCommentId: text("carried_from_comment_id"),
 });
 
 export const insertClipCommentSchema = createInsertSchema(clipComments).omit({ createdAt: true });
 export type InsertClipComment = z.infer<typeof insertClipCommentSchema>;
 export type ClipComment = typeof clipComments.$inferSelect;
+
+// ─── Loose File Comments ──────────────────────────────────────────────────────
+// Notes on a loose file before it's organized. Mirrors clip_comments; moved into
+// clip_comments (same ids) by materializeLooseFileCore when the file is organized.
+
+export const looseFileComments = sqliteTable("loose_file_comments", {
+  id: text("id").primaryKey(),
+  looseFileId: text("loose_file_id").notNull().references(() => looseFiles.id, { onDelete: "cascade" }),
+  parentId: text("parent_id"), // null = top-level; set = reply (one level deep only)
+  author: text("author").notNull(),
+  text: text("text").notNull(),
+  timestamp: real("timestamp").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertLooseFileCommentSchema = createInsertSchema(looseFileComments).omit({ createdAt: true });
+export type InsertLooseFileComment = z.infer<typeof insertLooseFileCommentSchema>;
+export type LooseFileComment = typeof looseFileComments.$inferSelect;
 
 // ─── Production Tasks ─────────────────────────────────────────────────────────
 

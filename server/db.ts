@@ -258,3 +258,34 @@ if (!hasLooseFilesTrackId) {
   sqlite.exec("ALTER TABLE loose_files ADD COLUMN track_id TEXT REFERENCES instrument_tracks(id)");
   console.log("[PatchBay] Added track_id column to loose_files table.");
 }
+
+// Create loose_file_comments table if not exists — notes on a loose file before it's
+// organized. Mirrors clip_comments; rows are moved into clip_comments (same ids) by
+// materializeLooseFileCore, and cascade-deleted with the loose file otherwise.
+const hasLooseFileComments = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM sqlite_master WHERE type='table' AND name='loose_file_comments'"
+).get() as { c: number }).c;
+if (!hasLooseFileComments) {
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS loose_file_comments (
+      id TEXT PRIMARY KEY,
+      loose_file_id TEXT NOT NULL REFERENCES loose_files(id) ON DELETE CASCADE,
+      parent_id TEXT,
+      author TEXT NOT NULL,
+      text TEXT NOT NULL,
+      timestamp REAL NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  console.log("[PatchBay] Created loose_file_comments table.");
+}
+
+// Add carried_from_comment_id to clip_comments if missing — marks rows that arrived by
+// carry-over (organize move, or the copy-from route) so getActivity can skip them.
+const hasClipCommentsCarriedFrom = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('clip_comments') WHERE name='carried_from_comment_id'"
+).get() as { c: number }).c;
+if (!hasClipCommentsCarriedFrom) {
+  sqlite.exec("ALTER TABLE clip_comments ADD COLUMN carried_from_comment_id TEXT");
+  console.log("[PatchBay] Added carried_from_comment_id column to clip_comments table.");
+}

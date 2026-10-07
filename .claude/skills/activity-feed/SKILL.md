@@ -93,6 +93,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `file-uploaded` | Yes | |
 | `clip-comment-added` / `clip-comment-reply` | Added: Yes / Reply: No | Only the top-level comment has a rationale for feed visibility — no Tier-1 synthesized counterpart exists for replies, so surfacing them would risk duplicate-feeling events. |
 | `clip-comment-edited` / `clip-comment-deleted` | No — sort-only | Editing/deleting comment text isn't meaningful production activity. |
+| `loose-file-comment-added` / `-reply` / `-edited` / `-deleted` | Added: Yes / others: No — sort-only | Notes on a loose file; logged only when the file has a `songId` (band-wide files log nothing). Same rationale as clip comments. Tier-1 `clip-comment` synthesis skips `clip_comments` rows with `carried_from_comment_id` set (notes moved in on organize or copied via copy-from). |
 | `task-status-change` | Yes | |
 | `task-comment-added` / `task-comment-reply` | Added: Yes / Reply: No | Same rationale as clip comments. |
 | `task-comment-edited` / `task-comment-deleted` | No — sort-only | Same rationale as clip comments. |

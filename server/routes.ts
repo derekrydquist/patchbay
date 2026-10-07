@@ -196,6 +196,19 @@ function clipCommentSongId(commentId: string): string | null {
     .where(eq(clipComments.id, commentId)).get();
   return row?.songId ?? null;
 }
+
+// ─── Comment author helpers ───────────────────────────────────────────────────
+// Comment authors are always the session user — never read from the request body.
+async function sessionUsername(req: Request): Promise<string | null> {
+  if (!req.session.userId) return null;
+  return (await storage.getUser(req.session.userId))?.username ?? null;
+}
+// Case-insensitive: usernames are stored lowercase today, but older comment rows
+// may carry a differently-cased author string.
+function isCommentAuthor(username: string | null, author: string): boolean {
+  return username !== null && username.toLowerCase() === author.toLowerCase();
+}
+
 function reviewSongId(reviewId: string): string | null {
   return db.select({ songId: songReviews.songId }).from(songReviews)
     .where(eq(songReviews.id, reviewId)).get()?.songId ?? null;
@@ -1978,12 +1991,128 @@ export async function registerRoutes(
     res.status(204).send();
   });
 
+  // ─── Loose File Comments ─────────────────────────────────────────────────────
+  // Notes on a loose file before it's organized; moved into clip_comments (same ids)
+  // by materializeLooseFileCore. Ownership via assertLooseFileOwned, which covers both
+  // song-scoped and band-wide files. Activity is logged only for song-scoped files —
+  // activity_log.songId is NOT NULL, so band-wide files have nowhere to log.
+
+  app.get("/api/loose-files/:id/comments", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+    res.json(await storage.getLooseFileComments(looseFileId));
+  });
+
+  app.post("/api/loose-files/:id/comments", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+    const { text, parentId } = req.body as { text?: string; parentId?: string };
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ message: "text is required" });
+    }
+    if (parentId) {
+      const parent = await storage.getLooseFileComment(parentId);
+      if (!parent || parent.parentId || parent.looseFileId !== looseFileId) {
+        return res.status(400).json({ message: "parentId must reference a top-level comment on this loose file" });
+      }
+    }
+    const author = await sessionUsername(req);
+    if (!author) return res.status(401).json({ message: "Not logged in" });
+    const comment = await storage.addLooseFileComment({
+      id: randomUUID(),
+      looseFileId,
+      author,
+      text,
+      timestamp: Date.now(),
+      parentId: parentId ?? null,
+    });
+
+    if (looseFile.songId) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: looseFile.songId,
+        type: parentId ? 'loose-file-comment-reply' : 'loose-file-comment-added',
+        description: parentId
+          ? `${author} replied to a note on ${looseFile.name}`
+          : `${author} added a note to ${looseFile.name}`,
+        timestamp: Date.now(),
+        author,
+      }).catch(console.error);
+    }
+
+    res.status(201).json(comment);
+  });
+
+  app.patch("/api/loose-file-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const existing = await storage.getLooseFileComment(commentId);
+    if (!existing) return res.status(404).json({ message: "Comment not found" });
+    const looseFile = await storage.getLooseFile(existing.looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Comment not found" });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+    const username = await sessionUsername(req);
+    if (!isCommentAuthor(username, existing.author)) {
+      return res.status(403).json({ message: "Only the comment's author can edit it" });
+    }
+    const { text } = req.body as { text?: string };
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ message: "text is required" });
+    }
+    const comment = await storage.updateLooseFileComment(commentId, text);
+    if (!comment) return res.status(404).json({ message: "Comment not found" });
+
+    if (looseFile.songId) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: looseFile.songId,
+        type: 'loose-file-comment-edited',
+        description: `${username} edited a note on ${looseFile.name}`,
+        timestamp: Date.now(),
+        author: username,
+      }).catch(console.error);
+    }
+
+    res.json(comment);
+  });
+
+  app.delete("/api/loose-file-comments/:id", requireBand, async (req, res) => {
+    const commentId = req.params.id as string;
+    const existing = await storage.getLooseFileComment(commentId);
+    if (!existing) return res.status(404).json({ message: "Comment not found" });
+    const looseFile = await storage.getLooseFile(existing.looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Comment not found" });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+    const username = await sessionUsername(req);
+    if (!isCommentAuthor(username, existing.author)) {
+      return res.status(403).json({ message: "Only the comment's author can delete it" });
+    }
+    await storage.deleteLooseFileComment(commentId);
+
+    if (looseFile.songId) {
+      storage.logActivity({
+        id: randomUUID(),
+        songId: looseFile.songId,
+        type: 'loose-file-comment-deleted',
+        description: `${username} deleted a note on ${looseFile.name}`,
+        timestamp: Date.now(),
+        author: username,
+      }).catch(console.error);
+    }
+
+    res.status(204).send();
+  });
+
   // ─── Clip Comments ────────────────────────────────────────────────────────────
 
   app.get("/api/clips/:clipId/comments", requireBand, async (req, res) => {
     const clipId = req.params.clipId as string;
     const songId = clipSongId(clipId);
-    if (!songId || !assertSongOwned(req, res, songId)) return;
+    if (!songId) return res.status(404).json({ message: "Not found" });
+    if (!assertSongOwned(req, res, songId)) return;
     const comments = await storage.getClipComments(clipId);
     res.json(comments);
   });
@@ -1991,14 +2120,21 @@ export async function registerRoutes(
   app.post("/api/clips/:clipId/comments", requireBand, async (req, res) => {
     const clipId = req.params.clipId as string;
     const songId = clipSongId(clipId);
-    if (!songId || !assertSongOwned(req, res, songId)) return;
-    const { author, text, parentId } = req.body as { author: string; text: string; parentId?: string };
+    if (!songId) return res.status(404).json({ message: "Not found" });
+    if (!assertSongOwned(req, res, songId)) return;
+    // Any `author` in the body is ignored — always the session user.
+    const { text, parentId } = req.body as { text?: string; parentId?: string };
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ message: "text is required" });
+    }
     if (parentId) {
       const parent = db.select().from(clipComments).where(eq(clipComments.id, parentId)).get();
       if (!parent || parent.parentId || parent.clipId !== clipId) {
         return res.status(400).json({ message: "parentId must reference a top-level comment on this clip" });
       }
     }
+    const author = await sessionUsername(req);
+    if (!author) return res.status(401).json({ message: "Not logged in" });
     const comment = await storage.addClipComment({
       id: randomUUID(),
       clipId,
@@ -2008,40 +2144,74 @@ export async function registerRoutes(
       parentId: parentId ?? null,
     });
 
-    const clipCommentActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
     storage.logActivity({
       id: randomUUID(),
       songId,
       type: parentId ? 'clip-comment-reply' : 'clip-comment-added',
       description: parentId
-        ? `${clipCommentActor} replied to a comment on a clip`
-        : `${clipCommentActor} commented on a clip`,
+        ? `${author} replied to a comment on a clip`
+        : `${author} commented on a clip`,
       timestamp: Date.now(),
-      author: clipCommentActor,
+      author,
     }).catch(console.error);
 
     res.status(201).json(comment);
   });
 
+  // Carries a source's notes onto a freshly copied clip (Add to Song / Promote to
+  // Song). Two independent ids, so ownership is asserted on both the destination
+  // clip's song and the source (a clip's song, or a loose file's song/band).
+  app.post("/api/clips/:clipId/comments/copy-from", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const destSongId = clipSongId(clipId);
+    if (!destSongId) return res.status(404).json({ message: "Not found" });
+    if (!assertSongOwned(req, res, destSongId)) return;
+
+    const source = (req.body as { source?: { kind?: unknown; id?: unknown } }).source;
+    if (!source || (source.kind !== 'clip' && source.kind !== 'loose') || typeof source.id !== 'string' || !source.id) {
+      return res.status(400).json({ message: "source must be { kind: 'clip' | 'loose', id: string }" });
+    }
+    if (source.kind === 'clip') {
+      if (source.id === clipId) {
+        return res.status(400).json({ message: "source and destination must be different clips" });
+      }
+      const sourceSongId = clipSongId(source.id);
+      if (!sourceSongId) return res.status(404).json({ message: "Not found" });
+      if (!assertSongOwned(req, res, sourceSongId)) return;
+    } else {
+      const looseFile = await storage.getLooseFile(source.id);
+      if (!looseFile) return res.status(404).json({ message: "Not found" });
+      if (!assertLooseFileOwned(req, res, looseFile)) return;
+    }
+
+    const copied = await storage.copyCommentsToClip(clipId, { kind: source.kind, id: source.id });
+    res.status(201).json(copied);
+  });
+
   app.patch("/api/clip-comments/:id", requireBand, async (req, res) => {
     const commentId = req.params.id as string;
     const songId = clipCommentSongId(commentId);
-    if (!songId || !assertSongOwned(req, res, songId)) return;
-    const comment = await storage.updateClipComment(commentId, req.body.text);
+    if (!songId) return res.status(404).json({ message: "Comment not found" });
+    if (!assertSongOwned(req, res, songId)) return;
+    const existing = db.select().from(clipComments).where(eq(clipComments.id, commentId)).get()!;
+    const username = await sessionUsername(req);
+    if (!isCommentAuthor(username, existing.author)) {
+      return res.status(403).json({ message: "Only the comment's author can edit it" });
+    }
+    const { text } = req.body as { text?: string };
+    if (typeof text !== "string" || !text.trim()) {
+      return res.status(400).json({ message: "text is required" });
+    }
+    const comment = await storage.updateClipComment(commentId, text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
 
-    const editCommentActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
     storage.logActivity({
       id: randomUUID(),
       songId,
       type: 'clip-comment-edited',
-      description: `${editCommentActor} edited a comment on a clip`,
+      description: `${username} edited a comment on a clip`,
       timestamp: Date.now(),
-      author: editCommentActor,
+      author: username,
     }).catch(console.error);
 
     res.json(comment);
@@ -2050,17 +2220,20 @@ export async function registerRoutes(
   app.delete("/api/clip-comments/:id", requireBand, async (req, res) => {
     const commentId = req.params.id as string;
     const songId = clipCommentSongId(commentId);
-    if (!songId || !assertSongOwned(req, res, songId)) return;
-    const deleteCommentActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
+    if (!songId) return res.status(404).json({ message: "Comment not found" });
+    if (!assertSongOwned(req, res, songId)) return;
+    const existing = db.select().from(clipComments).where(eq(clipComments.id, commentId)).get()!;
+    const username = await sessionUsername(req);
+    if (!isCommentAuthor(username, existing.author)) {
+      return res.status(403).json({ message: "Only the comment's author can delete it" });
+    }
     storage.logActivity({
       id: randomUUID(),
       songId,
       type: 'clip-comment-deleted',
-      description: `${deleteCommentActor} deleted a comment on a clip`,
+      description: `${username} deleted a comment on a clip`,
       timestamp: Date.now(),
-      author: deleteCommentActor,
+      author: username,
     }).catch(console.error);
     await storage.deleteClipComment(commentId);
     res.status(204).send();
