@@ -71,6 +71,10 @@ import {
   ideasShelfBackgroundDropId,
   IDEAS_SHELF_BACKGROUND_DROP_PREFIX,
 } from '@/hooks/use-loose-file-organize-dnd';
+import {
+  useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
+  type NativeFileDropHandlers,
+} from '@/hooks/use-native-file-drop';
 import { DndContext, useDroppable, useDraggable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -482,9 +486,15 @@ interface IdeaListRowProps {
   idea: Song;
   isSelected: boolean;
   onSelect: () => void;
+  /** Finder file drop — uploads into this Idea. */
+  onFileDrop: (files: File[]) => void;
 }
 
-function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
+function IdeaListRow({ idea, isSelected, onSelect, onFileDrop }: IdeaListRowProps) {
+  const nativeDrop = useNativeFileDrop({
+    enabled: !!idea.defaultTrackId && !!idea.defaultSectionName,
+    onDrop: onFileDrop,
+  });
   // Also the drop target for an organized clip dragged out of Column 2 (move to
   // this Idea) — ideaSongId identifies the destination for that drag. The row the
   // clip came from stays ENABLED (a disabled row is invisible to collision
@@ -504,12 +514,13 @@ function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
     <button
       ref={setNodeRef}
       onClick={onSelect}
+      {...nativeDrop.handlers}
       className={cn(
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
           : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        isOver && !isOwnIdea && 'bg-primary/10 border-primary/50'
+        ((isOver && !isOwnIdea) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -571,10 +582,13 @@ interface SongsSectionRowProps {
   idea: ApiIdea;
   isSelected: boolean;
   onSelect: () => void;
+  /** Finder file drop — uploads into this section as a real clip. */
+  onFileDrop: (files: File[]) => void;
 }
 
-function SongsSectionRow({ idea, isSelected, onSelect }: SongsSectionRowProps) {
+function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop }: SongsSectionRowProps) {
   const hasFiles = idea.clips.length > 0;
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionDropId(idea.id),
     data: { trackId: idea.trackId, sectionName: idea.sectionName },
@@ -584,12 +598,13 @@ function SongsSectionRow({ idea, isSelected, onSelect }: SongsSectionRowProps) {
     <button
       ref={setNodeRef}
       onClick={onSelect}
+      {...nativeDrop.handlers}
       className={cn(
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
           : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        isOver && 'bg-primary/10 border-primary/50'
+        (isOver || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -619,9 +634,12 @@ interface SongsTrackRowProps {
   track: ApiTrack;
   isSelected: boolean;
   onSelect: () => void;
+  /** Finder file drop — a loose file on THIS track (Track-scoped tier). */
+  onFileDrop: (files: File[]) => void;
 }
 
-function SongsTrackRow({ track, isSelected, onSelect }: SongsTrackRowProps) {
+function SongsTrackRow({ track, isSelected, onSelect, onFileDrop }: SongsTrackRowProps) {
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
   const activeLooseFileDrag = useActiveLooseFileDrag();
@@ -635,12 +653,13 @@ function SongsTrackRow({ track, isSelected, onSelect }: SongsTrackRowProps) {
     <button
       ref={setNodeRef}
       onClick={onSelect}
+      {...nativeDrop.handlers}
       className={cn(
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
           : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        isOver && !isSameTrackDrag && 'bg-primary/10 border-primary/50'
+        ((isOver && !isSameTrackDrag) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -659,17 +678,16 @@ function SongsTrackRow({ track, isSelected, onSelect }: SongsTrackRowProps) {
 // being dragged — disabled for plain Tracks-column files and every other drag
 // type. Nests every Track row; Track rows win via matchOrganizeDropTarget's
 // background-is-a-fallback rule. Stable id suffix. Native OS-file drop handlers
-// pass straight through (the existing "Drop to upload" flow).
+// are passed in (useNativeFileDrop) — a Finder drop here is a song-level loose file.
 interface SongsTracksColumnDropZoneProps {
   className?: string;
   children: React.ReactNode;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
+  /** Finder file drop handlers (useNativeFileDrop). */
+  nativeDropHandlers: NativeFileDropHandlers;
 }
 
 function SongsTracksColumnDropZone({
-  className, children, onDragOver, onDragLeave, onDrop,
+  className, children, nativeDropHandlers,
 }: SongsTracksColumnDropZoneProps) {
   const activeLooseFileDrag = useActiveLooseFileDrag();
   const disabled = !activeLooseFileDrag?.trackId;
@@ -684,9 +702,7 @@ function SongsTracksColumnDropZone({
       ref={setNodeRef}
       // isOver ignores disabled — gate the highlight on both.
       className={cn(className, isOver && !disabled && 'bg-primary/5')}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      {...nativeDropHandlers}
     >
       {children}
     </div>
@@ -702,9 +718,11 @@ interface SongsSectionsColumnDropZoneProps {
   selectedTrackId: string | null;
   className?: string;
   children: React.ReactNode;
+  /** Finder file drop handlers — a loose file on the selected Track. */
+  nativeDropHandlers: NativeFileDropHandlers;
 }
 
-function SongsSectionsColumnDropZone({ selectedTrackId, className, children }: SongsSectionsColumnDropZoneProps) {
+function SongsSectionsColumnDropZone({ selectedTrackId, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
   const activeLooseFileDrag = useActiveLooseFileDrag();
   const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrackId;
   const { setNodeRef, isOver } = useDroppable({
@@ -714,7 +732,7 @@ function SongsSectionsColumnDropZone({ selectedTrackId, className, children }: S
   });
 
   return (
-    <div ref={setNodeRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')}>
+    <div ref={setNodeRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')} {...nativeDropHandlers}>
       {children}
     </div>
   );
@@ -737,13 +755,12 @@ interface SongsFilesColumnDropZoneProps {
   selectedSection: ApiIdea | null;
   className?: string;
   children: React.ReactNode;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
+  /** Finder file drop handlers (useNativeFileDrop). */
+  nativeDropHandlers: NativeFileDropHandlers;
 }
 
 function SongsFilesColumnDropZone({
-  selectedSection, className, children, onDragOver, onDragLeave, onDrop,
+  selectedSection, className, children, nativeDropHandlers,
 }: SongsFilesColumnDropZoneProps) {
   const { setNodeRef, isOver } = useDroppable({
     id: bucketVersionsDropId('songs-files-column'),
@@ -755,9 +772,7 @@ function SongsFilesColumnDropZone({
     <div
       ref={setNodeRef}
       className={cn(className, isOver && 'bg-primary/5')}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      {...nativeDropHandlers}
     >
       {children}
     </div>
@@ -774,13 +789,12 @@ interface IdeaFilesColumnDropZoneProps {
   selectedInstrument: ApiTrack | null;
   className?: string;
   children: React.ReactNode;
-  onDragOver: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
-  onDrop: (e: React.DragEvent) => void;
+  /** Finder file drop handlers (useNativeFileDrop). */
+  nativeDropHandlers: NativeFileDropHandlers;
 }
 
 function IdeaFilesColumnDropZone({
-  selectedInstrument, className, children, onDragOver, onDragLeave, onDrop,
+  selectedInstrument, className, children, nativeDropHandlers,
 }: IdeaFilesColumnDropZoneProps) {
   const idea = selectedInstrument?.ideas[0];
   const { setNodeRef, isOver } = useDroppable({
@@ -798,9 +812,7 @@ function IdeaFilesColumnDropZone({
     <div
       ref={setNodeRef}
       className={cn(className, isOver && !isOwnContainer && 'bg-primary/5')}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
+      {...nativeDropHandlers}
     >
       {children}
     </div>
@@ -814,8 +826,8 @@ function IdeaFilesColumnDropZone({
 // other drag type. Nests every Idea row; Idea rows win via matchOrganizeDropTarget's
 // background-is-a-fallback rule (the unassigned LooseFileRows here are draggables,
 // not droppables, so a drop on one lands on this background — the file joins them).
-// Stable id suffix. Its highlight is its own; the native OS-file "Drop to upload"
-// banner on the Column 1 wrapper is a separate mechanism and is untouched.
+// Stable id suffix. Its highlight is its own; the native OS-file drop highlight on
+// the Column 1 wrapper (useNativeFileDrop) is a separate mechanism.
 //
 // Also the Finder-style "click blank space to deselect" target: onBlankClick fires
 // only when both the primary-button pointerdown and the click land on this wrapper
@@ -904,14 +916,20 @@ export default function Dashboard() {
   const [selectedFile, setSelectedFile] = useState<Song | null>(null);
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrack | null>(null);
   const [selectedSection, setSelectedSection] = useState<ApiIdea | null>(null);
-  const [isDragOver, setIsDragOver] = useState(false);
-  // Native OS file drop (Finder drag) onto the Tracks column (Songs quick-browser)
-  // and the Ideas shelf's Column 1 (Ideas list) — separate state from isDragOver
-  // above since both a Files column and one of these can be visible at once within
-  // the same view, and they must highlight independently.
-  const [isTracksColumnDragOver, setIsTracksColumnDragOver] = useState(false);
-  const [isIdeasColumnDragOver, setIsIdeasColumnDragOver] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  // Set only by a Finder drop that carries its own destination (Track row, Sections
+  // background, Songs Section row, Idea row); drives the UploadModal props instead
+  // of the current selection. Cleared when the dialog closes, so the Upload buttons
+  // (which never set it) keep following the selection exactly as before.
+  const [dropUploadTarget, setDropUploadTarget] = useState<{
+    mode: 'placed' | 'loose';
+    songId: string;
+    songType: 'song' | 'idea';
+    ideaId?: string;
+    looseTrackId?: string;
+    instrumentName?: string;
+    sectionName?: string;
+  } | null>(null);
   const [uploadMode, setUploadMode] = useState<'placed' | 'loose' | 'band-loose'>('placed');
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClip | null>(null);
@@ -960,13 +978,15 @@ export default function Dashboard() {
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
 
-  // Native OS file drop (Finder drag) onto the Songs quick-browser's Tracks column
-  // (Column 2) — no destination section, so this routes through 'loose' mode
-  // (song-scoped loose file), same as that column's "Add Files" dropdown item.
-  const handleTracksColumnFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsTracksColumnDragOver(false);
-    if (!e.dataTransfer.files?.length) return;
+  // ── Finder file drops (useNativeFileDrop) ──────────────────────────────────
+  // A drop carries its own destination. Column backgrounds keep their existing
+  // routes (Songs Tracks column → song-level loose file; Ideas Column 1 → band-wide;
+  // Files columns → the selected section / Idea). Rows and the Sections background
+  // set dropUploadTarget so the dialog lands where the file was released.
+
+  // Songs quick-browser Tracks column (Column 2) — song-level loose file, same as
+  // that column's "Add Files" dropdown item.
+  const handleTracksColumnFileDrop = (files: File[]) => {
     if (!selectedFile) {
       toast({
         title: 'Select a song first',
@@ -975,39 +995,50 @@ export default function Dashboard() {
       });
       return;
     }
-    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    if (!audioFiles.length) {
-      toast({
-        title: 'Unsupported file type',
-        description: 'Only audio files can be uploaded here.',
-        variant: 'destructive',
-      });
-      return;
-    }
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
     setUploadMode('loose');
     setUploadInitialFiles(audioFiles);
     setIsUploadOpen(true);
   };
 
-  // Native OS file drop onto the Ideas shelf's Column 1 (Ideas list) — no Idea
-  // target, so this routes through 'band-loose' mode (band-wide unassigned loose
-  // file), same as that column's "Upload Files" dropdown item.
-  const handleIdeasColumnFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsIdeasColumnDragOver(false);
-    if (!e.dataTransfer.files?.length) return;
-    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    if (!audioFiles.length) {
-      toast({
-        title: 'Unsupported file type',
-        description: 'Only audio files can be uploaded here.',
-        variant: 'destructive',
-      });
-      return;
-    }
+  // Ideas shelf Column 1 (Ideas list) — band-wide unassigned loose file, same as
+  // that column's "Upload Files" dropdown item.
+  const handleIdeasColumnFileDrop = (files: File[]) => {
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
     setUploadMode('band-loose');
     setUploadInitialFiles(audioFiles);
     setIsUploadOpen(true);
+  };
+
+  // Songs quick-browser Track row, or the Sections background for the selected
+  // Track — a loose file on that Track, created in one server write.
+  const handleSongsTrackFileDrop = (files: File[], track: ApiTrack) => {
+    if (!selectedFile) return;
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
+    setDropUploadTarget({ mode: 'loose', songId: selectedFile.id, songType: 'song', looseTrackId: track.id });
+    setUploadInitialFiles(audioFiles);
+    setIsUploadOpen(true);
+    if (selectedInstrument?.id !== track.id) selectSongsTrack(track);
+  };
+
+  // Songs quick-browser Section row — a real clip in that section, like
+  // Workspace's Section row. Selects the section, as the Workspace drop does.
+  const handleSongsSectionFileDrop = (files: File[], idea: ApiIdea) => {
+    if (!selectedFile || !selectedInstrument) return;
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
+    setDropUploadTarget({
+      mode: 'placed', songId: selectedFile.id, songType: 'song', ideaId: idea.id,
+      instrumentName: selectedInstrument.name, sectionName: idea.sectionName,
+    });
+    setUploadInitialFiles(audioFiles);
+    setIsUploadOpen(true);
+    setSelectedSection(idea);
+    const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${selectedInstrument.id}&sectionId=${idea.id}`;
+    appliedSearchRef.current = s; setLocation(`/?${s}`);
   };
 
   const [selectedAlbum, setSelectedAlbum] = useState<AlbumWithCount | null>(null);
@@ -1170,6 +1201,66 @@ export default function Dashboard() {
     const s = `tab=files&filter=ideas&ideaId=${idea.id}`;
     appliedSearchRef.current = s; setLocation(`/?${s}`);
   };
+
+  // Ideas shelf Idea row — upload into that Idea, selected or not. The row knows
+  // only its hidden default Folder's (trackId, sectionName); the dialog needs the
+  // ideas-row id, so resolve it from the Idea's bucket first. View follows the drop.
+  const handleIdeaRowFileDrop = async (files: File[], idea: Song) => {
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
+    let destIdeaId: string | undefined;
+    try {
+      const bucket = await queryClient.fetchQuery<ApiTrack[]>({
+        queryKey: bucketKeys.bucket(idea.id),
+        queryFn: () => fetchBucket(idea.id),
+      });
+      destIdeaId = bucket.find(t => t.id === idea.defaultTrackId)
+        ?.ideas.find(i => i.sectionName === idea.defaultSectionName)?.id;
+    } catch {
+      destIdeaId = undefined;
+    }
+    if (!destIdeaId) {
+      toast({ title: 'Upload failed', description: `Couldn't open ${idea.name}.`, variant: 'destructive' });
+      return;
+    }
+    selectIdea(idea);
+    setDropUploadTarget({ mode: 'placed', songId: idea.id, songType: 'idea', ideaId: destIdeaId, instrumentName: idea.name });
+    setUploadInitialFiles(audioFiles);
+    setIsUploadOpen(true);
+  };
+
+  const songsTracksColumnDrop = useNativeFileDrop({ onDrop: handleTracksColumnFileDrop });
+  // No Track selected → catch and discard (no highlight, no toast).
+  const songsSectionsColumnDrop = useNativeFileDrop({
+    enabled: !!selectedFile && !!selectedInstrument,
+    onDrop: (files) => { if (selectedInstrument) handleSongsTrackFileDrop(files, selectedInstrument); },
+  });
+  // Same destination as the selected Section row.
+  const songsFilesColumnDrop = useNativeFileDrop({
+    enabled: !!selectedSection,
+    onDrop: (files) => { if (selectedSection) handleSongsSectionFileDrop(files, selectedSection); },
+  });
+  const ideasColumnDrop = useNativeFileDrop({ onDrop: handleIdeasColumnFileDrop });
+  // While a loose-file preview shows, Column 2 is no destination: the drop is caught
+  // (the browser never opens the file) but there's no highlight, upload or toast.
+  const ideaFilesColumnDrop = useNativeFileDrop({
+    enabled: !!selectedFile && !previewLooseFile,
+    onDrop: (files) => {
+      const audioFiles = takeAudioFiles(files);
+      if (!audioFiles.length || !selectedFile) return;
+      // The selected Idea's hidden default Folder; null only while its bucket loads,
+      // in which case the selection-driven props below are used unchanged.
+      if (selectedSection) {
+        setDropUploadTarget({
+          mode: 'placed', songId: selectedFile.id, songType: 'idea',
+          ideaId: selectedSection.id, instrumentName: selectedFile.name,
+        });
+      } else {
+        setUploadMode('placed');
+      }
+      setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
+    },
+  });
 
   // Ideas shelf: show a band-wide loose file (Column 1) as the preview — clicking
   // one, or the file a make-loose just produced. The mirror of selectIdea: a loose
@@ -2608,11 +2699,9 @@ export default function Dashboard() {
               <SongsTracksColumnDropZone
                 className={cn(
                   'w-44 shrink-0 border-r border-white/5 flex flex-col transition-colors',
-                  isTracksColumnDragOver ? 'bg-primary/5' : 'bg-black/10'
+                  songsTracksColumnDrop.isOver && selectedFile ? NATIVE_DROP_COLUMN_CLASS : 'bg-black/10'
                 )}
-                onDragOver={(e) => { e.preventDefault(); if (selectedFile) setIsTracksColumnDragOver(true); }}
-                onDragLeave={(e) => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsTracksColumnDragOver(false); }}
-                onDrop={handleTracksColumnFileDrop}
+                nativeDropHandlers={songsTracksColumnDrop.handlers}
               >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/instrheader">
                   <span>{selectedFile?.type === 'idea' ? 'Folders' : 'Tracks'}</span>
@@ -2650,17 +2739,13 @@ export default function Dashboard() {
                           No {selectedFile.type === 'idea' ? 'folders' : 'tracks'}
                         </p>
                       )}
-                      {isTracksColumnDragOver && (
-                        <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
-                          <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
-                        </div>
-                      )}
                       {fileBucket.map(track => (
                         <SongsTrackRow
                           key={track.id}
                           track={track}
                           isSelected={selectedInstrument?.id === track.id}
                           onSelect={() => selectSongsTrack(track)}
+                          onFileDrop={(files) => handleSongsTrackFileDrop(files, track)}
                         />
                       ))}
                       {selectedFileLooseFiles.map(lf => (
@@ -2674,7 +2759,11 @@ export default function Dashboard() {
               {/* Column 3 — Sections / Subfolders */}
               <SongsSectionsColumnDropZone
                 selectedTrackId={selectedInstrument?.id ?? null}
-                className="w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15] transition-colors"
+                className={cn(
+                  'w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15] transition-colors',
+                  songsSectionsColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS
+                )}
+                nativeDropHandlers={songsSectionsColumnDrop.handlers}
               >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/sectheader">
                   <span>{selectedFile?.type === 'idea' ? 'Subfolders' : 'Sections'}</span>
@@ -2709,6 +2798,7 @@ export default function Dashboard() {
                               appliedSearchRef.current = s; setLocation(`/?${s}`);
                             }
                           }}
+                          onFileDrop={(files) => handleSongsSectionFileDrop(files, idea)}
                         />
                       ))}
                       {/* Track-scoped resting tier — always below the Section list,
@@ -2726,26 +2816,9 @@ export default function Dashboard() {
                 selectedSection={selectedSection}
                 className={cn(
                   'flex-1 flex flex-col transition-colors',
-                  isDragOver && selectedSection ? 'bg-primary/5' : 'bg-black/20'
+                  songsFilesColumnDrop.isOver ? NATIVE_DROP_COLUMN_CLASS : 'bg-black/20'
                 )}
-                onDragOver={e => { e.preventDefault(); if (selectedSection) setIsDragOver(true); }}
-                onDragLeave={e => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsDragOver(false); }}
-                onDrop={e => {
-                  e.preventDefault();
-                  setIsDragOver(false);
-                  if (selectedSection && e.dataTransfer.files.length > 0) {
-                    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) {
-                      setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
-                    } else {
-                      toast({
-                        title: 'Unsupported file type',
-                        description: 'Only audio files can be uploaded here.',
-                        variant: 'destructive',
-                      });
-                    }
-                  }
-                }}
+                nativeDropHandlers={songsFilesColumnDrop.handlers}
               >
                 <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
@@ -2779,21 +2852,16 @@ export default function Dashboard() {
                   ) : selectedSection.clips.length === 0 ? (
                     <div className={cn(
                       'flex flex-col items-center justify-start pt-4 border-2 border-dashed rounded-lg transition-colors mx-1',
-                      isDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
+                      songsFilesColumnDrop.isOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
                     )}>
-                      <Upload size={20} className={cn('mb-3', isDragOver ? 'text-primary/60' : 'text-white/15')} />
-                      <p className={cn('text-[10px] uppercase tracking-widest mb-1', isDragOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
-                        {isDragOver ? 'Drop to upload' : 'No files yet'}
+                      <Upload size={20} className={cn('mb-3', songsFilesColumnDrop.isOver ? 'text-primary/60' : 'text-white/15')} />
+                      <p className={cn('text-[10px] uppercase tracking-widest mb-1', songsFilesColumnDrop.isOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
+                        No files yet
                       </p>
                       <p className="text-[10px] text-muted-foreground/30">Drop audio files or use Upload above</p>
                     </div>
                   ) : (
                     <>
-                      {isDragOver && (
-                        <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
-                          <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to add more files</p>
-                        </div>
-                      )}
                       {selectedSection.clips.map(clip => (
                         <SongsClipContextMenuCard
                           key={clip.id}
@@ -2827,10 +2895,8 @@ export default function Dashboard() {
 
               {/* Column 1 — Ideas list */}
               <div
-                className={cn('w-52 shrink-0 border-r border-white/5 flex flex-col transition-colors', isIdeasColumnDragOver && 'bg-primary/5')}
-                onDragOver={(e) => { e.preventDefault(); setIsIdeasColumnDragOver(true); }}
-                onDragLeave={(e) => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsIdeasColumnDragOver(false); }}
-                onDrop={handleIdeasColumnFileDrop}
+                className={cn('w-52 shrink-0 border-r border-white/5 flex flex-col transition-colors', ideasColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
+                {...ideasColumnDrop.handlers}
               >
                 <div className="px-3 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/ideasheader">
                   <span>Ideas</span>
@@ -2865,17 +2931,13 @@ export default function Dashboard() {
                   {filteredFiles.length === 0 && unassignedLooseFiles.length === 0 && (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No ideas yet — create one</p>
                   )}
-                  {isIdeasColumnDragOver && (
-                    <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
-                      <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
-                    </div>
-                  )}
                   {filteredFiles.map(idea => (
                     <IdeaListRow
                       key={idea.id}
                       idea={idea}
                       isSelected={selectedFile?.id === idea.id}
                       onSelect={() => selectIdea(idea)}
+                      onFileDrop={(files) => { void handleIdeaRowFileDrop(files, idea); }}
                     />
                   ))}
                   {unassignedLooseFiles.map(lf => (
@@ -2898,25 +2960,8 @@ export default function Dashboard() {
                 // is showing, Column 2 is no destination: preventDefault still runs
                 // (so the browser never opens the file), but no highlight, no upload
                 // and no toast — Column 1 is where loose files are dropped.
-                className={cn('flex-1 flex flex-col transition-colors', isDragOver && selectedFile && !previewLooseFile ? 'bg-primary/5' : 'bg-black/20')}
-                onDragOver={e => { e.preventDefault(); if (selectedFile && !previewLooseFile) setIsDragOver(true); }}
-                onDragLeave={e => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsDragOver(false); }}
-                onDrop={e => {
-                  e.preventDefault();
-                  setIsDragOver(false);
-                  if (selectedFile && !previewLooseFile && e.dataTransfer.files.length > 0) {
-                    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-                    if (audioFiles.length > 0) {
-                      setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
-                    } else {
-                      toast({
-                        title: 'Unsupported file type',
-                        description: 'Only audio files can be uploaded here.',
-                        variant: 'destructive',
-                      });
-                    }
-                  }
-                }}
+                className={cn('flex-1 flex flex-col transition-colors', ideaFilesColumnDrop.isOver ? NATIVE_DROP_COLUMN_CLASS : 'bg-black/20')}
+                nativeDropHandlers={ideaFilesColumnDrop.handlers}
               >
                 <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
@@ -3010,22 +3055,17 @@ export default function Dashboard() {
                     if (clips.length === 0 && selectedFileLooseFiles.length === 0) return (
                       <div className={cn(
                         'flex flex-col items-center justify-start pt-4 border-2 border-dashed rounded-lg transition-colors mx-1',
-                        isDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
+                        ideaFilesColumnDrop.isOver ? 'border-primary/50 bg-primary/5' : 'border-white/8'
                       )}>
-                        <Upload size={20} className={cn('mb-3', isDragOver ? 'text-primary/60' : 'text-white/15')} />
-                        <p className={cn('text-[10px] uppercase tracking-widest mb-1', isDragOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
-                          {isDragOver ? 'Drop to upload' : 'No files yet'}
+                        <Upload size={20} className={cn('mb-3', ideaFilesColumnDrop.isOver ? 'text-primary/60' : 'text-white/15')} />
+                        <p className={cn('text-[10px] uppercase tracking-widest mb-1', ideaFilesColumnDrop.isOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
+                          No files yet
                         </p>
                         <p className="text-[10px] text-muted-foreground/30">Drop audio files or use Upload above</p>
                       </div>
                     );
                     return (
                       <>
-                        {isDragOver && (
-                          <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
-                            <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to add more files</p>
-                          </div>
-                        )}
                         {/* Files uploaded to this Idea before being organized (legacy —
                             new uploads always attach directly, see UploadModal below).
                             Clicking one loads its preview above; dropping one anywhere
@@ -3413,13 +3453,24 @@ export default function Dashboard() {
           affect this mode, even when an Idea happens to be selected. */}
       <UploadModal
         open={isUploadOpen}
-        onOpenChange={setIsUploadOpen}
-        songId={uploadMode === 'band-loose' ? undefined : selectedFile?.id}
-        mode={uploadMode}
-        defaultIdeaId={selectedSection?.id}
-        defaultInstrumentName={filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? '')}
-        defaultSectionName={filesFilter === 'ideas' ? undefined : selectedSection?.sectionName}
-        songType={filesFilter === 'ideas' ? 'idea' : 'song'}
+        onOpenChange={(open) => { setIsUploadOpen(open); if (!open) setDropUploadTarget(null); }}
+        {...(dropUploadTarget ? {
+          songId: dropUploadTarget.songId,
+          mode: dropUploadTarget.mode,
+          defaultIdeaId: dropUploadTarget.ideaId,
+          defaultInstrumentName: dropUploadTarget.instrumentName,
+          defaultSectionName: dropUploadTarget.sectionName,
+          songType: dropUploadTarget.songType,
+          looseTrackId: dropUploadTarget.looseTrackId,
+          announceDestination: true,
+        } : {
+          songId: uploadMode === 'band-loose' ? undefined : selectedFile?.id,
+          mode: uploadMode,
+          defaultIdeaId: selectedSection?.id,
+          defaultInstrumentName: filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? ''),
+          defaultSectionName: filesFilter === 'ideas' ? undefined : selectedSection?.sectionName,
+          songType: filesFilter === 'ideas' ? 'idea' as const : 'song' as const,
+        })}
         initialFiles={uploadInitialFiles}
         onUploadSuccess={() => {
           if (filesFilter === 'ideas') queryClient.invalidateQueries({ queryKey: ['songs'] });

@@ -32,7 +32,7 @@ async function uploadFile(
   return res.json();
 }
 
-async function createLooseFile(songId: string, payload: {
+async function createLooseFile(songId: string, trackId: string | undefined, payload: {
   name: string;
   type: string;
   color: string;
@@ -48,7 +48,7 @@ async function createLooseFile(songId: string, payload: {
   const res = await fetch(`/api/songs/${songId}/loose-files`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...payload, url: payload.src }),
+    body: JSON.stringify({ ...payload, url: payload.src, ...(trackId ? { trackId } : {}) }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ message: 'Failed to save file' }));
@@ -131,13 +131,21 @@ export interface UploadModalProps {
   // but has no songId at all — files land in loose_files with songId: null,
   // scoped to the session's band instead. Never pass songId with 'band-loose'.
   mode?: 'placed' | 'loose' | 'band-loose';
+  // 'loose' only: create the file directly in this Track's Track-scoped tier (one
+  // server write — see POST /api/songs/:songId/loose-files). Omitted = song-level.
+  looseTrackId?: string;
+  // Set by Finder-drop call sites that carry a destination: the header names it
+  // ("Adding to Drums" / "Adding to Drums > Intro"). In 'placed' mode for a song the
+  // name follows the Destination dropdown, so it never goes stale if changed.
+  announceDestination?: boolean;
   onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
 }
 
 export function UploadModal({
   open, onOpenChange, songId,
   defaultIdeaId, defaultInstrumentName, defaultSectionName,
-  initialFiles, songType = 'song', mode = 'placed', onUploadSuccess,
+  initialFiles, songType = 'song', mode = 'placed', looseTrackId, announceDestination = false,
+  onUploadSuccess,
 }: UploadModalProps) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -228,6 +236,19 @@ export function UploadModal({
 
   const hasExtracting = uploadFiles.some(f => f.status === 'extracting');
 
+  // "Adding to …" header line — only for Finder drops that carry a destination.
+  const announcedDestination = (() => {
+    if (!announceDestination) return null;
+    if (mode === 'loose') return looseTrackId ? tracks.find(t => t.id === looseTrackId)?.name ?? null : null;
+    if (mode !== 'placed') return null;
+    if (songType === 'idea') return defaultInstrumentName || null;
+    for (const t of tracks) {
+      const idea = t.ideas.find(i => i.id === uploadDestination);
+      if (idea) return `${t.name} > ${idea.sectionName}`;
+    }
+    return null;
+  })();
+
   const uploadMutation = useMutation({
     mutationFn: async (): Promise<{ destTrackId: string; destIdeaId: string } | { loose: true } | { bandLoose: true } | undefined> => {
       if (uploadFiles.length === 0) return;
@@ -259,7 +280,7 @@ export function UploadModal({
           if (status !== 'ready') continue;
           const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
             await uploadFile(file, 'loose', 'unplaced', '');
-          await createLooseFile(songId!, {
+          await createLooseFile(songId!, looseTrackId, {
             name: originalFileName || file.name,
             type: 'audio',
             color: 'hsl(var(--primary))',
@@ -315,7 +336,8 @@ export function UploadModal({
         return;
       }
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
+      // all() covers the song's list and every Track's byTrack list.
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
@@ -337,7 +359,9 @@ export function UploadModal({
         <div className="p-6 border-b border-white/5 bg-gradient-to-r from-primary/10 to-transparent">
           <DialogTitle className="text-sm uppercase tracking-widest font-heading">Asset Ingestion</DialogTitle>
           <p className="text-[10px] text-muted-foreground mt-1 uppercase">
-            {mode === 'loose' || mode === 'band-loose' ? 'Files are added without a destination — organize them later' : 'Drop files to add them to the project'}
+            {announcedDestination
+              ? `Adding to ${announcedDestination}`
+              : mode === 'loose' || mode === 'band-loose' ? 'Files are added without a destination — organize them later' : 'Drop files to add them to the project'}
           </p>
         </div>
         <div className="p-6 space-y-6">

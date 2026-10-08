@@ -1708,6 +1708,12 @@ export async function registerRoutes(
    * format, originalFileName, sampleRate, bitDepth, channels, uploadedDate), plus
    * name/type/color chosen by the client. uploadedBy is always resolved server-side
    * from the session — never trusted from the body.
+   *
+   * Optional trackId creates the file directly in that Track's Track-scoped tier
+   * (a Finder drop onto a Track row or the Sections-column background) in one
+   * write — never upload-then-assign, which could leave a song-level file behind
+   * if the second call failed. The track must belong to this same song; the song
+   * itself is already asserted to be in the session's band above.
    */
   app.post("/api/songs/:songId/loose-files", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
@@ -1715,12 +1721,21 @@ export async function registerRoutes(
 
     const {
       url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
-      name, type, color,
+      name, type, color, trackId,
     } = req.body as {
       url?: string; duration?: number; format?: string; originalFileName?: string;
       sampleRate?: string; bitDepth?: string; channels?: string; uploadedDate?: string;
-      name?: string; type?: string; color?: string;
+      name?: string; type?: string; color?: string; trackId?: string;
     };
+
+    if (trackId !== undefined) {
+      if (typeof trackId !== 'string' || !trackId) {
+        return res.status(400).json({ message: "trackId must be a non-empty string." });
+      }
+      if (trackSongId(trackId) !== songId) {
+        return res.status(400).json({ message: "Track not found in this song." });
+      }
+    }
 
     const looseFileActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
@@ -1729,6 +1744,7 @@ export async function registerRoutes(
     const parsed = insertLooseFileSchema.safeParse({
       id: randomUUID(),
       songId,
+      ...(trackId ? { trackId } : {}),
       name,
       type,
       color,

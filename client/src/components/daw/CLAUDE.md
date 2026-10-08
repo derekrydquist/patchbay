@@ -497,10 +497,10 @@ When a section is selected but has no clips, the Files column renders a full-hei
 <div className="flex-1 p-2">
   <div className={cn(
     'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors',
-    isVersionsDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
+    filesColumnDrop.isOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
   )}>
     <Upload size={18} ... />
-    <p ...>{isVersionsDragOver ? 'Drop to upload' : 'No files yet'}</p>
+    <p ...>No files yet</p>
     <p ...>Drop audio files or use Upload above</p>
   </div>
 </div>
@@ -508,7 +508,7 @@ When a section is selected but has no clips, the Files column renders a full-hei
 
 The empty state is rendered **outside** `ScrollArea` as a `flex-1` sibling of the column header div — this is required so `h-full` on the inner bordered div has a proper flex parent (the `flex flex-col` versions column div) to fill against. When placed inside a `ScrollArea`, `h-full` has no bounded parent and the div collapses to its content height.
 
-`isVersionsDragOver` state (in `MediaBucket`) drives the gold border / tinted background. The `onDragLeave` handler uses `e.currentTarget.contains(e.relatedTarget as Node)` to avoid flickering when the pointer moves over child elements within the column.
+`filesColumnDrop.isOver` (the column's `useNativeFileDrop` instance) drives the gold border / tinted background — a recolor of the same 2px dashed border, so the box never changes size. The text stays "No files yet" during a drag. Flicker over child elements is handled by the hook's enter/leave counting, not `relatedTarget`; see "Finder drops vs. Upload buttons" and the `useNativeFileDrop` rules under "What To Avoid" in root `CLAUDE.md`.
 
 When clips exist (or a search query is active), `ScrollArea` renders as normal for the clip list.
 

@@ -16,6 +16,9 @@ import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveLooseFileDrag,
 } from '@/hooks/use-loose-file-organize-dnd';
+import {
+  useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
+} from '@/hooks/use-native-file-drop';
 import { BucketClip, useLiveClipCommentSummary } from './Clip';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -35,7 +38,6 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import { useToast } from '@/hooks/use-toast';
 
 // ─── Convert ApiClip → daw-data Clip (for BucketClip component) ──────────────
 
@@ -61,20 +63,21 @@ function toClip(apiClip: ApiClip): Clip {
 // trackId/sectionName directly — read by the shared use-loose-file-organize-dnd
 // hook's handleDragEnd, called from Timeline.tsx's own handleDragEnd since
 // MediaBucket is rendered inside Timeline's DndContext and does not own drag-end
-// handling itself). Native onDragOver/onDragLeave/onDrop handlers (OS file drag)
-// are unrelated and untouched.
+// handling itself). A Finder file drop is a separate, native mechanism
+// (useNativeFileDrop) — it uploads into this section as a real clip.
 
 interface SectionFolderRowProps {
   idea: ApiIdea;
   isSelected: boolean;
   onSelect: () => void;
-  onFileDrop: (e: React.DragEvent) => void;
+  onFileDrop: (files: File[]) => void;
   onRemove: () => void;
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
 }
 
 function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef }: SectionFolderRowProps) {
   const hasFiles = idea.clips.length > 0;
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionDropId(idea.id),
     data: { trackId: idea.trackId, sectionName: idea.sectionName },
@@ -90,21 +93,13 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
         <button
           ref={combinedRef}
           onClick={onSelect}
-          onDragOver={(e) => {
-            e.preventDefault();
-            e.currentTarget.classList.add('bg-primary/10', 'border', 'border-primary/50');
-          }}
-          onDragLeave={(e) => {
-            e.preventDefault();
-            e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
-          }}
-          onDrop={onFileDrop}
+          {...nativeDrop.handlers}
           className={cn(
             "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
             isSelected
               ? "bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]"
               : "text-muted-foreground hover:bg-white/5 hover:text-white",
-            isOver && "bg-primary/10 border-primary/50"
+            (isOver || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
           )}
         >
           <div className="flex items-center gap-2">
@@ -140,18 +135,22 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
 // use-loose-file-organize-dnd hook's handleDragEnd). Dropping a loose file here
 // moves it into the Track-scoped resting tier (trackId set, no sectionName yet)
 // rather than organizing it into a real clip — see loose_files in root CLAUDE.md.
+// A Finder file drop lands in the same tier (a loose file on THIS track), via
+// useNativeFileDrop — it no longer falls through to the Tracks-column background.
 
 interface TrackFolderRowProps {
   track: ApiTrack;
   isSelected: boolean;
   onSelect: () => void;
+  onFileDrop: (files: File[]) => void;
   onRemove: () => void;
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
   /** From MediaBucket's useActiveLooseFileDrag — null when no loose-file drag is active. */
   activeLooseFileDrag: { trackId: string | null } | null;
 }
 
-function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef, activeLooseFileDrag }: TrackFolderRowProps) {
+function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeLooseFileDrag }: TrackFolderRowProps) {
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
   // Any content beneath the track counts — an organized clip in any of its ideas,
   // OR a Track-scoped loose file resting below the Section list (not yet organized
   // into a clip). See ApiTrack.hasLooseFiles / storage.getBucket.
@@ -184,6 +183,7 @@ function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef, acti
         <button
           ref={combinedRef}
           onClick={onSelect}
+          {...nativeDrop.handlers}
           className={cn(
             "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
             isSelected
@@ -191,7 +191,7 @@ function TrackFolderRow({ track, isSelected, onSelect, onRemove, buttonRef, acti
               : "text-muted-foreground hover:bg-white/5 hover:text-white",
             // No glow for the own-track row — the drop there is a cancel (see
             // handleDragEnd), so the highlight must not advertise it as a target.
-            isOver && !isSameTrackDrag && "bg-primary/10 border-primary/50"
+            ((isOver && !isSameTrackDrag) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
           )}
         >
           <div className="flex items-center gap-2">
@@ -233,7 +233,6 @@ interface MediaBucketProps {
 
 export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketProps) {
   const queryClient = useQueryClient();
-  const { toast } = useToast();
 
   const viewIdeaMutation = useMutation({
     mutationFn: (ideaId: string) =>
@@ -252,6 +251,11 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const [uploadMode, setUploadMode] = useState<'placed' | 'loose'>('placed');
   const [uploadInitialIdeaId, setUploadInitialIdeaId] = useState('');
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
+  // Finder drops only: the Track a 'loose' upload lands on, and whether the dialog
+  // names the destination. Cleared when the dialog closes, so the Upload buttons
+  // (which never set them) keep their song-level, unnamed behavior.
+  const [uploadLooseTrackId, setUploadLooseTrackId] = useState<string | undefined>(undefined);
+  const [uploadAnnounce, setUploadAnnounce] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
@@ -259,8 +263,6 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const [isAddInstrumentOpen, setIsAddInstrumentOpen] = useState(false);
   const [newInstrumentName, setNewInstrumentName] = useState('');
   const [addInstrumentError, setAddInstrumentError] = useState<string | null>(null);
-  const [isVersionsDragOver, setIsVersionsDragOver] = useState(false);
-  const [isTracksDragOver, setIsTracksDragOver] = useState(false);
   const sessionRestored = useRef(false);
   const tracksRef = useRef<ApiTrack[]>([]);
   const selectedTrackRef = useRef<HTMLButtonElement | null>(null);
@@ -504,51 +506,55 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
   // ── File input helpers ───────────────────────────────────────────────────────
 
-  const handleIdeaFileDrop = (e: React.DragEvent, idea: ApiIdea, track: ApiTrack) => {
-    e.preventDefault();
-    e.currentTarget.classList.remove('bg-primary/10', 'border', 'border-primary/50');
-    if (!e.dataTransfer.files?.length) return;
-    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    if (!audioFiles.length) {
-      toast({
-        title: 'Unsupported file type',
-        description: 'Only audio files can be uploaded here.',
-        variant: 'destructive',
-      });
-      return;
-    }
+  // Finder file drops (useNativeFileDrop). A drop carries its own destination:
+  // Section row / Files column → a real clip in that section; Track row / Sections-
+  // column background → a loose file on that Track; Tracks-column background → a
+  // song-level loose file. Native drag events and dnd-kit's pointer-sensor drags
+  // are independent mechanisms that never intercept each other.
+  const handleIdeaFileDrop = (files: File[], idea: ApiIdea, track: ApiTrack) => {
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
     setUploadMode('placed');
     setUploadInitialFiles(audioFiles);
     setUploadInitialIdeaId(idea.id);
+    setUploadAnnounce(true);
     setIsUploadOpen(true);
     setSelectedTrack(track);
     setSelectedIdea(idea);
   };
 
-  // Native OS file drop (Finder drag) onto the Tracks column — no destination idea,
-  // so this always routes through 'loose' mode, same as the header Upload button /
-  // "Add Files" dropdown item. Coexists with dnd-kit's own drag interactions
-  // elsewhere in this file the same way SectionFolderRow/Versions column already do
-  // (native browser drag events and dnd-kit's pointer-sensor-driven drags are
-  // independent mechanisms that never intercept each other — see CLAUDE.md).
-  const handleTracksFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsTracksDragOver(false);
-    if (!e.dataTransfer.files?.length) return;
-    const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
-    if (!audioFiles.length) {
-      toast({
-        title: 'Unsupported file type',
-        description: 'Only audio files can be uploaded here.',
-        variant: 'destructive',
-      });
-      return;
-    }
+  const handleTrackFileDrop = (files: File[], track: ApiTrack) => {
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
+    setUploadMode('loose');
+    setUploadInitialFiles(audioFiles);
+    setUploadInitialIdeaId('');
+    setUploadLooseTrackId(track.id);
+    setUploadAnnounce(true);
+    setIsUploadOpen(true);
+    if (selectedTrack?.id !== track.id) { setSelectedTrack(track); setSelectedIdea(null); }
+  };
+
+  const handleTracksFileDrop = (files: File[]) => {
+    const audioFiles = takeAudioFiles(files);
+    if (!audioFiles.length) return;
     setUploadMode('loose');
     setUploadInitialFiles(audioFiles);
     setUploadInitialIdeaId('');
     setIsUploadOpen(true);
   };
+
+  const tracksColumnDrop = useNativeFileDrop({ onDrop: handleTracksFileDrop });
+  // No Track selected → catch and discard (no highlight, no toast): the drop has
+  // no destination, but the browser must still never open the file.
+  const sectionsColumnDrop = useNativeFileDrop({
+    enabled: !!selectedTrack,
+    onDrop: (files) => { if (selectedTrack) handleTrackFileDrop(files, selectedTrack); },
+  });
+  const filesColumnDrop = useNativeFileDrop({
+    enabled: !!selectedIdea && !!selectedTrack,
+    onDrop: (files) => { if (selectedIdea && selectedTrack) handleIdeaFileDrop(files, selectedIdea, selectedTrack); },
+  });
 
   // ── Derived data ─────────────────────────────────────────────────────────────
 
@@ -692,10 +698,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         {/* ── Instruments column ── */}
         <div
           ref={setTracksBackgroundDroppableRef}
-          className={cn('w-1/4 flex flex-col transition-colors', (isTracksDragOver || isTracksBackgroundDropTarget) && 'bg-primary/5')}
-          onDragOver={(e) => { e.preventDefault(); setIsTracksDragOver(true); }}
-          onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsTracksDragOver(false); }}
-          onDrop={handleTracksFileDrop}
+          className={cn('w-1/4 flex flex-col transition-colors', isTracksBackgroundDropTarget && 'bg-primary/5', tracksColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
+          {...tracksColumnDrop.handlers}
         >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Tracks</span>
@@ -733,11 +737,6 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                   <AlertCircle size={12} /> Failed to load
                 </div>
               )}
-              {isTracksDragOver && (
-                <div className="border-2 border-dashed border-primary/50 rounded-lg p-2 text-center mb-1">
-                  <p className="text-[10px] text-primary/70 uppercase tracking-widest">Drop to upload</p>
-                </div>
-              )}
               {tracks
                 .filter(track => {
                   if (!searchQuery) return true;
@@ -757,6 +756,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                     track={track}
                     isSelected={selectedTrack?.id === track.id}
                     onSelect={() => { setSelectedTrack(track); setSelectedIdea(null); }}
+                    onFileDrop={(files) => handleTrackFileDrop(files, track)}
                     onRemove={() => deleteTrackMutation.mutate(track.id)}
                     buttonRef={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
                     activeLooseFileDrag={activeLooseFileDrag}
@@ -772,7 +772,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         {/* ── Sections column ── */}
         <div
           ref={setSectionsBackgroundDroppableRef}
-          className={cn('w-1/4 flex flex-col bg-black/10 transition-colors', isSectionsBackgroundDropTarget && 'bg-primary/5')}
+          className={cn('w-1/4 flex flex-col bg-black/10 transition-colors', isSectionsBackgroundDropTarget && 'bg-primary/5', sectionsColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
+          {...sectionsColumnDrop.handlers}
         >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02] flex items-center justify-between group/header">
             <span>Sections</span>
@@ -809,7 +810,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                       idea={idea}
                       isSelected={selectedIdea?.id === idea.id}
                       onSelect={() => setSelectedIdea(idea)}
-                      onFileDrop={(e) => handleIdeaFileDrop(e, idea, selectedTrack)}
+                      onFileDrop={(files) => handleIdeaFileDrop(files, idea, selectedTrack)}
                       onRemove={() => hideIdeaMutation.mutate(idea.id)}
                       buttonRef={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
                     />
@@ -833,22 +834,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         {/* ── Versions column ── */}
         <div
           ref={setVersionsDroppableRef}
-          className={cn('flex-1 flex flex-col bg-black/20 transition-colors', isVersionsDropTarget && 'bg-primary/5')}
-          onDragOver={(e) => {
-            if (!selectedIdea || !selectedTrack) return;
-            e.preventDefault();
-            setIsVersionsDragOver(true);
-          }}
-          onDragLeave={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-              setIsVersionsDragOver(false);
-            }
-          }}
-          onDrop={(e) => {
-            setIsVersionsDragOver(false);
-            if (!selectedIdea || !selectedTrack) return;
-            handleIdeaFileDrop(e, selectedIdea, selectedTrack);
-          }}
+          className={cn('flex-1 flex flex-col bg-black/20 transition-colors', isVersionsDropTarget && 'bg-primary/5', filesColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
+          {...filesColumnDrop.handlers}
         >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
             Files
@@ -858,11 +845,11 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
             <div className="flex-1 p-2">
               <div className={cn(
                 'flex flex-col items-center justify-center h-full border-2 border-dashed rounded-lg transition-colors',
-                isVersionsDragOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
+                filesColumnDrop.isOver ? 'border-primary/50 bg-primary/5' : 'border-white/[0.08]'
               )}>
-                <Upload size={18} className={cn('mb-2', isVersionsDragOver ? 'text-primary/60' : 'text-white/15')} />
-                <p className={cn('text-[10px] uppercase tracking-widest mb-1', isVersionsDragOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
-                  {isVersionsDragOver ? 'Drop to upload' : 'No files yet'}
+                <Upload size={18} className={cn('mb-2', filesColumnDrop.isOver ? 'text-primary/60' : 'text-white/15')} />
+                <p className={cn('text-[10px] uppercase tracking-widest mb-1', filesColumnDrop.isOver ? 'text-primary/70' : 'text-muted-foreground/50')}>
+                  No files yet
                 </p>
                 <p className="text-[10px] text-muted-foreground/30">Drop audio files or use Upload above</p>
               </div>
@@ -871,7 +858,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
             <ScrollArea className="flex-1">
               <div className="p-2 space-y-1">
                 {selectedIdea ? (
-                  filteredVersions.length === 0 && searchQuery ? (
+                  <>
+                  {filteredVersions.length === 0 && searchQuery ? (
                     <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
                       No files match your search
                     </div>
@@ -886,7 +874,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                         autoOpenInfo={clip.id === autoOpenClipId}
                       />
                     ))
-                  )
+                  )}
+                  </>
                 ) : (
                   <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
                     Select a section to view or add files
@@ -901,9 +890,14 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
       <UploadModal
         open={isUploadOpen}
-        onOpenChange={setIsUploadOpen}
+        onOpenChange={(open) => {
+          setIsUploadOpen(open);
+          if (!open) { setUploadLooseTrackId(undefined); setUploadAnnounce(false); }
+        }}
         songId={songId}
         mode={uploadMode}
+        looseTrackId={uploadMode === 'loose' ? uploadLooseTrackId : undefined}
+        announceDestination={uploadAnnounce}
         defaultIdeaId={uploadInitialIdeaId || undefined}
         defaultInstrumentName={uploadInitialIdeaId ? tracks.find(t => t.ideas.some(i => i.id === uploadInitialIdeaId))?.name : undefined}
         defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}

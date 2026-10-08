@@ -164,6 +164,14 @@ Loose-file list routes (GET /api/songs/:songId/loose-files, /api/tracks/:trackId
 Organize / place-on-timeline reuse the loose file's id as the new clip's id and move its notes
 into clip_comments (same ids).
 
+POST   /api/songs/:songId/loose-files    — record an uploaded-but-unplaced file (body: the
+                                           POST /api/upload result fields + name/type/color;
+                                           uploadedBy from the session). Optional trackId creates it
+                                           directly in that Track's Track-scoped tier in one write
+                                           (Finder drop on a Track row / Sections background) — the
+                                           track must belong to this song, else 400. Omitted =
+                                           song-level. Logs loose-file-uploaded.
+
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
 
