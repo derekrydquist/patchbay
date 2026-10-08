@@ -2412,6 +2412,7 @@ export default function SongHome() {
                 collisionDetection={looseFileOrganizeDnd.collisionDetection}
                 onDragStart={looseFileOrganizeDnd.handleDragStart}
                 onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+                onDragCancel={looseFileOrganizeDnd.handleDragCancel}
               >
                 <MediaBucket songId={songId} />
                 <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />

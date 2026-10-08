@@ -259,6 +259,17 @@ if (!hasLooseFilesTrackId) {
   console.log("[PatchBay] Added track_id column to loose_files table.");
 }
 
+// Add added_to_songs to loose_files if missing — carries clips.addedToSongs across a
+// clip -> loose file -> clip round trip (POST /api/clips/:clipId/make-loose, then
+// organize), so the "added to song" pills aren't lost.
+const hasLooseFilesAddedToSongs = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('loose_files') WHERE name='added_to_songs'"
+).get() as { c: number }).c;
+if (!hasLooseFilesAddedToSongs) {
+  sqlite.exec("ALTER TABLE loose_files ADD COLUMN added_to_songs TEXT");
+  console.log("[PatchBay] Added added_to_songs column to loose_files table.");
+}
+
 // Create loose_file_comments table if not exists — notes on a loose file before it's
 // organized. Mirrors clip_comments; rows are moved into clip_comments (same ids) by
 // materializeLooseFileCore, and cascade-deleted with the loose file otherwise.

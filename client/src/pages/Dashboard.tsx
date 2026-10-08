@@ -57,7 +57,7 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
   useActiveLooseFileDrag,
@@ -68,6 +68,8 @@ import {
   bucketTrackDropId,
   bucketSectionsBackgroundDropId,
   bucketTracksBackgroundDropId,
+  ideasShelfBackgroundDropId,
+  IDEAS_SHELF_BACKGROUND_DROP_PREFIX,
 } from '@/hooks/use-loose-file-organize-dnd';
 import { DndContext, useDroppable, useDraggable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
@@ -172,6 +174,11 @@ function activityUrl(event: ActivityEvent): string {
   }
   if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea') {
     return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
+  }
+  // The file left its Idea and is now band-wide, so there's no Idea to select —
+  // just open the Ideas shelf, where it sits in Column 1.
+  if (event.type === 'clip-made-loose') {
+    return '/?tab=files&filter=ideas';
   }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
@@ -800,6 +807,37 @@ function IdeaFilesColumnDropZone({
   );
 }
 
+// ─── Ideas shelf Column 1 (Ideas list) background drop target ────────────────
+// Drop an organized clip dragged out of Column 2 onto Column 1's open space to turn
+// it back into a band-wide loose file (POST /api/clips/:clipId/make-loose). Enabled
+// ONLY while an idea-clip drag is active — disabled for loose-file drags and every
+// other drag type. Nests every Idea row; Idea rows win via matchOrganizeDropTarget's
+// background-is-a-fallback rule (the unassigned LooseFileRows here are draggables,
+// not droppables, so a drop on one lands on this background — the file joins them).
+// Stable id suffix. Its highlight is its own; the native OS-file "Drop to upload"
+// banner on the Column 1 wrapper is a separate mechanism and is untouched.
+interface IdeasShelfBackgroundDropZoneProps {
+  className?: string;
+  children: React.ReactNode;
+}
+
+function IdeasShelfBackgroundDropZone({ className, children }: IdeasShelfBackgroundDropZoneProps) {
+  const activeDrag = useActiveDragSource();
+  const disabled = activeDrag?.type !== IDEA_CLIP_DRAG_TYPE;
+  const { setNodeRef, isOver } = useDroppable({
+    id: ideasShelfBackgroundDropId('ideas-shelf-ideas-column'),
+    disabled,
+    data: { makeLoose: true },
+  });
+
+  return (
+    // isOver ignores disabled — gate the highlight on both.
+    <div ref={setNodeRef} className={cn(className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}>
+      {children}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const search = useSearch();
@@ -1093,13 +1131,10 @@ export default function Dashboard() {
         // selectedSection (those auto-derive from selectedFile once its bucket
         // loads — see the fileBucket effect above). Resolve which idea-type song
         // owns this trackId from the already-loaded songs list.
+        // Through selectIdea (declared below; only called after render) so the
+        // URL follows the file too, same as a row click and move-to-idea.
         const idea = songs.find(s => s.type === 'idea' && s.defaultTrackId === dest.trackId);
-        if (idea) {
-          setSelectedFile(idea);
-          setSelectedInstrument(null);
-          setSelectedSection(null);
-          setPreviewLooseFile(null);
-        }
+        if (idea) selectIdea(idea);
       } else {
         // Songs quick-browser: same pendingInstrumentIdRef/pendingSectionNameRef
         // mechanism Add Instrument/Add Section already use, picked up by the
@@ -1119,6 +1154,18 @@ export default function Dashboard() {
     appliedSearchRef.current = s; setLocation(`/?${s}`);
   };
 
+  // Ideas shelf: show a band-wide loose file (Column 1) as the preview — clicking
+  // one, or the file a make-loose just produced. The mirror of selectIdea: a loose
+  // file belongs to no Idea, so the Idea selection and the URL's ideaId are cleared
+  // too, keeping the highlight, the state and the URL in agreement. Column 2 then
+  // has no upload/drop destination of its own (see its native drop handlers).
+  const previewBandLooseFile = (lf: ApiLooseFile) => {
+    setPreviewLooseFile(lf);
+    setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null);
+    const s = 'tab=files&filter=ideas';
+    appliedSearchRef.current = s; setLocation(`/?${s}`);
+  };
+
   // Ideas shelf: drag an organized clip from Column 2 onto another Idea row to move
   // it there. Runs alongside looseFileOrganizeDnd in the same DndContext — that hook
   // ignores this payload type, and this one ignores loose files.
@@ -1134,6 +1181,16 @@ export default function Dashboard() {
       toast({ title: 'Failed to move file', description: msg, variant: 'destructive' });
     },
   });
+  // Ideas shelf: drop an organized clip on Column 1's open space to make it a
+  // band-wide loose file again. The new loose file is highlighted in Column 1 and
+  // previewed in Column 2 — the view follows the file.
+  const makeClipLoose = useMakeClipLoose({
+    onSuccess: (looseFile) => previewBandLooseFile(looseFile),
+    onError: (msg) => {
+      console.error('[makeClipLoose] error:', msg);
+      toast({ title: 'Failed to move file out', description: msg, variant: 'destructive' });
+    },
+  });
   const handleIdeaClipDragStart = (event: DragStartEvent) => {
     const data = event.active.data.current as { type?: string; clip?: ApiClip } | undefined;
     setActiveIdeaClip(data?.type === IDEA_CLIP_DRAG_TYPE && data.clip ? data.clip : null);
@@ -1143,6 +1200,10 @@ export default function Dashboard() {
     const { active, over } = event;
     const data = active.data.current as { type?: string; clip?: ApiClip; sourceSongId?: string } | undefined;
     if (data?.type !== IDEA_CLIP_DRAG_TYPE || !data.clip || !data.sourceSongId || !over) return;
+    if (String(over.id).startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)) {
+      makeClipLoose.mutate({ clipId: data.clip.id, sourceSongId: data.sourceSongId });
+      return;
+    }
     // Only an Idea row carries ideaSongId; Column 2 itself (the file's own
     // container) doesn't, so a drop there is a no-op.
     const destSongId = (over.data.current as { ideaSongId?: string } | undefined)?.ideaSongId;
@@ -2415,6 +2476,7 @@ export default function Dashboard() {
               collisionDetection={looseFileOrganizeDnd.collisionDetection}
               onDragStart={looseFileOrganizeDnd.handleDragStart}
               onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+              onDragCancel={looseFileOrganizeDnd.handleDragCancel}
             >
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
@@ -2740,7 +2802,7 @@ export default function Dashboard() {
               collisionDetection={looseFileOrganizeDnd.collisionDetection}
               onDragStart={(e) => { looseFileOrganizeDnd.handleDragStart(e); handleIdeaClipDragStart(e); }}
               onDragEnd={(e) => { if (!looseFileOrganizeDnd.handleDragEnd(e)) handleIdeaClipDragEnd(e); }}
-              onDragCancel={() => setActiveIdeaClip(null)}
+              onDragCancel={() => { looseFileOrganizeDnd.handleDragCancel(); setActiveIdeaClip(null); }}
             >
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
@@ -2775,7 +2837,7 @@ export default function Dashboard() {
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <IdeasShelfBackgroundDropZone className="flex-1 overflow-y-auto p-2 space-y-1 transition-colors [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 && unassignedLooseFiles.length === 0 && (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No ideas yet — create one</p>
                   )}
@@ -2788,7 +2850,7 @@ export default function Dashboard() {
                     <IdeaListRow
                       key={idea.id}
                       idea={idea}
-                      isSelected={!previewLooseFile && selectedFile?.id === idea.id}
+                      isSelected={selectedFile?.id === idea.id}
                       onSelect={() => selectIdea(idea)}
                     />
                   ))}
@@ -2798,23 +2860,27 @@ export default function Dashboard() {
                       looseFile={lf}
                       songId={null}
                       isSelected={previewLooseFile?.id === lf.id}
-                      onClick={() => setPreviewLooseFile(lf)}
+                      onClick={() => previewBandLooseFile(lf)}
                       onDeleted={() => setPreviewLooseFile(prev => (prev?.id === lf.id ? null : prev))}
                     />
                   ))}
-                </div>
+                </IdeasShelfBackgroundDropZone>
               </div>
 
               {/* Column 2 — Files (flat list across the Idea's auto-created Folder) */}
               <IdeaFilesColumnDropZone
                 selectedInstrument={selectedInstrument}
-                className={cn('flex-1 flex flex-col transition-colors', isDragOver && selectedFile ? 'bg-primary/5' : 'bg-black/20')}
-                onDragOver={e => { e.preventDefault(); if (selectedFile) setIsDragOver(true); }}
+                // OS-file drops land in the selected Idea. While a loose-file preview
+                // is showing, Column 2 is no destination: preventDefault still runs
+                // (so the browser never opens the file), but no highlight, no upload
+                // and no toast — Column 1 is where loose files are dropped.
+                className={cn('flex-1 flex flex-col transition-colors', isDragOver && selectedFile && !previewLooseFile ? 'bg-primary/5' : 'bg-black/20')}
+                onDragOver={e => { e.preventDefault(); if (selectedFile && !previewLooseFile) setIsDragOver(true); }}
                 onDragLeave={e => { const rel = e.relatedTarget; if (!rel || !e.currentTarget.contains(rel as Node)) setIsDragOver(false); }}
                 onDrop={e => {
                   e.preventDefault();
                   setIsDragOver(false);
-                  if (selectedFile && e.dataTransfer.files.length > 0) {
+                  if (selectedFile && !previewLooseFile && e.dataTransfer.files.length > 0) {
                     const audioFiles = Array.from(e.dataTransfer.files).filter(f => f.type.startsWith('audio/'));
                     if (audioFiles.length > 0) {
                       setUploadMode('placed'); setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
@@ -2830,15 +2896,17 @@ export default function Dashboard() {
               >
                 <div className="px-3 h-8 flex items-center justify-between border-b border-white/5 bg-white/[0.02] shrink-0">
                   <span className="text-[10px] uppercase tracking-tighter text-muted-foreground font-bold">Files</span>
-                  {selectedFile && (
-                    <button
-                      onClick={() => { setUploadMode('placed'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
-                      className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
-                    >
-                      <Upload size={10} />
-                      Upload
-                    </button>
-                  )}
+                  {/* Follows the selection, like an OS-file drop onto this column: into
+                      the selected Idea (named on the button), or band-wide into Column 1
+                      when no Idea is selected (nothing selected, or a loose-file preview). */}
+                  <button
+                    onClick={() => { setUploadMode(selectedFile ? 'placed' : 'band-loose'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                    title={selectedFile ? `Upload to ${selectedFile.name}` : 'Upload'}
+                    className="flex items-center gap-1 min-w-0 max-w-[60%] text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
+                  >
+                    <Upload size={10} className="shrink-0" />
+                    <span className="truncate">{selectedFile ? `Upload to ${selectedFile.name}` : 'Upload'}</span>
+                  </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {previewLooseFile ? (

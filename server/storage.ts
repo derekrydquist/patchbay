@@ -37,6 +37,16 @@ export class LooseFileNotFoundError extends Error {
   }
 }
 
+// Thrown by dematerializeClipToBandLoose when the clip can't be turned back into a
+// loose file (not in an Idea, removed, final, or placed on a timeline) — the route
+// translates this to a 409 with the message as-is.
+export class ClipNotLooseableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClipNotLooseableError";
+  }
+}
+
 // Mirrors routes.ts's UPLOADS_DIR resolution exactly (same env override) — kept
 // as a separate constant rather than importing from routes.ts to avoid a
 // circular import (routes.ts imports `storage` from this file).
@@ -134,7 +144,8 @@ export interface ActivityEvent {
       | 'lyrics-edited' | 'lyrics-comment-added' | 'lyrics-comment-reply'
       | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
-      | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea';
+      | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
+      | 'clip-made-loose';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -216,6 +227,7 @@ export interface IStorage {
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
   moveClipToIdea(clipId: string, destSongId: string): Promise<Clip>;
+  makeClipLoose(clipId: string, bandId: string): Promise<LooseFile>;
   materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
@@ -370,7 +382,9 @@ function materializeLooseFileCore(
     active: true,
     sectionName,
     metadata: looseFile.metadata,
-    addedToSongs: null,
+    // Non-null only for a file that was an organized clip before being made loose
+    // (dematerializeClipToBandLoose) — its "added to song" pills come back with it.
+    addedToSongs: looseFile.addedToSongs,
     createdAt: new Date().toISOString(),
   };
   tx.insert(clips).values(clip).run();
@@ -396,6 +410,69 @@ function materializeLooseFileCore(
 
   tx.delete(looseFiles).where(eq(looseFiles.id, looseFileId)).run();
   return clip;
+}
+
+// The mirror of materializeLooseFileCore: turn an organized Ideas-shelf clip back into
+// a band-wide, unassigned loose file (Ideas shelf Column 1). A Finder-style move — the
+// loose file reuses the clip's id and src, and the clip's notes move into
+// loose_file_comments with the same ids, so nothing is duplicated and nothing is lost.
+// Never touches the physical file: the new loose_files row points at the same src.
+//
+// Only idea-type, active, non-final clips with no timeline_clips instances qualify —
+// a real-song clip is tied into the isFinal/timeline/task sync, which this must never
+// touch. bandId comes from the caller's session, never from the request.
+function dematerializeClipToBandLoose(tx: DrizzleTx, clipId: string, bandId: string): LooseFile {
+  const row = tx.select({ clip: clips, songType: songs.type })
+    .from(clips)
+    .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+    .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+    .where(eq(clips.id, clipId))
+    .get();
+  if (!row) throw new ClipNotLooseableError("File not found.");
+  const { clip } = row;
+  if (row.songType !== 'idea') throw new ClipNotLooseableError("Only files in an Idea can be moved out to the Ideas list.");
+  if (!clip.active) throw new ClipNotLooseableError("This file has been removed.");
+  if (clip.isFinal) throw new ClipNotLooseableError("A file marked final can't be moved out.");
+  const placed = tx.select({ id: timelineClips.id }).from(timelineClips)
+    .where(eq(timelineClips.bucketClipId, clipId)).get();
+  if (placed) throw new ClipNotLooseableError("This file is placed on a timeline and can't be moved out.");
+
+  const looseFile: LooseFile = {
+    id: clip.id,
+    songId: null,
+    bandId,
+    trackId: null,
+    name: clip.name,
+    type: clip.type,
+    color: clip.color,
+    duration: clip.duration,
+    src: clip.src,
+    metadata: clip.metadata,
+    uploadedBy: clip.metadata?.uploadedBy ?? null,
+    addedToSongs: clip.addedToSongs,
+    createdAt: new Date().toISOString(),
+  };
+  tx.insert(looseFiles).values(looseFile).run();
+
+  // Notes travel with the file, same ids (reply parentIds stay valid). Must run
+  // before the clip delete below — clip_comments cascades on it.
+  // carriedFromCommentId has no loose_file_comments column; it's dropped here.
+  const carried = tx.select().from(clipComments).where(eq(clipComments.clipId, clipId)).all();
+  if (carried.length) {
+    tx.insert(looseFileComments).values(carried.map((c) => ({
+      id: c.id,
+      looseFileId: looseFile.id,
+      parentId: c.parentId,
+      author: c.author,
+      text: c.text,
+      timestamp: c.timestamp,
+      createdAt: c.createdAt,
+    }))).run();
+  }
+
+  tx.delete(clips).where(eq(clips.id, clipId)).run();
+  return looseFile;
 }
 
 // Shared by the three loose-file list methods: the filtered loose_files rows, each with a
@@ -1082,6 +1159,7 @@ export class SQLiteStorage implements IStorage {
       src: null,
       metadata: null,
       uploadedBy: null,
+      addedToSongs: null,
       ...data,
       id: data.id ?? randomUUID(),
       createdAt: now,
@@ -1190,6 +1268,12 @@ export class SQLiteStorage implements IStorage {
       if (!moved) throw new Error(`[moveClipToIdea] clip ${clipId} not found`);
       return moved;
     });
+  }
+
+  // Ideas shelf: drop an organized clip on Column 1's empty space — it becomes a
+  // band-wide loose file again. See dematerializeClipToBandLoose.
+  async makeClipLoose(clipId: string, bandId: string): Promise<LooseFile> {
+    return db.transaction((tx) => dematerializeClipToBandLoose(tx, clipId, bandId));
   }
 
   async materializeLooseFileToTimeline(

@@ -51,6 +51,12 @@ export const BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX = 'bucket-sections-bg||';
 // Sections background nests every Section row, so it gets the same fallback-only
 // priority in matchOrganizeDropTarget.
 export const BUCKET_TRACKS_BACKGROUND_DROP_PREFIX = 'bucket-tracks-bg||';
+// The Ideas shelf Column 1 list's open space — drop an organized Ideas-shelf clip
+// here to turn it back into a band-wide loose file (make-loose). Enabled only while
+// an idea-clip drag is active (never for loose-file drags), so the loose-file
+// handleDragEnd below never sees it. Nests every Idea row, so it gets the same
+// fallback-only priority in matchOrganizeDropTarget: an Idea row always wins.
+export const IDEAS_SHELF_BACKGROUND_DROP_PREFIX = 'ideas-shelf-bg||';
 
 export function bucketSectionDropId(ideaId: string): string {
   return `${BUCKET_SECTION_DROP_PREFIX}${ideaId}`;
@@ -72,11 +78,19 @@ export function bucketTracksBackgroundDropId(suffix: string): string {
   return `${BUCKET_TRACKS_BACKGROUND_DROP_PREFIX}${suffix}`;
 }
 
+export function ideasShelfBackgroundDropId(suffix: string): string {
+  return `${IDEAS_SHELF_BACKGROUND_DROP_PREFIX}${suffix}`;
+}
+
 // Column-background targets that geometrically contain other organize targets —
 // matched only as a fallback (see matchOrganizeDropTarget).
 function isBackgroundDropId(id: UniqueIdentifier): boolean {
   const s = String(id);
-  return s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) || s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX);
+  return (
+    s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) ||
+    s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX) ||
+    s.startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)
+  );
 }
 
 export function isBucketOrganizeDropId(id: string | number): boolean {
@@ -86,7 +100,8 @@ export function isBucketOrganizeDropId(id: string | number): boolean {
     s.startsWith(BUCKET_VERSIONS_DROP_PREFIX) ||
     s.startsWith(BUCKET_TRACK_DROP_PREFIX) ||
     s.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX) ||
-    s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX)
+    s.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX) ||
+    s.startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)
   );
 }
 
@@ -107,8 +122,9 @@ export function isBucketOrganizeDropId(id: string | number): boolean {
 // row, Versions column, or Track row) and only falls back to the background if
 // nothing more specific matched anywhere in the full pass. This makes the priority
 // explicit rather than relying on dnd-kit's incidental container registration order.
-// The two backgrounds are different columns and never overlap each other, so
-// remembering whichever one matched is unambiguous.
+// The backgrounds (these two, plus the Ideas shelf's Column 1 list,
+// IDEAS_SHELF_BACKGROUND_DROP_PREFIX, on a different surface) never overlap each
+// other, so remembering whichever one matched is unambiguous.
 //
 // dnd-kit only passes ENABLED droppables to collision detection — which is why a
 // Track row stays enabled even for a drag of a file already scoped to it: a
@@ -251,6 +267,13 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     setActiveDrag(type === 'loose-file' && clip ? clip : null);
   };
 
+  // Escape / sensor cancel. Without this the ghost's clip outlived a cancelled
+  // drag (harmless only because DragOverlay renders nothing with no active drag).
+  // handleDragEnd clears it too, first thing, for every drop outcome.
+  const handleDragCancel = () => {
+    setActiveDrag(null);
+  };
+
   // Returns true when the event was a loose-file organize drop (handled here, whether
   // it succeeded or warned) — callers embedding this inside a larger handleDragEnd
   // (Timeline.tsx) can early-return on true and fall through to their own logic on
@@ -261,6 +284,9 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     if (!over) return false;
     if (active.data.current?.type !== 'loose-file') return false;
     if (!isBucketOrganizeDropId(over.id)) return false;
+    // Idea-clip-only target (make-loose) — not a loose-file destination. It is
+    // disabled for loose-file drags, so this is a guard, not a live path.
+    if (String(over.id).startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)) return false;
 
     const looseFileId = active.data.current?.clip?.id;
     if (!looseFileId) {
@@ -321,15 +347,19 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
       return true;
     }
 
-    const dropData = over.data.current as { trackId?: string; sectionName?: string } | undefined;
+    const dropData = over.data.current as { trackId?: string; sectionName?: string; ideaSongId?: string } | undefined;
     if (!dropData?.trackId || !dropData?.sectionName) {
       console.warn('[LooseFileDrop] missing trackId/sectionName on organize drop target', dropData);
       return true;
     }
     const destTrackId = dropData.trackId;
     const destSectionName = dropData.sectionName;
+    // An Ideas shelf Idea row names its own song (ideaSongId), which can differ from
+    // the selected song this hook was built with; every other organize target
+    // belongs to the selected song.
+    const destSongId = dropData.ideaSongId ?? songId;
     organizeLooseFileMutation.mutate(
-      { looseFileId, trackId: destTrackId, sectionName: destSectionName },
+      { looseFileId, trackId: destTrackId, sectionName: destSectionName, destSongId },
       { onSuccess: () => options?.onOrganized?.({ action: 'organize', trackId: destTrackId, sectionName: destSectionName }) }
     );
     return true;
@@ -340,6 +370,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     collisionDetection: organizeDropCollision,
     handleDragStart,
     handleDragEnd,
+    handleDragCancel,
     activeDrag,
     isPending:
       organizeLooseFileMutation.isPending ||

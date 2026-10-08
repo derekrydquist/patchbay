@@ -72,6 +72,9 @@ export interface ApiLooseFile {
   src: string | null;
   metadata: DawClip['metadata'] | null;
   uploadedBy: string | null;
+  // Same shape as ApiClip.addedToSongs — non-null only for a file that was an
+  // organized clip before being made loose (POST /api/clips/:clipId/make-loose).
+  addedToSongs?: AddedToSong[] | null;
   createdAt: string;
   // Comment aggregate from the three list routes (unassigned, by song, by track) —
   // same shape as /api/songs/:songId/clip-comment-summary entries. Optional because

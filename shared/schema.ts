@@ -159,6 +159,11 @@ export const looseFiles = sqliteTable("loose_files", {
   src: text("src"),
   metadata: text("metadata", { mode: "json" }).$type<ClipMetadata>(),
   uploadedBy: text("uploaded_by"),
+  // Same shape as clips.addedToSongs. Set only when an organized clip is made loose
+  // again (dematerializeClipToBandLoose) so its "added to song" pills survive a round
+  // trip out and back in; materializeLooseFileCore copies it back onto the clip.
+  addedToSongs: text("added_to_songs", { mode: "json" })
+    .$type<Array<{ songId: string; songName: string; instrument: string; section: string }>>(),
   createdAt: text("created_at").notNull(),
 });
 

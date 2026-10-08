@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, othersCommentTimestamp } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, othersCommentTimestamp } from "./storage";
 import {
   type InstrumentTrack,
   insertSongSchema,
@@ -2021,6 +2021,49 @@ export async function registerRoutes(
     }).catch(console.error);
 
     res.json(clip);
+  });
+
+  /**
+   * POST /api/clips/:clipId/make-loose — Ideas shelf only: turn an organized clip back
+   * into a band-wide, unassigned loose file (dropped on Column 1's empty space). A move,
+   * never a copy: same id, same src, notes carried. bandId comes from the session only.
+   * Real-song, removed, final, or timeline-placed clips are rejected with 409 by
+   * storage.makeClipLoose, so nothing here touches the isFinal/timeline/task sync.
+   */
+  app.post("/api/clips/:clipId/make-loose", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const sourceSongId = clipSongId(clipId);
+    if (!sourceSongId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, sourceSongId)) return;
+
+    const sourceSong = db.select({ name: songs.name }).from(songs).where(eq(songs.id, sourceSongId)).get();
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    let looseFile;
+    try {
+      looseFile = await storage.makeClipLoose(clipId, req.bandId!);
+    } catch (err) {
+      if (err instanceof ClipNotLooseableError) {
+        return res.status(409).json({ message: err.message });
+      }
+      console.error("[clips/:clipId/make-loose] failed:", err);
+      return res.status(500).json({ message: "Failed to move file out." });
+    }
+
+    // Logged against the SOURCE song — the file now has no song, and
+    // activity_log.songId is NOT NULL.
+    storage.logActivity({
+      id: randomUUID(),
+      songId: sourceSongId,
+      type: 'clip-made-loose',
+      description: `${actor} moved ${looseFile.name} out of ${sourceSong?.name ?? 'an Idea'}`,
+      timestamp: Date.now(),
+      author: actor,
+    }).catch(console.error);
+
+    res.json(looseFile);
   });
 
   /**

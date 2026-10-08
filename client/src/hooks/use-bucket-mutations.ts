@@ -9,11 +9,30 @@ import {
 // `trackId` is optional and only relevant when the organized/placed file had
 // moved through the Track-scoped resting tier — passing it drops the file from
 // that Track's Sections-column list too (harmless no-op invalidation otherwise).
+//
+// `destSongId` is the song the file landed in when that can differ from `songId`
+// (the caller's selected song) — an Ideas shelf drop onto a different Idea's row.
+// With staleTime: Infinity, refreshing only the selected song left the destination
+// serving its old cached list. Its bucket is refetched even with no observer
+// (refetchType 'all'), so the list shown when the view follows the file is fresh.
+// `clipId` is the new clip's id, which is the loose file's id reused — both comment
+// threads cached under it are dropped so neither side can serve a stale list.
 function invalidateAfterLooseFilePlacement(
   queryClient: ReturnType<typeof useQueryClient>,
   songId: string | undefined,
-  trackId?: string
+  trackId?: string,
+  extra?: { destSongId?: string; clipId?: string }
 ) {
+  const destSongId = extra?.destSongId;
+  if (destSongId && destSongId !== songId) {
+    queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(destSongId), refetchType: 'all' });
+    queryClient.invalidateQueries({ queryKey: looseFileKeys.list(destSongId) });
+    queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', destSongId] });
+  }
+  if (extra?.clipId) {
+    queryClient.invalidateQueries({ queryKey: ['clip-comments', extra.clipId] });
+    queryClient.invalidateQueries({ queryKey: ['loose-file-comments', extra.clipId] });
+  }
   queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
   queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
   // Always invalidated, regardless of songId: the organized file may have come
@@ -243,7 +262,10 @@ export function useOrganizeLooseFile(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { looseFileId: string; trackId: string; sectionName: string }) => {
+    // destSongId is client-only bookkeeping for cache invalidation (the song the
+    // file lands in, when it isn't the hook's songId) — the server resolves the
+    // destination from trackId + sectionName.
+    mutationFn: async (vars: { looseFileId: string; trackId: string; sectionName: string; destSongId?: string }) => {
       const res = await fetch(`/api/loose-files/${vars.looseFileId}/organize`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -256,7 +278,7 @@ export function useOrganizeLooseFile(
       return res.json() as Promise<ApiClip>;
     },
     onSuccess: (clip, vars) => {
-      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId);
+      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId, { destSongId: vars.destSongId, clipId: clip.id });
       opts?.onSuccess?.(clip);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
@@ -399,7 +421,7 @@ export function usePlaceLooseFileOnTimeline(
       return res.json() as Promise<{ clip: ApiClip; timelineClip: ApiTimelineClip }>;
     },
     onSuccess: (result, vars) => {
-      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId);
+      invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId, { clipId: result.clip.id });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       opts?.onSuccess?.(result);
     },
@@ -437,6 +459,39 @@ export function useMoveClipToIdea(
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.destSongId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       opts?.onSuccess?.(clip, vars);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+// Ideas shelf: drop an organized clip on Column 1's empty space to turn it back into
+// a band-wide loose file. A Finder-style move — the loose file keeps the clip's id,
+// so notes (now under loose-file-comments) and last-viewed state follow it. The
+// source Idea's bucket, comment summary and hasFiles fill all change; the
+// unassigned list gains the file. Both comment-thread keys for this id are dropped
+// so an open thread never shows the stale side.
+export function useMakeClipLoose(
+  opts?: { onSuccess?: (looseFile: ApiLooseFile, vars: { clipId: string; sourceSongId: string }) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { clipId: string; sourceSongId: string }) => {
+      const res = await fetch(`/api/clips/${vars.clipId}/make-loose`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to move file out' }));
+        throw new Error(err.message ?? 'Failed to move file out');
+      }
+      return res.json() as Promise<ApiLooseFile>;
+    },
+    onSuccess: (looseFile, vars) => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.sourceSongId) });
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.sourceSongId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comments', vars.clipId] });
+      queryClient.invalidateQueries({ queryKey: ['loose-file-comments', vars.clipId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.(looseFile, vars);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
   });
