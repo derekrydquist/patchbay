@@ -516,6 +516,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **After an organize drop, invalidate the DESTINATION song's file list (`refetchType: 'all'`), not just the selected song's** — with `staleTime: Infinity` the destination otherwise shows a stale list.
 - **`LooseFileDragOverlay` anchors the ghost below-right of the cursor** — so it never covers the row being targeted. Don't restore the grab-offset ghost.
 - **Ideas shelf selection** — previewing a loose file clears the selected Idea and the URL's `ideaId`. Column 2's button reads "Upload to <Idea>" (into the selected Idea) or "Upload" (band-wide, nothing selected); a Finder drop on Column 2 follows the same rule, and accepts nothing while a loose preview shows.
+- **Ideas shelf blank-click deselect** — a click on Column 1's blank space (row gaps, padding, the 48px `pb-12` band after the last row) clears the selected Idea or loose preview. It counts only if both the press and the click land on the list wrapper, so a drag released over blank space never deselects.
 - **`instrument_tracks.pan` writes only go through `PATCH /api/tracks/:trackId`** — same single write path as `volume`; there is no separate pan-specific route. Do not add one.
 
 ---
@@ -799,6 +800,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Loose-file metadata was read-only** — More Info now edits BPM/Key/Time Sign./Tags through `PATCH /api/loose-files/:id/metadata`; a rejected save rolls the field back with a toast. A reported "own note shows unread after Add to Song" was not a bug: the note had been written from a profile signed in as another user.
 - **Move organized files between Ideas (Oct 2026)** — drag an Ideas-shelf file onto another Idea row (`POST /api/clips/:clipId/move-to-idea`); idea-type clips only, a move not a copy, notes/metadata stay with the clip id, duplicate names allowed; view follows the file. Feed: `clip-moved-to-idea`.
 - **Make a file loose again (Oct 2026)** — drop an Ideas-shelf file on Column 1's open space (`make-loose`); feed: `clip-made-loose`. Fixed alongside: organize refreshed the selected song instead of the destination, and the drag ghost covered the targeted row.
+- **Ideas shelf had no way to deselect (Oct 2026)** — clicking blank space in Column 1 now deselects, Finder-style; a 48px end band keeps a target when the list overflows.
 - **Ideas file list had no sort order** — `getBucket` has no `ORDER BY`; Column 2 now sorts by name (natural, case-insensitive), then `createdAt`. Songs quick-browser and MediaBucket Versions lists are still unsorted.
 
 ---

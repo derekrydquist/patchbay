@@ -816,12 +816,20 @@ function IdeaFilesColumnDropZone({
 // not droppables, so a drop on one lands on this background — the file joins them).
 // Stable id suffix. Its highlight is its own; the native OS-file "Drop to upload"
 // banner on the Column 1 wrapper is a separate mechanism and is untouched.
+//
+// Also the Finder-style "click blank space to deselect" target: onBlankClick fires
+// only when both the primary-button pointerdown and the click land on this wrapper
+// itself (row gaps and padding included), never on a row or button inside it. The
+// pointerdown target is recorded so a drag or press that ends over blank space,
+// but started elsewhere, never deselects.
 interface IdeasShelfBackgroundDropZoneProps {
   className?: string;
   children: React.ReactNode;
+  onBlankClick: () => void;
 }
 
-function IdeasShelfBackgroundDropZone({ className, children }: IdeasShelfBackgroundDropZoneProps) {
+function IdeasShelfBackgroundDropZone({ className, children, onBlankClick }: IdeasShelfBackgroundDropZoneProps) {
+  const pressedOnBlankRef = useRef(false);
   const activeDrag = useActiveDragSource();
   const disabled = activeDrag?.type !== IDEA_CLIP_DRAG_TYPE;
   const { setNodeRef, isOver } = useDroppable({
@@ -832,7 +840,16 @@ function IdeasShelfBackgroundDropZone({ className, children }: IdeasShelfBackgro
 
   return (
     // isOver ignores disabled — gate the highlight on both.
-    <div ref={setNodeRef} className={cn(className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}>
+    <div
+      ref={setNodeRef}
+      className={cn(className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}
+      onPointerDown={(e) => { pressedOnBlankRef.current = e.button === 0 && e.target === e.currentTarget; }}
+      onClick={(e) => {
+        const pressedOnBlank = pressedOnBlankRef.current;
+        pressedOnBlankRef.current = false;
+        if (pressedOnBlank && e.target === e.currentTarget) onBlankClick();
+      }}
+    >
       {children}
     </div>
   );
@@ -1159,7 +1176,9 @@ export default function Dashboard() {
   // file belongs to no Idea, so the Idea selection and the URL's ideaId are cleared
   // too, keeping the highlight, the state and the URL in agreement. Column 2 then
   // has no upload/drop destination of its own (see its native drop handlers).
-  const previewBandLooseFile = (lf: ApiLooseFile) => {
+  // null clears everything — nothing previewed, no Idea selected (Column 1 blank
+  // click, Finder-style deselect; same end state as closing a band-wide preview).
+  const previewBandLooseFile = (lf: ApiLooseFile | null) => {
     setPreviewLooseFile(lf);
     setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null);
     const s = 'tab=files&filter=ideas';
@@ -2837,7 +2856,12 @@ export default function Dashboard() {
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
-                <IdeasShelfBackgroundDropZone className="flex-1 overflow-y-auto p-2 space-y-1 transition-colors [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <IdeasShelfBackgroundDropZone
+                  onBlankClick={() => { if (selectedFile || previewLooseFile) previewBandLooseFile(null); }}
+                  // pb-12: a ~48px blank band after the last row, so an overflowing list
+                  // still has a comfortable click-to-deselect / make-loose drop target.
+                  // Padding is the wrapper itself, so it counts as blank space.
+                  className="flex-1 overflow-y-auto px-2 pt-2 pb-12 space-y-1 transition-colors [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 && unassignedLooseFiles.length === 0 && (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No ideas yet — create one</p>
                   )}
