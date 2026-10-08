@@ -416,7 +416,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 ### Bucket clip cards — WaveformPlayerCard — ✅ Built
 
-`BucketClip` in `Clip.tsx` renders a **`WaveformPlayerCard`** (`client/src/components/daw/WaveformPlayerCard.tsx`) in the VERSIONS column of `MediaBucket`. The same component is used in the Dashboard file browser (Songs and Ideas modes).
+`BucketClip` in `Clip.tsx` renders a **`WaveformPlayerCard`** (`client/src/components/daw/WaveformPlayerCard.tsx`) in the Files column of `MediaBucket`. The same component is used in the Dashboard file browser (Songs and Ideas modes).
 
 **`WaveformPlayerCard` props:** `src`, `name`, `duration`, `isFinal`, `color?` (left border), `waveformHeight?` (default 20px; MediaBucket uses 32px), `className?`.
 
@@ -489,9 +489,9 @@ The `hiddenTracks` useQuery (key: `['hidden-tracks', DEFAULT_SONG_ID]`) has `ena
 
 Both fire `queryClient.invalidateQueries({ queryKey: ['hidden-tracks', SONG_ID] })`. If either is missing, the restore dropdown in the Add Instrument dialog will show stale data until a manual page refresh.
 
-### Media Bucket — VERSIONS column empty state
+### Media Bucket — Files column empty state
 
-When a section is selected but has no clips, the VERSIONS column renders a full-height dashed-border drop zone (matching the Dashboard file browser empty state style) instead of plain text:
+When a section is selected but has no clips, the Files column renders a full-height dashed-border drop zone (matching the Dashboard file browser empty state style) instead of plain text:
 
 ```tsx
 <div className="flex-1 p-2">
@@ -564,7 +564,7 @@ Gold dot next to instrument and section folder names in MediaBucket's INSTRUMENT
 - **Section-level dot:** rendered when `idea.hasNew` is true.
 - **Instrument-level dot:** pure client-side derivation, no separate tracking — `track.ideas.some(i => i.active && i.hasNew)`. The `active` check matters: without it, a hidden section's stale `hasNew` can light up the parent with no way for the user to clear it.
 - Full Takes ideas need no special-casing — they're a normal `ideas` row and flow through the same path as any other section.
-- Clip-level (VERSIONS column) is intentionally untouched — this is folder-level only.
+- Clip-level (Files column) is intentionally untouched — this is folder-level only.
 
 ### Timeline Selection — ✅ Built
 

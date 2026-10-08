@@ -851,7 +851,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
           }}
         >
           <div className="px-4 py-2 text-[10px] uppercase tracking-tighter text-muted-foreground font-bold border-b border-white/5 bg-white/[0.02]">
-            Versions
+            Files
           </div>
           {selectedIdea && filteredVersions.length === 0 && !searchQuery ? (
             /* Empty state — rendered outside ScrollArea so h-full fills the column */
@@ -873,7 +873,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                 {selectedIdea ? (
                   filteredVersions.length === 0 && searchQuery ? (
                     <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
-                      No versions match your search
+                      No files match your search
                     </div>
                   ) : (
                     filteredVersions.map(clip => (
@@ -889,7 +889,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                   )
                 ) : (
                   <div className="flex items-center justify-center text-[10px] text-muted-foreground/40 italic mt-10 uppercase tracking-widest text-center px-4">
-                    Select a section to view or add versions
+                    Select a section to view or add files
                   </div>
                 )}
               </div>
