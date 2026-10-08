@@ -7,7 +7,7 @@ import {
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from './Clip';
 import { useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
-import { type ApiLooseFile } from '@/lib/bucket-api';
+import { type ApiLooseFile, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
 import { type Clip } from '@/lib/daw-data';
 import { cn } from '@/lib/utils';
 
@@ -51,6 +51,27 @@ export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow:
     markCommentsViewed(looseFile.id, queryClient);
     setState({ looseFile, focusNotes: !!opts?.focusNotes, focusComments: !!opts?.focusComments });
   }, [queryClient]);
+  // Sends only the changed field(s) — the route merges them server-side. Throws on
+  // failure so ClipInfoWindow rolls the field back and toasts.
+  const writeMetadata = useCallback(async (looseFile: ApiLooseFile, updates: Partial<NonNullable<Clip['metadata']>>) => {
+    const res = await fetch(`/api/loose-files/${looseFile.id}/metadata`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null) as { message?: string } | null;
+      throw new Error(body?.message ?? `Save failed (${res.status})`);
+    }
+    const updated = await res.json() as { metadata: ApiLooseFile['metadata'] };
+    // The open window renders from this snapshot, not the list query — keep it at
+    // the last saved value so a later failed edit rolls back to the right thing.
+    setState(prev => prev && prev.looseFile.id === looseFile.id
+      ? { ...prev, looseFile: { ...prev.looseFile, metadata: updated.metadata } }
+      : prev);
+    queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
+    queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(looseFile.songId ?? undefined) });
+  }, [queryClient]);
   const infoWindow = state && (
     <ClipInfoWindow
       clip={looseFileToClip(state.looseFile)}
@@ -60,6 +81,7 @@ export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow:
       focusComments={state.focusComments}
       target={{ kind: 'loose', id: state.looseFile.id }}
       songId={state.looseFile.songId ?? undefined}
+      metadataWriter={(_merged, updates) => writeMetadata(state.looseFile, updates)}
     />
   );
   return { open, infoWindow };

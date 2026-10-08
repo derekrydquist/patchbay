@@ -12,6 +12,7 @@ import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
+import { useToast } from '@/hooks/use-toast';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -149,14 +150,15 @@ type ClipMetadataValue = NonNullable<Clip['metadata']>;
 export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default', target, metadataWriter }: {
   clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string,
   target?: CommentTarget,
-  // Saves the full merged metadata object. When absent, a clip target falls back to
-  // PATCH /api/clips/:id; a loose target has no writer yet, so BPM / Time Sign. /
-  // Key / Tags render read-only. Passing one (e.g. a future
-  // PATCH /api/loose-files/:id/metadata) makes them editable with no other change.
-  metadataWriter?: (metadata: ClipMetadataValue) => Promise<void>,
+  // Saves an edit: `metadata` is the full merged object, `updates` only the changed
+  // field(s). When absent, a clip target falls back to PATCH /api/clips/:id (full
+  // object); a loose target without one renders BPM / Time Sign. / Key / Tags
+  // read-only. A passed writer that throws gets the edit rolled back + a toast.
+  metadataWriter?: (metadata: ClipMetadataValue, updates: Partial<ClipMetadataValue>) => Promise<void>,
 }) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const { toast } = useToast();
   const commentTarget: CommentTarget = target ?? { kind: 'clip', id: bucketClipId ?? clip.id };
   const effectiveId = commentTarget.id;
   const isLooseTarget = commentTarget.kind === 'loose';
@@ -300,13 +302,28 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   });
   const metadataEditable = !!writeMetadata;
 
-  const patchMeta = async (updates: Partial<ClipMetadataValue>) => {
-    if (!writeMetadata) return;
+  // Returns whether the save succeeded (so callers only flash "Saved" on success).
+  const patchMeta = async (updates: Partial<ClipMetadataValue>): Promise<boolean> => {
+    if (!writeMetadata) return false;
     const merged = { ...(effectiveMetadata ?? {}), ...updates } as ClipMetadataValue;
     try {
-      await writeMetadata(merged);
+      await writeMetadata(merged, updates);
+      return true;
     } catch (err) {
       console.error('[clip meta] patch failed:', err);
+      if (metadataWriter) {
+        // Roll the edited field(s) back to the last saved value.
+        if ('bpm' in updates) setBpm(effectiveMetadata?.bpm ? String(effectiveMetadata.bpm) : '');
+        if ('key' in updates) setKeyScale(effectiveMetadata?.key && effectiveMetadata.key !== 'Unknown' ? effectiveMetadata.key : '');
+        if ('timeSignature' in updates) setTimeSignature(effectiveMetadata?.timeSignature ?? '');
+        if ('tags' in updates) setTags(effectiveMetadata?.tags ?? []);
+        toast({
+          title: 'Failed to save',
+          description: err instanceof Error ? err.message : 'Metadata could not be saved.',
+          variant: 'destructive',
+        });
+      }
+      return false;
     }
   };
 
@@ -521,8 +538,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     const next = [...tags, t];
     setTags(next);
     setTagInput('');
-    await patchMeta({ tags: next });
-    flashSaved('tags');
+    if (await patchMeta({ tags: next })) flashSaved('tags');
   };
 
   const removeTag = async (tag: string) => {
@@ -567,8 +583,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
               </h4>
               <div className="grid grid-cols-3 gap-3">
                 {!metadataEditable ? (
-                  // No metadata writer for this target (a loose file today) — same
-                  // values, displayed read-only.
+                  // No metadata writer for this target — same values, displayed read-only.
                   <>
                     <InfoStat icon={Activity} label="BPM" value={effectiveMetadata?.bpm || undefined} mono />
                     <InfoStat icon={Clock} label="Time Sign." value={effectiveMetadata?.timeSignature} mono />
@@ -589,7 +604,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                     onChange={e => setBpm(e.target.value)}
                     onBlur={async () => {
                       const v = parseFloat(bpm);
-                      if (!isNaN(v) && v > 0) { await patchMeta({ bpm: v }); flashSaved('bpm'); }
+                      if (!isNaN(v) && v > 0 && await patchMeta({ bpm: v })) flashSaved('bpm');
                     }}
                     placeholder="—"
                     className="bg-black/30 border-white/5 text-xs h-7 font-mono"
@@ -606,8 +621,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                     value={timeSignature}
                     onChange={e => setTimeSignature(e.target.value)}
                     onBlur={async () => {
-                      await patchMeta({ timeSignature });
-                      flashSaved('timeSignature');
+                      if (await patchMeta({ timeSignature })) flashSaved('timeSignature');
                     }}
                     placeholder="4/4"
                     className="bg-black/30 border-white/5 text-xs h-7 font-mono"
@@ -624,8 +638,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                     value={keyScale}
                     onChange={e => setKeyScale(e.target.value)}
                     onBlur={async () => {
-                      await patchMeta({ key: keyScale });
-                      flashSaved('key');
+                      if (await patchMeta({ key: keyScale })) flashSaved('key');
                     }}
                     placeholder="e.g. C Minor"
                     className="bg-black/30 border-white/5 text-xs h-7 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"

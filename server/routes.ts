@@ -14,6 +14,7 @@ declare global {
 import { createServer, type Server } from "http";
 import bcrypt from "bcrypt";
 import multer from "multer";
+import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
@@ -26,6 +27,7 @@ import {
   insertIdeaSchema,
   insertClipSchema,
   insertLooseFileSchema,
+  type ClipMetadata,
   insertProductionTaskSchema,
   insertTaskCommentSchema,
   songs,
@@ -52,6 +54,15 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const updateSongBody = insertSongSchema.partial();
+
+// The user-editable subset of a loose file's metadata (ClipInfoWindow's Musical
+// Intelligence + Meta Tags). .strict() rejects every other key with a 400.
+const looseFileMetadataBody = z.object({
+  bpm: z.number().min(20).max(400),
+  key: z.string().trim().max(20),
+  timeSignature: z.string(),
+  tags: z.array(z.string()),
+}).partial().strict();
 
 // ─── Multer setup ─────────────────────────────────────────────────────────────
 
@@ -1804,6 +1815,38 @@ export async function registerRoutes(
     if (!destSongId || !assertSongOwned(req, res, destSongId)) return;
 
     const updated = await storage.assignLooseFileTrack(looseFileId, trackId);
+    res.json(updated);
+  });
+
+  /**
+   * PATCH /api/loose-files/:id/metadata — edit BPM / key / time signature / tags
+   * from ClipInfoWindow. Dedicated single-field route (like PATCH
+   * /api/songs/:id/lyrics). Only keys present in the body are merged into the
+   * stored metadata, so a one-field edit never wipes the others. No activity event.
+   */
+  app.patch("/api/loose-files/:id/metadata", requireBand, async (req, res) => {
+    const looseFileId = req.params.id as string;
+    const looseFile = await storage.getLooseFile(looseFileId);
+    if (!looseFile) return res.status(404).json({ message: "Loose file not found." });
+    if (!assertLooseFileOwned(req, res, looseFile)) return;
+
+    const parsed = looseFileMetadataBody.safeParse(req.body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const field = issue.path.length ? `${issue.path.join('.')}: ` : '';
+      return res.status(400).json({ message: `${field}${issue.message}` });
+    }
+    const updates: Partial<ClipMetadata> = {};
+    if (parsed.data.bpm !== undefined) updates.bpm = parsed.data.bpm;
+    if (parsed.data.key !== undefined) updates.key = parsed.data.key;
+    if (parsed.data.timeSignature !== undefined) updates.timeSignature = parsed.data.timeSignature;
+    if (parsed.data.tags !== undefined) updates.tags = parsed.data.tags;
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "No metadata fields to update." });
+    }
+
+    const merged = { ...(looseFile.metadata ?? {}), ...updates } as ClipMetadata;
+    const updated = await storage.updateLooseFileMetadata(looseFileId, merged);
     res.json(updated);
   });
 

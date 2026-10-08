@@ -627,7 +627,7 @@ Edit/delete controls render only on the current user's own comments (`isOwnComme
 
 **Comment targets (`target` prop):** `{ kind: 'clip' | 'loose', id }` picks the thread. `'loose'` uses `/api/loose-files/:id/comments` and `/api/loose-file-comments/:id`, query key `['loose-file-comments', id]`, and invalidates `looseFileKeys.all()` + `bucketKeys.bucket(songId)` (the row badge counts ride on the lists). Omitted → clip, as before.
 
-**`metadataWriter` prop:** saves the merged metadata. Clips fall back to `PATCH /api/clips/:id`; a loose target has no writer, so BPM / Time Sign. / Key / Tags render read-only (`InfoStat`). Passing a writer later (e.g. `PATCH /api/loose-files/:id/metadata`) makes them editable with no other change.
+**`metadataWriter` prop:** `(merged, updates)`. Clips fall back to `PATCH /api/clips/:id` (full object); loose files pass one from `useLooseFileInfoWindow` that sends only `updates` to `PATCH /api/loose-files/:id/metadata`. A passed writer that throws gets the field rolled back + a toast; with no writer the fields render read-only (`InfoStat`).
 
 **Loose files — one window per surface:** `useLooseFileInfoWindow()` + `LooseFileInfoProvider` (`LooseFileRow.tsx`), mounted in `MediaBucket` and `Dashboard`. `LooseFileContextMenu` (More Info / Add Note / Delete) reads `open` from context. The window lives at the surface root, never inside a row — a dialog portaled from inside a row still bubbles React click/pointer events into the row's `onClick` and dnd-kit listeners. Opening it marks the notes read.
 

@@ -211,6 +211,7 @@ export interface IStorage {
   getLooseFilesByBand(bandId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]>;
   getLooseFilesByTrack(trackId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]>;
   assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile>;
+  updateLooseFileMetadata(id: string, metadata: LooseFile['metadata']): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
@@ -1113,6 +1114,11 @@ export class SQLiteStorage implements IStorage {
   // trackId un-assigns — the file drops back to the plain song-scoped tier.
   async assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile> {
     db.update(looseFiles).set({ trackId }).where(eq(looseFiles.id, id)).run();
+    return db.select().from(looseFiles).where(eq(looseFiles.id, id)).get()!;
+  }
+
+  async updateLooseFileMetadata(id: string, metadata: LooseFile['metadata']): Promise<LooseFile> {
+    db.update(looseFiles).set({ metadata }).where(eq(looseFiles.id, id)).run();
     return db.select().from(looseFiles).where(eq(looseFiles.id, id)).get()!;
   }
 
