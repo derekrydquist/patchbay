@@ -138,12 +138,31 @@ PATCH  /api/clips/:clipId               — partial update of a bucket clip; whe
 GET    /api/clips/:clipId/comments       — list comments on a bucket clip; returns ClipCommentWithReplies[]
                                            (top-level comments with a `replies` array); ordered by
                                            timestamp asc; replies ordered by createdAt asc
-POST   /api/clips/:clipId/comments       — add a comment; body: { author, text, parentId? }; timestamp
-                                           set to Date.now(); if parentId provided, validates it
-                                           references a top-level comment (no grandchild replies → 400)
-PATCH  /api/clip-comments/:id            — edit a comment's text; body: { text }
-DELETE /api/clip-comments/:id            — deletes child replies first (no FK cascade on parentId),
-                                           then deletes the parent → 204
+POST   /api/clips/:clipId/comments       — add a comment; body: { text, parentId? } (any `author` in
+                                           the body is ignored — resolved from the session; 401 if
+                                           none); timestamp set to Date.now(); if parentId provided,
+                                           validates it references a top-level comment (no grandchild
+                                           replies → 400); empty text → 400
+PATCH  /api/clip-comments/:id            — edit a comment's text; body: { text }; author-only (403)
+DELETE /api/clip-comments/:id            — author-only (403); deletes child replies first (no FK
+                                           cascade on parentId), then deletes the parent → 204
+POST   /api/clips/:clipId/comments/copy-from — body: { source: { kind: 'clip' | 'loose', id } };
+                                           copies the source's notes onto this (freshly copied) clip
+                                           with new ids, reply parentIds remapped, original author +
+                                           timestamp kept, carried_from_comment_id set (hidden from the
+                                           feed). Ownership asserted on both ids. NOT idempotent — call
+                                           once per copy. Self-copy → 400. Returns 201 with the copied rows
+
+Loose-file notes (mirror of the above; ownership via assertLooseFileOwned, covering song-scoped
+and band-wide files; activity logged only when the file has a songId):
+GET    /api/loose-files/:id/comments     — LooseFileCommentWithReplies[]
+POST   /api/loose-files/:id/comments     — body: { text, parentId? }; author from the session
+PATCH  /api/loose-file-comments/:id      — body: { text }; author-only (403)
+DELETE /api/loose-file-comments/:id      — author-only (403); replies first → 204
+Loose-file list routes (GET /api/songs/:songId/loose-files, /api/tracks/:trackId/loose-files,
+/api/loose-files/unassigned) add commentCount, latestCommentAt, latestOthersCommentAt per file.
+Organize / place-on-timeline reuse the loose file's id as the new clip's id and move its notes
+into clip_comments (same ids).
 
 POST   /api/upload                       — upload an audio file; multipart fields: file, instrument,
                                            section, ideaId; returns { url, duration, format, originalFileName }
@@ -152,7 +171,10 @@ GET    /api/songs/:songId/task-counts             — returns { completed: numbe
                                                      a song; counts `complete` and `will-not-play` both
                                                      as completed; `will-not-play` is a final decision
 
-GET    /api/songs/:songId/clip-comment-summary      — map of { clipId → { count, latestCommentAt } }
+GET    /api/songs/:songId/clip-comment-summary      — map of { clipId → { count, latestCommentAt,
+                                                     latestOthersCommentAt } } — the last is the newest
+                                                     comment NOT by the session user (null if none),
+                                                     used for unread badges
                                                      for clips that have at least one comment; aggregates
                                                      clip_comments by clipId (GROUP BY) including replies
                                                      (replies share clipId, only differ by parentId); used

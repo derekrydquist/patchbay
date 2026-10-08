@@ -456,6 +456,13 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 - **`TimelineClip`** (`Clip.tsx`) — final badge `top-right` (only clip-level indicator; the `isFinal` ring on the clip container was removed separately — see "Recently fixed bugs" in root `CLAUDE.md`, "Timeline/Media Bucket final and comment badge inconsistency" — it rendered as an unwanted gold line at clip seams and added no information the badge doesn't already convey), comment badge `bottom-right` with `tcHasUnread`/`tcCommentInfo`-driven `onClick` opening `ClipInfoWindow` with `focusComments: true`.
 - **`WaveformPlayerCard`** — final badge `top-right`, rendered directly on the outer card whenever `isFinal` is true. **`BucketClip`** passes the comment badge in as `children` (`bottom-right`, `hasUnread`-driven, `onClick` opens `ClipInfoWindow` with `focusComments: true`) — both badges share the same `relative overflow-hidden` card container, so they never need coordination beyond their fixed corners.
 
+- **Dashboard** — organized file cards on the Ideas shelf and Songs quick-browser (`clipNotesBadge` → `SongsClipContextMenuCard`'s `notesBadge` prop), and the Ideas-shelf loose-file preview card. All open More Info with `focusComments` and mark read on open.
+- **`LooseFileRow`** uses a small inline `MessageCircle` instead (plain text row, not a card) — non-interactive, gold when unread.
+
+**Unread rule (all badges):** `hasUnreadComments(latestOthersCommentAt, lastViewed)` from `Clip.tsx` — someone else commented after this browser's last view. A missing `patchbay-lastViewedComments` entry counts as unread. Your own comments never count (`latestOthersCommentAt` excludes the session user server-side). Read state stays in localStorage, keyed by clip id or loose file id (organize reuses the loose file's id as the clip id, so it carries over).
+
+**Freshness:** `['clip-comment-summary', songId]` and the loose-file lists use `liveCommentRefetch` (focus + 30s). For the summary, that's applied once per surface via `useLiveClipCommentSummary(songId)` (Timeline, MediaBucket) — not on the per-clip observers, which would each run their own interval.
+
 **Do not** re-inline badge JSX at a new call site — extend `CornerBadge` (e.g. a new `corner` value) instead, or the two surfaces will drift apart again.
 
 ### Media Bucket — "Add Section"
@@ -601,7 +608,7 @@ Set `true` on `pointerdown` for any Mute/Solo/volume-slider control in the track
 - **Timeline-clip reorder** (gap drop, track-row drop with `activeType === 'clip'`) — does not call `insertClipInSection` and never touches `bucketClipId`; only `start` is patched. The existing value is preserved automatically.
 - **Replace** (`PATCH /api/timeline-clips/:id` from the Replace submenu) — sets `bucketClipId` to the selected replacement's `id`, so the source link correctly repoints to the new version rather than staying attached to the old one.
 
-`ClipInfoWindow` reads `effectiveId = clip.bucketClipId ?? clip.id` for all comment API calls, and resolves `effectiveMetadata` via a direct `bucketClipId` lookup against the bucket cache (an O(1) find, not a nested walk). The old name-matching code is left in place, commented out, as a deprecated fallback — not deleted, in case a row is ever found with a null `bucketClipId` (should not happen given the backfill, but defensive).
+`ClipInfoWindow` reads `effectiveId = clip.bucketClipId ?? clip.id` for all comment API calls (unless a `target` is passed — see "Comment targets" below), and resolves `effectiveMetadata` via a direct `bucketClipId` lookup against the bucket cache (an O(1) find, not a nested walk). The old name-matching code is left in place, commented out, as a deprecated fallback — not deleted, in case a row is ever found with a null `bucketClipId` (should not happen given the backfill, but defensive).
 
 **Do not** reintroduce trackId+sectionName+name matching as a resolution path. If a future feature needs to resolve a timeline clip's source, use `bucketClipId` directly.
 
@@ -612,9 +619,17 @@ Both `BucketClip` and `TimelineClip` have a `focusNotes` state that is set to `t
 
 **Comment CRUD with threading:**
 - `GET /api/clips/:clipId/comments` — fetched by `useQuery(["clip-comments", effectiveId])` with `enabled: open`; returns `ClipCommentWithReplies[]`
-- `POST /api/clips/:clipId/comments` — `{ author, text, parentId? }`
-- `PATCH /api/clip-comments/:id` — inline edit
-- `DELETE /api/clip-comments/:id` — server deletes replies first, then the parent
+- `POST /api/clips/:clipId/comments` — `{ text, parentId? }` (author is resolved server-side; never sent)
+- `PATCH /api/clip-comments/:id` — inline edit (author-only)
+- `DELETE /api/clip-comments/:id` — server deletes replies first, then the parent (author-only)
+
+Edit/delete controls render only on the current user's own comments (`isOwnComment`, case-insensitive).
+
+**Comment targets (`target` prop):** `{ kind: 'clip' | 'loose', id }` picks the thread. `'loose'` uses `/api/loose-files/:id/comments` and `/api/loose-file-comments/:id`, query key `['loose-file-comments', id]`, and invalidates `looseFileKeys.all()` + `bucketKeys.bucket(songId)` (the row badge counts ride on the lists). Omitted → clip, as before.
+
+**`metadataWriter` prop:** saves the merged metadata. Clips fall back to `PATCH /api/clips/:id`; a loose target has no writer, so BPM / Time Sign. / Key / Tags render read-only (`InfoStat`). Passing a writer later (e.g. `PATCH /api/loose-files/:id/metadata`) makes them editable with no other change.
+
+**Loose files — one window per surface:** `useLooseFileInfoWindow()` + `LooseFileInfoProvider` (`LooseFileRow.tsx`), mounted in `MediaBucket` and `Dashboard`. `LooseFileContextMenu` (More Info / Add Note / Delete) reads `open` from context. The window lives at the surface root, never inside a row — a dialog portaled from inside a row still bubbles React click/pointer events into the row's `onClick` and dnd-kit listeners. Opening it marks the notes read.
 
 **Note:** `clip_comments` references `clips.id` only, so all timeline placements of the same bucket clip share one comment thread by design — this is unrelated to the `bucketClipId` migration and predates it. Per-placement (instance-specific) comments would need a separate schema change; not scoped or started.
 
