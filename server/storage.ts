@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, type SQL } from "drizzle-orm";
+import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -205,9 +205,11 @@ export interface IStorage {
 
   // Loose Files (song-scoped, unplaced uploads)
   createLooseFile(data: InsertLooseFile): Promise<LooseFile>;
-  getLooseFilesBySong(songId: string): Promise<LooseFileWithCommentCount[]>;
-  getLooseFilesByBand(bandId: string): Promise<LooseFileWithCommentCount[]>;
-  getLooseFilesByTrack(trackId: string): Promise<LooseFileWithCommentCount[]>;
+  // viewerUsername: the session user — their own comments are excluded from
+  // latestOthersCommentAt (null counts every comment as someone else's).
+  getLooseFilesBySong(songId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]>;
+  getLooseFilesByBand(bandId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]>;
+  getLooseFilesByTrack(trackId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]>;
   assignLooseFileTrack(id: string, trackId: string | null): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
@@ -295,10 +297,15 @@ export type ReviewCommentWithReplies = SongReviewComment & {
 
 export type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
 export type LooseFileCommentWithReplies = LooseFileComment & { replies: LooseFileComment[] };
-// Loose-file list rows carry a comment aggregate for the (future) row badge — same
-// count/latestCommentAt shape as /api/songs/:songId/clip-comment-summary entries.
-// latestCommentAt is null when the file has no comments.
-export type LooseFileWithCommentCount = LooseFile & { commentCount: number; latestCommentAt: string | null };
+// Loose-file list rows carry a comment aggregate for the row badge — same shape as
+// /api/songs/:songId/clip-comment-summary entries. commentCount is the total;
+// latestOthersCommentAt ignores the viewer's own comments (it drives "unread", so
+// your own notes never light the badge). Both timestamps are null when absent.
+export type LooseFileWithCommentCount = LooseFile & {
+  commentCount: number;
+  latestCommentAt: string | null;
+  latestOthersCommentAt: string | null;
+};
 export type TaskCommentWithReplies = TaskComment & { replies: TaskComment[] };
 export type LyricsCommentWithReplies = LyricsComment & { replies: LyricsComment[] };
 export type AlbumWithCount = Album & { songCount: number };
@@ -392,12 +399,13 @@ function materializeLooseFileCore(
 // Shared by the three loose-file list methods: the filtered loose_files rows, each with a
 // LEFT JOIN aggregate over loose_file_comments (top-level comments and replies alike,
 // same as the clip-comment-summary endpoint counts them).
-function selectLooseFilesWithCommentCounts(where: SQL | undefined): LooseFileWithCommentCount[] {
+function selectLooseFilesWithCommentCounts(where: SQL | undefined, viewerUsername: string | null): LooseFileWithCommentCount[] {
   const rows = db
     .select({
       ...getTableColumns(looseFiles),
       commentCount: count(looseFileComments.id),
       latestTimestamp: max(looseFileComments.timestamp),
+      latestOthersTimestamp: max(othersCommentTimestamp(looseFileComments.author, looseFileComments.timestamp, viewerUsername)),
     })
     .from(looseFiles)
     .leftJoin(looseFileComments, eq(looseFileComments.looseFileId, looseFiles.id))
@@ -405,10 +413,22 @@ function selectLooseFilesWithCommentCounts(where: SQL | undefined): LooseFileWit
     .groupBy(looseFiles.id)
     .orderBy(asc(looseFiles.name))
     .all();
-  return rows.map(({ latestTimestamp, ...row }) => ({
+  return rows.map(({ latestTimestamp, latestOthersTimestamp, ...row }) => ({
     ...row,
     latestCommentAt: latestTimestamp != null ? new Date(latestTimestamp).toISOString() : null,
+    // max() over a raw SQL expression comes back as a string — coerce before Date().
+    latestOthersCommentAt: latestOthersTimestamp != null ? new Date(Number(latestOthersTimestamp)).toISOString() : null,
   }));
+}
+
+// A comment's timestamp if someone other than the viewer wrote it, else NULL —
+// wrap in max() for "newest comment by anyone else". Author match is
+// case-insensitive, same as the author-only edit/delete check.
+export function othersCommentTimestamp(
+  authorCol: SQLWrapper, timestampCol: SQLWrapper, viewerUsername: string | null,
+): SQL<number | null> {
+  if (!viewerUsername) return sql<number | null>`${timestampCol}`;
+  return sql<number | null>`CASE WHEN lower(${authorCol}) <> lower(${viewerUsername}) THEN ${timestampCol} END`;
 }
 
 export function insertProductionTaskForSection({
@@ -1070,21 +1090,21 @@ export class SQLiteStorage implements IStorage {
 
   // Excludes files that have moved to the Track-scoped tier (trackId set) — those
   // display only in that Track's Sections column now, via getLooseFilesByTrack.
-  async getLooseFilesBySong(songId: string): Promise<LooseFileWithCommentCount[]> {
-    return selectLooseFilesWithCommentCounts(and(eq(looseFiles.songId, songId), isNull(looseFiles.trackId)));
+  async getLooseFilesBySong(songId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(and(eq(looseFiles.songId, songId), isNull(looseFiles.trackId)), viewerUsername);
   }
 
   // Band-wide, unassigned loose files (songId IS NULL) — Ideas shelf Column 1's
   // "Upload Files". Never assigned to a song until a user drags one onto an Idea.
-  async getLooseFilesByBand(bandId: string): Promise<LooseFileWithCommentCount[]> {
-    return selectLooseFilesWithCommentCounts(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)));
+  async getLooseFilesByBand(bandId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(and(isNull(looseFiles.songId), eq(looseFiles.bandId, bandId)), viewerUsername);
   }
 
   // Track-scoped loose files — the "I know the track, not yet the section" resting
   // state. Rendered in that Track's own Sections column, sorted below the Section
   // list, until organized into a real clip (which clears the row entirely).
-  async getLooseFilesByTrack(trackId: string): Promise<LooseFileWithCommentCount[]> {
-    return selectLooseFilesWithCommentCounts(eq(looseFiles.trackId, trackId));
+  async getLooseFilesByTrack(trackId: string, viewerUsername: string | null): Promise<LooseFileWithCommentCount[]> {
+    return selectLooseFilesWithCommentCounts(eq(looseFiles.trackId, trackId), viewerUsername);
   }
 
   // Moves a song-scoped loose file into the Track-scoped tier — drag onto a Track

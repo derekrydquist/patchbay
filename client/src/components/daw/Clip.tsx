@@ -6,7 +6,7 @@ import { useDraggable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
-import { bucketKeys } from '@/lib/bucket-api';
+import { bucketKeys, looseFileKeys, liveCommentRefetch, fetchClipCommentSummary, type ClipCommentSummary } from '@/lib/bucket-api';
 import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
@@ -43,7 +43,15 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 
-type ClipCommentWithReplies = ClipComment & { replies: ClipComment[] };
+// The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
+// loose_file_comments rows, which differ only in their parent-id column.
+type ThreadComment = Pick<ClipComment, 'id' | 'parentId' | 'author' | 'text' | 'timestamp' | 'createdAt'>;
+type ThreadCommentWithReplies = ThreadComment & { replies: ThreadComment[] };
+
+// Which comment thread ClipInfoWindow reads and writes. 'clip' is a bucket clip
+// (clip_comments); 'loose' is a loose file (loose_file_comments). Defaults to the
+// clip resolved from bucketClipId ?? clip.id when omitted.
+export type CommentTarget = { kind: 'clip' | 'loose'; id: string };
 
 // ── Reactive lastViewedComments ──────────────────────────────────────────────
 // Stored as a single JSON blob so one setQueryData call re-renders all subscribers.
@@ -54,7 +62,7 @@ function readViewedMap(): Record<string, string> {
   catch { return {}; }
 }
 
-function useLastViewedComments() {
+export function useLastViewedComments() {
   return useQuery<Record<string, string>>({
     queryKey: ['lastViewedComments'],
     queryFn: readViewedMap,
@@ -62,10 +70,34 @@ function useLastViewedComments() {
   });
 }
 
-function markCommentsViewed(clipId: string, qc: ReturnType<typeof useQueryClient>) {
+// Keyed by clip id or loose file id — the two never collide, and organize reuses a
+// loose file's id as its clip's id, so read state carries across the move.
+export function markCommentsViewed(clipId: string, qc: ReturnType<typeof useQueryClient>) {
   const updated = { ...readViewedMap(), [clipId]: new Date().toISOString() };
   localStorage.setItem(LS_VIEWED_KEY, JSON.stringify(updated));
   qc.setQueryData(['lastViewedComments'], updated);
+}
+
+// Keeps ['clip-comment-summary', songId] fresh (focus + 30s interval, see
+// liveCommentRefetch) so other people's new notes light the badges without a
+// reload. Mounted once per surface (Timeline, MediaBucket) rather than inside
+// TimelineClip/BucketClip: each of those subscribes to the same key, and an
+// interval on every per-clip observer would fire one request per clip.
+export function useLiveClipCommentSummary(songId: string | undefined) {
+  useQuery<ClipCommentSummary>({
+    queryKey: ['clip-comment-summary', songId],
+    queryFn: () => fetchClipCommentSummary(songId!),
+    enabled: !!songId,
+    ...liveCommentRefetch,
+  });
+}
+
+// The unread rule for every comment badge (clips and loose files): someone OTHER
+// than you has commented, and their newest comment is later than this browser's
+// last view of the thread. Pass latestOthersCommentAt, never latestCommentAt —
+// your own notes must not count as unread for you.
+export function hasUnreadComments(latestOthersCommentAt: string | null | undefined, lastViewed: string | undefined): boolean {
+  return !!latestOthersCommentAt && (!lastViewed || latestOthersCommentAt > lastViewed);
 }
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -112,10 +144,47 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
   );
 }
 
-export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default' }: { clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string }) {
+type ClipMetadataValue = NonNullable<Clip['metadata']>;
+
+export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default', target, metadataWriter }: {
+  clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string,
+  target?: CommentTarget,
+  // Saves the full merged metadata object. When absent, a clip target falls back to
+  // PATCH /api/clips/:id; a loose target has no writer yet, so BPM / Time Sign. /
+  // Key / Tags render read-only. Passing one (e.g. a future
+  // PATCH /api/loose-files/:id/metadata) makes them editable with no other change.
+  metadataWriter?: (metadata: ClipMetadataValue) => Promise<void>,
+}) {
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const effectiveId = bucketClipId ?? clip.id;
+  const commentTarget: CommentTarget = target ?? { kind: 'clip', id: bucketClipId ?? clip.id };
+  const effectiveId = commentTarget.id;
+  const isLooseTarget = commentTarget.kind === 'loose';
+
+  // ── Comment endpoints / cache keys per target kind ─────────────────────────
+  const commentsUrl = isLooseTarget
+    ? `/api/loose-files/${effectiveId}/comments`
+    : `/api/clips/${effectiveId}/comments`;
+  const commentUrl = (commentId: string) => isLooseTarget
+    ? `/api/loose-file-comments/${commentId}`
+    : `/api/clip-comments/${commentId}`;
+  const commentsQueryKey = isLooseTarget
+    ? ['loose-file-comments', effectiveId]
+    : ['clip-comments', effectiveId];
+  const invalidateAfterCommentChange = () => {
+    queryClient.invalidateQueries({ queryKey: commentsQueryKey });
+    if (isLooseTarget) {
+      // commentCount / latestCommentAt ride on every loose-file list (row badge).
+      queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+    } else {
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
+    }
+    queryClient.invalidateQueries({ queryKey: ['songs'] });
+  };
+  // Edit/delete are author-only server-side; hide the controls on everyone else's.
+  const isOwnComment = (author: string) =>
+    !!user && author.toLowerCase() === user.username.toLowerCase();
 
   // When opened from a TimelineClip, clip.metadata is absent (the timeline
   // conversion never includes it). Resolve metadata from the warm bucket cache
@@ -220,16 +289,22 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     setTimeout(() => setSavedField(null), 1500);
   };
 
-  const patchMeta = async (updates: Partial<NonNullable<Clip['metadata']>>) => {
-    const merged = { ...(effectiveMetadata ?? {}), ...updates } as NonNullable<Clip['metadata']>;
+  const writeMetadata = metadataWriter ?? (isLooseTarget ? undefined : async (merged: ClipMetadataValue) => {
+    await fetch(`/api/clips/${effectiveId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ metadata: merged }),
+    });
+    queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+    queryClient.invalidateQueries({ queryKey: ['songs'] });
+  });
+  const metadataEditable = !!writeMetadata;
+
+  const patchMeta = async (updates: Partial<ClipMetadataValue>) => {
+    if (!writeMetadata) return;
+    const merged = { ...(effectiveMetadata ?? {}), ...updates } as ClipMetadataValue;
     try {
-      await fetch(`/api/clips/${effectiveId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ metadata: merged }),
-      });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      await writeMetadata(merged);
     } catch (err) {
       console.error('[clip meta] patch failed:', err);
     }
@@ -286,10 +361,10 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   };
 
   // ── Comment API ────────────────────────────────────────────────────────────
-  const { data: clipCommentsList = [] } = useQuery<ClipCommentWithReplies[]>({
-    queryKey: ["clip-comments", effectiveId],
+  const { data: clipCommentsList = [] } = useQuery<ThreadCommentWithReplies[]>({
+    queryKey: commentsQueryKey,
     queryFn: async () => {
-      const res = await fetch(`/api/clips/${effectiveId}/comments`);
+      const res = await fetch(commentsUrl);
       if (!res.ok) throw new Error("Failed to fetch");
       return res.json();
     },
@@ -346,17 +421,16 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const handleAddComment = async () => {
     if (!newComment.trim()) return;
     try {
-      await fetch(`/api/clips/${effectiveId}/comments`, {
+      // Author is resolved server-side from the session — never sent.
+      await fetch(commentsUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: user?.username ?? 'Unknown', text: newComment.trim() }),
+        body: JSON.stringify({ text: newComment.trim() }),
       });
       setNewComment("");
       markCommentsViewed(effectiveId, queryClient);
-      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
-      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
+      invalidateAfterCommentChange();
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
     } catch (err) {
       console.error('[clip comment] add failed:', err);
     }
@@ -365,15 +439,13 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
   const handleSaveEdit = async (id: string) => {
     if (!editText.trim()) return;
     try {
-      await fetch(`/api/clip-comments/${id}`, {
+      await fetch(commentUrl(id), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: editText.trim() }),
       });
       setEditingId(null);
-      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
-      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      invalidateAfterCommentChange();
     } catch (err) {
       console.error('[clip comment] edit failed:', err);
     }
@@ -381,10 +453,8 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
 
   const handleDeleteComment = async (id: string) => {
     try {
-      await fetch(`/api/clip-comments/${id}`, { method: 'DELETE' });
-      queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
-      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      await fetch(commentUrl(id), { method: 'DELETE' });
+      invalidateAfterCommentChange();
     } catch (err) {
       console.error('[clip comment] delete failed:', err);
     }
@@ -394,16 +464,15 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
     const text = replyText.trim();
     if (!text) return;
     try {
-      await fetch(`/api/clips/${effectiveId}/comments`, {
+      await fetch(commentsUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ author: user?.username ?? 'Unknown', text, parentId }),
+        body: JSON.stringify({ text, parentId }),
       });
       setReplyText('');
       markCommentsViewed(effectiveId, queryClient);
-      await queryClient.invalidateQueries({ queryKey: ["clip-comments", effectiveId] });
-      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      invalidateAfterCommentChange();
+      await queryClient.invalidateQueries({ queryKey: commentsQueryKey });
       setTimeout(() => lastReplyRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 50);
     } catch (err) {
       console.error('[clip comment] reply failed:', err);
@@ -497,6 +566,15 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                 <div className="h-px flex-1 bg-primary/20" /> Musical Intelligence
               </h4>
               <div className="grid grid-cols-3 gap-3">
+                {!metadataEditable ? (
+                  // No metadata writer for this target (a loose file today) — same
+                  // values, displayed read-only.
+                  <>
+                    <InfoStat icon={Activity} label="BPM" value={effectiveMetadata?.bpm || undefined} mono />
+                    <InfoStat icon={Clock} label="Time Sign." value={effectiveMetadata?.timeSignature} mono />
+                    <InfoStat icon={Music} label="Key / Scale" value={effectiveMetadata?.key && effectiveMetadata.key !== 'Unknown' ? effectiveMetadata.key : undefined} />
+                  </>
+                ) : (<>
                 {/* BPM */}
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-1.5 opacity-60">
@@ -553,6 +631,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                     className="bg-black/30 border-white/5 text-xs h-7 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
                   />
                 </div>
+                </>)}
               </div>
             </div>
 
@@ -597,23 +676,28 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                   {tags.map(tag => (
                     <span key={tag} className="flex items-center gap-0.5 text-[9px] px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-muted-foreground">
                       #{tag}
-                      <button
-                        onMouseDown={e => e.preventDefault()}
-                        onClick={() => removeTag(tag)}
-                        className="ml-0.5 hover:text-red-400 transition-colors"
-                      >
-                        <X size={8} />
-                      </button>
+                      {metadataEditable && (
+                        <button
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => removeTag(tag)}
+                          className="ml-0.5 hover:text-red-400 transition-colors"
+                        >
+                          <X size={8} />
+                        </button>
+                      )}
                     </span>
                   ))}
+                  {!metadataEditable && tags.length === 0 && (
+                    <span className="text-[11px] text-muted-foreground">—</span>
+                  )}
                 </div>
-                <Input
+                {metadataEditable && <Input
                   value={tagInput}
                   onChange={e => setTagInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTag(); } }}
                   placeholder="Add tag and press Enter…"
                   className="bg-black/40 border-white/10 text-xs h-7 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
-                />
+                />}
               </div>
             </div>
 
@@ -685,11 +769,11 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                   {capitalize(c.author).charAt(0)}
                                 </div>
                                 <span className="text-[11px] font-bold text-primary">
-                                  {c.author === (user?.username ?? '') ? 'You' : capitalize(c.author)}
+                                  {isOwnComment(c.author) ? 'You' : capitalize(c.author)}
                                 </span>
                                 <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(c.timestamp)}</span>
                               </div>
-                              <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                              {isOwnComment(c.author) && <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
                                 <button
                                   onClick={() => { setEditingId(c.id); setEditText(c.text); }}
                                   className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
@@ -702,7 +786,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                 >
                                   <Trash2 size={10} />
                                 </button>
-                              </div>
+                              </div>}
                             </div>
                             {editingId === c.id ? (
                               <div className="flex gap-2 mt-2">
@@ -762,11 +846,11 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                         {capitalize(r.author).charAt(0)}
                                       </div>
                                       <span className="text-[10px] font-bold text-primary">
-                                        {r.author === (user?.username ?? '') ? 'You' : capitalize(r.author)}
+                                        {isOwnComment(r.author) ? 'You' : capitalize(r.author)}
                                       </span>
                                       <span className="text-[9px] text-muted-foreground font-mono opacity-50">{formatRelativeTime(r.timestamp)}</span>
                                     </div>
-                                    <div className="flex items-center gap-1 opacity-0 group-hover/reply:opacity-100 transition-opacity">
+                                    {isOwnComment(r.author) && <div className="flex items-center gap-1 opacity-0 group-hover/reply:opacity-100 transition-opacity">
                                       <button
                                         onClick={() => { setEditingId(r.id); setEditText(r.text); }}
                                         className="p-1 rounded hover:bg-white/10 text-muted-foreground hover:text-primary transition-colors"
@@ -779,7 +863,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                       >
                                         <Trash2 size={9} />
                                       </button>
-                                    </div>
+                                    </div>}
                                   </div>
                                   {editingId === r.id ? (
                                     <div className="flex gap-2 mt-1">
@@ -808,7 +892,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
                                   value={replyText}
                                   onChange={handleReplyChange}
                                   onKeyDown={(e) => handleReplyKeyDown(e, c.id)}
-                                  placeholder={`Reply to ${c.author === (user?.username ?? '') ? 'yourself' : capitalize(c.author)}…`}
+                                  placeholder={`Reply to ${isOwnComment(c.author) ? 'yourself' : capitalize(c.author)}…`}
                                   className="bg-black/40 border-white/10 text-sm h-9 flex-1 placeholder:text-[10px] placeholder:text-muted-foreground placeholder:italic"
                                 />
                                 <Button
@@ -907,7 +991,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const resetTrimAllButtonRef = useRef<HTMLButtonElement | null>(null);
   const applyTrimAllButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
+  const { data: clipCommentSummary = {} } = useQuery<ClipCommentSummary>({
     queryKey: ['clip-comment-summary', songId],
     queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
   });
@@ -915,7 +999,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const tcEffectiveId = clip.bucketClipId ?? clip.id;
   const tcCommentInfo = clipCommentSummary[tcEffectiveId];
   const tcLastViewed = viewedMap[tcEffectiveId];
-  const tcHasUnread = tcCommentInfo != null && (!tcLastViewed || tcCommentInfo.latestCommentAt > tcLastViewed);
+  const tcHasUnread = hasUnreadComments(tcCommentInfo?.latestOthersCommentAt, tcLastViewed);
 
   // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
   useEffect(() => {
@@ -1772,14 +1856,14 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
   const queryClient = useQueryClient();
   const contextMenu = useReopenableContextMenu();
 
-  const { data: clipCommentSummary = {} } = useQuery<Record<string, { count: number; latestCommentAt: string }>>({
+  const { data: clipCommentSummary = {} } = useQuery<ClipCommentSummary>({
     queryKey: ['clip-comment-summary', songId],
     queryFn: () => fetch(`/api/songs/${songId}/clip-comment-summary`).then(r => r.json()),
   });
   const { data: viewedMap = {} } = useLastViewedComments();
   const commentInfo = clipCommentSummary[clip.id];
   const lastViewed = viewedMap[clip.id];
-  const hasUnread = commentInfo != null && (!lastViewed || commentInfo.latestCommentAt > lastViewed);
+  const hasUnread = hasUnreadComments(commentInfo?.latestOthersCommentAt, lastViewed);
 
   useEffect(() => {
     setIsFinal(clip.isFinal ?? false);

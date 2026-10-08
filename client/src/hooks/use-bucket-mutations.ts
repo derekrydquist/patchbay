@@ -27,6 +27,9 @@ function invalidateAfterLooseFilePlacement(
   queryClient.invalidateQueries({ queryKey: ['songs'] });
   queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
   queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+  // The file's notes move into clip_comments under the same id — refresh the clip
+  // comment badges (BucketClip / TimelineClip) so they show up without a reload.
+  queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
 }
 
 export function useAddInstrument(

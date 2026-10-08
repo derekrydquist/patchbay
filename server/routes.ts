@@ -17,7 +17,7 @@ import multer from "multer";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, othersCommentTimestamp } from "./storage";
 import {
   type InstrumentTrack,
   insertSongSchema,
@@ -1687,7 +1687,7 @@ export async function registerRoutes(
   app.get("/api/songs/:songId/loose-files", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
-    const files = await storage.getLooseFilesBySong(songId);
+    const files = await storage.getLooseFilesBySong(songId, await sessionUsername(req));
     res.json(files);
   });
 
@@ -1768,7 +1768,7 @@ export async function registerRoutes(
     const trackId = req.params.trackId as string;
     const songId = trackSongId(trackId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
-    const files = await storage.getLooseFilesByTrack(trackId);
+    const files = await storage.getLooseFilesByTrack(trackId, await sessionUsername(req));
     res.json(files);
   });
 
@@ -1814,7 +1814,7 @@ export async function registerRoutes(
 
   /** GET /api/loose-files/unassigned — list this band's unassigned loose files */
   app.get("/api/loose-files/unassigned", requireBand, async (req, res) => {
-    const files = await storage.getLooseFilesByBand(req.bandId!);
+    const files = await storage.getLooseFilesByBand(req.bandId!, await sessionUsername(req));
     res.json(files);
   });
 
@@ -2382,14 +2382,18 @@ export async function registerRoutes(
     res.json({ completed, total, applicable: true });
   });
 
-  app.get("/api/songs/:songId/clip-comment-summary", requireBand, (req, res) => {
+  // latestOthersCommentAt excludes the session user's own comments — it's what the
+  // client's unread check uses, so your own notes never light a badge for you.
+  app.get("/api/songs/:songId/clip-comment-summary", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
+    const viewer = await sessionUsername(req);
     const rows = db
       .select({
         clipId: clipComments.clipId,
         count: count(),
         latestTimestamp: max(clipComments.timestamp),
+        latestOthersTimestamp: max(othersCommentTimestamp(clipComments.author, clipComments.timestamp, viewer)),
       })
       .from(clipComments)
       .innerJoin(clips, eq(clipComments.clipId, clips.id))
@@ -2398,12 +2402,14 @@ export async function registerRoutes(
       .where(eq(instrumentTracks.songId, songId))
       .groupBy(clipComments.clipId)
       .all();
-    const result: Record<string, { count: number; latestCommentAt: string }> = {};
+    const result: Record<string, { count: number; latestCommentAt: string; latestOthersCommentAt: string | null }> = {};
     for (const row of rows) {
       if (row.count > 0) {
         result[row.clipId] = {
           count: row.count,
           latestCommentAt: new Date(row.latestTimestamp ?? 0).toISOString(),
+          // max() over a raw SQL expression comes back as a string — coerce before Date().
+          latestOthersCommentAt: row.latestOthersTimestamp != null ? new Date(Number(row.latestOthersTimestamp)).toISOString() : null,
         };
       }
     }

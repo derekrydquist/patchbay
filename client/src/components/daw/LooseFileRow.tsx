@@ -1,9 +1,11 @@
-import { type ReactNode } from 'react';
+import { type ReactNode, createContext, useCallback, useContext, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
-import { FileAudio, Trash2 } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { FileAudio, Info, MessageCircle, MessageSquare, Trash2 } from 'lucide-react';
 import {
-  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger,
+  ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from './Clip';
 import { useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import { type ApiLooseFile } from '@/lib/bucket-api';
 import { type Clip } from '@/lib/daw-data';
@@ -25,6 +27,42 @@ export function looseFileToClip(lf: ApiLooseFile): Clip {
     isFinal: false,
     metadata: lf.metadata as unknown as Clip['metadata'],
   };
+}
+
+// ─── More Info / Add Note for loose files ────────────────────────────────────
+// Each surface that renders loose files (MediaBucket, the Dashboard's Songs
+// quick-browser and Ideas shelf) owns ONE ClipInfoWindow for them via
+// useLooseFileInfoWindow(), and exposes its `open` through LooseFileInfoProvider so
+// every LooseFileRow menu below it can reach it without prop threading. The window
+// is mounted outside the rows on purpose: a dialog portaled from inside a row would
+// still bubble React click/pointer events up into the row's own onClick and
+// dnd-kit listeners.
+
+export type OpenLooseFileInfo = (looseFile: ApiLooseFile, opts?: { focusNotes?: boolean; focusComments?: boolean }) => void;
+
+const LooseFileInfoContext = createContext<OpenLooseFileInfo | null>(null);
+export const LooseFileInfoProvider = LooseFileInfoContext.Provider;
+
+export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow: ReactNode } {
+  const queryClient = useQueryClient();
+  const [state, setState] = useState<{ looseFile: ApiLooseFile; focusNotes: boolean; focusComments: boolean } | null>(null);
+  const open = useCallback<OpenLooseFileInfo>((looseFile, opts) => {
+    // Opening the thread marks it read — same shared map the clip badges use.
+    markCommentsViewed(looseFile.id, queryClient);
+    setState({ looseFile, focusNotes: !!opts?.focusNotes, focusComments: !!opts?.focusComments });
+  }, [queryClient]);
+  const infoWindow = state && (
+    <ClipInfoWindow
+      clip={looseFileToClip(state.looseFile)}
+      open
+      onOpenChange={o => { if (!o) setState(null); }}
+      focusNotes={state.focusNotes}
+      focusComments={state.focusComments}
+      target={{ kind: 'loose', id: state.looseFile.id }}
+      songId={state.looseFile.songId ?? undefined}
+    />
+  );
+  return { open, infoWindow };
 }
 
 interface LooseFileRowProps {
@@ -52,20 +90,20 @@ interface LooseFileRowProps {
   onDeleted?: () => void;
 }
 
-interface LooseFileDeleteMenuProps {
-  looseFile: Pick<ApiLooseFile, 'id' | 'trackId'>;
+interface LooseFileContextMenuProps {
+  looseFile: ApiLooseFile;
   songId: string | null;
   onDeleted?: () => void;
   children: ReactNode;
 }
 
-// The right-click "Delete" menu shared by every surface that can render a loose
-// file — LooseFileRow (Column 1 / Tracks-column lists) and the Ideas shelf's
-// one-off preview card (a bare WaveformPlayerCard, not a LooseFileRow, so it
-// needs this wrapped around it directly). Kept as one component specifically so
-// the two surfaces can't drift apart the way TimelineClip/WaveformPlayerCard's
-// final/comment badges once did — see CornerBadge in the daw CLAUDE.md.
-export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: LooseFileDeleteMenuProps) {
+// The right-click menu on every LooseFileRow: More Info, Add Note, Delete. More
+// Info / Add Note open the surface's shared ClipInfoWindow (see
+// useLooseFileInfoWindow above) and are omitted if no provider is mounted. The Ideas
+// shelf's one-off preview card isn't a LooseFileRow — it uses IdeaFileContextMenu,
+// which carries the same items plus Add to Song / Promote to Song.
+export function LooseFileContextMenu({ looseFile, songId, onDeleted, children }: LooseFileContextMenuProps) {
+  const openInfo = useContext(LooseFileInfoContext);
   const deleteMutation = useDeleteLooseFile({
     onSuccess: () => onDeleted?.(),
     onError: (msg) => console.error('[deleteLooseFile] error:', msg),
@@ -75,6 +113,23 @@ export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: 
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[140px]">
+        {openInfo && (
+          <>
+            <ContextMenuItem
+              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+              onClick={() => openInfo(looseFile)}
+            >
+              <Info size={13} className="text-white/50" /> More Info
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+              onClick={() => openInfo(looseFile, { focusNotes: true })}
+            >
+              <MessageSquare size={13} className="text-white/50" /> Add Note
+            </ContextMenuItem>
+            <ContextMenuSeparator className="bg-white/5" />
+          </>
+        )}
         <ContextMenuItem
           className="text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer text-xs flex items-center gap-2"
           onClick={() => deleteMutation.mutate({ looseFileId: looseFile.id, songId, trackId: looseFile.trackId })}
@@ -90,8 +145,8 @@ export function LooseFileDeleteMenu({ looseFile, songId, onDeleted, children }: 
 // Section (organize) or onto the Timeline (place-on-timeline) — see Timeline.tsx /
 // MediaBucket.tsx for the drop handling. Clickable only where `onClick` is passed;
 // otherwise it carries no folder-browser navigation state. Right-click offers a
-// single, unconfirmed Delete via LooseFileDeleteMenu — a loose file has no
-// dependent rows yet, so there's nothing for a delete to cascade into.
+// More Info / Add Note / Delete via LooseFileContextMenu; Delete is unconfirmed —
+// its only dependents are its own notes, which cascade with it.
 export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted }: LooseFileRowProps) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `loose-${looseFile.id}`,
@@ -109,8 +164,12 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
   // (which treats overflow-y: scroll as scrollable on both axes) then scrolled the
   // column sideways, clipping the track names.
 
+  const { data: viewedMap = {} } = useLastViewedComments();
+  const commentCount = looseFile.commentCount ?? 0;
+  const hasUnread = hasUnreadComments(looseFile.latestOthersCommentAt, viewedMap[looseFile.id]);
+
   return (
-    <LooseFileDeleteMenu looseFile={looseFile} songId={songId} onDeleted={onDeleted}>
+    <LooseFileContextMenu looseFile={looseFile} songId={songId} onDeleted={onDeleted}>
       <div
         ref={setNodeRef}
         {...listeners}
@@ -128,7 +187,17 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
       >
         <FileAudio size={14} className={cn('shrink-0', isSelected ? 'text-primary' : 'text-primary/50')} />
         <span className="font-bold tracking-tight truncate">{looseFile.name}</span>
+        {/* Notes indicator — inline counterpart of CornerBadge's comment variant
+            (gold when there are notes newer than this browser's last view). */}
+        {commentCount > 0 && (
+          <span
+            className="ml-auto shrink-0 flex items-center"
+            title={`${commentCount} ${commentCount === 1 ? 'note' : 'notes'}${hasUnread ? ' (new)' : ''}`}
+          >
+            <MessageCircle size={11} className={hasUnread ? 'text-primary fill-primary/30' : 'text-white/30'} />
+          </span>
+        )}
       </div>
-    </LooseFileDeleteMenu>
+    </LooseFileContextMenu>
   );
 }

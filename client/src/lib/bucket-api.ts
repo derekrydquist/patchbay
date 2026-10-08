@@ -79,6 +79,38 @@ export interface ApiLooseFile {
   // null when the file has no comments.
   commentCount?: number;
   latestCommentAt?: string | null;
+  // Newest comment NOT written by the session user — what the unread check uses,
+  // so your own notes never light the badge for you. Null when there are none.
+  latestOthersCommentAt?: string | null;
+}
+
+// GET /api/songs/:songId/clip-comment-summary — per bucket clip id. Cached under
+// ['clip-comment-summary', songId] by every surface that renders clip badges.
+// latestOthersCommentAt has the same meaning as on ApiLooseFile.
+export type ClipCommentSummary = Record<string, {
+  count: number;
+  latestCommentAt: string;
+  latestOthersCommentAt: string | null;
+}>;
+
+// Refresh policy for queries that carry OTHER people's comment activity — the
+// clip comment summary and the loose-file lists (their commentCount /
+// latestOthersCommentAt drive the unread badges). Without it, a teammate's new
+// note only appears after a reload. Note 'always', not true: the global default is
+// staleTime: Infinity, and refetchOnWindowFocus: true only refetches stale data,
+// so it would never fire. The interval pauses while the tab is hidden
+// (refetchIntervalInBackground: false). Apply to ONE observer per query per
+// surface — every observer runs its own interval timer.
+export const liveCommentRefetch = {
+  refetchOnWindowFocus: 'always',
+  refetchInterval: 30_000,
+  refetchIntervalInBackground: false,
+} as const;
+
+export async function fetchClipCommentSummary(songId: string): Promise<ClipCommentSummary> {
+  const res = await fetch(`/api/songs/${songId}/clip-comment-summary`);
+  if (!res.ok) throw new Error('Failed to fetch comment summary');
+  return res.json();
 }
 
 // Returned by POST /api/loose-files/:id/place-on-timeline alongside the clip.
@@ -139,6 +171,8 @@ export const bucketKeys = {
 };
 
 export const looseFileKeys = {
+  // Prefix of every key below — invalidates all loose-file lists at once.
+  all: () => ['loose-files'] as const,
   list: (songId: string | undefined) => ['loose-files', songId] as const,
   unassigned: () => ['loose-files', 'unassigned'] as const,
   byTrack: (trackId: string | undefined) => ['loose-files', 'track', trackId] as const,

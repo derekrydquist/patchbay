@@ -45,15 +45,17 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { ClipInfoWindow } from '@/components/daw/Clip';
+import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from '@/components/daw/Clip';
+import { CornerBadge } from '@/components/daw/CornerBadge';
 import { UploadModal } from '@/components/daw/UploadModal';
-import { LooseFileRow } from '@/components/daw/LooseFileRow';
+import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from '@/components/daw/LooseFileRow';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
+  fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary,
 } from '@/lib/bucket-api';
 import { useAddInstrument, useAddSection, useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import {
@@ -296,10 +298,6 @@ interface IdeaFileContextMenuProps {
   children: React.ReactNode;
   onMoreInfo: () => void;
   onAddNote: () => void;
-  // Disables More Info / Add Note — used for a loose file, which has no real
-  // `clips` row for comments (clip_comments.clipId is a hard FK to clips.id) or
-  // editable metadata (PATCH /api/clips/:clipId) to attach either feature to.
-  infoDisabled?: boolean;
   onAddToSong: () => void;
   onPromoteToSong: () => void;
   // Present only for the loose-file preview variant — organized clips have no
@@ -309,7 +307,7 @@ interface IdeaFileContextMenuProps {
 }
 
 function IdeaFileContextMenu({
-  children, onMoreInfo, onAddNote, infoDisabled, onAddToSong, onPromoteToSong, onDelete,
+  children, onMoreInfo, onAddNote, onAddToSong, onPromoteToSong, onDelete,
 }: IdeaFileContextMenuProps) {
   const contextMenu = useReopenableContextMenu();
   const trigger = React.isValidElement(children)
@@ -321,15 +319,13 @@ function IdeaFileContextMenu({
       <ContextMenuContent key={contextMenu.nonce} className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
         <ContextMenuItem
           onClick={onMoreInfo}
-          disabled={infoDisabled}
-          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
         >
           <Info size={13} className="text-white/50" /> More Info
         </ContextMenuItem>
         <ContextMenuItem
           onClick={onAddNote}
-          disabled={infoDisabled}
-          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+          className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
         >
           <MessageSquare size={13} className="text-white/50" /> Add Note
         </ContextMenuItem>
@@ -370,15 +366,19 @@ interface SongsClipContextMenuCardProps {
   onMoreInfo: () => void;
   onAddNote: () => void;
   onMarkFinal: () => void;
+  // Comment badge — the card's notes badge, rendered only when present.
+  notesBadge?: React.ReactNode;
 }
 
-function SongsClipContextMenuCard({ clip, onMoreInfo, onAddNote, onMarkFinal }: SongsClipContextMenuCardProps) {
+function SongsClipContextMenuCard({ clip, onMoreInfo, onAddNote, onMarkFinal, notesBadge }: SongsClipContextMenuCardProps) {
   const contextMenu = useReopenableContextMenu();
   return (
     <ContextMenu modal={false}>
       <ContextMenuTrigger asChild>
         <div onContextMenuCapture={contextMenu.onContextMenuCapture}>
-          <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} />
+          <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+            {notesBadge}
+          </WaveformPlayerCard>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent key={contextMenu.nonce} className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
@@ -415,6 +415,37 @@ function SongsClipContextMenuCard({ clip, onMoreInfo, onAddNote, onMarkFinal }: 
 // omitted since a loose file has no such history and neither flow's "mark
 // source as added" step runs for a loose source (see addToSongSourceIsLoose /
 // promoteSourceIsLoose in the component below).
+// The user-entered Musical Intelligence fields a copy (Add to Song / Promote to
+// Song) carries over from its source. The technical fields (format, sample rate,
+// ...) come fresh from the re-upload instead.
+function carriedMusicalMetadata(m: ApiClip['metadata']) {
+  return {
+    timeSignature: m?.timeSignature ?? '',
+    key: m?.key ?? '',
+    bpm: m?.bpm ?? 0,
+    tags: m?.tags ?? [],
+  };
+}
+
+// Copies the source's notes onto a copy's freshly created clip. NOT idempotent —
+// the server re-copies on every call — so each copy flow calls this exactly once
+// and never retries. Resolves to whether it succeeded; never throws, since the
+// file copy itself has already succeeded by the time this runs.
+async function copyNotesToClip(destClipId: string, source: { kind: 'clip' | 'loose'; id: string }): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/clips/${destClipId}/comments/copy-from`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+const NOTES_NOT_COPIED = "The file was copied, but its notes didn't copy.";
+
 function looseFileAsApiClip(lf: ApiLooseFile): ApiClip {
   return {
     id: lf.id,
@@ -779,6 +810,7 @@ export default function Dashboard() {
   const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClip | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
+  const [infoFocusComments, setInfoFocusComments] = useState(false);
 
   const [addToSongClip, setAddToSongClip] = useState<ApiClip | null>(null);
   // True when addToSongClip was converted from a loose file (looseFileAsApiClip)
@@ -912,6 +944,7 @@ export default function Dashboard() {
     queryKey: looseFileKeys.list(selectedFile?.id),
     queryFn: () => fetchLooseFiles(selectedFile!.id),
     enabled: !!selectedFile && activeTab === 'files' && (filesFilter === 'ideas' || filesFilter === 'songs'),
+    ...liveCommentRefetch,
   });
 
   // Songs quick-browser: the selected Track's Track-scoped loose files, rendered
@@ -920,6 +953,7 @@ export default function Dashboard() {
     queryKey: looseFileKeys.byTrack(selectedInstrument?.id),
     queryFn: () => fetchTrackLooseFiles(selectedInstrument!.id),
     enabled: !!selectedInstrument && activeTab === 'files' && filesFilter === 'songs',
+    ...liveCommentRefetch,
   });
 
   // Band-wide, unassigned loose files — Ideas shelf Column 1's "Upload Files".
@@ -929,7 +963,51 @@ export default function Dashboard() {
     queryKey: looseFileKeys.unassigned(),
     queryFn: fetchUnassignedLooseFiles,
     enabled: activeTab === 'files' && filesFilter === 'ideas',
+    ...liveCommentRefetch,
   });
+
+  // One More Info / Add Note window for every loose file on this page (Songs
+  // quick-browser rows, Ideas shelf rows, and the Ideas shelf preview card).
+  const looseFileInfo = useLooseFileInfoWindow();
+  const { data: viewedComments = {} } = useLastViewedComments();
+  // previewLooseFile is a snapshot taken on click — resolve it against the live
+  // lists so its notes badge (commentCount / latestCommentAt) stays current.
+  const livePreviewLooseFile = previewLooseFile
+    ? [...unassignedLooseFiles, ...selectedFileLooseFiles].find(lf => lf.id === previewLooseFile.id) ?? previewLooseFile
+    : null;
+
+  // Per-clip comment badges for the selected song's organized file cards (Ideas
+  // shelf Files column, Songs quick-browser Versions column) — same query key
+  // BucketClip/TimelineClip use, so the cache is shared with MediaBucket.
+  const { data: clipCommentSummary = {} } = useQuery<ClipCommentSummary>({
+    queryKey: ['clip-comment-summary', selectedFile?.id],
+    queryFn: () => fetchClipCommentSummary(selectedFile!.id),
+    enabled: !!selectedFile && activeTab === 'files' && (filesFilter === 'ideas' || filesFilter === 'songs'),
+    ...liveCommentRefetch,
+  });
+
+  // Every way of opening an organized clip's More Info on this page goes through
+  // here, so opening it always marks its notes read (as BucketClip/TimelineClip do).
+  const openClipInfo = (clip: ApiClip, opts?: { focusNotes?: boolean; focusComments?: boolean }) => {
+    markCommentsViewed(clip.id, queryClient);
+    setInfoClip(clip);
+    setInfoFocusNotes(!!opts?.focusNotes);
+    setInfoFocusComments(!!opts?.focusComments);
+  };
+
+  // The CornerBadge for an organized clip card — null when the clip has no notes.
+  const clipNotesBadge = (clip: ApiClip) => {
+    const info = clipCommentSummary[clip.id];
+    if (!info) return null;
+    return (
+      <CornerBadge
+        variant="comment"
+        corner="bottom-right"
+        hasUnread={hasUnreadComments(info.latestOthersCommentAt, viewedComments[clip.id])}
+        onClick={() => openClipInfo(clip, { focusComments: true })}
+      />
+    );
+  };
 
   // Shared loose-file organize drag interaction (sensors, collision detection,
   // handleDragEnd, drag-preview overlay) — the single implementation also used by
@@ -1352,7 +1430,7 @@ export default function Dashboard() {
   });
 
   // Backs the loose-file preview's combined context menu Delete item (the
-  // preview isn't a LooseFileRow, so it can't use LooseFileDeleteMenu directly —
+  // preview isn't a LooseFileRow, so it can't use LooseFileContextMenu directly —
   // Delete here is one item among several in IdeaFileContextMenu, not its own
   // wrapping ContextMenu). Same mutation, same no-confirmation behavior.
   const deletePreviewLooseFile = useDeleteLooseFile({
@@ -1417,12 +1495,13 @@ export default function Dashboard() {
       if (!uploadRes.ok) throw new Error('Upload failed');
       const up = await uploadRes.json();
 
+      const newClipId = crypto.randomUUID();
       const clipName = `${destTrack.name} ${destIdea.sectionName} V1`;
       const clipRes = await fetch(`/api/ideas/${destIdea.id}/clips`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: crypto.randomUUID(),
+          id: newClipId,
           name: clipName,
           type: 'audio',
           color: destTrack.color ?? 'hsl(var(--primary))',
@@ -1437,11 +1516,16 @@ export default function Dashboard() {
             uploadedBy: up.uploadedBy, uploadedDate: up.uploadedDate,
             sampleRate: up.sampleRate, bitDepth: up.bitDepth,
             channels: up.channels || 'Stereo',
-            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+            peakLevel: '', description: '',
+            ...carriedMusicalMetadata(promoteClip.metadata),
           },
         }),
       });
       if (!clipRes.ok) throw new Error('Failed to create clip record');
+
+      // Carry the source's notes onto the copy — exactly once (copy-from is not
+      // idempotent), and a failure doesn't undo the file copy that already succeeded.
+      const notesCopied = await copyNotesToClip(newClipId, { kind: promoteSourceIsLoose ? 'loose' : 'clip', id: promoteClip.id });
 
       const sourceClipId = promoteClip.id;
       const sourceFileId = selectedFile?.id;
@@ -1486,6 +1570,7 @@ export default function Dashboard() {
 
       toast({
         title: `Promoted to ${songName} — ${instrName} · ${sectName}`,
+        description: notesCopied ? undefined : NOTES_NOT_COPIED,
         action: (
           <ToastAction
             altText="Open Workspace"
@@ -1551,12 +1636,13 @@ export default function Dashboard() {
 
       const versionNum = destIdea.clips.length + 1;
       const clipName = `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
+      const newClipId = crypto.randomUUID();
 
       const clipRes = await fetch(`/api/ideas/${destSectionId}/clips`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: crypto.randomUUID(),
+          id: newClipId,
           name: clipName,
           type: 'audio',
           color: destTrack.color ?? 'hsl(var(--primary))',
@@ -1571,11 +1657,16 @@ export default function Dashboard() {
             uploadedBy: up.uploadedBy, uploadedDate: up.uploadedDate,
             sampleRate: up.sampleRate, bitDepth: up.bitDepth,
             channels: up.channels || 'Stereo',
-            peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+            peakLevel: '', description: '',
+            ...carriedMusicalMetadata(addToSongClip.metadata),
           },
         }),
       });
       if (!clipRes.ok) throw new Error('Failed to create clip record');
+
+      // Carry the source's notes onto the copy — exactly once (copy-from is not
+      // idempotent), and a failure doesn't undo the file copy that already succeeded.
+      const notesCopied = await copyNotesToClip(newClipId, { kind: addToSongSourceIsLoose ? 'loose' : 'clip', id: sourceClipId });
 
       // Track which songs this idea file has been added to, then update local state immediately.
       // Skipped entirely for a loose-file source: it has no real `clips` row for this PATCH
@@ -1614,6 +1705,7 @@ export default function Dashboard() {
       // Background refetch to keep cache consistent
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(sourceFileId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(destSongId) });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', destSongId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
 
@@ -1626,6 +1718,7 @@ export default function Dashboard() {
 
       toast({
         title: `Added to ${songName} — ${instrName} · ${sectName}`,
+        description: notesCopied ? undefined : NOTES_NOT_COPIED,
         action: (
           <ToastAction
             altText="Open Workspace"
@@ -1826,6 +1919,7 @@ export default function Dashboard() {
   };
 
   return (
+    <LooseFileInfoProvider value={looseFileInfo.open}>
     <div className="min-h-screen bg-[#09090b] text-white font-sans selection:bg-primary/30">
       <AppHeader
         activeNav={activeTab === 'files' ? 'library' : 'home'}
@@ -2531,9 +2625,10 @@ export default function Dashboard() {
                         <SongsClipContextMenuCard
                           key={clip.id}
                           clip={clip}
-                          onMoreInfo={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
-                          onAddNote={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
+                          onMoreInfo={() => openClipInfo(clip)}
+                          onAddNote={() => openClipInfo(clip, { focusNotes: true })}
                           onMarkFinal={() => markFinalMutation.mutate(clip.id)}
+                          notesBadge={clipNotesBadge(clip)}
                         />
                       ))}
                     </>
@@ -2675,9 +2770,8 @@ export default function Dashboard() {
                         </button>
                       </div>
                       <IdeaFileContextMenu
-                        infoDisabled
-                        onMoreInfo={() => {}}
-                        onAddNote={() => {}}
+                        onMoreInfo={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile)}
+                        onAddNote={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile, { focusNotes: true })}
                         onAddToSong={() => {
                           setAddToSongClip(looseFileAsApiClip(previewLooseFile));
                           setAddToSongSourceIsLoose(true);
@@ -2705,7 +2799,16 @@ export default function Dashboard() {
                             duration={previewLooseFile.duration}
                             isFinal={false}
                             waveformHeight={20}
-                          />
+                          >
+                            {(livePreviewLooseFile?.commentCount ?? 0) > 0 && (
+                              <CornerBadge
+                                variant="comment"
+                                corner="bottom-right"
+                                hasUnread={hasUnreadComments(livePreviewLooseFile?.latestOthersCommentAt, viewedComments[previewLooseFile.id])}
+                                onClick={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile, { focusComments: true })}
+                              />
+                            )}
+                          </WaveformPlayerCard>
                         </div>
                       </IdeaFileContextMenu>
                     </div>
@@ -2754,8 +2857,8 @@ export default function Dashboard() {
                         {clips.map(clip => (
                           <IdeaFileContextMenu
                             key={clip.id}
-                            onMoreInfo={() => { setInfoClip(clip); setInfoFocusNotes(false); }}
-                            onAddNote={() => { setInfoClip(clip); setInfoFocusNotes(true); }}
+                            onMoreInfo={() => openClipInfo(clip)}
+                            onAddNote={() => openClipInfo(clip, { focusNotes: true })}
                             onAddToSong={() => setAddToSongClip(clip)}
                             onPromoteToSong={() => {
                               setPromoteClip(clip);
@@ -2766,8 +2869,9 @@ export default function Dashboard() {
                           >
                             <div>
                               <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+                                {clipNotesBadge(clip)}
                                 {clip.addedToSongs && clip.addedToSongs.length > 0 && (
-                                  <div className="flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]">
+                                  <div className={cn('flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]', clipCommentSummary[clip.id] && 'pr-6')}>
                                     {clip.addedToSongs.map((a, i) => (
                                       <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
                                         {a.songName}
@@ -2933,10 +3037,11 @@ export default function Dashboard() {
                   metadata: infoClip.metadata ?? undefined,
                 }}
                 open={true}
-                onOpenChange={open => { if (!open) { setInfoClip(null); setInfoFocusNotes(false); } }}
+                onOpenChange={open => { if (!open) { setInfoClip(null); setInfoFocusNotes(false); setInfoFocusComments(false); } }}
                 bucketClipId={infoClip.id}
                 songId={selectedFile?.id ?? 'patchbay-default'}
                 focusNotes={infoFocusNotes}
+                focusComments={infoFocusComments}
               />
             )}
           </div>
@@ -3571,6 +3676,8 @@ export default function Dashboard() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      {looseFileInfo.infoWindow}
     </div>
+    </LooseFileInfoProvider>
   );
 }

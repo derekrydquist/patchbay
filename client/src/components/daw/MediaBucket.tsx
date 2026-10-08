@@ -5,7 +5,7 @@ import { useDroppable } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
-  fetchBucket, bucketKeys, fetchLooseFiles, fetchTrackLooseFiles, looseFileKeys,
+  fetchBucket, bucketKeys, fetchLooseFiles, fetchTrackLooseFiles, looseFileKeys, liveCommentRefetch,
 } from '@/lib/bucket-api';
 import {
   useAddInstrument, useAddSection, useAddFullTake,
@@ -16,8 +16,8 @@ import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveLooseFileDrag,
 } from '@/hooks/use-loose-file-organize-dnd';
-import { BucketClip } from './Clip';
-import { LooseFileRow } from './LooseFileRow';
+import { BucketClip, useLiveClipCommentSummary } from './Clip';
+import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
 import { AddInstrumentModal } from './modals/AddInstrumentModal';
 import { AddSectionModal } from './modals/AddSectionModal';
@@ -277,6 +277,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const { data: looseFiles = [] } = useQuery<ApiLooseFile[]>({
     queryKey: looseFileKeys.list(songId),
     queryFn: () => fetchLooseFiles(songId),
+    ...liveCommentRefetch,
   });
 
   // Track-scoped resting tier — files dragged off the Tracks column onto this
@@ -286,7 +287,11 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     queryKey: looseFileKeys.byTrack(selectedTrack?.id),
     queryFn: () => fetchTrackLooseFiles(selectedTrack!.id),
     enabled: !!selectedTrack?.id,
+    ...liveCommentRefetch,
   });
+
+  // Keeps the BucketClip comment badges current (one observer for the whole bucket).
+  useLiveClipCommentSummary(songId);
 
   const { data: hiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
     queryKey: bucketKeys.hiddenIdeas(selectedTrack?.id),
@@ -648,9 +653,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrack?.id;
   const isSectionsBackgroundDropTarget = isSectionsBackgroundOver && !isOwnTrackDrag;
 
+  // One More Info / Add Note window for every loose-file row in this bucket.
+  const looseFileInfo = useLooseFileInfoWindow();
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
+    <LooseFileInfoProvider value={looseFileInfo.open}>
     <div className="w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0">
 
       {/* Header */}
@@ -968,6 +977,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
           }}
         isRestoring={restoreSectionMutation.isPending}
       />
+      {looseFileInfo.infoWindow}
     </div>
+    </LooseFileInfoProvider>
   );
 }

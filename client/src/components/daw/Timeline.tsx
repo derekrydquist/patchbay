@@ -32,6 +32,7 @@ import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifi
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack } from '@/lib/bucket-api';
+import { useLiveClipCommentSummary } from './Clip';
 import { usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
@@ -337,6 +338,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     )),
     [bucketTracksForPlacement]
   );
+
+  // Keeps the TimelineClip comment badges current (one observer for the whole timeline).
+  useLiveClipCommentSummary(songId);
 
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${songId}/timeline`],
