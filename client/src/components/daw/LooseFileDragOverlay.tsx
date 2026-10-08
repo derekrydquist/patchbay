@@ -10,11 +10,14 @@ import { type Clip } from '@/lib/daw-data';
 // existing DragOverlay already renders a ghost for every drag type it handles,
 // loose files included.
 //
+// Also renders the Ideas shelf's organized-clip drags (move to another Idea) — only
+// the name is shown, so any object with one works.
+//
 // A portal-based DragOverlay is required here (not just LooseFileRow's own inline
 // transform) because a plain in-place transform can visually clip/detach inside a
 // scrolling, overflow-hidden column — this was the root cause of the Songs
 // quick-browser's detached/misplaced drag-preview bug.
-export function LooseFileDragOverlay({ clip }: { clip: Clip | null }) {
+export function LooseFileDragOverlay({ clip }: { clip: Pick<Clip, 'name'> | null }) {
   return (
     <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
       {clip ? (

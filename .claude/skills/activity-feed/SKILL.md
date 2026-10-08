@@ -70,6 +70,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `clip-unmarked-final` | Yes | |
 | `song-created` | Yes | |
 | `idea-created` | Yes | |
+| `clip-moved-to-idea` | Yes | Ideas shelf drag of an organized file to another Idea; logged once, against the destination song. |
 | `song-deleted` | Yes | |
 | `track-added` | Yes | |
 | `track-deleted` | Yes | |
@@ -133,7 +134,7 @@ The numbered lists below retain per-event route and description detail not repea
 24. **`song-created`** — logged from `POST /api/songs` when `type !== 'idea'`. Description: `"{user} created a new song — {name}"`.
 25. **`idea-created`** — logged from `POST /api/songs` when `type === 'idea'`. Description: `"{user} created a new idea — {name}"`.
 
-**Events 26–42 below (mixed feed-visibility — see "Tier 2 event types — full reference" above for the authoritative Yes/No per type):**
+**Events 26–43 below (mixed feed-visibility — see "Tier 2 event types — full reference" above for the authoritative Yes/No per type):**
 
 This grouping predates the read-path filter and originally assumed every item here was sort-only "not yet evaluated for feed display." That assumption turned out to be wrong for several of them once actually audited (2026-08-12) — `file-uploaded`, `clip-removed`, `clip-comment-added`, `task-comment-added`, `review-comment-resolved`/`unresolved`, `clip-trim-applied-to-instances`, `timeline-cleared`, `song-added-to-album`, and `song-removed-from-album` are all feed-visible today. The reference table above is the source of truth for visibility; this list keeps the per-route implementation detail.
 
@@ -156,6 +157,7 @@ This grouping predates the read-path filter and originally assumed every item he
 40. **`song-added-to-album`** — logged from `POST /api/albums/:id/songs`. Deduped on `bandId + type` within a 5-second window (looser than other dedup keys here — `activity_log` has no `albumId` column to scope tighter) so the album song picker's sequential per-song POSTs collapse to one row.
 41. **`song-removed-from-album`** — logged from `DELETE /api/albums/:id/songs/:songId`. No dedup (not a batch-prone action).
 42. **`album-song-reordered`** — not currently implemented. `PATCH /api/albums/:id/songs/:songId/move` (Move Up/Down) has no `logActivity()` call today. Pre-classified sort-only for whenever that logging is added, consistent with `timeline-reordered`.
+43. **`clip-moved-to-idea`** — logged from `POST /api/clips/:clipId/move-to-idea`, once, against the destination. Description: `"{user} moved {clipName} from {sourceIdea} to {destIdea}"`.
 
 **Album lifecycle events not implemented:** `album-created` / `album-renamed` / `album-deleted` have no logging path — `activity_log.songId` is `NOT NULL`, and albums have no song to attach an event to. Implementing these would need a nullable `songId` (or a new `albumId` column), a `LEFT JOIN` change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision.
 
@@ -213,7 +215,7 @@ function activityUrl(event: ActivityEvent): string {
   }
   if (event.type === 'song-created')
     return `/?tab=files&filter=songs&songId=${event.songId}`;
-  if (event.type === 'idea-created')
+  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea')
     return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   if (event.instrument && event.sectionName)
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
@@ -224,7 +226,7 @@ function activityUrl(event: ActivityEvent): string {
 - **`status-change`** and **`task-comment`** events open the workspace Production tab with the task modal auto-opened (ProductionTracker reads `?taskId=` from the URL on mount).
 - **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, then automatically open the More Info / inspection modal for the specific clip with the notes input focused. See `autoOpenInfo` prop below.
 - **`song-created`** navigates to `/?tab=files&filter=songs&songId=X` — Dashboard reads this via `useSearch()` and auto-selects the song in the Files tab Songs column.
-- **`idea-created`** navigates to `/?tab=files&filter=ideas&ideaId=X` — Dashboard reads this and auto-selects the idea in the Ideas column.
+- **`idea-created`** and **`clip-moved-to-idea`** navigate to `/?tab=files&filter=ideas&ideaId=X` (the destination Idea for a move) — Dashboard reads this and auto-selects the idea in the Ideas column.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
 
 **`autoOpenInfo` — clip inspection modal auto-open:**

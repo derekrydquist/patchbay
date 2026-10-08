@@ -406,3 +406,38 @@ export function usePlaceLooseFileOnTimeline(
     onError: (err: Error) => opts?.onError?.(err.message),
   });
 }
+
+// Ideas shelf: move an organized clip from one Idea (idea-type song) to another.
+// A Finder-style move — same clip id, so notes, metadata and last-viewed state
+// follow it. Both songs' buckets and comment summaries change (the file leaves
+// one flat list and joins the other), and ['songs'] carries hasFiles for the
+// Column 1 folder-fill icon on both rows.
+export function useMoveClipToIdea(
+  opts?: { onSuccess?: (clip: ApiClip, vars: { clipId: string; sourceSongId: string; destSongId: string }) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { clipId: string; sourceSongId: string; destSongId: string }) => {
+      const res = await fetch(`/api/clips/${vars.clipId}/move-to-idea`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ songId: vars.destSongId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to move file' }));
+        throw new Error(err.message ?? 'Failed to move file');
+      }
+      return res.json() as Promise<ApiClip>;
+    },
+    onSuccess: (clip, vars) => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.sourceSongId) });
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.destSongId) });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.sourceSongId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.destSongId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.(clip, vars);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}

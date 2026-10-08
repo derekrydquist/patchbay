@@ -1974,6 +1974,56 @@ export async function registerRoutes(
   });
 
   /**
+   * POST /api/clips/:clipId/move-to-idea — Ideas shelf only: move an organized clip
+   * from its idea-type song to another idea-type song (Finder-style move, never a
+   * copy). Two-ID route: the clip's song and the destination song are asserted
+   * independently. Real-song clips are rejected so nothing here touches the
+   * isFinal/timeline/task sync.
+   */
+  app.post("/api/clips/:clipId/move-to-idea", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const sourceSongId = clipSongId(clipId);
+    if (!sourceSongId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, sourceSongId)) return;
+
+    const { songId: destSongId } = req.body as { songId?: string };
+    if (!destSongId) return res.status(400).json({ message: "songId is required." });
+    if (!assertSongOwned(req, res, destSongId)) return;
+
+    const sourceSong = db.select({ name: songs.name, type: songs.type }).from(songs).where(eq(songs.id, sourceSongId)).get();
+    const destSong = db.select({ name: songs.name, type: songs.type }).from(songs).where(eq(songs.id, destSongId)).get();
+    if (sourceSong?.type !== 'idea' || destSong?.type !== 'idea') {
+      return res.status(400).json({ message: "Only files in an Idea can be moved to another Idea." });
+    }
+    if (sourceSongId === destSongId) {
+      return res.status(400).json({ message: "The file is already in this Idea." });
+    }
+
+    const moveActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    let clip;
+    try {
+      clip = await storage.moveClipToIdea(clipId, destSongId);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-idea] move failed:", err);
+      return res.status(500).json({ message: "Failed to move file." });
+    }
+
+    storage.logActivity({
+      id: randomUUID(),
+      songId: destSongId,
+      type: 'clip-moved-to-idea',
+      description: `${moveActor} moved ${clip.name} from ${sourceSong.name} to ${destSong.name}`,
+      timestamp: Date.now(),
+      author: moveActor,
+    }).catch(console.error);
+
+    res.json(clip);
+  });
+
+  /**
    * POST /api/loose-files/:id/place-on-timeline — materialize a loose file into a
    * clips row AND a timeline_clips row in the same transaction. Same two-ID
    * ownership assertion as organize.

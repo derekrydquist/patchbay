@@ -191,6 +191,29 @@ export function useActiveLooseFileDrag(): { trackId: string | null } | null {
   return drag;
 }
 
+// Drag payload type for an organized clip dragged out of the Ideas shelf's Column 2
+// (Finder-style move to another Idea). Not a loose file — handleDragEnd below ignores
+// it, and Dashboard's own clip-move handler picks it up.
+export const IDEA_CLIP_DRAG_TYPE = 'idea-clip';
+
+// Kind + origin of whatever is being dragged, for drop targets that need to tell drag
+// types apart (e.g. an Idea row suppressing its highlight for a clip dragged out of
+// that same Idea). Same useDndMonitor approach as useActiveLooseFileDrag above, for
+// the same per-frame re-render reason. Must be called inside a DndContext.
+export function useActiveDragSource(): { type: string | null; sourceSongId: string | null } | null {
+  const [drag, setDrag] = useState<{ type: string | null; sourceSongId: string | null } | null>(null);
+  const listener = useMemo(() => ({
+    onDragStart: ({ active }: DragStartEvent) => {
+      const data = active.data.current as { type?: string; sourceSongId?: string } | undefined;
+      setDrag({ type: data?.type ?? null, sourceSongId: data?.sourceSongId ?? null });
+    },
+    onDragEnd: () => setDrag(null),
+    onDragCancel: () => setDrag(null),
+  }), []);
+  useDndMonitor(listener);
+  return drag;
+}
+
 interface UseLooseFileOrganizeDndOptions {
   onError?: (message: string) => void;
   onOrganized?: (dest: OrganizeDestination) => void;

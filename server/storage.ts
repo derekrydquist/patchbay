@@ -134,7 +134,7 @@ export interface ActivityEvent {
       | 'lyrics-edited' | 'lyrics-comment-added' | 'lyrics-comment-reply'
       | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
-      | 'loose-file-comment-edited' | 'loose-file-comment-deleted';
+      | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -215,6 +215,7 @@ export interface IStorage {
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
+  moveClipToIdea(clipId: string, destSongId: string): Promise<Clip>;
   materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
@@ -1163,6 +1164,32 @@ export class SQLiteStorage implements IStorage {
 
   async materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip> {
     return db.transaction((tx) => materializeLooseFileCore(tx, looseFileId, trackId, sectionName));
+  }
+
+  // Ideas shelf: move an organized clip from one idea-type song to another. A pure
+  // re-parent — only ideaId/sectionName change; id, name, src, metadata, createdAt and
+  // addedToSongs stay, so notes (keyed on clips.id) and the physical file come along
+  // untouched. Idea-type clips never have timeline_clips, production tasks or isFinal
+  // (enforced by the route, which only accepts idea-type songs on both ends), so there
+  // is nothing in the isFinal/timeline/task sync to reconcile.
+  async moveClipToIdea(clipId: string, destSongId: string): Promise<Clip> {
+    const dest = await this.ensureIdeaDefaultFolder(destSongId);
+    if (!dest) throw new Error(`[moveClipToIdea] destination ${destSongId} is not an idea-type song`);
+    return db.transaction((tx) => {
+      const destIdea = tx.select().from(ideas)
+        .where(and(eq(ideas.trackId, dest.trackId), eq(ideas.sectionName, dest.sectionName)))
+        .get();
+      if (!destIdea) {
+        throw new Error(`[moveClipToIdea] no idea row for trackId=${dest.trackId} sectionName=${JSON.stringify(dest.sectionName)}`);
+      }
+      tx.update(clips)
+        .set({ ideaId: destIdea.id, sectionName: destIdea.sectionName })
+        .where(eq(clips.id, clipId))
+        .run();
+      const moved = tx.select().from(clips).where(eq(clips.id, clipId)).get();
+      if (!moved) throw new Error(`[moveClipToIdea] clip ${clipId} not found`);
+      return moved;
+    });
   }
 
   async materializeLooseFileToTimeline(

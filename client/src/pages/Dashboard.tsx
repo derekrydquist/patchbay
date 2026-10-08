@@ -57,17 +57,19 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
   useActiveLooseFileDrag,
+  useActiveDragSource,
+  IDEA_CLIP_DRAG_TYPE,
   bucketSectionDropId,
   bucketVersionsDropId,
   bucketTrackDropId,
   bucketSectionsBackgroundDropId,
   bucketTracksBackgroundDropId,
 } from '@/hooks/use-loose-file-organize-dnd';
-import { DndContext, useDroppable } from '@dnd-kit/core';
+import { DndContext, useDroppable, useDraggable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
@@ -168,7 +170,7 @@ function activityUrl(event: ActivityEvent): string {
   if (event.type === 'song-created') {
     return `/?tab=files&filter=songs&songId=${event.songId}`;
   }
-  if (event.type === 'idea-created') {
+  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea') {
     return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   }
   if (event.instrument && event.sectionName) {
@@ -476,11 +478,18 @@ interface IdeaListRowProps {
 }
 
 function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
+  // Also the drop target for an organized clip dragged out of Column 2 (move to
+  // this Idea) — ideaSongId identifies the destination for that drag. The row the
+  // clip came from stays ENABLED (a disabled row is invisible to collision
+  // detection, so the drop would fall through to whatever lies beneath) but shows
+  // no highlight, and Dashboard's clip-move handler treats the drop as a cancel.
+  const activeDrag = useActiveDragSource();
+  const isOwnIdea = activeDrag?.type === IDEA_CLIP_DRAG_TYPE && activeDrag.sourceSongId === idea.id;
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionDropId(idea.id),
     disabled: !idea.defaultTrackId || !idea.defaultSectionName,
     data: (idea.defaultTrackId && idea.defaultSectionName)
-      ? { trackId: idea.defaultTrackId, sectionName: idea.defaultSectionName }
+      ? { trackId: idea.defaultTrackId, sectionName: idea.defaultSectionName, ideaSongId: idea.id }
       : undefined,
   });
 
@@ -493,7 +502,7 @@ function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
           : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        isOver && 'bg-primary/10 border-primary/50'
+        isOver && !isOwnIdea && 'bg-primary/10 border-primary/50'
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -502,6 +511,43 @@ function IdeaListRow({ idea, isSelected, onSelect }: IdeaListRowProps) {
       </div>
       <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
     </button>
+  );
+}
+
+// Sort order for the Ideas shelf's flat file list — case-insensitive, natural.
+const IDEA_FILE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+// ─── Idea file card (Ideas shelf, Column 2) ───────────────────────────────────
+// One organized clip in the selected Idea's flat file list, draggable onto another
+// Idea row in Column 1 to move it there (Finder-style — a move, never a copy). A
+// child component so useDraggable runs once per card inside the DndContext. The
+// draggable node is the <div> IdeaFileContextMenu clones as its trigger (Radix Slot
+// composes the refs). The play button, waveform canvas and comment badge all stop
+// left-button pointerdown, so a drag starts from the rest of the card: the name/
+// duration row, the padding, and the addedToSongs pill row. No transform on the
+// source card — LooseFileDragOverlay renders the ghost; the card just dims in place.
+interface IdeaClipCardProps extends Omit<IdeaFileContextMenuProps, 'children' | 'onDelete'> {
+  clip: ApiClip;
+  sourceSongId: string;
+  children: React.ReactNode;
+}
+
+function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCardProps) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `idea-clip-${clip.id}`,
+    data: { type: IDEA_CLIP_DRAG_TYPE, clip, sourceSongId },
+  });
+  return (
+    <IdeaFileContextMenu {...menuProps}>
+      <div
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
+        className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity', isDragging && 'opacity-40')}
+      >
+        {children}
+      </div>
+    </IdeaFileContextMenu>
   );
 }
 
@@ -735,11 +781,16 @@ function IdeaFilesColumnDropZone({
     disabled: !idea,
     data: idea ? { trackId: idea.trackId, sectionName: idea.sectionName } : undefined,
   });
+  // An organized clip dragged within Column 2 is already in this container — no
+  // highlight, and the drop is a no-op (its payload isn't a loose file, and this
+  // target carries no ideaSongId for the clip-move handler).
+  const activeDrag = useActiveDragSource();
+  const isOwnContainer = activeDrag?.type === IDEA_CLIP_DRAG_TYPE;
 
   return (
     <div
       ref={setNodeRef}
-      className={cn(className, isOver && 'bg-primary/5')}
+      className={cn(className, isOver && !isOwnContainer && 'bg-primary/5')}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -1058,6 +1109,47 @@ export default function Dashboard() {
       }
     },
   });
+
+  // Ideas shelf: select an Idea in Column 1 — the one path for both a row click and
+  // the view following a file moved into another Idea.
+  const selectIdea = (idea: Song) => {
+    setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null);
+    setPreviewLooseFile(null);
+    const s = `tab=files&filter=ideas&ideaId=${idea.id}`;
+    appliedSearchRef.current = s; setLocation(`/?${s}`);
+  };
+
+  // Ideas shelf: drag an organized clip from Column 2 onto another Idea row to move
+  // it there. Runs alongside looseFileOrganizeDnd in the same DndContext — that hook
+  // ignores this payload type, and this one ignores loose files.
+  const [activeIdeaClip, setActiveIdeaClip] = useState<ApiClip | null>(null);
+  const moveClipToIdea = useMoveClipToIdea({
+    onSuccess: (_clip, vars) => {
+      // The view follows the file into its new Idea.
+      const dest = songs.find(s => s.id === vars.destSongId);
+      if (dest) selectIdea(dest);
+    },
+    onError: (msg) => {
+      console.error('[moveClipToIdea] error:', msg);
+      toast({ title: 'Failed to move file', description: msg, variant: 'destructive' });
+    },
+  });
+  const handleIdeaClipDragStart = (event: DragStartEvent) => {
+    const data = event.active.data.current as { type?: string; clip?: ApiClip } | undefined;
+    setActiveIdeaClip(data?.type === IDEA_CLIP_DRAG_TYPE && data.clip ? data.clip : null);
+  };
+  const handleIdeaClipDragEnd = (event: DragEndEvent) => {
+    setActiveIdeaClip(null);
+    const { active, over } = event;
+    const data = active.data.current as { type?: string; clip?: ApiClip; sourceSongId?: string } | undefined;
+    if (data?.type !== IDEA_CLIP_DRAG_TYPE || !data.clip || !data.sourceSongId || !over) return;
+    // Only an Idea row carries ideaSongId; Column 2 itself (the file's own
+    // container) doesn't, so a drop there is a no-op.
+    const destSongId = (over.data.current as { ideaSongId?: string } | undefined)?.ideaSongId;
+    // Dropping back onto the file's own Idea row is a cancel — no request, no toast.
+    if (!destSongId || destSongId === data.sourceSongId) return;
+    moveClipToIdea.mutate({ clipId: data.clip.id, sourceSongId: data.sourceSongId, destSongId });
+  };
 
   const { data: destBucket = [] } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(destSongId),
@@ -2646,8 +2738,9 @@ export default function Dashboard() {
             <DndContext
               sensors={looseFileOrganizeDnd.sensors}
               collisionDetection={looseFileOrganizeDnd.collisionDetection}
-              onDragStart={looseFileOrganizeDnd.handleDragStart}
-              onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+              onDragStart={(e) => { looseFileOrganizeDnd.handleDragStart(e); handleIdeaClipDragStart(e); }}
+              onDragEnd={(e) => { if (!looseFileOrganizeDnd.handleDragEnd(e)) handleIdeaClipDragEnd(e); }}
+              onDragCancel={() => setActiveIdeaClip(null)}
             >
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
@@ -2696,12 +2789,7 @@ export default function Dashboard() {
                       key={idea.id}
                       idea={idea}
                       isSelected={!previewLooseFile && selectedFile?.id === idea.id}
-                      onSelect={() => {
-                        setSelectedFile(idea); setSelectedInstrument(null); setSelectedSection(null);
-                        setPreviewLooseFile(null);
-                        const s = `tab=files&filter=ideas&ideaId=${idea.id}`;
-                        appliedSearchRef.current = s; setLocation(`/?${s}`);
-                      }}
+                      onSelect={() => selectIdea(idea)}
                     />
                   ))}
                   {unassignedLooseFiles.map(lf => (
@@ -2820,7 +2908,13 @@ export default function Dashboard() {
                     // Flattened across every track/idea the song currently has — normally
                     // exactly one (see ensureIdeaDefaultFolder), but this stays correct
                     // even for a legacy idea that somehow ended up with more than one.
-                    const clips = fileBucket.flatMap(t => t.ideas.flatMap(i => i.clips));
+                    // getBucket returns clips in no particular order (no ORDER BY), so
+                    // sort here: by name, case-insensitive and natural ("take 2" before
+                    // "take 10"), ties broken by createdAt (ISO strings sort correctly).
+                    const clips = fileBucket
+                      .flatMap(t => t.ideas.flatMap(i => i.clips))
+                      .sort((a, b) =>
+                        IDEA_FILE_NAME_COLLATOR.compare(a.name, b.name) || a.createdAt.localeCompare(b.createdAt));
                     if (clips.length === 0 && selectedFileLooseFiles.length === 0) return (
                       <div className={cn(
                         'flex flex-col items-center justify-start pt-4 border-2 border-dashed rounded-lg transition-colors mx-1',
@@ -2855,8 +2949,10 @@ export default function Dashboard() {
                           />
                         ))}
                         {clips.map(clip => (
-                          <IdeaFileContextMenu
+                          <IdeaClipCard
                             key={clip.id}
+                            clip={clip}
+                            sourceSongId={selectedFile.id}
                             onMoreInfo={() => openClipInfo(clip)}
                             onAddNote={() => openClipInfo(clip, { focusNotes: true })}
                             onAddToSong={() => setAddToSongClip(clip)}
@@ -2867,21 +2963,19 @@ export default function Dashboard() {
                               setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
                             }}
                           >
-                            <div>
-                              <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
-                                {clipNotesBadge(clip)}
-                                {clip.addedToSongs && clip.addedToSongs.length > 0 && (
-                                  <div className={cn('flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]', clipCommentSummary[clip.id] && 'pr-6')}>
-                                    {clip.addedToSongs.map((a, i) => (
-                                      <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
-                                        {a.songName}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                              </WaveformPlayerCard>
-                            </div>
-                          </IdeaFileContextMenu>
+                            <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+                              {clipNotesBadge(clip)}
+                              {clip.addedToSongs && clip.addedToSongs.length > 0 && (
+                                <div className={cn('flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]', clipCommentSummary[clip.id] && 'pr-6')}>
+                                  {clip.addedToSongs.map((a, i) => (
+                                    <span key={i} className="text-[9px] font-bold tracking-tight bg-primary/15 text-primary border border-primary/25 rounded-sm px-1.5 py-0.5 max-w-[120px] truncate">
+                                      {a.songName}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </WaveformPlayerCard>
+                          </IdeaClipCard>
                         ))}
                       </>
                     );
@@ -2890,7 +2984,7 @@ export default function Dashboard() {
               </IdeaFilesColumnDropZone>
 
             </div>
-            <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
+            <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag ?? activeIdeaClip} />
             </DndContext>
             ) : (
             /* Albums — 2-column browser */
