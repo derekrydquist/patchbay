@@ -48,7 +48,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from '@/components/daw/Clip';
 import { CornerBadge } from '@/components/daw/CornerBadge';
 import { UploadModal } from '@/components/daw/UploadModal';
-import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from '@/components/daw/LooseFileRow';
+import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow, looseFileToClip } from '@/components/daw/LooseFileRow';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
@@ -527,7 +527,10 @@ function IdeaListRow({ idea, isSelected, onSelect, onFileDrop }: IdeaListRowProp
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-          : 'text-muted-foreground hover:bg-white/5 hover:text-white',
+          // Plain hover is off while any dnd-kit drag is active (the Column 1 wrapper
+          // carries data-dnd-active — see IdeasShelfBackgroundDropZone). During a drag
+          // the drop highlight below is the only feedback, so hover never overrides it.
+          : 'text-muted-foreground not-group-data-[dnd-active]/ideas-list:hover:bg-white/5 not-group-data-[dnd-active]/ideas-list:hover:text-white',
         ((isOver && !isOwnIdea) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
@@ -572,6 +575,40 @@ function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCa
         {...listeners}
         {...attributes}
         className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity', isDragging && 'opacity-40')}
+      >
+        {children}
+      </div>
+    </IdeaFileContextMenu>
+  );
+}
+
+// ─── Loose-file preview card (Ideas shelf, Column 2) ─────────────────────────
+// The one-off preview of a loose file, draggable onto an Idea row to organize it —
+// same payload shape as LooseFileRow's, so looseFileOrganizeDnd handles the drop,
+// the destination refresh and the view following the file with no extra code. The
+// draggable id differs from the Column 1 row's (`loose-{id}`), which is mounted at
+// the same time for the same file. Drag handle, dimming and no-transform rules are
+// IdeaClipCard's (see above). Column 2 is disabled while a preview shows and Column
+// 1's background only accepts idea-clip drags, so only an Idea row takes this drop.
+interface IdeaLooseFilePreviewCardProps extends Omit<IdeaFileContextMenuProps, 'children' | 'onRemoveFromIdea'> {
+  looseFile: ApiLooseFile;
+  children: React.ReactNode;
+}
+
+function IdeaLooseFilePreviewCard({ looseFile, children, ...menuProps }: IdeaLooseFilePreviewCardProps) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `loose-preview-${looseFile.id}`,
+    data: { clip: looseFileToClip(looseFile), type: 'loose-file', songId: looseFile.songId, trackId: looseFile.trackId },
+  });
+  return (
+    <IdeaFileContextMenu {...menuProps}>
+      <div
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
+        // focus-visible:outline-none — the dnd-kit attributes make this div focusable
+        // (tabIndex 0); same fix as BucketClip and TimelineClip.
+        className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity focus-visible:outline-none', isDragging && 'opacity-40')}
       >
         {children}
       </div>
@@ -797,6 +834,8 @@ function SongsFilesColumnDropZone({
 // never chosen by the user — Ideas have no Folder-selection UI at all.
 interface IdeaFilesColumnDropZoneProps {
   selectedInstrument: ApiTrack | null;
+  /** True while a loose-file preview shows — Column 2 is then no destination. */
+  disabled?: boolean;
   className?: string;
   children: React.ReactNode;
   /** Finder file drop handlers (useNativeFileDrop). */
@@ -804,12 +843,12 @@ interface IdeaFilesColumnDropZoneProps {
 }
 
 function IdeaFilesColumnDropZone({
-  selectedInstrument, className, children, nativeDropHandlers,
+  selectedInstrument, disabled = false, className, children, nativeDropHandlers,
 }: IdeaFilesColumnDropZoneProps) {
   const idea = selectedInstrument?.ideas[0];
   const { setNodeRef, isOver } = useDroppable({
     id: bucketVersionsDropId('ideas-shelf-files-column'),
-    disabled: !idea,
+    disabled: !idea || disabled,
     data: idea ? { trackId: idea.trackId, sectionName: idea.sectionName } : undefined,
   });
   // An organized clip dragged within Column 2 is already in this container — no
@@ -821,7 +860,8 @@ function IdeaFilesColumnDropZone({
   return (
     <div
       ref={setNodeRef}
-      className={cn(className, isOver && !isOwnContainer && 'bg-primary/5')}
+      // isOver ignores disabled — gate the highlight on both.
+      className={cn(className, isOver && !isOwnContainer && !!idea && !disabled && 'bg-primary/5')}
       {...nativeDropHandlers}
     >
       {children}
@@ -861,10 +901,15 @@ function IdeasShelfBackgroundDropZone({ className, children, onBlankClick }: Ide
   });
 
   return (
-    // isOver ignores disabled — gate the highlight on both.
+    // isOver ignores disabled — gate the highlight on both. data-dnd-active (any
+    // dnd-kit drag) turns off plain row hover inside this list: rows style their
+    // hover with not-group-data-[dnd-active]/ideas-list:hover:*, so only real drop
+    // targets light up. A loose-file row is never a target itself — an organized-
+    // card drop on one lands on this background, which shows its own ring.
     <div
       ref={setNodeRef}
-      className={cn(className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}
+      data-dnd-active={activeDrag ? '' : undefined}
+      className={cn('group/ideas-list', className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}
       onPointerDown={(e) => { pressedOnBlankRef.current = e.button === 0 && e.target === e.currentTarget; }}
       onClick={(e) => {
         const pressedOnBlank = pressedOnBlankRef.current;
@@ -2988,6 +3033,7 @@ export default function Dashboard() {
               {/* Column 2 — Files (flat list across the Idea's auto-created Folder) */}
               <IdeaFilesColumnDropZone
                 selectedInstrument={selectedInstrument}
+                disabled={!!previewLooseFile}
                 // OS-file drops land in the selected Idea. While a loose-file preview
                 // is showing, Column 2 is no destination: preventDefault still runs
                 // (so the browser never opens the file), but no highlight, no upload
@@ -3026,7 +3072,8 @@ export default function Dashboard() {
                           <X size={12} />
                         </button>
                       </div>
-                      <IdeaFileContextMenu
+                      <IdeaLooseFilePreviewCard
+                        looseFile={previewLooseFile}
                         onMoreInfo={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile)}
                         onAddNote={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile, { focusNotes: true })}
                         onAddToSong={() => {
@@ -3049,25 +3096,23 @@ export default function Dashboard() {
                           );
                         }}
                       >
-                        <div>
-                          <WaveformPlayerCard
-                            src={previewLooseFile.src}
-                            name={previewLooseFile.name}
-                            duration={previewLooseFile.duration}
-                            isFinal={false}
-                            waveformHeight={20}
-                          >
-                            {(livePreviewLooseFile?.commentCount ?? 0) > 0 && (
-                              <CornerBadge
-                                variant="comment"
-                                corner="bottom-right"
-                                hasUnread={hasUnreadComments(livePreviewLooseFile?.latestOthersCommentAt, viewedComments[previewLooseFile.id])}
-                                onClick={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile, { focusComments: true })}
-                              />
-                            )}
-                          </WaveformPlayerCard>
-                        </div>
-                      </IdeaFileContextMenu>
+                        <WaveformPlayerCard
+                          src={previewLooseFile.src}
+                          name={previewLooseFile.name}
+                          duration={previewLooseFile.duration}
+                          isFinal={false}
+                          waveformHeight={20}
+                        >
+                          {(livePreviewLooseFile?.commentCount ?? 0) > 0 && (
+                            <CornerBadge
+                              variant="comment"
+                              corner="bottom-right"
+                              hasUnread={hasUnreadComments(livePreviewLooseFile?.latestOthersCommentAt, viewedComments[previewLooseFile.id])}
+                              onClick={() => looseFileInfo.open(livePreviewLooseFile ?? previewLooseFile, { focusComments: true })}
+                            />
+                          )}
+                        </WaveformPlayerCard>
+                      </IdeaLooseFilePreviewCard>
                     </div>
                   ) : !selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">

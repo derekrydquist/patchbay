@@ -226,7 +226,10 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
           isSelected
             ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
             : 'text-muted-foreground/80',
-          onClick && !isSelected && 'hover:bg-white/5 hover:text-white',
+          // Hover is suppressed inside the Ideas shelf's Column 1 while a drag is
+          // active (group/ideas-list[data-dnd-active], set in Dashboard.tsx) — a row
+          // is never a drop target. Outside that group this is a plain hover.
+          onClick && !isSelected && 'not-group-data-[dnd-active]/ideas-list:hover:bg-white/5 not-group-data-[dnd-active]/ideas-list:hover:text-white',
           isDragging && 'opacity-40'
         )}
         title={looseFile.name}
