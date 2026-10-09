@@ -152,6 +152,16 @@ POST   /api/clips/:clipId/comments/copy-from — body: { source: { kind: 'clip' 
                                            timestamp kept, carried_from_comment_id set (hidden from the
                                            feed). Ownership asserted on both ids. NOT idempotent — call
                                            once per copy. Self-copy → 400. Returns 201 with the copied rows
+POST   /api/clips/:clipId/remove         — soft-remove a version (active = false) via releaseClipDependencies;
+                                           body: { confirm? }. Real songs without confirm → 409
+                                           { code, message, dependents } if in use. Logs clip-removed
+POST   /api/clips/:clipId/move-to-idea   — Ideas only; body: { songId } (destination Idea). Same clip id,
+                                           notes follow. Both songs asserted. Logs clip-moved-to-idea
+POST   /api/clips/:clipId/make-loose     — Ideas only; clip → band-wide loose file (same id, notes moved).
+                                           Final / removed / timeline-placed → 409. Logs clip-made-loose
+POST   /api/clips/:clipId/delete         — Ideas only; permanent delete, notes cascade, audio unlinked only
+                                           if no other row shares src. Real-song / Final / placed → 409;
+                                           204. Logs clip-deleted
 
 Loose-file notes (mirror of the above; ownership via assertLooseFileOwned, covering song-scoped
 and band-wide files; activity logged only when the file has a songId):
@@ -163,6 +173,10 @@ Loose-file list routes (GET /api/songs/:songId/loose-files, /api/tracks/:trackId
 /api/loose-files/unassigned) add commentCount, latestCommentAt, latestOthersCommentAt per file.
 Organize / place-on-timeline reuse the loose file's id as the new clip's id and move its notes
 into clip_comments (same ids).
+
+PATCH  /api/loose-files/:id/metadata     — merges only the keys sent (bpm 20–400, key ≤ 20 chars,
+                                           timeSignature, tags); no activity event
+GET    /api/new-files-count              — { count }: band's active clips created in the last 48h
 
 POST   /api/songs/:songId/loose-files    — record an uploaded-but-unplaced file (body: the
                                            POST /api/upload result fields + name/type/color;

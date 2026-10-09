@@ -66,7 +66,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 - Rows a single action also produces are logged but sort-only, or hidden in `getActivity`. They still count for the Your Songs sort, which reads every row regardless of type.
 - **Clip-built `file-added` row:** hidden for organized and placed clips. New rows link through `activity_log.clip_id`; older ones match strictly on song, track, section, the clip's name in the text, and a 2-second window.
 - **Task comments:** due-date and assignee comments are reworded as actions ("set the due date for T · S to X", "assigned T · S to X"). Automatic comments ("All clips marked final", "Clip state changed", "Clips unmarked as final") are skipped.
-- **Greeting "new files":** `GET /api/new-files-count` returns the band's active clips created in the last 48h. Removed clips and still-loose files don't count.
+- **Greeting "new files":** `GET /api/new-files-count` returns the band's active clips created in the last 48h. Removed or deleted clips don't count; a loose file counts only once organized.
 
 ### Tier 2 event types — full reference
 
@@ -78,6 +78,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `idea-created` | Yes | |
 | `clip-moved-to-idea` | Yes | Ideas shelf drag of an organized file to another Idea; logged once, against the destination song. |
 | `clip-made-loose` | Yes | Ideas shelf drag of an organized file onto Column 1's open space (back to a band-wide loose file); logged once, against the source song. |
+| `clip-deleted` | Yes | Ideas shelf Delete of an organized file; logged once, against the Idea. |
 | `song-deleted` | Yes | |
 | `track-added` | Yes | |
 | `track-deleted` | Yes | |
@@ -169,6 +170,7 @@ This grouping predates the read-path filter and originally assumed every item he
 42. **`album-song-reordered`** — not currently implemented. `PATCH /api/albums/:id/songs/:songId/move` (Move Up/Down) has no `logActivity()` call today. Pre-classified sort-only for whenever that logging is added, consistent with `timeline-reordered`.
 43. **`clip-moved-to-idea`** — logged from `POST /api/clips/:clipId/move-to-idea`, once, against the destination. Description: `"{user} moved {clipName} from {sourceIdea} to {destIdea}"`.
 44. **`clip-made-loose`** — logged from `POST /api/clips/:clipId/make-loose`, once, against the source Idea (the file has no song afterward, and `activity_log.songId` is `NOT NULL`). Description: `"{user} moved {clipName} out of {sourceIdea}"`.
+45. **`clip-deleted`** — logged from `POST /api/clips/:clipId/delete`, once, against the Idea. Description: `"{user} deleted {clipName} from {idea}"` (never "Files"). The clip's built `file-added` and comment rows vanish with it; older text-only rows stay as history.
 
 **Album lifecycle events not implemented:** `album-created` / `album-renamed` / `album-deleted` have no logging path — `activity_log.songId` is `NOT NULL`, and albums have no song to attach an event to. Implementing these would need a nullable `songId` (or a new `albumId` column), a `LEFT JOIN` change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision.
 
@@ -226,7 +228,7 @@ function activityUrl(event: ActivityEvent): string {
   }
   if (event.type === 'song-created')
     return `/?tab=files&filter=songs&songId=${event.songId}`;
-  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea')
+  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea' || event.type === 'clip-deleted')
     return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   if (event.type === 'clip-made-loose')
     return '/?tab=files&filter=ideas';
@@ -239,7 +241,7 @@ function activityUrl(event: ActivityEvent): string {
 - **`status-change`** and **`task-comment`** events open the workspace Production tab with the task modal auto-opened (ProductionTracker reads `?taskId=` from the URL on mount).
 - **`clip-comment`** events open the workspace File Browser navigated to the matching instrument + section, then automatically open the More Info / inspection modal for the specific clip with the notes input focused. See `autoOpenInfo` prop below.
 - **`song-created`** navigates to `/?tab=files&filter=songs&songId=X` — Dashboard reads this via `useSearch()` and auto-selects the song in the Files tab Songs column.
-- **`idea-created`** and **`clip-moved-to-idea`** navigate to `/?tab=files&filter=ideas&ideaId=X` (the destination Idea for a move) — Dashboard reads this and auto-selects the idea in the Ideas column.
+- **`idea-created`**, **`clip-moved-to-idea`** and **`clip-deleted`** navigate to `/?tab=files&filter=ideas&ideaId=X` (the destination Idea for a move) — Dashboard reads this and auto-selects the idea in the Ideas column.
 - **`clip-made-loose`** navigates to `/?tab=files&filter=ideas` with no `ideaId` — the file is band-wide now, sitting in Column 1.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
 

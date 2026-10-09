@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil, FolderOutput } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { cn } from '@/lib/utils';
@@ -57,7 +57,7 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
   useActiveLooseFileDrag,
@@ -176,7 +176,7 @@ function activityUrl(event: ActivityEvent): string {
   if (event.type === 'song-created') {
     return `/?tab=files&filter=songs&songId=${event.songId}`;
   }
-  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea') {
+  if (event.type === 'idea-created' || event.type === 'clip-moved-to-idea' || event.type === 'clip-deleted') {
     return `/?tab=files&filter=ideas&ideaId=${event.songId}`;
   }
   // The file left its Idea and is now band-wide, so there's no Idea to select —
@@ -303,7 +303,8 @@ function EditableTagList({ label, items, onChange }: EditableTagListProps) {
 
 // ─── Ideas shelf Column 2 — shared file context menu ──────────────────────────
 // One menu shape for every file rendered in an Idea's flat file list: More Info,
-// Add Note, Add to Song, Promote to Song, and (loose-file preview only) Delete.
+// Add Note, Add to Song, Promote to Song, then Remove from Idea (organized clips
+// only) and Delete (both: the loose file on the preview, the clip on a card).
 // Used by both the organized-clip cards (clips.map below) and the one-off loose-
 // file preview, so the two can never drift apart the way independently-styled
 // badges once did elsewhere in this app (see CornerBadge in the daw CLAUDE.md).
@@ -313,14 +314,15 @@ interface IdeaFileContextMenuProps {
   onAddNote: () => void;
   onAddToSong: () => void;
   onPromoteToSong: () => void;
-  // Present only for the loose-file preview variant — organized clips have no
-  // delete affordance here (a separate, undecided product question; see the
-  // paused Remove/Delete audit).
+  // Organized clips only (IdeaClipCard requires it; the loose-file preview never
+  // passes it) — same action as dropping the card on Column 1's open space.
+  onRemoveFromIdea?: () => void;
+  // Loose-file preview: deletes the loose file. Organized card: deletes the clip.
   onDelete?: () => void;
 }
 
 function IdeaFileContextMenu({
-  children, onMoreInfo, onAddNote, onAddToSong, onPromoteToSong, onDelete,
+  children, onMoreInfo, onAddNote, onAddToSong, onPromoteToSong, onRemoveFromIdea, onDelete,
 }: IdeaFileContextMenuProps) {
   const contextMenu = useReopenableContextMenu();
   const trigger = React.isValidElement(children)
@@ -355,16 +357,22 @@ function IdeaFileContextMenu({
         >
           <Sparkles size={13} className="text-primary/50" /> Promote to Song
         </ContextMenuItem>
+        {(onRemoveFromIdea || onDelete) && <ContextMenuSeparator className="bg-white/5" />}
+        {onRemoveFromIdea && (
+          <ContextMenuItem
+            onClick={onRemoveFromIdea}
+            className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+          >
+            <FolderOutput size={13} className="text-white/50" /> Remove from Idea
+          </ContextMenuItem>
+        )}
         {onDelete && (
-          <>
-            <ContextMenuSeparator className="bg-white/5" />
-            <ContextMenuItem
-              onClick={onDelete}
-              className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
-            >
-              <Trash2 size={13} /> Delete
-            </ContextMenuItem>
-          </>
+          <ContextMenuItem
+            onClick={onDelete}
+            className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
+          >
+            <Trash2 size={13} /> Delete
+          </ContextMenuItem>
         )}
       </ContextMenuContent>
     </ContextMenu>
@@ -544,7 +552,9 @@ const IDEA_FILE_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, se
 // left-button pointerdown, so a drag starts from the rest of the card: the name/
 // duration row, the padding, and the addedToSongs pill row. No transform on the
 // source card — LooseFileDragOverlay renders the ghost; the card just dims in place.
-interface IdeaClipCardProps extends Omit<IdeaFileContextMenuProps, 'children' | 'onDelete'> {
+interface IdeaClipCardProps extends Omit<IdeaFileContextMenuProps, 'children' | 'onRemoveFromIdea' | 'onDelete'> {
+  onRemoveFromIdea: () => void;
+  onDelete: () => void;
   clip: ApiClip;
   sourceSongId: string;
   children: React.ReactNode;
@@ -1314,6 +1324,17 @@ export default function Dashboard() {
       toast({ title: 'Failed to move file out', description: msg, variant: 'destructive' });
     },
   });
+  // Shared by the Column 1 background drop and the card's "Remove from Idea" item.
+  const makeIdeaClipLoose = (clipId: string, sourceSongId: string) =>
+    makeClipLoose.mutate({ clipId, sourceSongId });
+  // Ideas shelf card "Delete": permanent, no confirmation. The selected Idea stays
+  // selected — the card just disappears from its list.
+  const deleteIdeaClip = useDeleteIdeaClip({
+    onError: (msg) => {
+      console.error('[deleteIdeaClip] error:', msg);
+      toast({ title: 'Failed to delete file', description: msg, variant: 'destructive' });
+    },
+  });
   const handleIdeaClipDragStart = (event: DragStartEvent) => {
     const data = event.active.data.current as { type?: string; clip?: ApiClip } | undefined;
     setActiveIdeaClip(data?.type === IDEA_CLIP_DRAG_TYPE && data.clip ? data.clip : null);
@@ -1324,7 +1345,7 @@ export default function Dashboard() {
     const data = active.data.current as { type?: string; clip?: ApiClip; sourceSongId?: string } | undefined;
     if (data?.type !== IDEA_CLIP_DRAG_TYPE || !data.clip || !data.sourceSongId || !over) return;
     if (String(over.id).startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)) {
-      makeClipLoose.mutate({ clipId: data.clip.id, sourceSongId: data.sourceSongId });
+      makeIdeaClipLoose(data.clip.id, data.sourceSongId);
       return;
     }
     // Only an Idea row carries ideaSongId; Column 2 itself (the file's own
@@ -3105,6 +3126,8 @@ export default function Dashboard() {
                               setPromoteInstrument(settings?.defaultInstruments?.[0] ?? DEFAULT_INSTRUMENTS[0]);
                               setPromoteSection(settings?.defaultSections?.[0] ?? DEFAULT_SECTIONS[0]);
                             }}
+                            onRemoveFromIdea={() => makeIdeaClipLoose(clip.id, selectedFile.id)}
+                            onDelete={() => deleteIdeaClip.mutate({ clipId: clip.id, songId: selectedFile.id })}
                           >
                             <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
                               {clipNotesBadge(clip)}

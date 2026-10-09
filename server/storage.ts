@@ -48,6 +48,42 @@ export class ClipNotLooseableError extends Error {
   }
 }
 
+// Thrown by storage.deleteIdeaClip when the clip can't be deleted (not in an Idea,
+// final, or placed on a timeline) — the route translates this to a 409.
+export class ClipNotDeletableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClipNotDeletableError";
+  }
+}
+
+// Unlink an uploaded file once its last DB row is gone. Must run after the caller's
+// own row is deleted. Guards against deleting a file another row still needs. New
+// uploads get a unique physical name (buildFilename's token), but older uploads
+// collided — loose uploads all computed loose_unplaced_v1.*, and section uploads
+// reused {instrument}_{section}_v{n} across songs — so existing data still has many
+// independent rows sharing one src, left unrepaired. A file can also be shared
+// legitimately: a loose file or clip keeps its src when it's organized, made loose,
+// or placed on the timeline (materializeLooseFileCore copies `src` as-is). So check
+// for other referents first and skip the unlink if any exist. Best-effort: a missing
+// file or failed unlink is logged, never thrown.
+function unlinkUploadIfUnreferenced(src: string, logTag: string): void {
+  const otherLooseFile = db.select({ id: looseFiles.id }).from(looseFiles)
+    .where(eq(looseFiles.src, src)).get();
+  const clipRef = db.select({ id: clips.id }).from(clips)
+    .where(eq(clips.src, src)).get();
+  const timelineClipRef = db.select({ id: timelineClips.id }).from(timelineClips)
+    .where(eq(timelineClips.src, src)).get();
+  if (otherLooseFile || clipRef || timelineClipRef) return;
+
+  const filePath = path.join(UPLOADS_DIR, path.basename(src));
+  fs.unlink(filePath, (err) => {
+    if (err && err.code !== 'ENOENT') {
+      console.error(`${logTag} failed to remove uploaded file:`, err);
+    }
+  });
+}
+
 // Mirrors routes.ts's UPLOADS_DIR resolution exactly (same env override) — kept
 // as a separate constant rather than importing from routes.ts to avoid a
 // circular import (routes.ts imports `storage` from this file).
@@ -146,7 +182,7 @@ export interface ActivityEvent {
       | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
       | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
-      | 'clip-made-loose' | 'clip-final-set' | 'clip-final-cleared'
+      | 'clip-made-loose' | 'clip-deleted' | 'clip-final-set' | 'clip-final-cleared'
       // Sort-only: a task outcome whose cause already has its own feed row.
       | 'task-auto-completed' | 'task-auto-reverted';
   description: string;
@@ -228,6 +264,7 @@ export interface IStorage {
   updateLooseFileMetadata(id: string, metadata: LooseFile['metadata']): Promise<LooseFile>;
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
+  deleteIdeaClip(clipId: string): Promise<Clip>;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
   moveClipToIdea(clipId: string, destSongId: string): Promise<Clip>;
   makeClipLoose(clipId: string, bandId: string): Promise<LooseFile>;
@@ -1279,32 +1316,33 @@ export class SQLiteStorage implements IStorage {
     const looseFile = db.select().from(looseFiles).where(eq(looseFiles.id, id)).get();
     db.delete(looseFiles).where(eq(looseFiles.id, id)).run();
     // Best-effort: the DB row is the source of truth and is already gone above.
-    // A missing (or already-removed) physical file must never surface as an error.
-    if (!looseFile?.src) return;
+    if (looseFile?.src) unlinkUploadIfUnreferenced(looseFile.src, '[deleteLooseFile]');
+  }
 
-    // Guard against deleting a file another row still needs. New uploads get a
-    // unique physical name (buildFilename's token), but older uploads collided —
-    // loose uploads all computed loose_unplaced_v1.*, and section uploads reused
-    // {instrument}_{section}_v{n} across songs — so existing data still has many
-    // independent rows sharing one src, left unrepaired. A file can also be shared
-    // legitimately: a loose file or clip keeps its src when it's organized, made
-    // loose, or placed on the timeline (materializeLooseFileCore copies `src`
-    // as-is). So check for other referents first and skip the unlink (leaving the
-    // row's own reference to a shared file orphaned, not the file).
-    const [otherLooseFile] = db.select({ id: looseFiles.id }).from(looseFiles)
-      .where(eq(looseFiles.src, looseFile.src)).all();
-    const [clipRef] = db.select({ id: clips.id }).from(clips)
-      .where(eq(clips.src, looseFile.src)).all();
-    const [timelineClipRef] = db.select({ id: timelineClips.id }).from(timelineClips)
-      .where(eq(timelineClips.src, looseFile.src)).all();
-    if (otherLooseFile || clipRef || timelineClipRef) return;
-
-    const filePath = path.join(UPLOADS_DIR, path.basename(looseFile.src));
-    fs.unlink(filePath, (err) => {
-      if (err && err.code !== 'ENOENT') {
-        console.error('[deleteLooseFile] failed to remove uploaded file:', err);
-      }
+  // Ideas shelf "Delete": permanently remove an organized clip from an idea-type song.
+  // One transaction deletes the row (clip_comments cascade); the physical file is
+  // unlinked after commit, and only if nothing else still references its src.
+  async deleteIdeaClip(clipId: string): Promise<Clip> {
+    const deleted = db.transaction((tx) => {
+      const row = tx.select({ clip: clips, songType: songs.type })
+        .from(clips)
+        .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+        .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+        .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+        .where(eq(clips.id, clipId))
+        .get();
+      if (!row) throw new ClipNotDeletableError("File not found.");
+      if (row.songType !== 'idea') throw new ClipNotDeletableError("Files in a song can't be deleted. Use Remove instead.");
+      // Idea clips never carry these today; refuse rather than bypass the isFinal/timeline sync.
+      if (row.clip.isFinal) throw new ClipNotDeletableError("A file marked final can't be deleted.");
+      const placed = tx.select({ id: timelineClips.id }).from(timelineClips)
+        .where(eq(timelineClips.bucketClipId, clipId)).get();
+      if (placed) throw new ClipNotDeletableError("This file is placed on a timeline and can't be deleted.");
+      tx.delete(clips).where(eq(clips.id, clipId)).run();
+      return row.clip;
     });
+    if (deleted.src) unlinkUploadIfUnreferenced(deleted.src, '[deleteIdeaClip]');
+    return deleted;
   }
 
   async materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip> {

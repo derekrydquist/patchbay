@@ -496,3 +496,30 @@ export function useMakeClipLoose(
     onError: (err: Error) => opts?.onError?.(err.message),
   });
 }
+
+// Ideas shelf: permanently delete an organized clip (POST /api/clips/:clipId/delete).
+// The Idea's bucket, comment summary and hasFiles fill change; ['activity'] covers
+// the feed row and the greeting's new-files count (['activity', 'new-files-count']).
+export function useDeleteIdeaClip(
+  opts?: { onSuccess?: (vars: { clipId: string; songId: string }) => void; onError?: (message: string) => void }
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (vars: { clipId: string; songId: string }) => {
+      const res = await fetch(`/api/clips/${vars.clipId}/delete`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to delete file' }));
+        throw new Error(err.message ?? 'Failed to delete file');
+      }
+    },
+    onSuccess: (_data, vars) => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId) });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comments', vars.clipId] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.(vars);
+    },
+    onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}

@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, othersCommentTimestamp } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -2278,6 +2278,47 @@ export async function registerRoutes(
     }).catch(console.error);
 
     res.json(looseFile);
+  });
+
+  /**
+   * POST /api/clips/:clipId/delete — Ideas shelf only: permanently delete an organized
+   * clip (no soft-delete). Real-song clips are refused with 409 — they use Remove, which
+   * keeps the isFinal/timeline/task sync intact. The physical file is unlinked only when
+   * no other loose_files/clips/timeline_clips row shares its src.
+   */
+  app.post("/api/clips/:clipId/delete", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, songId)) return;
+
+    const song = db.select({ name: songs.name }).from(songs).where(eq(songs.id, songId)).get();
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    let clip;
+    try {
+      clip = await storage.deleteIdeaClip(clipId);
+    } catch (err) {
+      if (err instanceof ClipNotDeletableError) {
+        return res.status(409).json({ message: err.message });
+      }
+      console.error("[clips/:clipId/delete] failed:", err);
+      return res.status(500).json({ message: "Failed to delete file." });
+    }
+
+    // Names the Idea, never its hidden "Files" track/section.
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-deleted',
+      description: `${actor} deleted ${clip.name} from ${song?.name ?? 'an Idea'}`,
+      timestamp: Date.now(),
+      author: actor,
+    }).catch(console.error);
+
+    res.status(204).send();
   });
 
   /**
