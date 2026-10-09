@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useDroppable } from '@dnd-kit/core';
@@ -15,6 +15,7 @@ import {
 import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveLooseFileDrag,
+  useSpringLoadedTracks, flashSpringOpenedColumn,
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
   useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
@@ -629,6 +630,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     disabled: !selectedTrack,
     data: selectedTrack ? { trackId: selectedTrack.id } : undefined,
   });
+  // Same node, also held for the spring-open flash. The column div never unmounts
+  // on a track change (only its contents swap), so the animation isn't lost.
+  const sectionsColumnRef = useRef<HTMLDivElement | null>(null);
+  const setSectionsColumnRef = useCallback((node: HTMLDivElement | null) => {
+    sectionsColumnRef.current = node;
+    setSectionsBackgroundDroppableRef(node);
+  }, [setSectionsBackgroundDroppableRef]);
 
   // Tracks-column background drop target — the reverse of a Track-row drop: a
   // Track-scoped loose file dropped here has its trackId cleared and returns to the
@@ -651,6 +659,28 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   });
   // isOver doesn't know about `disabled` — gate the highlight on both.
   const isTracksBackgroundDropTarget = isTracksBackgroundOver && !isTracksBackgroundDisabled;
+
+  // Spring-loaded Track rows: resting a loose-file drag on a Track row opens it,
+  // exactly like a click (selects the Track, clears the Section). The selection is
+  // this component's own state, so it's set directly. A drag that ends without
+  // moving the file puts the drag-start Track + Section back (by id, re-resolved
+  // from fresh bucket data), with the same setters.
+  useSpringLoadedTracks({
+    selectedTrackId: selectedTrack?.id ?? null,
+    onOpenTrack: (trackId) => {
+      const track = tracksRef.current.find(t => t.id === trackId);
+      if (track) {
+        setSelectedTrack(track); setSelectedIdea(null);
+        flashSpringOpenedColumn(sectionsColumnRef.current);
+      }
+    },
+    captureSelection: () => ({ trackId: selectedTrack?.id ?? null, ideaId: selectedIdea?.id ?? null }),
+    restoreSelection: ({ trackId, ideaId }) => {
+      const track = trackId ? tracksRef.current.find(t => t.id === trackId) ?? null : null;
+      setSelectedTrack(track);
+      setSelectedIdea(track && ideaId ? track.ideas.find(i => i.id === ideaId) ?? null : null);
+    },
+  });
 
   // Sections-background highlight: no glow when the dragged file is already scoped to
   // the selected track — that drop is a cancel in handleDragEnd. Highlight-only; the
@@ -771,7 +801,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
         {/* ── Sections column ── */}
         <div
-          ref={setSectionsBackgroundDroppableRef}
+          ref={setSectionsColumnRef}
           className={cn('w-1/4 flex flex-col bg-black/10 transition-colors', isSectionsBackgroundDropTarget && 'bg-primary/5', sectionsColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
           {...sectionsColumnDrop.handlers}
         >

@@ -39,6 +39,8 @@ import {
   useLooseFileOrganizeDnd,
   isBucketOrganizeDropId,
   matchOrganizeDropTarget,
+  reportLooseFileDrop,
+  resolveDeferredLooseFileDrop,
 } from '@/hooks/use-loose-file-organize-dnd';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
@@ -2169,8 +2171,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
     if (!over) { setInsertionPoint(null); return; }
 
-    const activeType = active.data.current?.type;
-    const clip = active.data.current?.clip as Clip;
+    // dragData (captured at drag start) covers a source row that unmounted mid-drag —
+    // e.g. a shelf loose file whose Sections column a spring-loaded Track replaced.
+    const activeType = active.data.current?.type ?? dragData?.type;
+    const clip = (active.data.current?.clip ?? dragData?.clip) as Clip;
     const overId = over.id as string;
 
     // ── MediaBucket Section-row / Versions-column drop: organize a loose file directly
@@ -2424,6 +2428,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         (s) => dropTimeSec >= s.start && dropTimeSec < s.start + s.duration
       );
 
+      // The file doesn't move until the dialog confirms — a spring-opened Track
+      // stays selected while it's open (see resolveDeferredLooseFileDrop below).
+      reportLooseFileDrop(active.id, 'deferred');
       setLoosePlacementModal({
         looseFileId,
         trackId: targetTrack.id,
@@ -3258,7 +3265,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           data sourcing: this targets place-on-timeline, not the ideas/clips copy flow). */}
       <Dialog
         open={loosePlacementModal !== null}
-        onOpenChange={(open) => { if (!open) setLoosePlacementModal(null); }}
+        onOpenChange={(open) => {
+          if (!open) { setLoosePlacementModal(null); resolveDeferredLooseFileDrop(false); }
+        }}
       >
         <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
           <DialogHeader>
@@ -3316,7 +3325,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
               type="button"
               variant="outline"
               className="border-white/10 hover:bg-white/5 text-xs"
-              onClick={() => setLoosePlacementModal(null)}
+              onClick={() => { setLoosePlacementModal(null); resolveDeferredLooseFileDrop(false); }}
             >
               Cancel
             </Button>
@@ -3329,6 +3338,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                   sectionName: placementSectionName,
                 });
                 setLoosePlacementModal(null);
+                resolveDeferredLooseFileDrop(true);
               }}
               disabled={!loosePlacementModal?.trackId || !placementSectionName || placeLooseFileOnTimelineMutation.isPending}
               className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"

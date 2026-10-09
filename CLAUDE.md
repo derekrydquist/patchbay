@@ -359,6 +359,18 @@ interface UploadModalProps {
 
 ---
 
+## Spring-loaded tracks (loose-file drags)
+
+All in `use-loose-file-organize-dnd.ts`; mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedTracks`), not the Ideas shelf.
+
+- **Spring** — `useSpringLoadedTracks`: a loose-file drag held over a Track row for 800ms (`SPRING_LOAD_DELAY_MS`) selects that track, as a click does. Applies to drags from the Tracks column and from a track's shelf; never springs the file's own track.
+- **Flash** — `flashSpringOpenedColumn` flashes the Sections column gold on a spring (150ms rise, 150ms hold, 900ms fade). Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
+- **Restore** — a drag that ends without moving the file (Escape, release over nothing, own-track drop, cancelled placement dialog) restores the drag-start selection, only if a spring changed it.
+- **Drop report** — `handleDragEnd` calls `reportLooseFileDrop(id, 'moved')` before each mutation; Timeline reports `'deferred'` when the placement dialog opens. No report = no move.
+- **Drag snapshot** — `{ clip, type, songId, trackId }` + active id, saved at drag start: a dragged row can unmount mid-drag when the Sections column changes, and dnd-kit then discards its data. Drops read live data first, then the snapshot; Timeline's `handleDragEnd` falls back to its own drag-start copy the same way.
+
+---
+
 ## Auth Architecture
 
 Session-based auth using `express-session` (server-side sessions, cookie transport) and `bcrypt` (password hashing, cost 10).
@@ -691,6 +703,8 @@ These are things that need a decision before being built:
 - **`activity_log.author` is nullable; pre-existing rows have `author=null`** — the column was retrofitted after initial `activity_log` usage. Rows written before the retrofit have no author and will not contribute to any user's personalized "Your Songs" sort. This is acceptable — those events are old and the sort degrades gracefully to `createdAt` for songs with no user-attributed activity.
 - **Playhead visual position vs. scroll-state desync — suspected, unconfirmed** — during manual testing of the edge-scroll rebuild, two screenshots appeared to show the rendered playhead position and the actual scroll state disagreeing. Investigated via headless Playwright automation with frame-by-frame position sampling through a full held-drag-and-release cycle; no discontinuity exceeding normal per-frame movement was found in that environment. Per this project's own precedent with the Safari playback-start-failure investigation (never reproducible in headless WebKit despite being real on real hardware), a clean headless result is not proof the desync doesn't exist on real hardware — treat as open, not resolved, pending a deliberate real-browser reproduction attempt.
 - **Playhead release snap — suspected, unconfirmed** — a visible snap was reported at the moment of releasing the pointer during active edge-scroll. The fix believed responsible for this class of bug (deferring time-value updates to the rAF loop instead of firing on every pointermove event during active edge-scroll, to prevent render-scheduling contention) was confirmed still intact in the code after the later redesign, but the snap itself was not reproducible via headless Playwright automation (no main-thread stalls or frame gaps found near release across multiple targeted repro attempts). Same caveat as the visual-desync item above — treat as open pending real-browser confirmation.
+- **Songs browser URL after an organize drop** — the section is selected on screen but the URL has no `sectionId`.
+- **Song delete 500s on a Track-scoped loose file or an opened section** — `loose_files.track_id` and `bucket_folder_views.idea_id` have no cascade; `deleteSong` relies on cascades. Not fixed.
 - **Timeline content pop-in on page load (parked, low priority)** — `tracks` starts as an empty array on mount; the entire track/clip grid (headers, section bands, clips, waveforms) appears in a single commit when `GET /api/songs/:id/timeline` resolves (~130–140ms locally; could be worse in production). No loading skeleton exists. Confirmed via real-browser testing to be pre-existing and independent of the scroll-persistence work (see "Timeline — session persistence" in `client/src/components/daw/CLAUDE.md`). A secondary, related effect: individual clip waveforms decode and render asynchronously per-clip after the grid appears, with no ordering guarantee tied to track position — decode time appears to scale with clip duration/file size rather than screen position, so a top-of-list track can render its waveform after a lower one. Proper fix (loading skeleton or suspense boundary) is a bigger scope decision, not a quick patch — not scheduled.
 
 ---
@@ -823,6 +837,8 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Organized Ideas files had no Delete or menu "move out" (Oct 2026)** — the menu now has Remove from Idea and Delete; feed: `clip-deleted`.
 - **Loose-file preview card couldn't be dragged (Oct 2026)** — only the Column 1 row could; the card now drags onto an Idea row.
 - **Column 1 rows showed hover during drags (Oct 2026)** — invalid rows lit up and hover hid Idea rows' drop tint; hover is now off during a drag.
+- **Spring-loaded tracks (Oct 2026)** — holding a loose-file drag on a Track row opens it; see "Spring-loaded tracks" above.
+- **Shelf-file drops lost after the row unmounted (Oct 2026)** — dnd-kit discarded the drag data; drops now fall back to a drag-start snapshot.
 
 ---
 

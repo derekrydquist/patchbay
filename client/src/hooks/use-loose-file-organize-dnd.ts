@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import {
   useSensor,
   useSensors,
@@ -9,6 +9,7 @@ import {
   type CollisionDetection,
   type Collision,
   type DragStartEvent,
+  type DragOverEvent,
   type DragEndEvent,
   type DroppableContainer,
   type ClientRect,
@@ -207,6 +208,208 @@ export function useActiveLooseFileDrag(): { trackId: string | null } | null {
   return drag;
 }
 
+// How long a loose-file drag must rest on a Track row before that Track opens.
+export const SPRING_LOAD_DELAY_MS = 800;
+
+// ── Drop report: did a loose-file drop start a move? ──────────────────────────
+// The spring hook below restores the pre-drag selection when a drag ends WITHOUT
+// moving the file, but the drop itself is decided elsewhere — in the surface's
+// DndContext onDragEnd (useLooseFileOrganizeDnd's handleDragEnd, and Timeline's for
+// place-on-timeline). dnd-kit calls that onDragEnd prop first and then notifies
+// useDndMonitor listeners, synchronously in the same call, so a report written by
+// the drop handler is always there when the monitor's onDragEnd reads it. Keyed by
+// the draggable id and cleared at every drag start, so a report can never leak into
+// a later drag. No report = the file did not move (a cancel, a non-target, or a
+// drop handler that bailed).
+//   'moved'    — a mutation fired (organize, assign-track, un-assign).
+//   'deferred' — Workspace's Place on Timeline dialog opened; the move waits on it.
+export type LooseFileDropReport = 'moved' | 'deferred';
+let lastDropReport: { activeId: UniqueIdentifier; report: LooseFileDropReport } | null = null;
+
+export function reportLooseFileDrop(activeId: UniqueIdentifier, report: LooseFileDropReport): void {
+  lastDropReport = { activeId, report };
+}
+
+function clearLooseFileDropReport(): void {
+  lastDropReport = null;
+}
+
+function takeLooseFileDropReport(activeId: UniqueIdentifier): LooseFileDropReport | null {
+  const r = lastDropReport && lastDropReport.activeId === activeId ? lastDropReport.report : null;
+  lastDropReport = null;
+  return r;
+}
+
+// Fired by Timeline when the Place on Timeline dialog that a drop opened ('deferred')
+// is closed: placed = true for Place Clip, false for Cancel / Escape / outside click.
+// A window event, same idiom as find-in-bucket, since MediaBucket (which owns the
+// selection) and Timeline (which owns the dialog) don't share props. A dialog opened
+// from a context menu has no deferred drop behind it, so its event is a no-op.
+const LOOSE_PLACEMENT_RESOLVED_EVENT = 'loose-placement-resolved';
+
+export function resolveDeferredLooseFileDrop(placed: boolean): void {
+  window.dispatchEvent(new CustomEvent(LOOSE_PLACEMENT_RESOLVED_EVENT, { detail: { placed } }));
+}
+
+interface SpringLoadedTracksOptions<S> {
+  selectedTrackId: string | null;
+  /** Select the Track exactly like a click (also clears the Section). */
+  onOpenTrack: (trackId: string) => void;
+  /** The surface's current selection, snapshotted at drag start. */
+  captureSelection: () => S;
+  /** Put a snapshot back with the same setters a click uses. No flash. */
+  restoreSelection: (selection: S) => void;
+}
+
+// Spring-loaded Track rows: holding a loose-file drag over a Track row for
+// SPRING_LOAD_DELAY_MS selects that Track (onOpenTrack), so its Sections column
+// fills in and the file can be dropped onto a Section row in the same drag. Drops
+// are untouched — this only changes selection mid-drag. Mount once per DndContext,
+// inside it (MediaBucket, the Songs quick-browser); not on the Ideas shelf.
+//
+// Driven by useDndMonitor's onDragOver, which dnd-kit fires only when the collision
+// result's id changes — so while the pointer rests on one Track row no further
+// events arrive and the timer runs; entering another row (or leaving to nothing)
+// fires once and restarts or clears it.
+//
+// Every loose-file drag is eligible. A Track-scoped (shelf) file lives in the
+// selected Track's Sections column, which unmounts when another Track opens; dnd-kit
+// then drops the row's data, so handleDragEnd falls back to the snapshot taken at
+// drag start (see useLooseFileOrganizeDnd). A shelf file never springs its own
+// origin Track open.
+//
+// Restore: if a spring changed the selection and the drag ends without moving the
+// file (Escape or any other cancel, a release over no target, a drop the handler
+// cancels), the selection captured at drag start comes back — for a shelf file that
+// is its origin Track, so its shelf is visible again. A drag that moved the file
+// leaves the selection to the existing "view follows the file" handling. A drag
+// that never sprung never touches the selection.
+export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>): void {
+  // Read at event time, so the listener below never needs re-subscribing.
+  const latest = useRef(options);
+  latest.current = options;
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const eligibleRef = useRef(false);
+  const originTrackIdRef = useRef<string | null>(null);
+  // Selection at drag start, and whether a spring changed it during this drag.
+  const startSelectionRef = useRef<{ selection: S } | null>(null);
+  const sprungRef = useRef(false);
+  // A Place on Timeline dialog is open over a sprung selection: restore on cancel.
+  const pendingRestoreRef = useRef<{ selection: S } | null>(null);
+
+  const listener = useMemo(() => {
+    const clear = () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+    const finish = () => {
+      clear();
+      eligibleRef.current = false;
+      originTrackIdRef.current = null;
+      startSelectionRef.current = null;
+      sprungRef.current = false;
+    };
+    return {
+      onDragStart: ({ active }: DragStartEvent) => {
+        clear();
+        clearLooseFileDropReport();
+        pendingRestoreRef.current = null;
+        const data = active.data.current as { type?: string; trackId?: string | null } | undefined;
+        eligibleRef.current = data?.type === 'loose-file';
+        originTrackIdRef.current = data?.trackId ?? null;
+        startSelectionRef.current = eligibleRef.current
+          ? { selection: latest.current.captureSelection() }
+          : null;
+        sprungRef.current = false;
+      },
+      onDragOver: ({ over }: DragOverEvent) => {
+        clear();
+        if (!eligibleRef.current || !over) return;
+        if (!String(over.id).startsWith(BUCKET_TRACK_DROP_PREFIX)) return;
+        const trackId = (over.data.current as { trackId?: string } | undefined)?.trackId;
+        if (!trackId || trackId === latest.current.selectedTrackId || trackId === originTrackIdRef.current) return;
+        timerRef.current = setTimeout(() => {
+          timerRef.current = null;
+          if (trackId === latest.current.selectedTrackId) return;
+          sprungRef.current = true;
+          latest.current.onOpenTrack(trackId);
+        }, SPRING_LOAD_DELAY_MS);
+      },
+      onDragEnd: ({ active }: DragEndEvent) => {
+        const report = takeLooseFileDropReport(active.id);
+        const start = startSelectionRef.current;
+        if (sprungRef.current && start) {
+          if (report === 'deferred') pendingRestoreRef.current = start;
+          else if (report !== 'moved') latest.current.restoreSelection(start.selection);
+        }
+        finish();
+      },
+      onDragCancel: () => {
+        clearLooseFileDropReport();
+        const start = startSelectionRef.current;
+        if (sprungRef.current && start) latest.current.restoreSelection(start.selection);
+        finish();
+      },
+      clear,
+    };
+  }, []);
+  useDndMonitor(listener);
+  useEffect(() => listener.clear, [listener]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const pending = pendingRestoreRef.current;
+      pendingRestoreRef.current = null;
+      if (pending && !(e as CustomEvent<{ placed: boolean }>).detail.placed) {
+        latest.current.restoreSelection(pending.selection);
+      }
+    };
+    window.addEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
+    return () => window.removeEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
+  }, []);
+}
+
+// Spring-open flash timing and strength: a quick rise to a soft peak, a short hold,
+// then a long ease-out fade so the tail stays visible. Total duration is the sum;
+// the keyframe offsets are derived from these in flashSpringOpenedColumn.
+export const SPRING_FLASH_RISE_MS = 150;
+export const SPRING_FLASH_HOLD_MS = 150;
+export const SPRING_FLASH_FADE_MS = 900;
+/** Gold alpha at the peak, for both the background and the inset ring. */
+export const SPRING_FLASH_PEAK_ALPHA = 0.18;
+
+// Gold flash over a Sections column when useSpringLoadedTracks opens a Track —
+// never on a click or a restore. Web Animations API on the existing node: no
+// remount (which would re-register the column's drop target), no inserted element,
+// no size change. Only the peak keyframe is given; the start and end are implicit,
+// so the flash rises from and fades back into the column's LIVE background/
+// box-shadow — a drop highlight that turns on mid-flash shows through as it fades
+// instead of being overwritten. A second spring cancels the running flash and
+// restarts it.
+const springFlashes = new WeakMap<Element, Animation>();
+
+export function flashSpringOpenedColumn(el: HTMLElement | null): void {
+  if (!el || typeof el.animate !== 'function') return;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+  springFlashes.get(el)?.cancel();
+  const gold = `rgba(212, 175, 55, ${SPRING_FLASH_PEAK_ALPHA})`;
+  const peak = { backgroundColor: gold, boxShadow: `inset 0 0 0 2px ${gold}` };
+  const duration = SPRING_FLASH_RISE_MS + SPRING_FLASH_HOLD_MS + SPRING_FLASH_FADE_MS;
+  // Offsets 0 and 1 are implicit (the column's own live values). A keyframe's
+  // easing applies to the segment that starts at it: the rise (implicit 0 → peak
+  // start) is linear, the hold is flat, only the fade (peak end → implicit 1) eases out.
+  const animation = el.animate(
+    [
+      { offset: SPRING_FLASH_RISE_MS / duration, ...peak },
+      { offset: (SPRING_FLASH_RISE_MS + SPRING_FLASH_HOLD_MS) / duration, ...peak, easing: 'ease-out' },
+    ],
+    { duration, easing: 'linear' }
+  );
+  springFlashes.set(el, animation);
+}
+
 // Drag payload type for an organized clip dragged out of the Ideas shelf's Column 2
 // (Finder-style move to another Idea). Not a loose file — handleDragEnd below ignores
 // it, and Dashboard's own clip-move handler picks it up.
@@ -230,6 +433,15 @@ export function useActiveDragSource(): { type: string | null; sourceSongId: stri
   return drag;
 }
 
+// The drag data LooseFileRow (and the Ideas shelf preview card) put on a loose-file
+// draggable — everything handleDragEnd reads from active.data.current.
+interface LooseFileDragData {
+  clip: Clip;
+  type: 'loose-file';
+  songId: string | null;
+  trackId: string | null;
+}
+
 interface UseLooseFileOrganizeDndOptions {
   onError?: (message: string) => void;
   onOrganized?: (dest: OrganizeDestination) => void;
@@ -237,6 +449,12 @@ interface UseLooseFileOrganizeDndOptions {
 
 export function useLooseFileOrganizeDnd(songId: string | undefined, options?: UseLooseFileOrganizeDndOptions) {
   const [activeDrag, setActiveDrag] = useState<Clip | null>(null);
+  // Copy of the loose-file drag data, taken at drag start. If the dragged row
+  // unmounts mid-drag (a spring-loaded Track replaced the Sections column holding
+  // it), dnd-kit keeps active.id but swaps active.data.current for an empty object;
+  // handleDragEnd then reads this instead. Keyed by the draggable id so a stale copy
+  // never applies to a different drag.
+  const dragSnapshotRef = useRef<{ activeId: UniqueIdentifier; data: LooseFileDragData } | null>(null);
   const sensors = useLooseFileOrganizeSensors();
   const { toast } = useToast();
   const organizeLooseFileMutation = useOrganizeLooseFile(songId, {
@@ -262,9 +480,16 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
   });
 
   const handleDragStart = (event: DragStartEvent) => {
-    const clip = event.active.data.current?.clip as Clip | undefined;
-    const type = event.active.data.current?.type as string | undefined;
-    setActiveDrag(type === 'loose-file' && clip ? clip : null);
+    const data = event.active.data.current as Partial<LooseFileDragData> | undefined;
+    const isLooseFile = data?.type === 'loose-file' && !!data.clip;
+    setActiveDrag(isLooseFile ? data.clip! : null);
+    clearLooseFileDropReport();
+    dragSnapshotRef.current = isLooseFile
+      ? {
+          activeId: event.active.id,
+          data: { clip: data.clip!, type: 'loose-file', songId: data.songId ?? null, trackId: data.trackId ?? null },
+        }
+      : null;
   };
 
   // Escape / sensor cancel. Without this the ghost's clip outlived a cancelled
@@ -272,23 +497,35 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
   // handleDragEnd clears it too, first thing, for every drop outcome.
   const handleDragCancel = () => {
     setActiveDrag(null);
+    dragSnapshotRef.current = null;
   };
 
   // Returns true when the event was a loose-file organize drop (handled here, whether
   // it succeeded or warned) — callers embedding this inside a larger handleDragEnd
   // (Timeline.tsx) can early-return on true and fall through to their own logic on
   // false rather than duplicating the isBucketOrganizeDropId/type check themselves.
+  // Whether the file actually moves is reported separately: each branch that fires a
+  // mutation calls reportLooseFileDrop(..., 'moved') first; every other return
+  // (warnings, own-track cancel, not-a-target) reports nothing — see
+  // useSpringLoadedTracks, which restores the pre-drag selection on no move.
   const handleDragEnd = (event: DragEndEvent): boolean => {
     const { active, over } = event;
     setActiveDrag(null);
+    const snapshot = dragSnapshotRef.current;
+    dragSnapshotRef.current = null;
+    // Live data when the dragged row is still mounted; otherwise the drag-start copy.
+    const live = active.data.current as Partial<LooseFileDragData> | undefined;
+    const drag: Partial<LooseFileDragData> | undefined = live?.type
+      ? live
+      : snapshot && snapshot.activeId === active.id ? snapshot.data : undefined;
     if (!over) return false;
-    if (active.data.current?.type !== 'loose-file') return false;
+    if (drag?.type !== 'loose-file') return false;
     if (!isBucketOrganizeDropId(over.id)) return false;
     // Idea-clip-only target (make-loose) — not a loose-file destination. It is
     // disabled for loose-file drags, so this is a guard, not a live path.
     if (String(over.id).startsWith(IDEAS_SHELF_BACKGROUND_DROP_PREFIX)) return false;
 
-    const looseFileId = active.data.current?.clip?.id;
+    const looseFileId = drag.clip?.id;
     if (!looseFileId) {
       console.warn('[LooseFileDrop] missing loose file id on drag data');
       return true;
@@ -299,11 +536,12 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     // Track-scoped loose file is being dragged, but the origin is re-checked here
     // since un-assigning a file with no track has nothing to do.
     if (String(over.id).startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX)) {
-      const originTrackId = (active.data.current as { trackId?: string | null } | undefined)?.trackId ?? null;
+      const originTrackId = drag.trackId ?? null;
       if (!originTrackId) {
         console.warn('[LooseFileDrop] Tracks-background drop on a file with no trackId — nothing to un-assign');
         return true;
       }
+      reportLooseFileDrop(active.id, 'moved');
       unassignLooseFileTrackMutation.mutate(
         { looseFileId, originTrackId },
         { onSuccess: () => options?.onOrganized?.({ action: 'unassign-track', originTrackId }) }
@@ -328,7 +566,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
       // invalidate the ORIGIN track's Sections-column list too, not just the
       // destination's, so a genuine cross-track move never leaves the source view
       // stale.
-      const originTrackId = (active.data.current as { trackId?: string | null } | undefined)?.trackId ?? null;
+      const originTrackId = drag.trackId ?? null;
       const destTrackId = trackDropData.trackId;
       // Dropping a Track-scoped file back onto its OWN track — its own Track row, or
       // the Sections-column background while that same track is selected — is a
@@ -340,6 +578,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
       if (originTrackId === destTrackId) {
         return true;
       }
+      reportLooseFileDrop(active.id, 'moved');
       assignLooseFileTrackMutation.mutate(
         { looseFileId, trackId: destTrackId, originTrackId },
         { onSuccess: () => options?.onOrganized?.({ action: 'assign-track', trackId: destTrackId }) }
@@ -358,6 +597,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     // the selected song this hook was built with; every other organize target
     // belongs to the selected song.
     const destSongId = dropData.ideaSongId ?? songId;
+    reportLooseFileDrop(active.id, 'moved');
     organizeLooseFileMutation.mutate(
       { looseFileId, trackId: destTrackId, sectionName: destSectionName, destSongId },
       { onSuccess: () => options?.onOrganized?.({ action: 'organize', trackId: destTrackId, sectionName: destSectionName }) }

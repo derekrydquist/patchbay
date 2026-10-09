@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, KeyboardEvent } from 'react';
+import React, { useState, useRef, useEffect, useCallback, KeyboardEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
@@ -62,6 +62,8 @@ import {
   useLooseFileOrganizeDnd,
   useActiveLooseFileDrag,
   useActiveDragSource,
+  useSpringLoadedTracks,
+  flashSpringOpenedColumn,
   IDEA_CLIP_DRAG_TYPE,
   bucketSectionDropId,
   bucketVersionsDropId,
@@ -718,6 +720,27 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop }: SongsTrackRo
   );
 }
 
+// ─── Songs quick-browser spring-loaded Track rows ──────────────────────────────
+// Renders nothing — mounts useSpringLoadedTracks inside the Songs DndContext
+// (Dashboard() itself sits outside it, so the hook can't be called there).
+// onOpenTrack selects the Track exactly like a click (selectSongsTrack).
+// A drag that ends without moving the file puts the drag-start Track + Section
+// (and URL) back via restoreSelection.
+function SongsSpringLoadedTracks({ selectedTrackId, selectedSectionId, onOpenTrack, restoreSelection }: {
+  selectedTrackId: string | null;
+  selectedSectionId: string | null;
+  onOpenTrack: (trackId: string) => void;
+  restoreSelection: (trackId: string | null, sectionId: string | null) => void;
+}) {
+  useSpringLoadedTracks({
+    selectedTrackId,
+    onOpenTrack,
+    captureSelection: () => ({ trackId: selectedTrackId, sectionId: selectedSectionId }),
+    restoreSelection: ({ trackId, sectionId }) => restoreSelection(trackId, sectionId),
+  });
+  return null;
+}
+
 // ─── Songs quick-browser Column 2 (Tracks) background drop target ────────────
 // Un-assign target, same as MediaBucket's Tracks-column background: a Track-scoped
 // loose file dropped on open column space has its trackId cleared and returns to
@@ -763,13 +786,16 @@ function SongsTracksColumnDropZone({
 // drags cancel in handleDragEnd, so the highlight is suppressed for them.
 interface SongsSectionsColumnDropZoneProps {
   selectedTrackId: string | null;
+  /** Bumped by Dashboard each time a Track springs open (never on a click); each
+   *  change flashes this column. 0 = no spring yet. */
+  flashNonce: number;
   className?: string;
   children: React.ReactNode;
   /** Finder file drop handlers — a loose file on the selected Track. */
   nativeDropHandlers: NativeFileDropHandlers;
 }
 
-function SongsSectionsColumnDropZone({ selectedTrackId, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
+function SongsSectionsColumnDropZone({ selectedTrackId, flashNonce, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
   const activeLooseFileDrag = useActiveLooseFileDrag();
   const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrackId;
   const { setNodeRef, isOver } = useDroppable({
@@ -777,9 +803,19 @@ function SongsSectionsColumnDropZone({ selectedTrackId, className, children, nat
     disabled: !selectedTrackId,
     data: selectedTrackId ? { trackId: selectedTrackId } : undefined,
   });
+  // Same node, also held for the spring-open flash. This div never unmounts on a
+  // track change (only its contents swap), so the animation isn't lost.
+  const columnRef = useRef<HTMLDivElement | null>(null);
+  const setColumnRef = useCallback((node: HTMLDivElement | null) => {
+    columnRef.current = node;
+    setNodeRef(node);
+  }, [setNodeRef]);
+  useEffect(() => {
+    if (flashNonce > 0) flashSpringOpenedColumn(columnRef.current);
+  }, [flashNonce]);
 
   return (
-    <div ref={setNodeRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')} {...nativeDropHandlers}>
+    <div ref={setColumnRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')} {...nativeDropHandlers}>
       {children}
     </div>
   );
@@ -1020,15 +1056,24 @@ export default function Dashboard() {
   const pendingSectionIdRef = useRef<string | null>(null);
   const appliedSearchRef = useRef<string | null>(null);
 
-  // Songs quick-browser: select a Track (clearing the Section) and mirror it into
-  // the URL — shared by a Track-row click and an assign-track drop.
-  const selectSongsTrack = (track: ApiTrack) => {
-    setSelectedInstrument(track); setSelectedSection(null);
+  // Bumped when a Track springs open mid-drag (SongsSpringLoadedTracks) — flashes
+  // the Sections column, which lives here in Dashboard() outside that component.
+  const [songsSectionsFlashNonce, setSongsSectionsFlashNonce] = useState(0);
+  // Songs quick-browser: set the Track + Section selection and mirror it into the
+  // URL, in the same shapes the Song-row, Track-row and Section-row clicks write.
+  // Used directly to put a spring-loaded drag's starting selection back.
+  const selectSongsTrackAndSection = (track: ApiTrack | null, section: ApiIdea | null) => {
+    setSelectedInstrument(track); setSelectedSection(track ? section : null);
     if (selectedFile) {
-      const s = `tab=files&filter=songs&songId=${selectedFile.id}&instrumentId=${track.id}`;
+      let s = `tab=files&filter=songs&songId=${selectedFile.id}`;
+      if (track) s += `&instrumentId=${track.id}`;
+      if (track && section) s += `&sectionId=${section.id}`;
       appliedSearchRef.current = s; setLocation(`/?${s}`);
     }
   };
+  // Select a Track (clearing the Section) — shared by a Track-row click, an
+  // assign-track drop and a spring-loaded Track.
+  const selectSongsTrack = (track: ApiTrack) => selectSongsTrackAndSection(track, null);
   const appliedAlbumSearchRef = useRef<string | null>(null);
   const hasRestoredFromUrl = useRef<boolean>(false);
   const pendingNewIdeaIdRef = useRef<string | null>(null);
@@ -2665,6 +2710,18 @@ export default function Dashboard() {
               onDragEnd={looseFileOrganizeDnd.handleDragEnd}
               onDragCancel={looseFileOrganizeDnd.handleDragCancel}
             >
+            <SongsSpringLoadedTracks
+              selectedTrackId={selectedInstrument?.id ?? null}
+              selectedSectionId={selectedSection?.id ?? null}
+              onOpenTrack={(trackId) => {
+                const track = fileBucket.find(t => t.id === trackId);
+                if (track) { selectSongsTrack(track); setSongsSectionsFlashNonce(n => n + 1); }
+              }}
+              restoreSelection={(trackId, sectionId) => {
+                const track = trackId ? fileBucket.find(t => t.id === trackId) ?? null : null;
+                selectSongsTrackAndSection(track, track && sectionId ? track.ideas.find(i => i.id === sectionId) ?? null : null);
+              }}
+            />
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
               {/* Column 1 — Songs */}
@@ -2836,6 +2893,7 @@ export default function Dashboard() {
               {/* Column 3 — Sections / Subfolders */}
               <SongsSectionsColumnDropZone
                 selectedTrackId={selectedInstrument?.id ?? null}
+                flashNonce={songsSectionsFlashNonce}
                 className={cn(
                   'w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15] transition-colors',
                   songsSectionsColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS
