@@ -12,6 +12,7 @@ import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
+import { ClipInUseDialog, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
 import { useToast } from '@/hooks/use-toast';
 import {
   ContextMenu,
@@ -1944,20 +1945,27 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     executeMark(!isFinal);
   };
 
-  const handleRemove = async () => {
-    try {
-      await fetch(`/api/clips/${clip.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ active: false }),
-      });
+  // Remove (soft) through POST /api/clips/:clipId/remove. If the version is in use
+  // (timeline placements or Final), the server answers
+  // clip-in-use and ClipInUseDialog asks before repeating with confirm: true.
+  const { toast } = useToast();
+  const removeAction = useClipInUseAction({
+    request: (confirm) => postClipLeave(`/api/clips/${clip.id}/remove`, {}, confirm),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
-    } catch (err) {
-      console.error('[removeClip] error:', err);
-    }
-  };
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+    },
+    onError: (msg) => {
+      console.error('[removeClip] error:', msg);
+      toast({ title: 'Failed to remove file', description: msg, variant: 'destructive' });
+    },
+  });
+  const handleRemove = () => removeAction.run();
 
   return (
     <>
@@ -2031,6 +2039,12 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
+
+      <ClipInUseDialog
+        {...removeAction.dialogProps}
+        actionLabel="Remove anyway"
+        consequence="Removing it takes its placements off the timeline and clears Final."
+      />
 
       {showInfo && (
         <ClipInfoWindow

@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { eq, ne, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -26,6 +26,7 @@ import {
   productionTasks, taskComments, clipComments, looseFileComments, songReviews, songReviewComments,
   lyricsComments, activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
 } from "@shared/schema";
+import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -228,6 +229,12 @@ export interface IStorage {
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
   moveClipToIdea(clipId: string, destSongId: string): Promise<Clip>;
   makeClipLoose(clipId: string, bandId: string): Promise<LooseFile>;
+  // A version leaving its section (Remove today, moves later). See releaseClipDependencies.
+  getClipDependents(clipId: string): Promise<ClipDependents | undefined>;
+  removeClip(clipId: string): Promise<Clip | undefined>;
+  getTaskByTrackSection(trackId: string, sectionName: string): Promise<ProductionTask | undefined>;
+  countActiveClipsForIdea(ideaId: string): Promise<number>;
+  hasActiveFinalClipInIdea(ideaId: string, excludeClipId?: string): Promise<boolean>;
   materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
@@ -513,6 +520,20 @@ function dematerializeClipToBandLoose(tx: DrizzleTx, clipId: string, bandId: str
 
   tx.delete(clips).where(eq(clips.id, clipId)).run();
   return looseFile;
+}
+
+// What falls off when a real-song version leaves its section (Remove today, moves
+// later): its placed timeline copies, Final on this one row, and any task's
+// relatedClipId link. Matched by bucketClipId, never by track + section, which would
+// also catch other versions' copies. This is the approved fourth isFinal write path:
+// it writes isFinal = false on this row only — no same-name cascade, which would
+// un-final other clips on the track. Runs inside the caller's transaction; the
+// caller recomputes the section's task after commit (taskStatusAfterVersionLeaves).
+// Audio, notes, metadata and addedToSongs are untouched.
+export function releaseClipDependencies(tx: DrizzleTx, clipId: string): void {
+  tx.delete(timelineClips).where(eq(timelineClips.bucketClipId, clipId)).run();
+  tx.update(clips).set({ isFinal: false }).where(eq(clips.id, clipId)).run();
+  tx.update(productionTasks).set({ relatedClipId: null }).where(eq(productionTasks.relatedClipId, clipId)).run();
 }
 
 // Shared by the three loose-file list methods: the filtered loose_files rows, each with a
@@ -1317,6 +1338,74 @@ export class SQLiteStorage implements IStorage {
   // band-wide loose file again. See dematerializeClipToBandLoose.
   async makeClipLoose(clipId: string, bandId: string): Promise<LooseFile> {
     return db.transaction((tx) => dematerializeClipToBandLoose(tx, clipId, bandId));
+  }
+
+  // What would fall off if this version left its section — see ClipDependents.
+  // The task entry uses the same rule the route applies afterwards, counting the
+  // section's other active versions.
+  async getClipDependents(clipId: string): Promise<ClipDependents | undefined> {
+    const row = db.select({ clip: clips, idea: ideas })
+      .from(clips).innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .where(eq(clips.id, clipId)).get();
+    if (!row) return undefined;
+    const timelineCopies = db.select({
+      id: timelineClips.id, trackName: instrumentTracks.name,
+      sectionName: timelineClips.sectionName, start: timelineClips.start,
+    })
+      .from(timelineClips).innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
+      .where(eq(timelineClips.bucketClipId, clipId))
+      .orderBy(asc(timelineClips.start)).all();
+    const tasks: ClipDependents['tasks'] = [];
+    const task = await this.getTaskByTrackSection(row.idea.trackId, row.idea.sectionName);
+    if (task) {
+      const othersLeft = db.select({ value: count() }).from(clips)
+        .where(and(eq(clips.ideaId, row.idea.id), eq(clips.active, true), ne(clips.id, clipId)))
+        .get()?.value ?? 0;
+      const anyRemainingFinal = await this.hasActiveFinalClipInIdea(row.idea.id, clipId);
+      tasks.push({
+        taskId: task.id,
+        sectionName: task.sectionName,
+        status: task.status as TaskStatus,
+        willChangeTo: taskStatusAfterVersionLeaves(task.status as TaskStatus, othersLeft, row.clip.isFinal, anyRemainingFinal),
+      });
+    }
+    return { timelineCopies, isFinal: row.clip.isFinal, tasks };
+  }
+
+  // Bucket Remove: release what depends on the version, then soft-remove it
+  // (active = false), in one transaction. The task recompute is the caller's.
+  async removeClip(clipId: string): Promise<Clip | undefined> {
+    return db.transaction((tx) => {
+      if (!tx.select({ id: clips.id }).from(clips).where(eq(clips.id, clipId)).get()) return undefined;
+      releaseClipDependencies(tx, clipId);
+      tx.update(clips).set({ active: false }).where(eq(clips.id, clipId)).run();
+      return tx.select().from(clips).where(eq(clips.id, clipId)).get();
+    });
+  }
+
+  // production_tasks is unique per (trackId, sectionName) — keyed by id, not track name.
+  async getTaskByTrackSection(trackId: string, sectionName: string): Promise<ProductionTask | undefined> {
+    return db.select().from(productionTasks)
+      .where(and(eq(productionTasks.trackId, trackId), eq(productionTasks.sectionName, sectionName)))
+      .get();
+  }
+
+  // Whether any active version in the section (other than excludeClipId) is Final.
+  async hasActiveFinalClipInIdea(ideaId: string, excludeClipId?: string): Promise<boolean> {
+    return !!db.select({ id: clips.id }).from(clips)
+      .where(and(
+        eq(clips.ideaId, ideaId),
+        eq(clips.active, true),
+        eq(clips.isFinal, true),
+        excludeClipId ? ne(clips.id, excludeClipId) : undefined,
+      ))
+      .get();
+  }
+
+  async countActiveClipsForIdea(ideaId: string): Promise<number> {
+    return db.select({ value: count() }).from(clips)
+      .where(and(eq(clips.ideaId, ideaId), eq(clips.active, true)))
+      .get()?.value ?? 0;
   }
 
   async materializeLooseFileToTimeline(

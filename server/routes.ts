@@ -19,6 +19,7 @@ import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
 import { db, sqlite } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, othersCommentTimestamp } from "./storage";
+import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
   insertSongSchema,
@@ -334,6 +335,52 @@ async function advanceTaskOnClipAdded(track: InstrumentTrack, sectionName: strin
     await storage.updateTask(task.id, { status: "in-progress" });
   }
   await reconcileSectionTaskStatus(track.id, sectionName, actor, actor);
+}
+
+// ─── applyTaskAfterVersionLeaves ───────────────────────────────────────────────
+// Recomputes the task of a section a real-song version just left (Remove today,
+// moves later), after the leave has committed. Applies taskStatusAfterVersionLeaves
+// to the section's remaining ACTIVE versions — not timeline copies. Deliberately
+// does not call reconcileSectionTaskStatus: that helper does nothing when a section
+// has no timeline clips (so a Complete task would stay Complete after its last copy
+// went), and it can push a task to Complete when the remaining copies are all final,
+// which this rule never does.
+// leavingWasFinal is the clip's isFinal from BEFORE the leave (releaseClipDependencies
+// has already cleared it by the time this runs).
+async function applyTaskAfterVersionLeaves(
+  track: InstrumentTrack,
+  sectionName: string,
+  ideaId: string,
+  leavingWasFinal: boolean,
+  actor: string,
+): Promise<void> {
+  const task = await storage.getTaskByTrackSection(track.id, sectionName);
+  if (!task) return;
+  const activeVersionsLeft = await storage.countActiveClipsForIdea(ideaId);
+  const anyRemainingFinal = await storage.hasActiveFinalClipInIdea(ideaId);
+  const next = taskStatusAfterVersionLeaves(task.status as TaskStatus, activeVersionsLeft, leavingWasFinal, anyRemainingFinal);
+  if (next === task.status) return;
+  await storage.updateTask(task.id, { status: next });
+  const label = STATUS_LABELS[next];
+  await storage.addTaskComment({
+    id: randomUUID(),
+    taskId: task.id,
+    author: 'System',
+    text: next === 'todo'
+      ? `${label} — no files left in this section`
+      : `${label} — the section's Final file left`,
+    timestamp: Date.now(),
+  });
+  storage.logActivity({
+    id: randomUUID(),
+    songId: track.songId,
+    type: 'task-status-change',
+    description: `${actor} changed status to ${label.replace(/^Status changed to /, '')} — ${track.name} · ${sectionName}`,
+    timestamp: Date.now(),
+    instrument: track.name,
+    sectionName,
+    author: actor,
+  }).catch(console.error);
 }
 
 export async function registerRoutes(
@@ -2048,6 +2095,75 @@ export async function registerRoutes(
       description: `${moveActor} moved ${clip.name} from ${sourceSong.name} to ${destSong.name}`,
       timestamp: Date.now(),
       author: moveActor,
+    }).catch(console.error);
+
+    res.json(clip);
+  });
+
+  /**
+   * POST /api/clips/:clipId/remove — bucket Remove (soft: active = false). On a real
+   * song, if anything depends on the version (placed timeline copies or Final) and
+   * confirm isn't true, answers 409
+   * { code: 'clip-in-use', message, dependents } so the client can show
+   * ClipInUseDialog and repeat with confirm: true. Otherwise releases the
+   * dependencies and removes in one transaction (storage.removeClip), then
+   * recomputes the section's task (applyTaskAfterVersionLeaves). Idea clips have no
+   * dependents and go straight through. Audio, notes and metadata stay.
+   */
+  app.post("/api/clips/:clipId/remove", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, songId)) return;
+    const { confirm } = req.body as { confirm?: boolean };
+
+    const row = db.select({ clip: clips, idea: ideas, track: instrumentTracks, song: songs })
+      .from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(eq(clips.id, clipId))
+      .get();
+    if (!row) return res.status(404).json({ message: "Clip not found." });
+    if (!row.clip.active) return res.status(409).json({ message: "This file has already been removed." });
+    const isRealSong = row.song.type === 'song';
+
+    if (isRealSong && confirm !== true) {
+      const dependents = await storage.getClipDependents(clipId);
+      if (dependents && hasClipDependents(dependents)) {
+        return res.status(409).json({ code: CLIP_IN_USE_CODE, message: "This file is in use.", dependents });
+      }
+    }
+
+    const clip = await storage.removeClip(clipId);
+    if (!clip) return res.status(404).json({ message: "Clip not found." });
+
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    if (isRealSong) {
+      try {
+        // row.clip was read before removeClip, so isFinal is the pre-release value.
+        await applyTaskAfterVersionLeaves(row.track, row.idea.sectionName, row.idea.id, row.clip.isFinal, actor);
+      } catch (err) {
+        console.error("[clips/:clipId/remove] failed to recompute task status:", err);
+      }
+    }
+
+    // Same type as the old PATCH { active: false } path. Idea-type songs name the Idea,
+    // never their hidden "Files" track/section.
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-removed',
+      description: isRealSong
+        ? `${actor} removed ${clip.name} from ${row.track.name} → ${row.idea.sectionName}`
+        : `${actor} removed ${clip.name} from ${row.song.name}`,
+      timestamp: Date.now(),
+      instrument: row.track.name,
+      sectionName: row.idea.sectionName,
+      author: actor,
     }).catch(console.error);
 
     res.json(clip);
