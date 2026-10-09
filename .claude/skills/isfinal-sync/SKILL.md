@@ -15,7 +15,7 @@ Marking a clip as final and changing a task's status are kept in sync automatica
 
 **Unmarking** follows the same-name rule in reverse: clearing `isFinal` on one timeline clip clears it on every clip with the same `trackId + name`.
 
-These rules apply from all three entry points. Never write `isFinal` outside the three entry points or the rules will be silently bypassed.
+These rules apply from all three entry points. Never write `isFinal` outside the three entry points or the rules will be silently bypassed. **Approved fourth path (planned):** a version move or Remove clears Final on that one clip inside its own transaction, then recomputes the section's task.
 
 **Entry point 1 — bucket clip marked final (`PATCH /api/clips/:clipId`)**
 

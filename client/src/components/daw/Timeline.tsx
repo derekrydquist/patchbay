@@ -316,6 +316,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     },
   });
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
+    // The view follows the file, same find-in-bucket event organize fires above.
+    onSuccess: ({ timelineClip }) => {
+      window.dispatchEvent(new CustomEvent('find-in-bucket', {
+        detail: { trackId: timelineClip.trackId, sectionName: timelineClip.sectionName ?? undefined },
+      }));
+    },
     onError: (msg) => console.error('[placeLooseFileOnTimeline] error:', msg),
   });
 

@@ -345,6 +345,45 @@ export type AlbumMembership = { albumId: string; albumName: string; songId: stri
 // transaction so the clip-insert and loose-file-delete are always atomic together, and
 // (for the timeline variant) atomic with the timeline_clips insert too.
 type DrizzleTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// The one naming rule for a clip landing in a section of a real song (type 'song'):
+// whatever its current name, it becomes "{dest track} {dest section} V{m}", m = the
+// highest V among the destination idea's clips with that prefix (inactive clips
+// included) + 1, V1 if none. Gaps stay; no other clip is renamed or renumbered. Idea
+// clips and Full Take sections (their clips store sectionName null) keep the name as
+// given. Plain string comparison, not a regex, so names with special characters need
+// no escaping. Call inside the transaction that inserts or moves the clip, and before
+// it lands — the clip itself must not count toward m.
+//
+// The pre-rename name is kept as metadata.originalFileName when that's empty, so a
+// raw filename ("drums_chorus.mp3") isn't lost. An existing originalFileName is never
+// overwritten. Returns the metadata unchanged when nothing needs filling.
+function landingClipName(
+  tx: DrizzleTx,
+  ideaId: string,
+  name: string,
+  metadata: Clip['metadata'],
+): { name: string; metadata: Clip['metadata'] } {
+  const dest = tx.select({ idea: ideas, trackName: instrumentTracks.name, songType: songs.type })
+    .from(ideas)
+    .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+    .where(eq(ideas.id, ideaId))
+    .get();
+  if (!dest || dest.songType !== 'song' || dest.idea.isFullTake) return { name, metadata };
+
+  const destPrefix = `${dest.trackName} ${dest.idea.sectionName} V`;
+  let highest = 0;
+  for (const { name: existing } of tx.select({ name: clips.name }).from(clips).where(eq(clips.ideaId, ideaId)).all()) {
+    if (!existing.startsWith(destPrefix)) continue;
+    const rest = existing.slice(destPrefix.length);
+    if (/^\d+$/.test(rest)) highest = Math.max(highest, Number(rest));
+  }
+  const finalName = `${destPrefix}${highest + 1}`;
+  if (finalName === name || metadata?.originalFileName) return { name: finalName, metadata };
+  return { name: finalName, metadata: { ...(metadata ?? {}), originalFileName: name } as NonNullable<Clip["metadata"]> };
+}
+
 function materializeLooseFileCore(
   tx: DrizzleTx,
   looseFileId: string,
@@ -369,10 +408,11 @@ function materializeLooseFileCore(
   // The clip reuses the loose file's id — the file keeps one identity across the move,
   // so client-side state keyed by id (e.g. the comment badge's last-viewed map) carries
   // over. Safe: the loose_files row is deleted below in the same transaction.
+  const landed = landingClipName(tx, idea.id, looseFile.name, looseFile.metadata);
   const clip: Clip = {
     id: looseFile.id,
     ideaId: idea.id,
-    name: looseFile.name,
+    name: landed.name,
     type: looseFile.type,
     color: looseFile.color,
     start: 0,
@@ -381,7 +421,7 @@ function materializeLooseFileCore(
     isFinal: false,
     active: true,
     sectionName,
-    metadata: looseFile.metadata,
+    metadata: landed.metadata,
     // Non-null only for a file that was an organized clip before being made loose
     // (dematerializeClipToBandLoose) — its "added to song" pills come back with it.
     addedToSongs: looseFile.addedToSongs,
@@ -1011,22 +1051,28 @@ export class SQLiteStorage implements IStorage {
 
   // ── Clips (bucket versions) ────────────────────────────────────────────────
 
+  // A real-song upload is named by landingClipName in the same transaction as the
+  // insert, whatever name the client sent.
   async createClip(data: InsertClip): Promise<Clip> {
     const now = new Date().toISOString();
-    const clip: Clip = {
-      start: 0,
-      isFinal: false,
-      active: true,
-      src: null,
-      sectionName: null,
-      metadata: null,
-      addedToSongs: null,
-      ...data,
-      id: data.id ?? randomUUID(),
-      createdAt: now,
-    };
-    db.insert(clips).values(clip).run();
-    return db.select().from(clips).where(eq(clips.id, clip.id)).get()!;
+    return db.transaction((tx) => {
+      const landed = landingClipName(tx, data.ideaId, data.name, data.metadata ?? null);
+      const clip: Clip = {
+        start: 0,
+        isFinal: false,
+        active: true,
+        src: null,
+        sectionName: null,
+        addedToSongs: null,
+        ...data,
+        id: data.id ?? randomUUID(),
+        name: landed.name,
+        metadata: landed.metadata,
+        createdAt: now,
+      };
+      tx.insert(clips).values(clip).run();
+      return tx.select().from(clips).where(eq(clips.id, clip.id)).get()!;
+    });
   }
 
   async countClipsForIdea(ideaId: string): Promise<number> {
