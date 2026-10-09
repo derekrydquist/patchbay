@@ -431,7 +431,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 **Reopening on a second right-click of the same trigger** — Radix's `ContextMenu` doesn't natively support re-firing when the same trigger is right-clicked again while its own menu is already open. Fixed via `use-reopenable-context-menu.ts` (a nonce-driven `key` remount on `ContextMenuContent`) paired with `modal={false}` on the `ContextMenu` root; wired into `BucketClip`, `IdeaFileContextMenu`, and `SongsClipContextMenuCard` (all in `Dashboard.tsx`/`Clip.tsx`). See "Platform and browser gotchas" below for why.
 
-**Context menu items (BucketClip):** More Info · Add Note · Mark as Final / Unmark Final · Add to Timeline (only when `onAddToTimeline` is passed — Workspace, not SongHome) · Download · **Remove** (red). Remove calls `PATCH /api/clips/:clipId { active: false }` (soft-delete) and invalidates `['bucket', songId]`. The `clips` table has an `active` column (boolean, default true); `getBucket` in `storage.ts` filters `eq(clips.active, true)`.
+**Context menu items (BucketClip):** More Info · Add Note · Mark as Final / Unmark Final · Add to Timeline (only when `onAddToTimeline` is passed — Workspace, not SongHome) · Download · **Remove** (red). Remove calls `POST /api/clips/:clipId/remove` (soft-delete, `active = false`) through `useClipInUseAction`; see "Remove and the in-use check" below. The `clips` table has an `active` column (boolean, default true); `getBucket` in `storage.ts` filters `eq(clips.active, true)`.
 
 **`isFinal` persistence** — `useEffect` syncs `isFinal` from the prop whenever the bucket query refetches. Local state is optimistically updated and reverted on API failure. `executeMark(newIsFinal)` is the shared path for both the direct toggle and the sibling-confirmation dialog.
 
@@ -440,6 +440,13 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 **Timeline clip removal guard** — `TimelineClip` shows an `AlertDialog` ("Remove Final Clip?") when a user selects "Remove Clip" from the context menu and `isFinal === true`. This is managed via `showRemoveConfirm` state in `TimelineClip`.
 
 **Auto-isFinal on timeline clip placement** — `POST /api/tracks/:trackId/clips` checks whether a final bucket clip exists for the same `trackId + sectionName`. If one exists, the newly placed timeline clip is immediately set to `isFinal: true`.
+
+### Remove and the in-use check — ✅ Built
+
+- **Trigger:** removing a real-song version with timeline copies or Final returns 409 `{ code: 'clip-in-use', dependents }`. `ClipInUseDialog` lists them; confirming repeats with `confirm: true`. A task status change alone never opens the dialog.
+- **On confirm:** `releaseClipDependencies` (`storage.ts`) deletes the clip's timeline copies by `bucketClipId`, clears Final on that one clip and nulls `relatedClipId`; then the section's task is recomputed. Audio, notes and metadata stay.
+- **Task rule** (`taskStatusAfterVersionLeaves`, `shared/clip-dependents.ts`): no active versions left → To Do; Complete → In Progress only if the leaving file was Final and no other Final remains; will-not-play never touched.
+- **Reuse:** the planned version moves reuse `releaseClipDependencies`, the 409 shape, `postClipLeave` and `useClipInUseAction`.
 
 ### Shared CornerBadge component — final/comment badges — ✅ Built
 
@@ -1013,6 +1020,10 @@ All three depend on the card (not the wrapper) being their nearest overflow ance
 **Scrollbar hover/visibility timing (if building similar fade logic elsewhere):** check hover state at fire-time, not schedule-time. An early version scheduled a flat 600ms hide-timer on every scroll event regardless of current hover state, causing a flash-then-fade bug when hovering right as a scroll ended. Correct pattern: `show()` clears any pending hide timer without scheduling a new one; `scheduleHide()` queues a 600ms timeout whose callback checks current `isHovering`/`isDragging` refs before hiding (no-ops if either is still true); `mouseenter`/`mouseleave` toggle the hover ref directly and call `show()`/`scheduleHide()` respectively.
 
 **Vertical scroll indicator is intentionally simpler than horizontal.** Vertical uses a native, lightly CSS-styled scrollbar (`::-webkit-scrollbar:vertical`, thin + gold, reusing the same `rgba` values as the horizontal JS thumb) rather than a custom JS-driven thumb. The `.scrollbar-hide-x` utility class hides only the native horizontal bar (`::-webkit-scrollbar:horizontal { display: none }`) while leaving the vertical bar visible and styled. This asymmetry — native/reveal-on-scroll/Safari-gray vs. horizontal's always-visible/JS-driven/gold-in-both-browsers — is a deliberate cost/effort trade-off, not a bug. Vertical scroll is a well-understood gesture that didn't need the same discoverability treatment as horizontal. Full parity, if ever wanted, would mean generalizing the horizontal JS thumb to handle both axes.
+
+### Production Tracker — due-date field
+
+Native `<input type="date">` with `[color-scheme:dark]` so Chrome's calendar icon shows on the dark field. No click handler: `showPicker()` on click blocked typing in Chrome.
 
 ### Production Tracker — Add/Remove Section & Instrument
 

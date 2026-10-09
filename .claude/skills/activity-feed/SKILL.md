@@ -62,6 +62,12 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 
 **Read-path filtering (added 2026-08-12):** `activity_log` had never had type-based filtering — every write, including types intended as "sort-only" (meant only to feed `getSongsWithLastActive`'s ranking, never to render), rendered as a visible Activity Feed row. This is now corrected inside `getActivity()` (`server/storage.ts`): a `notInArray(activityLog.type, [...])` condition excludes sort-only types from the `events[]` array returned to the client. The filter is read-path only — `logActivity()` still writes every type unconditionally, and `getSongsWithLastActive` (a separate function, separate query, no `type` condition) is untouched and still sees the full unfiltered table. Sort-only events continue to influence the Dashboard "Your Songs" ranking; they just never appear as feed rows. This also means the "Feed-visible?" column below is no longer just documentation intent — it is enforced in code for the first time. Two classifications changed as a result of actually auditing this (see the numbered lists below for detail): `idea-hidden` (item 15) turned out to be sort-only despite living in the old "Structural events" grouping, and the old single `clip-trimmed` type was split into `clip-trim-adjusted` (sort-only) and `clip-trim-applied-to-instances` (feed-visible) — they were previously indistinguishable in the log.
 
+**One row per user action (Oct 2026):**
+- Rows a single action also produces are logged but sort-only, or hidden in `getActivity`. They still count for the Your Songs sort, which reads every row regardless of type.
+- **Clip-built `file-added` row:** hidden for organized and placed clips. New rows link through `activity_log.clip_id`; older ones match strictly on song, track, section, the clip's name in the text, and a 2-second window.
+- **Task comments:** due-date and assignee comments are reworded as actions ("set the due date for T · S to X", "assigned T · S to X"). Automatic comments ("All clips marked final", "Clip state changed", "Clips unmarked as final") are skipped.
+- **Greeting "new files":** `GET /api/new-files-count` returns the band's active clips created in the last 48h. Removed clips and still-loose files don't count.
+
 ### Tier 2 event types — full reference
 
 | Type | Feed-visible? | Notes |
@@ -81,7 +87,10 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `section-added` | Yes | Two independent call sites (song section add; per-track idea/section bootstrap) both dedup via a 5-second lookback window against `activity_log` so simultaneous per-track calls collapse to one row. |
 | `section-deleted` | Yes | |
 | `section-restored` | Yes | Two independent client mutations hit this same server route (MediaBucket's `useRestoreSectionSongWide`, Production Tracker's `restoreSectionMutation`) — both are now wired to invalidate the feed; previously only one was. |
-| `clip-added-to-timeline` | Yes | |
+| `clip-added-to-timeline` | Yes | Reads "placed X on the timeline in T — S" (older rows reworded in `getActivity`). |
+| `clip-removed-from-timeline` | Yes | Reads "removed X from the timeline in T — S" (older rows reworded). |
+| `clip-final-set` / `clip-final-cleared` | Yes | "X marked/unmarked {clip} as Final", from `PATCH /api/clips` and `PATCH /api/timeline-clips` when the value changes (not Replace). |
+| `task-auto-completed` / `task-auto-reverted` | No — sort-only | Task outcome whose cause has its own row: a clip-level Final change, or Remove. |
 | `clip-replaced` | Yes | |
 | `timeline-reordered` | No — sort-only | A single drag reorder PATCHes every sibling clip whose `start` shifted. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (reorders are section-locked, so this is a correct proxy key) so one drag produces one row, not one per shifted clip. |
 | `clip-removed-from-timeline` | Yes | |
@@ -92,12 +101,12 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `idea-restored` | Yes | |
 | `clip-metadata-edited` | No — sort-only | Fires once per blur-to-save field edit in `ClipInfoWindow` — too granular for the feed. |
 | `clip-removed` | Yes | Bucket soft-delete. |
-| `file-uploaded` | Yes | |
-| `clip-comment-added` / `clip-comment-reply` | Added: Yes / Reply: No | Only the top-level comment has a rationale for feed visibility — no Tier-1 synthesized counterpart exists for replies, so surfacing them would risk duplicate-feeling events. |
+| `file-uploaded` | No — sort-only | Repeated the clip-built `file-added` row. |
+| `clip-comment-added` / `clip-comment-reply` | No — sort-only (both) | Top-level comments show through the row built from `clip_comments` (names track · section), so this generic row was a duplicate (Oct 2026). |
 | `clip-comment-edited` / `clip-comment-deleted` | No — sort-only | Editing/deleting comment text isn't meaningful production activity. |
 | `loose-file-comment-added` / `-reply` / `-edited` / `-deleted` | Added: Yes / others: No — sort-only | Notes on a loose file; logged only when the file has a `songId` (band-wide files log nothing). Same rationale as clip comments. Tier-1 `clip-comment` synthesis skips `clip_comments` rows with `carried_from_comment_id` set (notes moved in on organize or copied via copy-from). |
 | `task-status-change` | Yes | |
-| `task-comment-added` / `task-comment-reply` | Added: Yes / Reply: No | Same rationale as clip comments. |
+| `task-comment-added` / `task-comment-reply` | No — sort-only (both; the row built from `task_comments` shows instead) | Same rationale as clip comments. |
 | `task-comment-edited` / `task-comment-deleted` | No — sort-only | Same rationale as clip comments. |
 | `review-shared` | Yes | |
 | `review-comment` / `review-reply` | Yes | Review comments are the one comment surface where all five actions (add/reply/edit/delete/resolve) were already correctly wired for live feed updates before this session — reference pattern. |
