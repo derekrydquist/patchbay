@@ -1212,18 +1212,15 @@ export class SQLiteStorage implements IStorage {
     // A missing (or already-removed) physical file must never surface as an error.
     if (!looseFile?.src) return;
 
-    // Guard against deleting a file another row still needs. This is not a
-    // theoretical case: every loose-file upload currently goes through
-    // POST /api/upload with a fixed instrument='loose'/section='unplaced' and no
-    // ideaId, so buildFilename always computes version 1 — same-extension loose
-    // uploads collide on one physical filename and silently overwrite each other
-    // on disk while their loose_files rows (and, once organized, their clips/
-    // timeline_clips rows, which copy `src` as-is in materializeLooseFileCore)
-    // remain distinct. Confirmed present in current data (many rows sharing one
-    // src). Until that upload-side collision is fixed, unlinking on the honor
-    // system would delete a file out from under any other row still pointing at
-    // the same path — so check for other referents first and skip the unlink
-    // (leaving the row's own reference to a shared file orphaned, not the file).
+    // Guard against deleting a file another row still needs. New uploads get a
+    // unique physical name (buildFilename's token), but older uploads collided —
+    // loose uploads all computed loose_unplaced_v1.*, and section uploads reused
+    // {instrument}_{section}_v{n} across songs — so existing data still has many
+    // independent rows sharing one src, left unrepaired. A file can also be shared
+    // legitimately: a loose file or clip keeps its src when it's organized, made
+    // loose, or placed on the timeline (materializeLooseFileCore copies `src`
+    // as-is). So check for other referents first and skip the unlink (leaving the
+    // row's own reference to a shared file orphaned, not the file).
     const [otherLooseFile] = db.select({ id: looseFiles.id }).from(looseFiles)
       .where(eq(looseFiles.src, looseFile.src)).all();
     const [clipRef] = db.select({ id: clips.id }).from(clips)

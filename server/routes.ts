@@ -87,17 +87,31 @@ const upload = multer({
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Build a PatchBay-convention filename: {instrument}_{section}_v{n}.{ext} */
+/**
+ * Build a unique physical filename: {instrument}_{section}_v{n}_{token}.{ext}
+ * The readable prefix is for humans browsing uploads/ only — nothing parses it.
+ * The token (8 chars of a random UUID) is what makes it unique: the prefix alone
+ * is neither song-scoped nor stable (v{n} comes from a clip count that drops when
+ * clips leave an idea, and loose uploads always get v1), so without it a new
+ * upload could overwrite another row's audio. Unrelated to the clip's display
+ * name and V-number.
+ */
 function buildFilename(
   instrument: string,
   section: string,
   versionNum: number,
   originalName: string
 ): string {
-  const ext = path.extname(originalName).toLowerCase() || ".wav";
-  const inst = instrument.toLowerCase().replace(/\s+/g, "-");
-  const sec = section.toLowerCase().replace(/\s+/g, "-");
-  return `${inst}_${sec}_v${versionNum}${ext}`;
+  // instrument/section come from the request body: keep only [a-z0-9-] so a value
+  // like "../../x" can never steer the write outside uploads/.
+  const slug = (s: string) =>
+    s.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "unknown";
+  const rawExt = path.extname(originalName).toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 10);
+  const ext = rawExt ? `.${rawExt}` : ".wav";
+  const inst = slug(instrument);
+  const sec = slug(section);
+  const token = randomUUID().slice(0, 8);
+  return `${inst}_${sec}_v${versionNum}_${token}${ext}`;
 }
 
 // ─── Band session enrichment ──────────────────────────────────────────────────
@@ -2432,12 +2446,17 @@ export async function registerRoutes(
           : 0;
         const versionNum = existingCount + 1;
 
-        // Build the canonical filename
+        // Build a unique physical filename (see buildFilename)
         const filename = buildFilename(instrument, section, versionNum, req.file.originalname);
         const destPath = path.join(UPLOADS_DIR, filename);
+        // Second line of defense behind buildFilename's slugging.
+        if (path.dirname(path.resolve(destPath)) !== path.resolve(UPLOADS_DIR)) {
+          return res.status(400).json({ message: "Invalid upload destination." });
+        }
 
-        // Write buffer to disk
-        fs.writeFileSync(destPath, req.file.buffer);
+        // Write buffer to disk. "wx" fails if the file exists — an upload must never
+        // overwrite audio another row points at; a token collision fails the upload instead.
+        fs.writeFileSync(destPath, req.file.buffer, { flag: "wx" });
 
         // Extract duration and technical metadata using music-metadata
         let duration = 0;
