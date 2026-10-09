@@ -360,6 +360,10 @@ export const activityLog = sqliteTable("activity_log", {
   commentId: text("comment_id"),
   bandId: text("band_id"),
   author: text("author"),
+  // Set on rows for actions that create a clip (organize, place-on-timeline), so
+  // getActivity can hide the clip-built "added" row for that same clip. Nullable;
+  // older rows don't have it.
+  clipId: text("clip_id"),
 });
 
 export type InsertActivityLog = typeof activityLog.$inferInsert;

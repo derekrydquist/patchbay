@@ -1067,6 +1067,19 @@ export default function Dashboard() {
     refetchInterval: 10000,
   });
 
+  // Greeting's "N new files since yesterday": clips created in the last 48h, counted on
+  // the server so files whose feed row is hidden (organized / placed loose files) still
+  // count. Under ['activity', …] so every existing ['activity'] invalidation refreshes it.
+  const { data: newFilesData } = useQuery<{ count: number }>({
+    queryKey: ['activity', 'new-files-count'],
+    queryFn: async () => {
+      const res = await fetch('/api/new-files-count');
+      if (!res.ok) throw new Error('Failed to load new files count');
+      return res.json();
+    },
+    refetchInterval: 10000,
+  });
+
   const { toast } = useToast();
 
   const { data: fileBucket = [] } = useQuery<ApiTrack[]>({
@@ -1542,9 +1555,7 @@ export default function Dashboard() {
   const dueSoonCount = overdueCount === 0
     ? activeTasks.filter(t => t.dueDate && parseLocalDate(t.dueDate) >= today && parseLocalDate(t.dueDate) <= sevenDaysFromNow).length
     : 0;
-  const newFilesCount = activityEvents.filter(e =>
-    e.type === 'file-added' && e.timestamp > Date.now() - 48 * 60 * 60 * 1000
-  ).length;
+  const newFilesCount = newFilesData?.count ?? 0;
   const clauseA = overdueCount > 0
     ? `${overdueCount} overdue task${overdueCount === 1 ? '' : 's'}`
     : dueSoonCount > 0

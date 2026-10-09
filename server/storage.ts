@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, ne, asc, desc, inArray, notInArray, count, and, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { eq, ne, asc, desc, inArray, notInArray, count, and, gte, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -146,7 +146,9 @@ export interface ActivityEvent {
       | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
       | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
-      | 'clip-made-loose';
+      | 'clip-made-loose' | 'clip-final-set' | 'clip-final-cleared'
+      // Sort-only: a task outcome whose cause already has its own feed row.
+      | 'task-auto-completed' | 'task-auto-reverted';
   description: string;
   timestamp: number; // ms since epoch
   songId: string;
@@ -235,6 +237,7 @@ export interface IStorage {
   getTaskByTrackSection(trackId: string, sectionName: string): Promise<ProductionTask | undefined>;
   countActiveClipsForIdea(ideaId: string): Promise<number>;
   hasActiveFinalClipInIdea(ideaId: string, excludeClipId?: string): Promise<boolean>;
+  countClipsCreatedSince(bandId: string, sinceIso: string): Promise<number>;
   materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
@@ -1402,6 +1405,17 @@ export class SQLiteStorage implements IStorage {
       .get();
   }
 
+  // Active clips created at or after sinceIso, across the band's songs and Ideas.
+  // createdAt is an ISO 8601 UTC string, so string comparison orders correctly.
+  async countClipsCreatedSince(bandId: string, sinceIso: string): Promise<number> {
+    return db.select({ value: count() }).from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(and(eq(songs.bandId, bandId), eq(clips.active, true), gte(clips.createdAt, sinceIso)))
+      .get()?.value ?? 0;
+  }
+
   async countActiveClipsForIdea(ideaId: string): Promise<number> {
     return db.select({ value: count() }).from(clips)
       .where(and(eq(clips.ideaId, ideaId), eq(clips.active, true)))
@@ -1476,8 +1490,43 @@ export class SQLiteStorage implements IStorage {
       .where(clipSongCond)
       .all();
 
+    // A clip created by organizing or placing a loose file already has its own row
+    // ('loose-file-organized' / 'loose-file-placed'); the clip-built "added" row would
+    // repeat it. Newer log rows carry the clip id. Older ones don't, so they're matched
+    // strictly: same song, track and section, the clip's own name in the text, and
+    // logged within 2s of the clip's createdAt (both are written in the same request —
+    // existing data matches 1:1, at most 8ms apart).
+    const looseLandingRows = db
+      .select({
+        clipId: activityLog.clipId,
+        type: activityLog.type,
+        description: activityLog.description,
+        timestamp: activityLog.timestamp,
+        instrument: activityLog.instrument,
+        sectionName: activityLog.sectionName,
+        songId: activityLog.songId,
+      })
+      .from(activityLog)
+      .innerJoin(songs, eq(activityLog.songId, songs.id))
+      .where(and(clipSongCond, inArray(activityLog.type, ['loose-file-organized', 'loose-file-placed'])))
+      .all();
+    const clipsWithOwnRow = new Set(looseLandingRows.flatMap((r) => (r.clipId ? [r.clipId] : [])));
+    const legacyLandingRows = new Map<string, typeof looseLandingRows>();
+    for (const r of looseLandingRows) {
+      if (r.clipId) continue;
+      const key = `${r.songId}|${r.instrument}|${r.sectionName}`;
+      legacyLandingRows.set(key, [...(legacyLandingRows.get(key) ?? []), r]);
+    }
+    const hasOwnLandingRow = (clipId: string, songId: string, track: string, section: string | null, name: string, ts: number) =>
+      clipsWithOwnRow.has(clipId) ||
+      (legacyLandingRows.get(`${songId}|${track}|${section}`) ?? []).some((r) =>
+        Math.abs(r.timestamp - ts) <= 2000 &&
+        (r.description.includes(` organized ${name} into `) || r.description.includes(` placed ${name} on the timeline `))
+      );
+
     for (const row of clipRows) {
       const ts = new Date(row.createdAt).getTime();
+      if (hasOwnLandingRow(row.clipId, row.songId, row.trackName, row.sectionName, row.clipName, ts)) continue;
       const uploader = row.metadata?.uploadedBy || 'Someone';
       // Idea-type songs have exactly one hidden, auto-created track/section (both
       // literally named "Files" — see ensureIdeaDefaultFolder). Naming it here would
@@ -1564,6 +1613,16 @@ export class SQLiteStorage implements IStorage {
       } else if (row.text.startsWith('Clip marked as final:')) {
         // Now covered by a real activity_log row ('marked-final') written at mutation time.
         continue;
+      } else if (
+        row.text.startsWith('All clips marked final') ||
+        row.text.startsWith('Clip state changed') ||
+        row.text.startsWith('Clips unmarked as final')
+      ) {
+        // Automatic comments: reconcileSectionTaskStatus's complete/revert notes and the
+        // Production tab's Complete / revert-from-Complete notes. The status change itself
+        // already has an activity_log row. Now authored 'System', but older rows carry a
+        // user's name and would otherwise read as "{user} commented on … task".
+        continue;
       } else if (row.text.startsWith('Clip unmarked as final:')) {
         const unmatchResult = row.text.match(/^Clip unmarked as final: "([^"]+)"/);
         const unmarkName = unmatchResult ? unmatchResult[1] : 'clip';
@@ -1610,6 +1669,27 @@ export class SQLiteStorage implements IStorage {
         });
       } else if (row.author === 'System') {
         continue;
+      } else if (/^(Due date set to |Due date removed$|Assignee set to |Assignee removed$)/.test(row.text)) {
+        // Task edits recorded as comments by PATCH /api/production-tasks/:id — shown as
+        // the action, not as "commented on". Mapped here so existing rows read the same.
+        const who = row.author === 'Unknown' ? 'You' : row.author;
+        const where = `${row.instrument} · ${row.sectionName}`;
+        const description =
+          row.text.startsWith('Due date set to ') ? `${who} set the due date for ${where} to ${row.text.slice('Due date set to '.length)}`
+          : row.text === 'Due date removed' ? `${who} cleared the due date for ${where}`
+          : row.text.startsWith('Assignee set to ') ? `${who} assigned ${where} to ${row.text.slice('Assignee set to '.length)}`
+          : `${who} unassigned ${where}`;
+        events.push({
+          type: 'task-comment',
+          description,
+          timestamp: row.timestamp,
+          songId: row.songId,
+          songName: row.songName,
+          taskId: row.taskId,
+          instrument: row.instrument,
+          sectionName: row.sectionName,
+          source: 'task',
+        });
       } else if (!row.text.startsWith('Clip unmarked as final')) {
         const displayAuthor = row.author === 'Unknown' ? 'You' : row.author;
         events.push({
@@ -1680,6 +1760,19 @@ export class SQLiteStorage implements IStorage {
       'loose-file-comment-reply',
       'loose-file-comment-edited',
       'loose-file-comment-deleted',
+      // Top-level clip and task comments are already shown by rows built from
+      // clip_comments / task_comments below, which name the track and section
+      // ("X commented on Bass · Chorus 2 task"). These generic rows ("X commented on a
+      // task") duplicated them. Skipped here rather than no longer logged, so existing
+      // rows disappear too and the Your Songs sort still counts the activity.
+      'clip-comment-added',
+      'task-comment-added',
+      // An upload already appears as the clip-built "added {clip} to {track} — {section}"
+      // row; this "uploaded {clip}" row repeated it.
+      'file-uploaded',
+      // Task outcomes of a clip marked/unmarked Final — that action has its own row.
+      'task-auto-completed',
+      'task-auto-reverted',
     ]);
     const logCond = songId
       ? and(eq(activityLog.songId, songId), bandCond, sortOnlyCond)
@@ -1702,9 +1795,29 @@ export class SQLiteStorage implements IStorage {
       .all();
 
     for (const row of logRows) {
+      // Older placement rows read "{user} added {clip} to {track} — {section}", the same
+      // words as the upload row. Reworded to the current text by stripping the exact
+      // suffix the route wrote (from the row's own instrument/section columns).
+      let description = row.description;
+      const oldPlacementSuffix = ` to ${row.instrument} — ${row.sectionName}`;
+      const addedAt = description.indexOf(' added ');
+      if (row.type === 'clip-added-to-timeline' && addedAt > 0 && description.endsWith(oldPlacementSuffix)) {
+        const who = description.slice(0, addedAt);
+        const name = description.slice(addedAt + ' added '.length, description.length - oldPlacementSuffix.length);
+        description = `${who} placed ${name} on the timeline in ${row.instrument} — ${row.sectionName}`;
+      }
+      // Older timeline-copy removals read "{user} removed {clip} from {track} — {section}",
+      // too close to the file removal ("… from {track} → {section}"). Same suffix strip.
+      const oldTimelineRemovalSuffix = ` from ${row.instrument} — ${row.sectionName}`;
+      const removedAt = description.indexOf(' removed ');
+      if (row.type === 'clip-removed-from-timeline' && removedAt > 0 && description.endsWith(oldTimelineRemovalSuffix)) {
+        const who = description.slice(0, removedAt);
+        const name = description.slice(removedAt + ' removed '.length, description.length - oldTimelineRemovalSuffix.length);
+        description = `${who} removed ${name} from the timeline in ${row.instrument} — ${row.sectionName}`;
+      }
       events.push({
         type: row.type as ActivityEvent['type'],
-        description: row.description,
+        description,
         timestamp: row.timestamp,
         songId: row.songId,
         songName: row.songName,

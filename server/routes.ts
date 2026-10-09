@@ -260,11 +260,21 @@ function lyricsCommentSongId(commentId: string): string | null {
 //   - all final     → advance to "complete" if not already
 //   - not all final → revert to "in-progress" if currently "complete"
 //   - task is "todo" && ≥1 clip → advance to "in-progress"
+//
+// The task comments it writes are system comments (author 'System', never a user or
+// the request body); actor is only for the activity_log row.
+//
+// outcomeSortOnly: the caller already logged a feed row naming the user's own action
+// (a clip marked/unmarked Final), so the task outcome is logged under sort-only types
+// ('task-auto-completed' / 'task-auto-reverted') — still counted by the Your Songs sort,
+// hidden from the feed. Callers whose only record is this row (placing or deleting a
+// timeline clip) leave it false and keep the visible 'marked-final' /
+// 'clip-unmarked-final' rows.
 async function reconcileSectionTaskStatus(
   trackId: string,
   sectionName: string,
   actor: string,
-  commentAuthor: string,
+  outcomeSortOnly = false,
 ): Promise<void> {
   const sectionClips = db.select().from(timelineClips)
     .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.sectionName, sectionName)))
@@ -285,14 +295,14 @@ async function reconcileSectionTaskStatus(
     await storage.addTaskComment({
       id: randomUUID(),
       taskId: task.id,
-      author: commentAuthor,
+      author: 'System',
       text: 'All clips marked final — task completed',
       timestamp: Date.now(),
     });
     storage.logActivity({
       id: randomUUID(),
       songId: track.songId,
-      type: 'marked-final',
+      type: outcomeSortOnly ? 'task-auto-completed' : 'marked-final',
       description: `${actor} completed ${track.name} · ${sectionName}`,
       timestamp: Date.now(),
       instrument: track.name,
@@ -304,14 +314,14 @@ async function reconcileSectionTaskStatus(
     await storage.addTaskComment({
       id: randomUUID(),
       taskId: task.id,
-      author: commentAuthor,
+      author: 'System',
       text: 'Clip state changed — task reverted to In Progress',
       timestamp: Date.now(),
     });
     storage.logActivity({
       id: randomUUID(),
       songId: track.songId,
-      type: 'clip-unmarked-final',
+      type: outcomeSortOnly ? 'task-auto-reverted' : 'clip-unmarked-final',
       description: `${actor} reverted ${track.name} · ${sectionName} to In Progress`,
       timestamp: Date.now(),
       instrument: track.name,
@@ -334,7 +344,7 @@ async function advanceTaskOnClipAdded(track: InstrumentTrack, sectionName: strin
   if (task?.status === "todo") {
     await storage.updateTask(task.id, { status: "in-progress" });
   }
-  await reconcileSectionTaskStatus(track.id, sectionName, actor, actor);
+  await reconcileSectionTaskStatus(track.id, sectionName, actor);
 }
 
 // ─── applyTaskAfterVersionLeaves ───────────────────────────────────────────────
@@ -371,10 +381,13 @@ async function applyTaskAfterVersionLeaves(
       : `${label} — the section's Final file left`,
     timestamp: Date.now(),
   });
+  // Sort-only, like reconcile's outcomes after a clip-level Final change: the file's own
+  // 'clip-removed' row is the feed record of the action. Still counted by the Your Songs
+  // sort. Both outcomes here (In Progress, To Do) are reverts.
   storage.logActivity({
     id: randomUUID(),
     songId: track.songId,
-    type: 'task-status-change',
+    type: 'task-auto-reverted',
     description: `${actor} changed status to ${label.replace(/^Status changed to /, '')} — ${track.name} · ${sectionName}`,
     timestamp: Date.now(),
     instrument: track.name,
@@ -463,6 +476,17 @@ export async function registerRoutes(
   app.get("/api/activity", requireBand, async (req, res) => {
     const events = await storage.getActivity(req.bandId!);
     res.json(events);
+  });
+
+  /**
+   * GET /api/new-files-count — the Dashboard greeting's "N new files since yesterday":
+   * active clips created in the last 48 hours, on real songs and Ideas, whether or not
+   * their feed row is shown. Still-loose files don't count until they're organized.
+   */
+  app.get("/api/new-files-count", requireBand, async (req, res) => {
+    const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const count = await storage.countClipsCreatedSince(req.bandId!, since);
+    res.json({ count });
   });
 
   app.get("/api/songs/:songId/activity", requireBand, async (req, res) => {
@@ -1090,7 +1114,7 @@ export async function registerRoutes(
             id: randomUUID(),
             songId: addTrack.songId,
             type: 'clip-added-to-timeline',
-            description: `${clipAddedActor} added ${clip.name} to ${addTrack.name} — ${clip.sectionName}`,
+            description: `${clipAddedActor} placed ${clip.name} on the timeline in ${addTrack.name} — ${clip.sectionName}`,
             timestamp: Date.now(),
             instrument: addTrack.name,
             sectionName: clip.sectionName,
@@ -1107,7 +1131,6 @@ export async function registerRoutes(
           trackId,
           clip.sectionName,
           clipAddedActor,
-          clipAddedActor,
         );
       } catch (err) {
         console.error("[timeline clip add] failed to reconcile task status:", err);
@@ -1121,7 +1144,9 @@ export async function registerRoutes(
     const clipId = req.params.id as string;
     const tclipSongId = timelineClipSongId(clipId);
     if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
-    const { author: commentAuthor, ...clipUpdates } = req.body;
+    // `author` is stripped so it never reaches the update; it's no longer used (system
+    // task comments are authored 'System').
+    const { author: _ignoredAuthor, ...clipUpdates } = req.body;
     const timelineClipActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
@@ -1165,13 +1190,34 @@ export async function registerRoutes(
             .run();
         }
 
+        // One feed row for the user's action, naming the clip — not for Replace, whose
+        // isFinal:false is a mechanical reset, and only when the value changed. The task
+        // outcome reconcile logs is then sort-only.
+        const finalChanged = !isReplace && existingClip.isFinal !== isFinal;
+        if (finalChanged) {
+          const finalTrack = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, clip.trackId)).get();
+          if (finalTrack) {
+            storage.logActivity({
+              id: randomUUID(),
+              songId: finalTrack.songId,
+              type: isFinal ? 'clip-final-set' : 'clip-final-cleared',
+              description: `${timelineClipActor} ${isFinal ? 'marked' : 'unmarked'} ${clip.name} as Final`,
+              timestamp: Date.now(),
+              instrument: finalTrack.name,
+              sectionName: clip.sectionName ?? undefined,
+              author: timelineClipActor,
+              clipId: clip.bucketClipId ?? undefined,
+            }).catch(console.error);
+          }
+        }
+
         // Reconcile task status from the full section state
         if (clip.sectionName) {
           await reconcileSectionTaskStatus(
             clip.trackId,
             clip.sectionName,
             timelineClipActor,
-            commentAuthor || "Unknown",
+            finalChanged,
           );
         }
       } catch (err) {
@@ -1265,7 +1311,7 @@ export async function registerRoutes(
           id: randomUUID(),
           songId: track.songId,
           type: 'clip-removed-from-timeline',
-          description: `${clipRemovedActor} removed ${clipToRemove.name} from ${track.name} — ${clipToRemove.sectionName}`,
+          description: `${clipRemovedActor} removed ${clipToRemove.name} from the timeline in ${track.name} — ${clipToRemove.sectionName}`,
           timestamp: Date.now(),
           instrument: track.name,
           sectionName: clipToRemove.sectionName ?? undefined,
@@ -1277,7 +1323,6 @@ export async function registerRoutes(
         await reconcileSectionTaskStatus(
           clipToRemove.trackId,
           clipToRemove.sectionName,
-          clipRemovedActor,
           clipRemovedActor,
         ).catch(err => console.error("[timeline clip delete] failed to reconcile task status:", err));
       }
@@ -1620,10 +1665,13 @@ export async function registerRoutes(
     const clipId = req.params.clipId as string;
     const songId = clipSongId(clipId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
-    const { author: commentAuthor, ...clipUpdates } = req.body;
+    // `author` is stripped so it never reaches the update; it's no longer used (system
+    // task comments are authored 'System').
+    const { author: _ignoredAuthor, ...clipUpdates } = req.body;
     const bucketClipActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
+    const wasFinal = db.select({ isFinal: clips.isFinal }).from(clips).where(eq(clips.id, clipId)).get()?.isFinal;
     const clip = await storage.updateClip(clipId, clipUpdates);
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
@@ -1648,12 +1696,31 @@ export async function registerRoutes(
               .run();
           }
 
+          // One feed row for the user's action, naming the clip; the task outcome
+          // reconcile logs is then sort-only. Only when the value actually changed.
+          const finalChanged = wasFinal !== undefined && wasFinal !== clipUpdates.isFinal;
+          if (finalChanged) {
+            const finalTrack = db.select({ name: instrumentTracks.name }).from(instrumentTracks)
+              .where(eq(instrumentTracks.id, idea.trackId)).get();
+            storage.logActivity({
+              id: randomUUID(),
+              songId,
+              type: clipUpdates.isFinal ? 'clip-final-set' : 'clip-final-cleared',
+              description: `${bucketClipActor} ${clipUpdates.isFinal ? 'marked' : 'unmarked'} ${clip.name} as Final`,
+              timestamp: Date.now(),
+              instrument: finalTrack?.name,
+              sectionName: idea.sectionName,
+              author: bucketClipActor,
+              clipId,
+            }).catch(console.error);
+          }
+
           // Reconcile task status from full section state
           await reconcileSectionTaskStatus(
             idea.trackId,
             idea.sectionName,
             bucketClipActor,
-            commentAuthor || "Unknown",
+            finalChanged,
           );
         }
       } catch (err) {
@@ -2043,6 +2110,7 @@ export async function registerRoutes(
         instrument: track.name,
         sectionName,
         author: organizeActor,
+        clipId: clip.id,
       }).catch(console.error);
       await advanceTaskOnClipAdded(track, sectionName, organizeActor);
     }
@@ -2256,6 +2324,7 @@ export async function registerRoutes(
         instrument: track.name,
         sectionName,
         author: placeActor,
+        clipId: result.clip.id,
       }).catch(console.error);
       await advanceTaskOnClipAdded(track, sectionName, placeActor);
     }
@@ -2726,7 +2795,12 @@ export async function registerRoutes(
     const taskId = req.params.id as string;
     const songId = taskSongId(taskId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
-    const { author: commentAuthor, ...taskUpdates } = req.body;
+    // `author` in the body is ignored (stripped so it never reaches the update). User
+    // actions are attributed to the session user; automatic comments to 'System'.
+    const { author: _ignoredAuthor, ...taskUpdates } = req.body;
+    const actorName = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
 
     const previous = db.select().from(productionTasks).where(eq(productionTasks.id, taskId)).get();
 
@@ -2769,7 +2843,7 @@ export async function registerRoutes(
           await storage.addTaskComment({
             id: randomUUID(),
             taskId,
-            author: commentAuthor || "Unknown",
+            author: 'System',
             text: `All clips marked final: ${uniqueNames.map(n => `"${n}"`).join(', ')}`,
             timestamp: Date.now(),
           });
@@ -2790,13 +2864,9 @@ export async function registerRoutes(
     const task = await storage.updateTask(taskId, taskUpdates);
     if (!task) return res.status(404).json({ message: "Task not found" });
 
-    const author = commentAuthor || "Unknown";
-
     if (previous && taskUpdates.status && taskUpdates.status !== previous.status) {
       const label = STATUS_LABELS[taskUpdates.status as string];
       if (label) {
-        const sessionUser = req.session.userId ? await storage.getUser(req.session.userId) : null;
-        const actorName = sessionUser?.username ?? author;
         await storage.addTaskComment({
           id: randomUUID(),
           taskId,
@@ -2823,7 +2893,7 @@ export async function registerRoutes(
       await storage.addTaskComment({
         id: randomUUID(),
         taskId,
-        author,
+        author: actorName,
         text,
         timestamp: Date.now(),
       });
@@ -2834,7 +2904,7 @@ export async function registerRoutes(
       await storage.addTaskComment({
         id: randomUUID(),
         taskId,
-        author,
+        author: actorName,
         text,
         timestamp: Date.now(),
       });
@@ -2876,7 +2946,7 @@ export async function registerRoutes(
             await storage.addTaskComment({
               id: randomUUID(),
               taskId,
-              author,
+              author: 'System',
               text: `Clips unmarked as final: ${unmarkedNames.map(n => `"${n}"`).join(', ')}. Status changed to ${statusNames[taskUpdates.status as string] ?? taskUpdates.status}.`,
               timestamp: Date.now(),
             });

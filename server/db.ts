@@ -300,3 +300,13 @@ if (!hasClipCommentsCarriedFrom) {
   sqlite.exec("ALTER TABLE clip_comments ADD COLUMN carried_from_comment_id TEXT");
   console.log("[PatchBay] Added carried_from_comment_id column to clip_comments table.");
 }
+
+// activity_log.clip_id — links an organize / place-on-timeline row to the clip it
+// created, so getActivity shows one row for that action. Nullable, additive.
+const hasActivityLogClipId = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('activity_log') WHERE name='clip_id'"
+).get() as { c: number }).c;
+if (!hasActivityLogClipId) {
+  sqlite.exec("ALTER TABLE activity_log ADD COLUMN clip_id TEXT");
+  console.log("[PatchBay] Added clip_id column to activity_log table.");
+}
