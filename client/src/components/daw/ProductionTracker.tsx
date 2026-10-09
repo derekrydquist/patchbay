@@ -421,11 +421,13 @@ function CellModal({
                 )}
               </label>
               <div className="px-1">
+                {/* [color-scheme:dark] makes Chrome draw its calendar icon light on the dark
+                    field — Chrome opens the picker only from that icon. */}
                 <Input
                   type="date"
                   value={task.dueDate || ''}
                   onChange={(e) => patchTask.mutate({ dueDate: e.target.value || null })}
-                  className="bg-black/40 border-white/10 text-xs h-10 w-full"
+                  className="bg-black/40 border-white/10 text-xs h-10 w-full [color-scheme:dark]"
                 />
               </div>
             </div>
