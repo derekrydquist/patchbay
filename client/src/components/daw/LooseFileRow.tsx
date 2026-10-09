@@ -1,7 +1,7 @@
 import { type ReactNode, createContext, useCallback, useContext, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { useQueryClient } from '@tanstack/react-query';
-import { FileAudio, Info, MessageCircle, MessageSquare, Trash2 } from 'lucide-react';
+import { FileAudio, Info, MessageCircle, MessageSquare, Plus, Trash2 } from 'lucide-react';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger,
 } from '@/components/ui/context-menu';
@@ -87,6 +87,16 @@ export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow:
   return { open, infoWindow };
 }
 
+// ─── Add to Timeline for loose files ─────────────────────────────────────────
+// Only Timeline.tsx (Workspace) provides this: it opens Timeline's own
+// Place-on-Timeline dialog for the file. Surfaces with no timeline (SongHome's
+// Song Files tab, the Songs quick-browser, the Ideas shelf) mount no provider, so
+// the menu item is omitted there — same opt-in shape as LooseFileInfoProvider.
+export type PlaceLooseFileOnTimeline = (looseFile: ApiLooseFile) => void;
+
+const LooseFilePlacementContext = createContext<PlaceLooseFileOnTimeline | null>(null);
+export const LooseFilePlacementProvider = LooseFilePlacementContext.Provider;
+
 interface LooseFileRowProps {
   looseFile: ApiLooseFile;
   // null for a band-wide, unassigned file (Ideas shelf Column 1) — carried in drag
@@ -119,13 +129,15 @@ interface LooseFileContextMenuProps {
   children: ReactNode;
 }
 
-// The right-click menu on every LooseFileRow: More Info, Add Note, Delete. More
-// Info / Add Note open the surface's shared ClipInfoWindow (see
-// useLooseFileInfoWindow above) and are omitted if no provider is mounted. The Ideas
+// The right-click menu on every LooseFileRow: More Info, Add Note, Add to Timeline,
+// Delete. More Info / Add Note open the surface's shared ClipInfoWindow (see
+// useLooseFileInfoWindow above) and are omitted if no provider is mounted; Add to
+// Timeline likewise needs LooseFilePlacementProvider (Workspace only). The Ideas
 // shelf's one-off preview card isn't a LooseFileRow — it uses IdeaFileContextMenu,
 // which carries the same items plus Add to Song / Promote to Song.
 export function LooseFileContextMenu({ looseFile, songId, onDeleted, children }: LooseFileContextMenuProps) {
   const openInfo = useContext(LooseFileInfoContext);
+  const placeOnTimeline = useContext(LooseFilePlacementContext);
   const deleteMutation = useDeleteLooseFile({
     onSuccess: () => onDeleted?.(),
     onError: (msg) => console.error('[deleteLooseFile] error:', msg),
@@ -135,20 +147,32 @@ export function LooseFileContextMenu({ looseFile, songId, onDeleted, children }:
     <ContextMenu>
       <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
       <ContextMenuContent className="bg-[#0c0c0e] border-white/10 min-w-[140px]">
-        {openInfo && (
+        {(openInfo || placeOnTimeline) && (
           <>
-            <ContextMenuItem
-              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-              onClick={() => openInfo(looseFile)}
-            >
-              <Info size={13} className="text-white/50" /> More Info
-            </ContextMenuItem>
-            <ContextMenuItem
-              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
-              onClick={() => openInfo(looseFile, { focusNotes: true })}
-            >
-              <MessageSquare size={13} className="text-white/50" /> Add Note
-            </ContextMenuItem>
+            {openInfo && (
+              <>
+                <ContextMenuItem
+                  className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                  onClick={() => openInfo(looseFile)}
+                >
+                  <Info size={13} className="text-white/50" /> More Info
+                </ContextMenuItem>
+                <ContextMenuItem
+                  className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                  onClick={() => openInfo(looseFile, { focusNotes: true })}
+                >
+                  <MessageSquare size={13} className="text-white/50" /> Add Note
+                </ContextMenuItem>
+              </>
+            )}
+            {placeOnTimeline && (
+              <ContextMenuItem
+                className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+                onClick={() => placeOnTimeline(looseFile)}
+              >
+                <Plus size={13} className="text-white/50" /> Add to Timeline
+              </ContextMenuItem>
+            )}
             <ContextMenuSeparator className="bg-white/5" />
           </>
         )}

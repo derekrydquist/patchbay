@@ -2004,9 +2004,13 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
             <CheckCircle2 size={14} className={isFinal ? "text-primary" : "text-primary/40"} />
             {isFinal ? "Unmark Final" : "Mark as Final"}
           </ContextMenuItem>
-          <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddToTimeline?.(clip, trackId); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
-            <Plus size={14} className="text-primary" /> Add to Timeline
-          </ContextMenuItem>
+          {/* Only surfaces with a timeline pass onAddToTimeline (Workspace); SongHome's
+              Song Files tab mounts MediaBucket without one, so the item is omitted there. */}
+          {onAddToTimeline && (
+            <ContextMenuItem onClick={(e) => { e.stopPropagation(); onAddToTimeline(clip, trackId); }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+              <Plus size={14} className="text-primary" /> Add to Timeline
+            </ContextMenuItem>
+          )}
           <Separator className="my-1 bg-border/50" />
           <ContextMenuItem onClick={(e) => {
             e.stopPropagation();

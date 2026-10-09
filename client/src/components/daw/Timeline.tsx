@@ -31,7 +31,8 @@ import {
 import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
-import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack } from '@/lib/bucket-api';
+import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
+import { LooseFilePlacementProvider } from './LooseFileRow';
 import { useLiveClipCommentSummary } from './Clip';
 import { usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
 import {
@@ -322,7 +323,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         detail: { trackId: timelineClip.trackId, sectionName: timelineClip.sectionName ?? undefined },
       }));
     },
-    onError: (msg) => console.error('[placeLooseFileOnTimeline] error:', msg),
+    // The dialog closes on confirm, before the server answers — without a toast a
+    // failed placement looks like nothing happened.
+    onError: (msg) => {
+      console.error('[placeLooseFileOnTimeline] error:', msg);
+      toast({ title: 'Failed to place file on the timeline', description: msg, variant: 'destructive' });
+    },
   });
 
   // Backs the Place-on-Timeline modal's Track/Section dropdowns. Same query key
@@ -457,6 +463,37 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const [loosePlacementModal, setLoosePlacementModal] = useState<{
     looseFileId: string; trackId: string; sectionName: string;
   } | null>(null);
+  // Place-on-Timeline's Section options: only the chosen track's own active,
+  // non-Full-Take sections — the server needs that exact idea row to exist, and
+  // Full Take isn't a section column. A selection that isn't in this list (a drop
+  // position on a section this track lacks, or a track switch) reads as empty.
+  const placementSectionNames = React.useMemo(() => {
+    const track = bucketTracksForPlacement.find((t) => t.id === loosePlacementModal?.trackId);
+    return track ? track.ideas.filter((i) => i.active && !i.isFullTake).map((i) => i.sectionName) : [];
+  }, [bucketTracksForPlacement, loosePlacementModal?.trackId]);
+  const placementSectionName = loosePlacementModal && placementSectionNames.includes(loosePlacementModal.sectionName)
+    ? loosePlacementModal.sectionName
+    : '';
+  // Shared by the timeline drop and the loose-file "Add to Timeline" menu item:
+  // the song has no sections at all, so the placement picker has nothing to offer.
+  const showNoSectionsToast = () => toast({
+    title: 'No sections yet',
+    description: 'This song has no sections yet — add one first, then place the file on the timeline.',
+    variant: 'destructive',
+  });
+  // Loose-file right-click "Add to Timeline" (LooseFilePlacementProvider, MediaBucket's
+  // rows): the same placement picker a timeline drop opens, but with no drop point —
+  // the track is pre-selected only for a file on a track's shelf, the section never.
+  const openLooseFilePlacement = (looseFile: ApiLooseFile) => {
+    if (songSectionNames.length === 0) {
+      showNoSectionsToast();
+      return;
+    }
+    const shelfTrackId = looseFile.trackId && bucketTracksForPlacement.some((t) => t.id === looseFile.trackId)
+      ? looseFile.trackId
+      : '';
+    setLoosePlacementModal({ looseFileId: looseFile.id, trackId: shelfTrackId, sectionName: '' });
+  };
   const [playheadTimeSecs, setPlayheadTimeState] = useState(() => {
     const saved = localStorage.getItem(`patchbay-playhead-${songId}`);
     if (saved) {
@@ -2373,11 +2410,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       // sections at all to choose from anywhere. Narrow toast, no modal — there is
       // nothing for the picker to offer.
       if (songSectionNames.length === 0) {
-        toast({
-          title: 'No sections yet',
-          description: 'This song has no sections yet — add one first, then place the file on the timeline.',
-          variant: 'destructive',
-        });
+        showNoSectionsToast();
         return;
       }
 
@@ -2805,6 +2838,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       onDragEnd={handleDragEnd}
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
+        <LooseFilePlacementProvider value={openLooseFilePlacement}>
         <MediaBucket
           songId={songId}
           modeTabs={modeTabs}
@@ -2869,6 +2903,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
           }}
         />
+        </LooseFilePlacementProvider>
 
         <div
           className="flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none shrink-0"
@@ -3236,7 +3271,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
               <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Track</Label>
               <Select
                 value={loosePlacementModal?.trackId ?? ''}
-                onValueChange={(v) => setLoosePlacementModal((prev) => prev ? { ...prev, trackId: v } : prev)}
+                onValueChange={(v) => setLoosePlacementModal((prev) => {
+                  if (!prev) return prev;
+                  // Clear a section the new track doesn't have.
+                  const nextTrack = bucketTracksForPlacement.find((t) => t.id === v);
+                  const stillValid = nextTrack?.ideas.some((i) => i.active && !i.isFullTake && i.sectionName === prev.sectionName);
+                  return { ...prev, trackId: v, sectionName: stillValid ? prev.sectionName : '' };
+                })}
               >
                 <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
                   <SelectValue placeholder="Select a track…" />
@@ -3253,7 +3294,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             <div className="space-y-1.5">
               <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section</Label>
               <Select
-                value={loosePlacementModal?.sectionName ?? ''}
+                value={placementSectionName}
                 onValueChange={(v) => setLoosePlacementModal((prev) => prev ? { ...prev, sectionName: v } : prev)}
                 disabled={!loosePlacementModal?.trackId}
               >
@@ -3261,7 +3302,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                   <SelectValue placeholder={loosePlacementModal?.trackId ? 'Select a section…' : 'Select a track first'} />
                 </SelectTrigger>
                 <SelectContent className="bg-[#0c0c0e] border-white/10">
-                  {songSectionNames.map((name) => (
+                  {placementSectionNames.map((name) => (
                     <SelectItem key={name} value={name} className="text-xs focus:bg-white/8 focus:text-white">
                       {name}
                     </SelectItem>
@@ -3281,15 +3322,15 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             </Button>
             <Button
               onClick={() => {
-                if (!loosePlacementModal?.trackId || !loosePlacementModal?.sectionName) return;
+                if (!loosePlacementModal?.trackId || !placementSectionName) return;
                 placeLooseFileOnTimelineMutation.mutate({
                   looseFileId: loosePlacementModal.looseFileId,
                   trackId: loosePlacementModal.trackId,
-                  sectionName: loosePlacementModal.sectionName,
+                  sectionName: placementSectionName,
                 });
                 setLoosePlacementModal(null);
               }}
-              disabled={!loosePlacementModal?.trackId || !loosePlacementModal?.sectionName || placeLooseFileOnTimelineMutation.isPending}
+              disabled={!loosePlacementModal?.trackId || !placementSectionName || placeLooseFileOnTimelineMutation.isPending}
               className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
             >
               {placeLooseFileOnTimelineMutation.isPending ? 'Placing…' : 'Place Clip'}

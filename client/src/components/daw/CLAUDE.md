@@ -431,7 +431,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 **Reopening on a second right-click of the same trigger** — Radix's `ContextMenu` doesn't natively support re-firing when the same trigger is right-clicked again while its own menu is already open. Fixed via `use-reopenable-context-menu.ts` (a nonce-driven `key` remount on `ContextMenuContent`) paired with `modal={false}` on the `ContextMenu` root; wired into `BucketClip`, `IdeaFileContextMenu`, and `SongsClipContextMenuCard` (all in `Dashboard.tsx`/`Clip.tsx`). See "Platform and browser gotchas" below for why.
 
-**Context menu items (BucketClip):** More Info · Add Note · Mark as Final / Unmark Final · Add to Timeline · Download · **Remove** (red). Remove calls `PATCH /api/clips/:clipId { active: false }` (soft-delete) and invalidates `['bucket', songId]`. The `clips` table has an `active` column (boolean, default true); `getBucket` in `storage.ts` filters `eq(clips.active, true)`.
+**Context menu items (BucketClip):** More Info · Add Note · Mark as Final / Unmark Final · Add to Timeline (only when `onAddToTimeline` is passed — Workspace, not SongHome) · Download · **Remove** (red). Remove calls `PATCH /api/clips/:clipId { active: false }` (soft-delete) and invalidates `['bucket', songId]`. The `clips` table has an `active` column (boolean, default true); `getBucket` in `storage.ts` filters `eq(clips.active, true)`.
 
 **`isFinal` persistence** — `useEffect` syncs `isFinal` from the prop whenever the bucket query refetches. Local state is optimistically updated and reverted on API failure. `executeMark(newIsFinal)` is the shared path for both the direct toggle and the sibling-confirmation dialog.
 
@@ -629,7 +629,7 @@ Edit/delete controls render only on the current user's own comments (`isOwnComme
 
 **`metadataWriter` prop:** `(merged, updates)`. Clips fall back to `PATCH /api/clips/:id` (full object); loose files pass one from `useLooseFileInfoWindow` that sends only `updates` to `PATCH /api/loose-files/:id/metadata`. A passed writer that throws gets the field rolled back + a toast; with no writer the fields render read-only (`InfoStat`).
 
-**Loose files — one window per surface:** `useLooseFileInfoWindow()` + `LooseFileInfoProvider` (`LooseFileRow.tsx`), mounted in `MediaBucket` and `Dashboard`. `LooseFileContextMenu` (More Info / Add Note / Delete) reads `open` from context. The window lives at the surface root, never inside a row — a dialog portaled from inside a row still bubbles React click/pointer events into the row's `onClick` and dnd-kit listeners. Opening it marks the notes read.
+**Loose files — one window per surface:** `useLooseFileInfoWindow()` + `LooseFileInfoProvider` (`LooseFileRow.tsx`), mounted in `MediaBucket` and `Dashboard`. `LooseFileContextMenu` (More Info / Add Note / Add to Timeline / Delete) reads `open` from context. "Add to Timeline" shows only under a `LooseFilePlacementProvider` (mounted by Timeline, so Workspace only); it opens Timeline's Place on Timeline dialog, pre-selecting the file's shelf track. The window lives at the surface root, never inside a row — a dialog portaled from inside a row still bubbles React click/pointer events into the row's `onClick` and dnd-kit listeners. Opening it marks the notes read.
 
 **Note:** `clip_comments` references `clips.id` only, so all timeline placements of the same bucket clip share one comment thread by design — this is unrelated to the `bucketClipId` migration and predates it. Per-placement (instance-specific) comments would need a separate schema change; not scoped or started.
 
@@ -755,6 +755,8 @@ A `useEffect(fn, [])` registers the handler. To avoid stale closures (the handle
 ---
 
 ### Placement feedback (Add to Timeline) — ✅ Built
+
+**Place on Timeline dialog (loose files, drop or menu):** the Section list shows only the chosen track's active, non-Full-Take sections; a track switch clears an invalid section. Failures show a destructive toast (the dialog closes before the server answers).
 
 Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a brief flash halo. Drag-and-drop placement is **deliberately silent** — do not add toasts or flashes to the drag path (`handleDragEnd`).
 
