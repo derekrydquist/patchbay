@@ -547,6 +547,7 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Ideas shelf preview card drag** — `IdeaLooseFilePreviewCard` uses the Column 1 row's loose-file payload, with drag id `loose-preview-{id}` (the row has `loose-{id}`). Only Idea rows accept it; Column 2 is `disabled` while a preview shows.
 - **Ideas shelf drag hover** — Column 1's wrapper sets `data-dnd-active` during any dnd-kit drag; rows use `not-group-data-[dnd-active]/ideas-list:hover:*`, so only valid targets light up. The preview handle has `focus-visible:outline-none`.
 - **Every Finder (OS file) drop target uses `useNativeFileDrop` (`client/src/hooks/use-native-file-drop.tsx`)** — never hand-rolled `onDragOver`/`onDragLeave`/`onDrop`. It reacts only to `dataTransfer.types` containing `'Files'` (dnd-kit drags never fire native events), stops propagation so a row wins over its column, counts dragenter/dragleave instead of using `relatedTarget` (null in Safari → flicker), and a disabled target still `preventDefault`s so the browser never navigates to the dropped file.
+- **Released Finder files must never open in the browser** — `useWindowFileDropGuard` (mounted once in `App.tsx`) cancels `dragover`/`drop` for any file drag no target took, with `dropEffect = 'none'`. Targets stop propagation, so it sees only leftovers; it skips `defaultPrevented` events, `<input type="file">` and non-file drags.
 - **Finder-drop feedback must never change layout** — no inserted banners, no border-width or padding changes. Rows recolor their existing `border border-transparent` (`NATIVE_DROP_ROW_CLASS`); column blank space gets a tint + inset ring (`NATIVE_DROP_COLUMN_CLASS`, a box-shadow). An in-flow "Drop to upload" banner used to push every row down 39px, making the top row unreachable and churning enter/leave as rows jumped under the pointer. Empty-state text ("No files yet") stays static.
 - **`instrument_tracks.pan` writes only go through `PATCH /api/tracks/:trackId`** — same single write path as `volume`; there is no separate pan-specific route. Do not add one.
 - **Fill in a column production depends on with a step that runs even when the column already exists** — never only when it's missing (see the NULL `track_id` fix under "Recently fixed bugs").
@@ -859,6 +860,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Finder drags never sprang tracks open (Oct 2026)** — native drags don't reach dnd-kit; see "Finder drags" under Spring-loaded tracks.
 - **First Finder drag closed the sprung track (Oct 2026)** — Chrome's zero-movement `pointermove` ended the drag and restored the old selection; such moves are now ignored, and `dragover` re-arms the tracker.
 - **Copy (+) cursor badge lost after a spring (Oct 2026)** — `dropEffect` was never set; targets now set `'copy'`.
+- **A Finder file released outside a target opened in a new tab (Oct 2026)** — the browser's default drop; the window guard now cancels it (see "What To Avoid").
 
 ---
 

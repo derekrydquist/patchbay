@@ -187,6 +187,56 @@ export function onNativeFileDragEnd(listener: (end: NativeFileDragEnd) => void):
   return onNativeFileDrag({ onEnd: listener });
 }
 
+// ─── Window-level guard: never open a dropped file ────────────────────────────
+// Releasing a Finder file anywhere that isn't a drop target used to make the
+// browser navigate to the file (a new tab playing the audio) — the drop's default
+// action. Mounted once for the whole app (useWindowFileDropGuard in App.tsx), so it
+// covers every page, the login page included.
+//
+// Listens on window in the BUBBLE phase, so it only ever sees what no target took:
+// - useNativeFileDrop targets call stopPropagation on dragover and drop, so their
+//   events never reach window — they keep their own preventDefault, 'copy' cursor
+//   and drop handling, untouched.
+// - A drop zone that calls preventDefault without stopping propagation (UploadModal's
+//   "Click or drag files here" box) does reach window; e.defaultPrevented marks it
+//   as handled and the guard leaves it alone.
+// - Anything inside an <input type="file"> is left to the browser, which handles a
+//   file drop onto one itself.
+// - Only native file drags ('Files' in dataTransfer.types). dnd-kit drags are
+//   pointer events and never fire drag events; a dragged link or text selection
+//   isn't a file and passes through.
+// What remains is a non-target: dragover is cancelled with dropEffect 'none' — the
+// cursor shows the no-drop state and the browser treats a release there as a
+// cancelled drag (no drop event, nothing opens) — and a drop that arrives anyway
+// is cancelled too. Nothing visible happens. The page-wide tracker above still sees
+// both events (it listens in the capture phase) and ends the drag as "no drop".
+function isInsideFileInput(t: EventTarget | null): boolean {
+  return t instanceof Element && !!t.closest('input[type="file"]');
+}
+function isUnhandledFileDragEvent(e: DragEvent): boolean {
+  return isFilesEvent(e) && !e.defaultPrevented && !isInsideFileInput(e.target);
+}
+const onGuardDragOver = (e: DragEvent) => {
+  if (!isUnhandledFileDragEvent(e)) return;
+  e.preventDefault();
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+};
+const onGuardDrop = (e: DragEvent) => {
+  if (!isUnhandledFileDragEvent(e)) return;
+  e.preventDefault();
+};
+
+export function useWindowFileDropGuard(): void {
+  useEffect(() => {
+    window.addEventListener('dragover', onGuardDragOver);
+    window.addEventListener('drop', onGuardDrop);
+    return () => {
+      window.removeEventListener('dragover', onGuardDragOver);
+      window.removeEventListener('drop', onGuardDrop);
+    };
+  }, []);
+}
+
 function markNativeDropAccepted() {
   dropAccepted = true;
 }
