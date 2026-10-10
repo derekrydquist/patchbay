@@ -155,6 +155,21 @@ POST   /api/clips/:clipId/comments/copy-from — body: { source: { kind: 'clip' 
 POST   /api/clips/:clipId/remove         — soft-remove a version (active = false) via releaseClipDependencies;
                                            body: { confirm? }. Real songs without confirm → 409
                                            { code, message, dependents } if in use. Logs clip-removed
+POST   /api/clips/:clipId/move-to-section — real songs; body: { ideaId, confirm? } (destination idea).
+                                           requireBand; clip's song and destination's song both asserted.
+                                           400: not a real song, clip inactive, source or destination is a
+                                           Full Take, destination idea or track hidden, different song,
+                                           same idea. Without confirm → 409 { code: 'clip-in-use', message,
+                                           dependents } if it has timeline copies or Final. Renamed via
+                                           landingClipName; tasks recomputed on both sides. Logs
+                                           clip-moved-to-section
+POST   /api/clips/:clipId/move-to-loose  — real songs; body: { trackId: string | null, confirm? } (null =
+                                           song-level; missing → 400). requireBand; clip's song asserted, and
+                                           the track's song when trackId is a string. 400: not a real song,
+                                           clip inactive, Full Take, track hidden or in a different song.
+                                           Same 409 clip-in-use. Clip → loose file (same id, original
+                                           createdAt, original filename, notes moved). Logs
+                                           clip-moved-to-loose
 POST   /api/clips/:clipId/move-to-idea   — Ideas only; body: { songId } (destination Idea). Same clip id,
                                            notes follow. Both songs asserted. Logs clip-moved-to-idea
 POST   /api/clips/:clipId/make-loose     — Ideas only; clip → band-wide loose file (same id, notes moved).

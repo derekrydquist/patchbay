@@ -15,7 +15,7 @@ Marking a clip as final and changing a task's status are kept in sync automatica
 
 **Unmarking** follows the same-name rule in reverse: clearing `isFinal` on one timeline clip clears it on every clip with the same `trackId + name`.
 
-These rules apply from all three entry points. Never write `isFinal` outside the three entry points or the rules will be silently bypassed. **Approved fourth path:** Remove (and the planned version moves) clears Final on that one clip via `releaseClipDependencies`, then recomputes the section's task. Never call `PATCH /api/clips` with `isFinal` for this — the same-name sync would un-final other clips.
+These rules apply from all three entry points. Never write `isFinal` outside the three entry points or the rules will be silently bypassed. **Approved fourth path:** Remove, move-to-section and move-to-loose clear Final on that one clip via `releaseClipDependencies`, then recompute the section's task. Never call `PATCH /api/clips` with `isFinal` for this — the same-name sync would un-final other clips.
 
 **Entry point 1 — bucket clip marked final (`PATCH /api/clips/:clipId`)**
 
@@ -120,6 +120,8 @@ Adding any clip — whether via bucket upload (`POST /api/ideas/:ideaId/clips`) 
 | `in-progress` / `complete` / `will-not-play` | no-op |
 
 Both routes wrap this logic in a `try/catch` so a task-lookup failure (e.g. no task row exists for this instrument+section) never blocks clip creation. Both client-side mutations invalidate `['production-tasks', songId]` in their `onSuccess` handler so the tracker reflects the new status immediately.
+
+**Version moves:** move-to-section's destination applies the same rule through `advanceTaskOnVersionArrived` (`routes.ts`), looked up by track id rather than track name, with no `reconcileSectionTaskStatus` call. An arriving version never changes a Complete task. The section a version leaves (move-to-section, move-to-loose, Remove) gets `applyTaskAfterVersionLeaves` instead; both moves clear the version's Final through `releaseClipDependencies`.
 
 This is distinct from the `isFinal ↔ task status` bidirectional sync: clip addition advances `todo → in-progress` (one-way); marking a clip final advances `in-progress → complete` (bidirectional — unmarking reverts to `in-progress`).
 

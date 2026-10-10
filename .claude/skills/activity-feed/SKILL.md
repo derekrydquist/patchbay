@@ -79,6 +79,8 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `clip-moved-to-idea` | Yes | Ideas shelf drag of an organized file to another Idea; logged once, against the destination song. |
 | `clip-made-loose` | Yes | Ideas shelf drag of an organized file onto Column 1's open space (back to a band-wide loose file); logged once, against the source song. |
 | `clip-deleted` | Yes | Ideas shelf Delete of an organized file; logged once, against the Idea. |
+| `clip-moved-to-section` | Yes | Real-song version moved to another section (Move A); logged once, `clipId` set, session author. |
+| `clip-moved-to-loose` | Yes | Real-song version moved back to a loose file (Moves B/C/D, "Remove from Section"); logged once, `clipId` set (the loose file reuses the clip id), session author. |
 | `song-deleted` / `idea-deleted` | Yes | Logged inside `deleteSong`'s transaction with the band id. Rendered with no link (`songDeleted`). |
 | `track-added` | Yes | |
 | `track-deleted` | Yes | |
@@ -171,6 +173,8 @@ This grouping predates the read-path filter and originally assumed every item he
 43. **`clip-moved-to-idea`** — logged from `POST /api/clips/:clipId/move-to-idea`, once, against the destination. Description: `"{user} moved {clipName} from {sourceIdea} to {destIdea}"`.
 44. **`clip-made-loose`** — logged from `POST /api/clips/:clipId/make-loose`, once, against the source Idea (the file has no song afterward, and `activity_log.songId` is `NOT NULL`). Description: `"{user} moved {clipName} out of {sourceIdea}"`.
 45. **`clip-deleted`** — logged from `POST /api/clips/:clipId/delete`, once, against the Idea. Description: `"{user} deleted {clipName} from {idea}"` (never "Files"). The clip's built `file-added` and comment rows vanish with it; older text-only rows stay as history.
+46. **`clip-moved-to-section`** — logged from `POST /api/clips/:clipId/move-to-section`, once. Description: `"{user} moved {oldName} to {track} → {section} as {newName}"` (" as …" dropped when the name didn't change). `instrument`/`sectionName` are the destination.
+47. **`clip-moved-to-loose`** — logged from `POST /api/clips/:clipId/move-to-loose`, once. Description: `"{user} moved {oldName} out of {track} → {section}"`, plus `" to {track}"` for a track shelf (C/D) and `" as {newName}"` when the loose file's name differs. `instrument` is the destination track for C/D, unset for B; no `sectionName`.
 
 **Album lifecycle events not implemented:** `album-created` / `album-renamed` / `album-deleted` have no logging path — `activity_log.songId` is `NOT NULL`, and albums have no song to attach an event to. Implementing these would need a nullable `songId` (or a new `albumId` column), a `LEFT JOIN` change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision.
 
@@ -245,6 +249,8 @@ function activityUrl(event: ActivityEvent): string {
 - **`song-created`** navigates to `/?tab=files&filter=songs&songId=X` — Dashboard reads this via `useSearch()` and auto-selects the song in the Files tab Songs column.
 - **`idea-created`**, **`clip-moved-to-idea`** and **`clip-deleted`** navigate to `/?tab=files&filter=ideas&ideaId=X` (the destination Idea for a move) — Dashboard reads this and auto-selects the idea in the Ideas column.
 - **`clip-made-loose`** navigates to `/?tab=files&filter=ideas` with no `ideaId` — the file is band-wide now, sitting in Column 1.
+- **`clip-moved-to-section`** has no special case: `instrument` + `sectionName` (the destination) route it to Workspace at the new section, like `clip-removed`.
+- **`clip-moved-to-loose`** with `instrument` (C/D) navigates to `/songs/:songId/workspace?instrument=X` (the destination track, no section); without it (B) to the song. Same case in Dashboard's and SongHome's `activityUrl`.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
 
 **`autoOpenInfo` — clip inspection modal auto-open:**
