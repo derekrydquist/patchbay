@@ -335,6 +335,7 @@ export interface IStorage {
   createBand(name: string): Promise<Band>;
   getUsersByBand(bandId: string): Promise<User[]>;
   backfillBands(): Promise<void>;
+  relinkNullTaskTracks(): Promise<void>;
 
   // Albums
   getAlbums(bandId: string): Promise<AlbumWithCount[]>;
@@ -2341,6 +2342,54 @@ export class SQLiteStorage implements IStorage {
 
   async getUsersByBand(bandId: string): Promise<User[]> {
     return db.select().from(users).where(eq(users.bandId, bandId)).orderBy(asc(users.username)).all();
+  }
+
+  // Startup self-heal for production_tasks rows with a NULL track_id. The track_id
+  // fill-in in db.ts only runs when the column is missing, so a drizzle-kit push that
+  // added the column first left every existing task unlinked (213 rows on production,
+  // repaired by hand Oct 2026). getTasksForSong inner-joins on track_id, so those tasks
+  // vanish from the Production tab. Match: same song, track name = task instrument
+  // (case-insensitive); the single active candidate, else the single candidate if none
+  // are active. Anything else stays NULL and is logged. Writes only track_id, only where
+  // it is NULL, in one transaction — safe on every boot.
+  async relinkNullTaskTracks(): Promise<void> {
+    const result = db.transaction((tx) => {
+      const nullTasks = tx
+        .select({ id: productionTasks.id, songId: productionTasks.songId, instrument: productionTasks.instrument })
+        .from(productionTasks)
+        .where(isNull(productionTasks.trackId))
+        .orderBy(asc(productionTasks.id))
+        .all();
+      let relinked = 0;
+      const unmatched: string[] = [];
+      for (const task of nullTasks) {
+        const candidates = tx
+          .select({ id: instrumentTracks.id, active: instrumentTracks.active })
+          .from(instrumentTracks)
+          .where(and(
+            eq(instrumentTracks.songId, task.songId),
+            sql`lower(${instrumentTracks.name}) = lower(${task.instrument})`,
+          ))
+          .all();
+        const active = candidates.filter((t) => t.active);
+        const trackId = active.length === 1 ? active[0].id
+          : active.length === 0 && candidates.length === 1 ? candidates[0].id
+          : null;
+        if (!trackId) {
+          unmatched.push(task.id);
+          continue;
+        }
+        relinked += tx
+          .update(productionTasks).set({ trackId })
+          .where(and(eq(productionTasks.id, task.id), isNull(productionTasks.trackId)))
+          .run().changes;
+      }
+      return { relinked, unmatched };
+    });
+    if (result.relinked > 0 || result.unmatched.length > 0) {
+      const left = result.unmatched.length > 0 ? ` (${result.unmatched.join(", ")})` : "";
+      console.log(`[tasks] Relinked ${result.relinked} task(s) with a NULL track_id; ${result.unmatched.length} left unmatched${left}`);
+    }
   }
 
   async backfillBands(): Promise<void> {

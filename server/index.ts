@@ -142,6 +142,11 @@ app.use((req, res, next) => {
 (async () => {
   await storage.seedUsers();
   await storage.backfillBands();
+  try {
+    await storage.relinkNullTaskTracks();
+  } catch (err) {
+    console.error("[tasks] NULL track_id relink failed; nothing changed, continuing boot:", err);
+  }
   await registerRoutes(httpServer, app);
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
