@@ -16,7 +16,7 @@ import {
 import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveOrganizeDrag,
-  organizeDropRules, type ActiveOrganizeDrag, type SectionDropTarget,
+  organizeDropRules, type ActiveOrganizeDrag, type SectionDropTarget, type TrackDropTarget, type TracksDropTarget,
   DRAG_SURFACE_GROUP, DRAG_SURFACE_ROW_HOVER, useDragSurfaceAttrs,
   useSpringLoadedTracks, useNativeSpringLoadedTracks, flashSpringOpenedColumn,
   type SpringLoadedTracksOptions,
@@ -169,10 +169,11 @@ function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, but
   // The active drag comes in as a prop (MediaBucket calls useActiveOrganizeDrag
   // once) rather than via useDndContext here — useDndContext's value changes on every
   // pointer move during any drag, which re-rendered every Track row each frame.
-  const accepts = organizeDropRules.trackRow(activeDrag, { trackId: track.id });
+  const target: TrackDropTarget = { trackId: track.id, songId: track.songId, trackName: track.name };
+  const accepts = organizeDropRules.trackRow(activeDrag, target);
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTrackDropId(track.id),
-    data: { trackId: track.id },
+    data: target,
   });
   const combinedRef = (node: HTMLButtonElement | null) => {
     setNodeRef(node);
@@ -642,10 +643,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // hit must always win over this one — handled in matchOrganizeDropTarget itself
   // (background matches are remembered but not returned until every other organize
   // target has been checked), not here.
+  const sectionsBackgroundTarget: TrackDropTarget | null = selectedTrack
+    ? { trackId: selectedTrack.id, songId, trackName: selectedTrack.name }
+    : null;
   const { setNodeRef: setSectionsBackgroundDroppableRef, isOver: isSectionsBackgroundOver } = useDroppable({
     id: bucketSectionsBackgroundDropId('media-bucket-sections-column'),
     disabled: !selectedTrack,
-    data: selectedTrack ? { trackId: selectedTrack.id } : undefined,
+    data: sectionsBackgroundTarget ?? undefined,
   });
   // Same node, also held for the spring-open flash. The column div never unmounts
   // on a track change (only its contents swap), so the animation isn't lost.
@@ -668,11 +672,12 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   //
   // Nests every Track row; Track rows win via matchOrganizeDropTarget's background
   // fallback, same as the Sections background vs. Section rows.
-  const isTracksBackgroundDisabled = !organizeDropRules.tracksBackground(activeDrag);
+  const tracksBackgroundTarget: TracksDropTarget = { unassign: true, songId };
+  const isTracksBackgroundDisabled = !organizeDropRules.tracksBackground(activeDrag, tracksBackgroundTarget);
   const { setNodeRef: setTracksBackgroundDroppableRef, isOver: isTracksBackgroundOver } = useDroppable({
     id: bucketTracksBackgroundDropId('media-bucket-tracks-column'),
     disabled: isTracksBackgroundDisabled,
-    data: { unassign: true },
+    data: tracksBackgroundTarget,
   });
   // isOver doesn't know about `disabled` — gate the highlight on both.
   const isTracksBackgroundDropTarget = isTracksBackgroundOver && !isTracksBackgroundDisabled;
@@ -708,7 +713,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // in handleDragEnd — and none for a version yet. Highlight-only; the droppable
   // itself stays enabled so collision behavior is unchanged.
   const isSectionsBackgroundDropTarget =
-    isSectionsBackgroundOver && organizeDropRules.sectionsBackground(activeDrag, { trackId: selectedTrack?.id ?? null });
+    isSectionsBackgroundOver && organizeDropRules.sectionsBackground(activeDrag, sectionsBackgroundTarget);
 
   // data-dnd-active on the root during any drag — rows drop their plain hover.
   const dragSurfaceAttrs = useDragSurfaceAttrs();

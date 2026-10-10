@@ -183,7 +183,7 @@ export interface ActivityEvent {
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
       | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
       | 'clip-made-loose' | 'clip-deleted' | 'clip-final-set' | 'clip-final-cleared'
-      | 'clip-moved-to-section'
+      | 'clip-moved-to-section' | 'clip-moved-to-loose'
       // Sort-only: a task outcome whose cause already has its own feed row.
       | 'task-auto-completed' | 'task-auto-reverted';
   description: string;
@@ -275,6 +275,7 @@ export interface IStorage {
   getClipDependents(clipId: string): Promise<ClipDependents | undefined>;
   removeClip(clipId: string): Promise<Clip | undefined>;
   moveClipToSection(clipId: string, destIdeaId: string): Promise<Clip | undefined>;
+  moveClipToLoose(clipId: string, trackId: string | null): Promise<LooseFile | undefined>;
   getTaskByTrackSection(trackId: string, sectionName: string): Promise<ProductionTask | undefined>;
   countActiveClipsForIdea(ideaId: string): Promise<number>;
   hasActiveFinalClipInIdea(ideaId: string, excludeClipId?: string): Promise<boolean>;
@@ -547,14 +548,22 @@ function dematerializeClipToBandLoose(tx: DrizzleTx, clipId: string, bandId: str
   };
   tx.insert(looseFiles).values(looseFile).run();
 
-  // Notes travel with the file, same ids (reply parentIds stay valid). Must run
-  // before the clip delete below — clip_comments cascades on it.
-  // carriedFromCommentId has no loose_file_comments column; it's dropped here.
+  carryClipCommentsToLooseFile(tx, clipId, looseFile.id);
+
+  tx.delete(clips).where(eq(clips.id, clipId)).run();
+  return looseFile;
+}
+
+// Notes travel with a clip that becomes a loose file, same ids (reply parentIds stay
+// valid). Must run before the clip row is deleted — clip_comments cascades on it.
+// carriedFromCommentId has no loose_file_comments column; it's dropped here. Shared
+// by dematerializeClipToBandLoose (Ideas make-loose) and moveClipToLooseCore.
+function carryClipCommentsToLooseFile(tx: DrizzleTx, clipId: string, looseFileId: string): void {
   const carried = tx.select().from(clipComments).where(eq(clipComments.clipId, clipId)).all();
   if (carried.length) {
     tx.insert(looseFileComments).values(carried.map((c) => ({
       id: c.id,
-      looseFileId: looseFile.id,
+      looseFileId,
       parentId: c.parentId,
       author: c.author,
       text: c.text,
@@ -562,7 +571,51 @@ function dematerializeClipToBandLoose(tx: DrizzleTx, clipId: string, bandId: str
       createdAt: c.createdAt,
     }))).run();
   }
+}
 
+// Real song: a version leaves its section and becomes a loose file of the same song —
+// Moves B/C/D and "Move Out of Section". trackId null = song-level (Tracks column),
+// a string = that track's shelf. One transaction: release what depends on the version
+// (releaseClipDependencies — the approved fourth isFinal write path), insert the
+// loose_files row, carry the notes, delete the clip. Never touches the physical file.
+//
+// Separate from dematerializeClipToBandLoose (Ideas make-loose), which refuses Final
+// and placed clips instead of releasing them, makes a band-wide file with a fresh
+// createdAt, and keeps the clip's name. Here:
+//   - id is the clip's id (one identity across the move, like organize/make-loose);
+//   - name is metadata.originalFileName when non-empty, else the clip's current name;
+//   - createdAt is the CLIP's original createdAt (decided — not a new one);
+//   - bandId is null, as every song-scoped loose file has it (scoped by songId);
+//   - metadata, src, addedToSongs are kept; uploadedBy comes from the metadata.
+// Validation (real song, active, not a Full Take, target track) is the route's.
+function moveClipToLooseCore(tx: DrizzleTx, clipId: string, trackId: string | null): LooseFile | undefined {
+  const row = tx.select({ clip: clips, songId: instrumentTracks.songId })
+    .from(clips)
+    .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+    .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+    .where(eq(clips.id, clipId))
+    .get();
+  if (!row) return undefined;
+  const { clip } = row;
+  releaseClipDependencies(tx, clipId);
+  const originalFileName = clip.metadata?.originalFileName?.trim();
+  const looseFile: LooseFile = {
+    id: clip.id,
+    songId: row.songId,
+    bandId: null,
+    trackId,
+    name: originalFileName || clip.name,
+    type: clip.type,
+    color: clip.color,
+    duration: clip.duration,
+    src: clip.src,
+    metadata: clip.metadata,
+    uploadedBy: clip.metadata?.uploadedBy ?? null,
+    addedToSongs: clip.addedToSongs,
+    createdAt: clip.createdAt,
+  };
+  tx.insert(looseFiles).values(looseFile).run();
+  carryClipCommentsToLooseFile(tx, clipId, looseFile.id);
   tx.delete(clips).where(eq(clips.id, clipId)).run();
   return looseFile;
 }
@@ -1468,6 +1521,11 @@ export class SQLiteStorage implements IStorage {
         .run();
       return tx.select().from(clips).where(eq(clips.id, clipId)).get();
     });
+  }
+
+  // Real song: a version becomes a loose file of its song. See moveClipToLooseCore.
+  async moveClipToLoose(clipId: string, trackId: string | null): Promise<LooseFile | undefined> {
+    return db.transaction((tx) => moveClipToLooseCore(tx, clipId, trackId));
   }
 
   // Ideas shelf: drop an organized clip on Column 1's empty space — it becomes a

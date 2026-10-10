@@ -43,7 +43,9 @@ import {
   resolveDeferredLooseFileDrop,
   BUCKET_CLIP_DRAG_TYPE,
   useVersionMoveDnd,
+  VersionMoveOutContext,
 } from '@/hooks/use-loose-file-organize-dnd';
+import { apiRequest } from '@/lib/queryClient';
 import { VersionMoveInUseDialog } from './ClipInUseDialog';
 import { LooseFileDragOverlay } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
@@ -346,11 +348,24 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // file through the same find-in-bucket event organize uses. Its in-use dialog is
   // rendered below, at this level, since the dragged card leaves its section.
   const versionMoveDnd = useVersionMoveDnd({
+    // The view follows the file: into its new section (Move A), or onto the track
+    // whose shelf now holds it (Moves C/D — track selected, no section). A song-level
+    // move (Move B, "Move Out of Section") leaves the selection as is; the file shows
+    // in the Tracks column.
     onMoved: (dest) => {
+      if (dest.kind === 'loose' && !dest.trackId) return;
       window.dispatchEvent(new CustomEvent('find-in-bucket', {
-        detail: { trackId: dest.trackId, sectionName: dest.sectionName },
+        detail: dest.kind === 'section'
+          ? { trackId: dest.trackId, sectionName: dest.sectionName }
+          : { trackId: dest.trackId },
       }));
     },
+  });
+  // "Move Out of Section" is offered on version cards only for a real song (type
+  // 'song') — same cache entry Workspace reads for the song name.
+  const { data: songInfo } = useQuery<{ type?: string }>({
+    queryKey: ['song', songId],
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
     // The view follows the file, same find-in-bucket event organize fires above.
@@ -2904,6 +2919,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <LooseFilePlacementProvider value={openLooseFilePlacement}>
+        <VersionMoveOutContext.Provider value={songInfo?.type === 'song' ? versionMoveDnd.moveOutOfSection : null}>
         <MediaBucket
           songId={songId}
           modeTabs={modeTabs}
@@ -2968,6 +2984,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
           }}
         />
+        </VersionMoveOutContext.Provider>
         </LooseFilePlacementProvider>
 
         <div

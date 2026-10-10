@@ -528,37 +528,54 @@ export function useDeleteIdeaClip(
 
 // ─── Real-song versions ──────────────────────────────────────────────────────
 
-// Move A: a version to another section of the same song (POST
-// /api/clips/:clipId/move-to-section). Built on useClipInUseAction, so a version
-// with timeline copies or Final first opens ClipInUseDialog (render it at the
-// surface level with this action's dialogProps/pendingVars) and confirming repeats
-// the request with confirm: true. The display fields (clipName, destTrackName,
-// destSectionName) are for the dialog's wording and the caller's "view follows the
-// file"; the server reads only ideaId.
-export interface MoveClipToSectionVars {
+// Moving a real-song version (one clips row) out of its section — two kinds, one
+// action, so each surface hosts a single in-use dialog:
+//   'section' — Move A: to another section of the same song
+//               (POST /api/clips/:clipId/move-to-section).
+//   'loose'   — Moves B/C/D and "Move Out of Section": back to a loose file of the
+//               same song, song-level (destTrackId null) or on a track's shelf
+//               (POST /api/clips/:clipId/move-to-loose).
+// Built on useClipInUseAction, so a version with timeline copies or Final first opens
+// the in-use dialog (render it at the surface level with this action's
+// dialogProps/pendingVars) and confirming repeats the request with confirm: true.
+// The name fields are for the dialog's wording and the caller's "view follows the
+// file"; the server reads only ideaId / trackId.
+interface MoveVersionBase {
   clipId: string;
   clipName: string;
   songId: string;
-  // The track the version leaves — named in the dialog's task line.
+  // Where the version is now — named in the dialog (intro for 'loose', task line).
   sourceTrackName: string;
-  destIdeaId: string;
-  destTrackId: string;
-  destTrackName: string;
-  destSectionName: string;
+  sourceSectionName: string;
 }
 
-export function useMoveClipToSection(opts?: {
-  onSuccess?: (clip: ApiClip, vars: MoveClipToSectionVars) => void;
-  onError?: (message: string, vars: MoveClipToSectionVars) => void;
-  onCancel?: (vars: MoveClipToSectionVars) => void;
+export type MoveVersionVars =
+  | (MoveVersionBase & {
+      kind: 'section';
+      destIdeaId: string;
+      destTrackId: string;
+      destTrackName: string;
+      destSectionName: string;
+    })
+  | (MoveVersionBase & {
+      kind: 'loose';
+      destTrackId: string | null;
+    });
+
+export function useMoveVersion(opts?: {
+  onSuccess?: (vars: MoveVersionVars) => void;
+  onError?: (message: string, vars: MoveVersionVars) => void;
+  onCancel?: (vars: MoveVersionVars) => void;
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  return useClipInUseAction<ApiClip, MoveClipToSectionVars>({
-    request: (confirm, vars) =>
-      postClipLeave<ApiClip>(`/api/clips/${vars.clipId}/move-to-section`, { ideaId: vars.destIdeaId }, confirm),
-    onSuccess: (clip, vars) => {
-      // The bucket key is also the Songs quick-browser's file list (fileBucket).
+  return useClipInUseAction<ApiClip | ApiLooseFile, MoveVersionVars>({
+    request: (confirm, vars) => vars.kind === 'section'
+      ? postClipLeave<ApiClip>(`/api/clips/${vars.clipId}/move-to-section`, { ideaId: vars.destIdeaId }, confirm)
+      : postClipLeave<ApiLooseFile>(`/api/clips/${vars.clipId}/move-to-loose`, { trackId: vars.destTrackId }, confirm),
+    onSuccess: (_result, vars) => {
+      // The bucket key is also the Songs quick-browser's file list (fileBucket), and
+      // carries hasLooseFiles for the Tracks-column folder icons.
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${vars.songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', vars.songId] });
@@ -566,10 +583,18 @@ export function useMoveClipToSection(opts?: {
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.songId] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
-      opts?.onSuccess?.(clip, vars);
+      if (vars.kind === 'loose') {
+        // The clip is now a loose file under the same id: both lists it can land in,
+        // and both comment threads cached under that id.
+        queryClient.invalidateQueries({ queryKey: looseFileKeys.list(vars.songId) });
+        if (vars.destTrackId) queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.destTrackId) });
+        queryClient.invalidateQueries({ queryKey: ['clip-comments', vars.clipId] });
+        queryClient.invalidateQueries({ queryKey: ['loose-file-comments', vars.clipId] });
+      }
+      opts?.onSuccess?.(vars);
     },
     onError: (message, vars) => {
-      console.error('[moveClipToSection] error:', message);
+      console.error('[moveVersion] error:', message);
       toast({ title: 'Failed to move file', description: message, variant: 'destructive' });
       opts?.onError?.(message, vars);
     },

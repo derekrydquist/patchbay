@@ -190,18 +190,28 @@ export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel
   );
 }
 
-// The in-use dialog for a version move (Move A), worded for the move. Rendered once
-// per surface with useVersionMoveDnd's dialogProps and pendingVars.
+// The in-use dialog for a version move — to another section (Move A) or out to a
+// loose file (Moves B/C/D, "Move Out of Section"). Rendered once per surface with
+// useVersionMoveDnd's dialogProps and pendingVars.
+type VersionMoveDialogVars =
+  | { kind: 'section'; clipName: string; sourceTrackName: string; destTrackName: string; destSectionName: string }
+  | { kind: 'loose'; clipName: string; sourceTrackName: string; sourceSectionName: string };
+
 export function VersionMoveInUseDialog({ dialogProps, vars }: {
   dialogProps: Omit<ClipInUseDialogProps, 'actionLabel' | 'intro' | 'consequence' | 'describe'>;
-  vars: { clipName: string; sourceTrackName: string; destTrackName: string; destSectionName: string } | null;
+  vars: VersionMoveDialogVars | null;
 }) {
+  const intro = !vars
+    ? undefined
+    : vars.kind === 'section'
+      ? `Moving "${vars.clipName}" to ${vars.destTrackName} › ${vars.destSectionName} will:`
+      : `Moving "${vars.clipName}" out of ${vars.sourceTrackName} › ${vars.sourceSectionName} will:`;
   return (
     <ClipInUseDialog
       {...dialogProps}
       describe={(d) => describeLeaveDependents(d, vars?.sourceTrackName || null)}
       actionLabel="Move"
-      intro={vars ? `Moving "${vars.clipName}" to ${vars.destTrackName} › ${vars.destSectionName} will:` : undefined}
+      intro={intro}
     />
   );
 }

@@ -2355,6 +2355,109 @@ export async function registerRoutes(
   });
 
   /**
+   * POST /api/clips/:clipId/move-to-loose — Moves B/C/D and "Move Out of Section": a
+   * real-song version leaves its section and becomes a loose file of the same song.
+   * Body { trackId: string | null, confirm? } — null = song-level (Tracks column), a
+   * string = that track's shelf. A missing trackId is a 400. Two-ID route when trackId
+   * is a string: the clip's song and the track's song are asserted independently. Same
+   * in-use flow as Remove and move-to-section (409 'clip-in-use' only for timeline
+   * copies or Final). storage.moveClipToLoose releases the version, inserts the loose
+   * file under the clip's id and deletes the clip; then the section left gets
+   * applyTaskAfterVersionLeaves. No destination task — a loose file has no section.
+   * One feed row: 'clip-moved-to-loose'.
+   */
+  app.post("/api/clips/:clipId/move-to-loose", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, songId)) return;
+
+    const body = req.body as { trackId?: string | null; confirm?: boolean };
+    if (body.trackId === undefined) return res.status(400).json({ message: "trackId is required (null for the song's loose files)." });
+    const destTrackId = body.trackId;
+    if (destTrackId !== null && (typeof destTrackId !== 'string' || !destTrackId)) {
+      return res.status(400).json({ message: "trackId must be a track id or null." });
+    }
+    let destTrack: InstrumentTrack | undefined;
+    if (destTrackId !== null) {
+      const destSongId = trackSongId(destTrackId);
+      if (!destSongId) return res.status(404).json({ message: "Track not found." });
+      if (!assertSongOwned(req, res, destSongId)) return;
+      destTrack = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, destTrackId)).get();
+      if (!destTrack) return res.status(404).json({ message: "Track not found." });
+    }
+
+    const row = db.select({ clip: clips, idea: ideas, track: instrumentTracks, song: songs })
+      .from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(eq(clips.id, clipId))
+      .get();
+    if (!row) return res.status(404).json({ message: "Clip not found." });
+
+    if (row.song.type !== 'song') {
+      return res.status(400).json({ message: "Only files in a song can be moved out of a section." });
+    }
+    if (!row.clip.active) return res.status(400).json({ message: "This file has been removed." });
+    // Full Take is always read from ideas.isFullTake, never from the section name.
+    if (row.idea.isFullTake) {
+      return res.status(400).json({ message: "Files in a Full Takes section can't be moved out." });
+    }
+    if (destTrack) {
+      if (destTrack.songId !== songId) {
+        return res.status(400).json({ message: "Files can only be moved within the same song." });
+      }
+      if (!destTrack.active) return res.status(400).json({ message: "That track is hidden." });
+    }
+
+    if (body.confirm !== true) {
+      const dependents = await storage.getClipDependents(clipId);
+      if (dependents && hasClipDependents(dependents)) {
+        return res.status(409).json({ code: CLIP_IN_USE_CODE, message: "This file is in use.", dependents });
+      }
+    }
+
+    let looseFile;
+    try {
+      looseFile = await storage.moveClipToLoose(clipId, destTrackId);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-loose] move failed:", err);
+      return res.status(500).json({ message: "Failed to move file." });
+    }
+    if (!looseFile) return res.status(404).json({ message: "Clip not found." });
+
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    try {
+      // row.clip was read before the move, so isFinal is the pre-release value.
+      await applyTaskAfterVersionLeaves(row.track, row.idea.sectionName, row.idea.id, row.clip.isFinal, actor);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-loose] failed to recompute the source task:", err);
+    }
+
+    // The one feed row. instrument is the destination track for a track shelf (the
+    // feed link opens Workspace on that track) and unset for song-level (the link
+    // opens the song).
+    const toTrack = destTrack ? ` to ${destTrack.name}` : '';
+    const renamed = looseFile.name !== row.clip.name ? ` as ${looseFile.name}` : '';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-moved-to-loose',
+      description: `${actor} moved ${row.clip.name} out of ${row.track.name} → ${row.idea.sectionName}${toTrack}${renamed}`,
+      timestamp: Date.now(),
+      instrument: destTrack?.name,
+      author: actor,
+      clipId: looseFile.id,
+    }).catch(console.error);
+
+    res.json(looseFile);
+  });
+
+  /**
    * POST /api/clips/:clipId/make-loose — Ideas shelf only: turn an organized clip back
    * into a band-wide, unassigned loose file (dropped on Column 1's empty space). A move,
    * never a copy: same id, same src, notes carried. bandId comes from the session only.

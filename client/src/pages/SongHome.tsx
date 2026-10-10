@@ -5,7 +5,7 @@ import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { DndContext, type DragEndEvent } from '@dnd-kit/core';
-import { useLooseFileOrganizeDnd, useVersionMoveDnd } from '@/hooks/use-loose-file-organize-dnd';
+import { useLooseFileOrganizeDnd, useVersionMoveDnd, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { VersionMoveInUseDialog } from '@/components/daw/ClipInUseDialog';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
 import {
@@ -30,6 +30,8 @@ interface Song {
   name: string;
   bpm: number | null;
   lyrics: string | null;
+  // 'song' or 'idea' — the API always returns it; read for "Move Out of Section".
+  type?: string;
 }
 
 interface LastSession {
@@ -156,6 +158,12 @@ function activityUrl(songId: string, event: ActivityEvent): string {
   }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
+  }
+  // A version moved out to a track's shelf: open Workspace on that track (no section),
+  // where the file sits below the Section list. Song-level (no track) falls through
+  // to the song.
+  if (event.type === 'clip-moved-to-loose' && event.instrument) {
+    return `${base}?instrument=${encodeURIComponent(event.instrument)}`;
   }
   return songBase;
 }
@@ -2153,9 +2161,16 @@ export default function SongHome() {
   // Version (bucket-clip) moves to another section — Move A, chained after the
   // loose-file handler (which ignores versions). Same find-in-bucket view-follows.
   const versionMoveDnd = useVersionMoveDnd({
+    // The view follows the file: into its new section (Move A), or onto the track
+    // whose shelf now holds it (Moves C/D — track selected, no section). A song-level
+    // move (Move B, "Move Out of Section") leaves the selection as is; the file shows
+    // in the Tracks column.
     onMoved: (dest) => {
+      if (dest.kind === 'loose' && !dest.trackId) return;
       window.dispatchEvent(new CustomEvent('find-in-bucket', {
-        detail: { trackId: dest.trackId, sectionName: dest.sectionName },
+        detail: dest.kind === 'section'
+          ? { trackId: dest.trackId, sectionName: dest.sectionName }
+          : { trackId: dest.trackId },
       }));
     },
   });
@@ -2430,7 +2445,10 @@ export default function SongHome() {
                 onDragEnd={handleFilesDragEnd}
                 onDragCancel={looseFileOrganizeDnd.handleDragCancel}
               >
-                <MediaBucket songId={songId} />
+                {/* "Move Out of Section" on version cards — real songs only. */}
+                <VersionMoveOutContext.Provider value={song?.type === 'song' ? versionMoveDnd.moveOutOfSection : null}>
+                  <MediaBucket songId={songId} />
+                </VersionMoveOutContext.Provider>
                 <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
               </DndContext>
               <VersionMoveInUseDialog dialogProps={versionMoveDnd.dialogProps} vars={versionMoveDnd.pendingVars} />

@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createContext, useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   useSensor,
   useSensors,
@@ -16,7 +16,7 @@ import {
   type UniqueIdentifier,
 } from '@dnd-kit/core';
 import { type Clip } from '@/lib/daw-data';
-import { useOrganizeLooseFile, useAssignLooseFileTrack, useUnassignLooseFileTrack, useMoveClipToSection } from '@/hooks/use-bucket-mutations';
+import { useOrganizeLooseFile, useAssignLooseFileTrack, useUnassignLooseFileTrack, useMoveVersion } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
 import { createHoldTimer, onNativeFileDrag, type NativeFileHold } from '@/hooks/use-native-file-drop';
 
@@ -278,6 +278,21 @@ export interface SectionDropTarget {
   trackName: string;
 }
 
+// The drop data a track target carries — a Track row, and the Sections column's
+// background for the track it shows. trackId is what the loose-file assign reads;
+// songId decides whether a version may move there (Moves C/D), trackName is for the
+// view following the file. The Tracks column's background carries TracksDropTarget.
+export interface TrackDropTarget {
+  trackId: string;
+  songId: string;
+  trackName: string;
+}
+
+export interface TracksDropTarget {
+  unassign: true;
+  songId: string;
+}
+
 // ── Per-target drop rules ────────────────────────────────────────────────────
 // Whether a bucket drop target accepts the active drag. A target highlights only
 // when isOver AND its rule says yes — never on isOver alone (dnd-kit's isOver is
@@ -304,11 +319,12 @@ export const organizeDropRules = {
     return versionAcceptsSection(drag, target); // bucket-clip: Move A
   },
   // A Track row. A loose file already scoped to this track: own-track drop, which
-  // handleDragEnd cancels — no highlight.
-  trackRow(drag: ActiveOrganizeDrag | null, target: { trackId: string }): boolean {
+  // handleDragEnd cancels — no highlight. A version: any track of its own song,
+  // its own track included (Move D: section → that track's shelf is a real move).
+  trackRow(drag: ActiveOrganizeDrag | null, target: { trackId: string; songId: string }): boolean {
     if (!drag) return false;
     if (drag.type === 'loose-file') return drag.trackId !== target.trackId;
-    return false; // bucket-clip: no move to a track's loose files yet
+    return drag.songId === target.songId && !drag.isFullTake; // bucket-clip: Move D
   },
   // The Files column of the selected section (null = no section selected). Its own
   // section (where a version drag starts) is never accepted.
@@ -318,19 +334,21 @@ export const organizeDropRules = {
     return versionAcceptsSection(drag, target); // bucket-clip: Move A
   },
   // The Sections column's open background, scoped to the selected track. A loose
-  // file already scoped to that track is a cancel — no highlight.
-  sectionsBackground(drag: ActiveOrganizeDrag | null, target: { trackId: string | null }): boolean {
-    if (!drag || !target.trackId) return false;
+  // file already scoped to that track is a cancel — no highlight. A version: the
+  // shown track's shelf, own track or not (Move C).
+  sectionsBackground(drag: ActiveOrganizeDrag | null, target: TrackDropTarget | null): boolean {
+    if (!drag || !target) return false;
     if (drag.type === 'loose-file') return !(drag.trackId && drag.trackId === target.trackId);
-    return false; // bucket-clip: no move to a track's loose files yet
+    return drag.songId === target.songId && !drag.isFullTake; // bucket-clip: Move C
   },
   // The Tracks column's open background. Also decides whether the droppable is
   // enabled at all (it nests every Track row, so an enabled-but-invalid background
-  // could swallow drops): only a Track-scoped loose file can be un-assigned.
-  tracksBackground(drag: ActiveOrganizeDrag | null): boolean {
+  // could swallow drops): a Track-scoped loose file (un-assign), or a version of the
+  // same song (Move B: song-level loose file). Track rows still win over it.
+  tracksBackground(drag: ActiveOrganizeDrag | null, target: { songId: string }): boolean {
     if (!drag) return false;
     if (drag.type === 'loose-file') return !!drag.trackId;
-    return false; // bucket-clip: no move to song-level loose files yet
+    return drag.songId === target.songId && !drag.isFullTake; // bucket-clip: Move B
   },
 };
 
@@ -815,25 +833,47 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
 }
 
 // ── Version moves (bucket-clip drops) ────────────────────────────────────────
-// Drop handling for a real-song version dragged onto a section — Move A: a Section
-// row, or the Files column showing another section. Chained after
+// Drop handling for a real-song version dragged onto a bucket target, chained after
 // useLooseFileOrganizeDnd's handleDragEnd on every surface (Timeline in Workspace,
-// SongHome, the Songs quick-browser), which ignores version drags. Acceptance uses
-// the same organizeDropRules.sectionRow rule as the highlight, so a drop is acted on
-// exactly where the row lit up; anything else does nothing.
+// SongHome, the Songs quick-browser), which ignores version drags:
+//   Section row / Files column showing another section → Move A (to that section)
+//   Track row                                         → Move D (that track's shelf)
+//   Sections column background                        → Move C (shown track's shelf)
+//   Tracks column background                          → Move B (song-level)
+// Acceptance uses the same organizeDropRules as the highlight, so a drop is acted on
+// exactly where the target lit up; anything else does nothing.
 //
 // A drop that starts a move reports 'deferred' to the spring-loaded tracks (the
-// request is async, and may open ClipInUseDialog), then resolves it: success → the
+// request is async, and may open the in-use dialog), then resolves it: success → the
 // file moved, the view follows it (onMoved); failure, Cancel or Escape → the
 // drag-start selection comes back if a spring changed it.
 //
-// The surface renders VersionMoveInUseDialog with dialogProps/pendingVars — at the
-// surface level, since the dragged card unmounts once the version leaves its section.
-export function useVersionMoveDnd(options?: { onMoved?: (dest: { trackId: string; sectionName: string }) => void }) {
-  const move = useMoveClipToSection({
-    onSuccess: (_clip, vars) => {
+// moveOutOfSection is the right-click "Move Out of Section" (same as Move B), shared
+// with the cards through VersionMoveOutContext. The surface renders
+// VersionMoveInUseDialog with dialogProps/pendingVars — at the surface level, since
+// the card unmounts once the version leaves its section.
+export type VersionMoveDestination =
+  | { kind: 'section'; trackId: string; sectionName: string }
+  | { kind: 'loose'; trackId: string | null };
+
+// "Move Out of Section" on a version card. Provided by the surface (null = the item
+// isn't offered there — not a real song, or no surface to host the dialog).
+export interface VersionMoveOutRequest {
+  clipId: string;
+  clipName: string;
+  songId: string;
+  sourceTrackName: string;
+  sourceSectionName: string;
+}
+export const VersionMoveOutContext = createContext<((req: VersionMoveOutRequest) => void) | null>(null);
+
+export function useVersionMoveDnd(options?: { onMoved?: (dest: VersionMoveDestination) => void }) {
+  const move = useMoveVersion({
+    onSuccess: (vars) => {
       resolveDeferredLooseFileDrop(true);
-      options?.onMoved?.({ trackId: vars.destTrackId, sectionName: vars.destSectionName });
+      options?.onMoved?.(vars.kind === 'section'
+        ? { kind: 'section', trackId: vars.destTrackId, sectionName: vars.destSectionName }
+        : { kind: 'loose', trackId: vars.destTrackId });
     },
     onError: () => resolveDeferredLooseFileDrop(false),
     onCancel: () => resolveDeferredLooseFileDrop(false),
@@ -848,23 +888,57 @@ export function useVersionMoveDnd(options?: { onMoved?: (dest: { trackId: string
     const { active, over } = event;
     if (!over || !isBucketOrganizeDropId(over.id)) return false;
     const id = String(over.id);
-    // Track rows and both column backgrounds don't take versions yet.
-    if (!id.startsWith(BUCKET_SECTION_DROP_PREFIX) && !id.startsWith(BUCKET_VERSIONS_DROP_PREFIX)) return true;
-    const target = over.data.current as SectionDropTarget | undefined;
-    if (!target?.ideaId || !organizeDropRules.sectionRow(toActiveOrganizeDrag(drag), target)) return true;
-    reportLooseFileDrop(active.id, 'deferred');
-    move.run({
+    const activeDrag = toActiveOrganizeDrag(drag);
+    const base = {
       clipId: drag.clip.id,
       clipName: drag.clip.name,
       songId: drag.songId,
       sourceTrackName: drag.trackName,
-      destIdeaId: target.ideaId,
-      destTrackId: target.trackId,
-      destTrackName: target.trackName,
-      destSectionName: target.sectionName,
-    });
+      sourceSectionName: drag.clip.sectionName ?? '',
+    };
+
+    if (id.startsWith(BUCKET_SECTION_DROP_PREFIX) || id.startsWith(BUCKET_VERSIONS_DROP_PREFIX)) {
+      const target = over.data.current as SectionDropTarget | undefined;
+      if (!target?.ideaId || !organizeDropRules.sectionRow(activeDrag, target)) return true;
+      reportLooseFileDrop(active.id, 'deferred');
+      move.run({
+        ...base,
+        kind: 'section',
+        destIdeaId: target.ideaId,
+        destTrackId: target.trackId,
+        destTrackName: target.trackName,
+        destSectionName: target.sectionName,
+      });
+      return true;
+    }
+
+    if (id.startsWith(BUCKET_TRACK_DROP_PREFIX) || id.startsWith(BUCKET_SECTIONS_BACKGROUND_DROP_PREFIX)) {
+      const target = over.data.current as TrackDropTarget | undefined;
+      if (!target?.trackId) return true;
+      const accepts = id.startsWith(BUCKET_TRACK_DROP_PREFIX)
+        ? organizeDropRules.trackRow(activeDrag, target)
+        : organizeDropRules.sectionsBackground(activeDrag, target);
+      if (!accepts) return true;
+      reportLooseFileDrop(active.id, 'deferred');
+      move.run({ ...base, kind: 'loose', destTrackId: target.trackId });
+      return true;
+    }
+
+    if (id.startsWith(BUCKET_TRACKS_BACKGROUND_DROP_PREFIX)) {
+      const target = over.data.current as TracksDropTarget | undefined;
+      if (!target?.songId || !organizeDropRules.tracksBackground(activeDrag, target)) return true;
+      reportLooseFileDrop(active.id, 'deferred');
+      move.run({ ...base, kind: 'loose', destTrackId: null });
+      return true;
+    }
+
     return true;
   };
 
-  return { handleDragEnd, dialogProps: move.dialogProps, pendingVars: move.pendingVars };
+  // Right-click "Move Out of Section" — Move B without a drag (nothing to report).
+  const moveOutOfSection = (req: VersionMoveOutRequest) => {
+    move.run({ ...req, kind: 'loose', destTrackId: null });
+  };
+
+  return { handleDragEnd, moveOutOfSection, dialogProps: move.dialogProps, pendingVars: move.pendingVars };
 }

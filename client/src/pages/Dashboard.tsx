@@ -64,6 +64,8 @@ import {
   useActiveOrganizeDrag,
   organizeDropRules,
   type SectionDropTarget,
+  type TrackDropTarget,
+  type TracksDropTarget,
   useVersionMoveDnd,
   BUCKET_CLIP_DRAG_TYPE,
   type BucketClipDragData,
@@ -199,6 +201,12 @@ function activityUrl(event: ActivityEvent): string {
   }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
+  }
+  // A version moved out to a track's shelf: open Workspace on that track (no section),
+  // where the file sits below the Section list. Song-level (no track) falls through
+  // to the song.
+  if (event.type === 'clip-moved-to-loose' && event.instrument) {
+    return `${base}?instrument=${encodeURIComponent(event.instrument)}`;
   }
   return songBase;
 }
@@ -410,11 +418,14 @@ interface SongsClipContextMenuCardProps {
   onMoreInfo: () => void;
   onAddNote: () => void;
   onMarkFinal: () => void;
+  // "Move Out of Section" (song-level loose file, Move B). Omitted where it isn't
+  // offered — an Idea, or a Full Take version.
+  onMoveOut?: () => void;
   // Comment badge — the card's notes badge, rendered only when present.
   notesBadge?: React.ReactNode;
 }
 
-function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMarkFinal, notesBadge }: SongsClipContextMenuCardProps) {
+function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMarkFinal, onMoveOut, notesBadge }: SongsClipContextMenuCardProps) {
   const contextMenu = useReopenableContextMenu();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `songs-clip-${clip.id}`,
@@ -458,6 +469,17 @@ function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMar
           <CheckCircle2 size={13} className={clip.isFinal ? 'text-primary' : 'text-white/50'} />
           {clip.isFinal ? 'Already Final' : 'Mark as Final'}
         </ContextMenuItem>
+        {onMoveOut && (
+          <>
+            <ContextMenuSeparator className="bg-white/5" />
+            <ContextMenuItem
+              onClick={onMoveOut}
+              className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
+            >
+              <FolderOutput size={13} className="text-white/50" /> Move Out of Section
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -755,10 +777,11 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: 
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
-  const accepts = organizeDropRules.trackRow(useActiveOrganizeDrag(), { trackId: track.id });
+  const target: TrackDropTarget = { trackId: track.id, songId: track.songId, trackName: track.name };
+  const accepts = organizeDropRules.trackRow(useActiveOrganizeDrag(), target);
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTrackDropId(track.id),
-    data: { trackId: track.id },
+    data: target,
   });
 
   return (
@@ -819,6 +842,8 @@ function SongsDragSurface({ className, children }: { className?: string; childre
 // background-is-a-fallback rule. Stable id suffix. Native OS-file drop handlers
 // are passed in (useNativeFileDrop) — a Finder drop here is a song-level loose file.
 interface SongsTracksColumnDropZoneProps {
+  /** The selected song — a version of it may move here (Move B). */
+  songId: string | null;
   className?: string;
   children: React.ReactNode;
   /** Finder file drop handlers (useNativeFileDrop). */
@@ -826,14 +851,16 @@ interface SongsTracksColumnDropZoneProps {
 }
 
 function SongsTracksColumnDropZone({
-  className, children, nativeDropHandlers,
+  songId, className, children, nativeDropHandlers,
 }: SongsTracksColumnDropZoneProps) {
   // organizeDropRules.tracksBackground decides both enabled and highlight.
-  const disabled = !organizeDropRules.tracksBackground(useActiveOrganizeDrag());
+  const activeDrag = useActiveOrganizeDrag();
+  const target: TracksDropTarget | null = songId ? { unassign: true, songId } : null;
+  const disabled = !target || !organizeDropRules.tracksBackground(activeDrag, target);
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTracksBackgroundDropId('songs-browser-tracks-column'),
     disabled,
-    data: { unassign: true },
+    data: target ?? undefined,
   });
 
   return (
@@ -856,6 +883,9 @@ function SongsTracksColumnDropZone({
 // the highlight for them.
 interface SongsSectionsColumnDropZoneProps {
   selectedTrackId: string | null;
+  /** The selected track's name and song — a version may move to its shelf (Move C). */
+  selectedTrackName: string | null;
+  songId: string | null;
   /** Bumped by Dashboard each time a Track springs open (never on a click); each
    *  change flashes this column. 0 = no spring yet. */
   flashNonce: number;
@@ -865,12 +895,15 @@ interface SongsSectionsColumnDropZoneProps {
   nativeDropHandlers: NativeFileDropHandlers;
 }
 
-function SongsSectionsColumnDropZone({ selectedTrackId, flashNonce, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
-  const accepts = organizeDropRules.sectionsBackground(useActiveOrganizeDrag(), { trackId: selectedTrackId });
+function SongsSectionsColumnDropZone({ selectedTrackId, selectedTrackName, songId, flashNonce, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
+  const target: TrackDropTarget | null = selectedTrackId && songId && selectedTrackName
+    ? { trackId: selectedTrackId, songId, trackName: selectedTrackName }
+    : null;
+  const accepts = organizeDropRules.sectionsBackground(useActiveOrganizeDrag(), target);
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionsBackgroundDropId('songs-browser-sections-column'),
-    disabled: !selectedTrackId,
-    data: selectedTrackId ? { trackId: selectedTrackId } : undefined,
+    disabled: !target,
+    data: target ?? undefined,
   });
   // Same node, also held for the spring-open flash. This div never unmounts on a
   // track change (only its contents swap), so the animation isn't lost.
@@ -1396,8 +1429,17 @@ export default function Dashboard() {
   const versionMoveDnd = useVersionMoveDnd({
     onMoved: (dest) => {
       if (filesFilter !== 'songs') return;
-      pendingInstrumentIdRef.current = dest.trackId;
-      pendingSectionNameRef.current = dest.sectionName;
+      if (dest.kind === 'section') {
+        pendingInstrumentIdRef.current = dest.trackId;
+        pendingSectionNameRef.current = dest.sectionName;
+        return;
+      }
+      // Moves C/D: select the track (no section) so its shelf shows the file —
+      // directly, like an assign-track drop, since the track already exists in the
+      // loaded bucket. Move B / "Move Out of Section": selection stays as is.
+      if (!dest.trackId) return;
+      const track = fileBucket.find(t => t.id === dest.trackId);
+      if (track) selectSongsTrack(track);
     },
   });
   const handleSongsDragEnd = (event: DragEndEvent) => {
@@ -2999,6 +3041,7 @@ export default function Dashboard() {
 
               {/* Column 2 — Instruments / Folders */}
               <SongsTracksColumnDropZone
+                songId={selectedFile?.id ?? null}
                 className={cn(
                   'w-44 shrink-0 border-r border-white/5 flex flex-col transition-colors',
                   songsTracksColumnDrop.isOver && selectedFile ? NATIVE_DROP_COLUMN_CLASS : 'bg-black/10'
@@ -3062,6 +3105,8 @@ export default function Dashboard() {
               {/* Column 3 — Sections / Subfolders */}
               <SongsSectionsColumnDropZone
                 selectedTrackId={selectedInstrument?.id ?? null}
+                selectedTrackName={selectedInstrument?.name ?? null}
+                songId={selectedFile?.id ?? null}
                 flashNonce={songsSectionsFlashNonce}
                 className={cn(
                   'w-44 shrink-0 border-r border-white/5 flex flex-col bg-black/[0.15] transition-colors',
@@ -3187,6 +3232,15 @@ export default function Dashboard() {
                           onMoreInfo={() => openClipInfo(clip)}
                           onAddNote={() => openClipInfo(clip, { focusNotes: true })}
                           onMarkFinal={() => markFinalMutation.mutate(clip.id)}
+                          onMoveOut={selectedFile?.type === 'song' && !selectedSection.isFullTake
+                            ? () => versionMoveDnd.moveOutOfSection({
+                                clipId: clip.id,
+                                clipName: clip.name,
+                                songId: selectedFile.id,
+                                sourceTrackName: selectedInstrument?.name ?? '',
+                                sourceSectionName: selectedSection.sectionName,
+                              })
+                            : undefined}
                           notesBadge={clipNotesBadge(clip)}
                         />
                       ))}

@@ -7,14 +7,14 @@ import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys, looseFileKeys, liveCommentRefetch, fetchClipCommentSummary, type ClipCommentSummary } from '@/lib/bucket-api';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp } from 'lucide-react';
+import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, FolderOutput } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
 import { ClipInUseDialog, describeLeaveDependents, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
 import { useToast } from '@/hooks/use-toast';
-import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData } from '@/hooks/use-loose-file-organize-dnd';
+import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
 import {
   ContextMenu,
@@ -1992,6 +1992,13 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
   });
   const handleRemove = () => removeAction.run();
 
+  // "Move Out of Section" — the version becomes a song-level loose file (Move B). The
+  // surface provides it (and hosts its in-use dialog, since this card unmounts once
+  // the version leaves); null where it isn't offered (not a real song). Never for a
+  // Full Take version.
+  const moveOutOfSection = React.useContext(VersionMoveOutContext);
+  const canMoveOut = !!moveOutOfSection && !clip.isFullTake;
+
   return (
     <>
       <ContextMenu modal={false}>
@@ -2053,6 +2060,23 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
           }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Download size={14} className="text-primary" /> Download
           </ContextMenuItem>
+          {canMoveOut && (
+            <ContextMenuItem
+              onClick={(e) => {
+                e.stopPropagation();
+                moveOutOfSection!({
+                  clipId: clip.id,
+                  clipName: clip.name,
+                  songId,
+                  sourceTrackName: trackName ?? '',
+                  sourceSectionName: clip.sectionName ?? '',
+                });
+              }}
+              className="gap-2 text-xs uppercase tracking-wider font-semibold"
+            >
+              <FolderOutput size={14} className="text-primary" /> Move Out of Section
+            </ContextMenuItem>
+          )}
           <ContextMenuItem
             onClick={(e) => { e.stopPropagation(); handleRemove(); }}
             className="gap-2 text-xs uppercase tracking-wider font-semibold text-red-400 focus:text-red-400 focus:bg-red-400/10"
