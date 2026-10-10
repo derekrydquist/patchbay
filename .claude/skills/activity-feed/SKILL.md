@@ -286,6 +286,7 @@ Right-clicking a clip in the IDEAS mode FILES column shows **"Add to Song"** (go
 3. `POST /api/ideas/:destIdeaId/clips` — creates the clip record at the destination. Clip name follows the Songs convention: `"{track} {section} V{n}"`.
 4. `PATCH /api/clips/:sourceClipId { addedToSongs: [...] }` — stamps the source clip so its "already added" gold pill shows up without a refetch; also updates `selectedInstrument` local state immediately. **Skipped for a loose-file source** — see "Loose-file source support" below.
 5. Invalidates `['bucket', sourceFileId]`, `['bucket', destSongId]`, `['songs']`, `['activity']`; closes the modal.
+6. Toast `"Added to {songName} — {instrument} · {section}"` with an **"Open Workspace →"** `ToastAction` to `/songs/:destSongId/workspace?instrument=...&section=...&file={newClipId}` — `file` makes MediaBucket scroll to and flash the new clip (landing flash, root `CLAUDE.md`).
 
 **No backend changes** — reuses `/api/upload`, `/api/ideas/:id/clips`, and `/api/clips/:id`.
 
@@ -316,7 +317,7 @@ const [isPromoting, setIsPromoting] = useState(false);
 4. `POST /api/ideas/:ideaId/clips` — creates the clip record in the new song's bucket. Clip name follows the Songs convention: `"{instrument} {section} V1"`. Metadata is copied from the upload response.
 5. `PATCH /api/clips/:sourceClipId { addedToSongs: [...] }` — stamps the source clip with `{ songId, songName, instrument, section }` so a gold pill badge appears on the original clip without waiting for a refetch. Also calls `setSelectedInstrument(prev => ...)` for immediate local state update. **Skipped for a loose-file source** — see "Loose-file source support" below.
 6. Invalidates `['bucket', sourceFileId]` and `['songs']`.
-7. `closePromoteModal()` then shows a toast: `"Promoted to {songName} — {instrument} · {section}"` with an **"Open Workspace →"** `ToastAction` that navigates to `/songs/:newSongId/workspace?instrument=...&section=...`.
+7. `closePromoteModal()` then shows a toast: `"Promoted to {songName} — {instrument} · {section}"` with an **"Open Workspace →"** `ToastAction` that navigates to `/songs/:newSongId/workspace?instrument=...&section=...&file={newClipId}` — `file` makes MediaBucket scroll to and flash the new clip (landing flash, root `CLAUDE.md`).
 
 **No backend changes** — reuses `/api/songs`, `/api/songs/:id/bucket`, `/api/upload`, `/api/ideas/:id/clips`, and `/api/clips/:id`.
 

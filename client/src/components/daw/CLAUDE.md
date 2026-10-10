@@ -418,7 +418,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 `BucketClip` in `Clip.tsx` renders a **`WaveformPlayerCard`** (`client/src/components/daw/WaveformPlayerCard.tsx`) in the Files column of `MediaBucket`. The same component is used in the Dashboard file browser (Songs and Ideas modes).
 
-**`WaveformPlayerCard` props:** `src`, `name`, `duration`, `isFinal`, `color?` (left border), `waveformHeight?` (default 20px; MediaBucket uses 32px), `className?`.
+**`WaveformPlayerCard` props:** `src`, `name`, `duration`, `isFinal`, `color?` (left border), `waveformHeight?` (default 20px; MediaBucket uses 32px), `className?`, `cardRef?` (the card's root element — the landing flash animates it, not the drag wrapper).
 
 **What it renders:**
 - Thin colored left border accent (`absolute left-0 top-0 bottom-0 w-0.5`) — only when `color` is provided; MediaBucket passes `clip.color`, Dashboard omits it
@@ -526,7 +526,7 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 
 **Song name in MediaBucket header** — The "Project: …" label in MediaBucket's header uses `useQuery(['song', songId])` to fetch the song name dynamically. In the SongHome context, this cache entry is already warm (SongHome fetches the same key). In the Workspace context, it makes one small fetch. Never hardcode the song name here.
 
-**URL param priority** — On fresh mount, `MediaBucket` checks for `?instrument=`, `?section=`, `?clipId=`, and `?openComments=` query params before falling back to localStorage. `instrument` + `section` navigate the three-column browser to the right idea. `clipId` + `openComments=true` (both must be present) set `autoOpenClipId` state, which causes the matching `BucketClip` to auto-open its More Info modal with the comment input focused. All four params are read in the same one-shot session restore `useEffect` so they resolve atomically on the first bucket data load.
+**URL param priority** — On fresh mount, `MediaBucket` checks for `?instrument=`, `?section=`, `?clipId=`, and `?openComments=` query params before falling back to localStorage. `instrument` + `section` navigate the three-column browser to the right idea. `clipId` + `openComments=true` (both must be present) set `autoOpenClipId` state, which causes the matching `BucketClip` to auto-open its More Info modal with the comment input focused. `?file=` (Add to Song / Promote to Song toast links) is also read: with no `instrument` it selects the track and section holding that clip. `file` (or else `clipId`) triggers the landing flash on that clip's card (`requestLandingFlash`, see "Landing flash" in root `CLAUDE.md`), replacing BucketClip's old 3-second `?file=` ring. All of these are read in the same one-shot session restore `useEffect` so they resolve atomically on the first bucket data load.
 
 ### Timeline — session persistence
 
@@ -766,16 +766,16 @@ A `useEffect(fn, [])` registers the handler. To avoid stale closures (the handle
 
 **Place on Timeline dialog (loose files, drop or menu):** the Section list shows only the chosen track's active, non-Full-Take sections; a track switch clears an invalid section. Failures show a destructive toast (the dialog closes before the server answers).
 
-Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a brief flash halo. Drag-and-drop placement is **deliberately silent** — do not add toasts or flashes to the drag path (`handleDragEnd`).
+Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a gold landing flash. Place on Timeline (the loose-file dialog, opened by a drop or by the menu) flashes the placed clip the same way, no toast. Bucket → timeline drag placement is **deliberately silent** — do not add toasts or flashes to the drag path (`handleDragEnd`).
 
-**Flash halo pattern (`TimelineClip` in `Clip.tsx`):**
-An `absolute inset-0 rounded-md` overlay div is rendered as the last child inside the clip's `relative` container. It uses `transition-opacity duration-700` to fade between `opacity-100` (flash active) and `opacity-0` (idle). Key classes: `border-2 border-white/90 shadow-[0_0_12px_rgba(255,255,255,0.6)] z-20 pointer-events-none`. **Do not use `ring-*` classes on timeline clips** — `overflow-hidden` on the clip container clips inline box-shadows (rings) to a sliver on one edge.
+**Gold outer glow (`TimelineClip` in `Clip.tsx`):**
+The shared landing flash (see "Landing flash" in root `CLAUDE.md`): `flashGold(clipContainerRef.current, { look: 'outerGlow', peakAlpha: TIMELINE_LANDING_GLOW_ALPHA, reducedMotion: 'ring' })` — a 2px gold ring plus soft glow OUTSIDE the clip's edge, animated as `box-shadow` on the container. Never a tint: Drums clips are gold. Under `prefers-reduced-motion`, a static gold outline just outside the edge for ~1.5s. While `isFlash` is set the clip's `zIndex` goes 1 → 2 (above neighbouring clips), and its `SectionCell` switches `overflow-hidden` → `overflow-visible` (it otherwise clips the glow, since the clip fills the cell). That cell change is tied to the flash, not to dragging, so the "`SectionCell` must never have drag-aware styling" rule still holds. **Do not use `ring-*` classes on timeline clips** — `overflow-hidden` on the clip container clips inline box-shadows (rings) to a sliver on one edge.
 
 **Flash plumbing:**
-- `insertClipInSection` returns the new clip's `id` (`nanoid()` generated, same value POSTed to the server)
+- `insertClipInSection` returns the new clip's `id` (`nanoid()` generated, same value POSTed to the server); Place on Timeline's `onSuccess` uses the server's `timelineClip.id`, which mounts with `isFlash` already set once live sync merges it
 - `flashClipId: string | null` state lives in `Timeline`; a `flashTimerRef` clears it after 1800ms
 - Threaded as props: `Timeline (flashClipId)` → `TimelineTrack (flashClipId?)` → `SectionCell (flashClipId?)` → `TimelineClip (isFlash = flashClipId === clip.id)`
-- A `useEffect([isFlash])` in `TimelineClip` calls `clipContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })` when `isFlash` becomes true; `combinedRef` satisfies both dnd-kit's `setNodeRef` and the local `clipContainerRef`
+- A `useEffect([isFlash])` in `TimelineClip` calls `clipContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })` and then `flashGold` when `isFlash` becomes true; `combinedRef` satisfies both dnd-kit's `setNodeRef` and the local `clipContainerRef`
 
 **Toast style convention for placement/creation toasts:**
 Gold-bordered card: `className: 'border-primary/50 bg-[#161410] shadow-[0_0_24px_rgba(234,179,8,0.25)]'`. Title: small-caps gold text with a lucide icon (`text-[11px] font-bold uppercase tracking-[0.2em] text-primary`). Description key values: `text-white font-semibold`; separator: `text-white/40`. The Add-to-Song toast in Dashboard predates this treatment — align it when next touched.

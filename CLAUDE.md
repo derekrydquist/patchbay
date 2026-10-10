@@ -349,9 +349,18 @@ interface UploadModalProps {
   mode?: 'placed' | 'loose' | 'band-loose'; // default: 'placed'
   looseTrackId?: string;          // 'loose' only: create the file in this Track's Track-scoped tier
   announceDestination?: boolean;  // Finder drops: header reads "Adding to Drums" / "Adding to Drums > Intro"
-  onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
+  onUploadSuccess?: (result: UploadSuccessResult) => void; // fires for all three modes
+}
+
+interface UploadSuccessResult {
+  mode: 'placed' | 'loose' | 'band-loose';
+  destTrackId: string | null;     // 'placed' only
+  destIdeaId: string | null;      // 'placed' only
+  landed: LandingFlashItem[];     // every landed file { id, zone }, in upload order
 }
 ```
+
+**After success** — the modal passes `landed` to `requestLandingFlash` itself (see "Landing flash"). A placed upload's destination is followed by MediaBucket and by the Songs quick-browser (selects the track and section, updates the URL); loose uploads don't move the selection.
 
 **Finder drops vs. Upload buttons** — a Finder drop carries its own destination: Track row / Sections background → loose file on that Track; Section row / Files column → clip in that section; Idea row / Ideas Column 2 → that Idea; Tracks-column background → song-level loose file; Ideas Column 1 background → band-wide. Drop call sites pass `looseTrackId` / `announceDestination` (Dashboard via a `dropUploadTarget` override that is cleared when the dialog closes); the Upload buttons never set them and follow the selection as before. Loose-file uploads invalidate `looseFileKeys.all()` (song list + every `byTrack`).
 
@@ -374,7 +383,7 @@ interface UploadModalProps {
 All in `use-loose-file-organize-dnd.ts` (Finder-drag timing and tracker in `use-native-file-drop.tsx`); mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedTracks`), not the Ideas shelf.
 
 - **Spring** — `useSpringLoadedTracks`: a loose-file or version (`bucket-clip`) drag held over a Track row for 800ms (`SPRING_LOAD_DELAY_MS`) selects that track, as a click does. Applies to loose-file drags (Tracks column, a track's shelf) and version drags (Files column); never springs the file's own track.
-- **Flash** — `flashSpringOpenedColumn` flashes the Sections column gold on a spring (150ms rise, 150ms hold, 900ms fade). Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
+- **Flash** — `flashSpringOpenedColumn` flashes the Sections column gold on a spring (150ms rise, 150ms hold, 900ms fade). A thin wrapper over `flashGold` (`use-landing-flash.ts`): Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
 - **Restore** — a drag that ends without moving the file (Escape, release over nothing, own-track drop, cancelled placement dialog) restores the drag-start selection, only if a spring changed it.
 - **Drop report** — `handleDragEnd` calls `reportLooseFileDrop(id, 'moved')` before each mutation; Timeline reports `'deferred'` when the placement dialog opens. Version drops always report `'deferred'`, then resolve: success follows the file; failure, Cancel or Escape in the in-use dialog restores the drag-start selection. No report = no move.
 - **Drag snapshot** — the drag data (`LooseFileDragData`, or `BucketClipDragData` `{ clip, type, trackId, trackName, ideaId, songId, isFullTake }`) + active id, saved at drag start by the hook's `handleDragStart` on every surface, Workspace included (Timeline's `handleDragStart` calls it): a dragged row can unmount mid-drag when a column changes, and dnd-kit then discards its data. Drops read live data first, then the snapshot (`resolveDrag`); Timeline's `handleDragEnd` falls back to its own drag-start copy the same way.
@@ -399,6 +408,19 @@ A version (a clip in a real song's section) can be dragged out of the Files colu
 - **Feed** — one visible row per move (`clip-moved-to-section` / `clip-moved-to-loose`). A version going loose loses its synthesized "added" and clip-comment feed rows (same as Ideas make-loose); the notes themselves are kept.
 - **Not movable** — Full Take versions (`ideas.isFullTake`, never the section name): no target accepts them and both routes refuse them. Hidden ideas and tracks aren't rendered, and move-to-section / move-to-loose refuse a hidden destination.
 - **View follows the file** — Move A selects the destination section; C/D select the destination track with no section; B leaves the selection.
+
+---
+
+## Landing flash
+
+After a file lands (version moves, Remove from Section, organize, assign/un-assign, Ideas moves, make-loose, uploads) it scrolls into view in its own column and flashes gold. One module: `client/src/hooks/use-landing-flash.ts`.
+
+- **Request / match** — the shared mutation paths (`use-bucket-mutations.ts`, `UploadModal`) call `requestLandingFlash({ id, zone }[])`; each row or card calls `useLandingFlash(id, zone, ref)` with its own id and a zone from its own data. Zones: `clip:<ideaId>`, `track:<trackId>`, `song:<songId>`, `band`. Matching on zone means a stale row at the old location never flashes. Works whether the row mounts before or after the request; requests expire after ~6s.
+- **Scrolling** — only the file's own scroller (Radix viewport or `overflow-y` auto/scroll ancestor), never `scrollIntoView`, so the page, the timeline and overflow-hidden parents never move. A multi-file batch scrolls the minimum to show all of them when they fit, otherwise the topmost. Instant under `prefers-reduced-motion`.
+- **`flashGold`** — row/card peak `LANDING_FLASH_PEAK_ALPHA` (0.36); the spring column flash is a thin wrapper with its original look. Under `prefers-reduced-motion`: no animation, a static gold ring for ~1.5s (the column flash just skips).
+- **Rows and cards** — `BucketClip`, `SongsClipContextMenuCard`, `IdeaClipCard`, `LooseFileRow`. Cards flash via `WaveformPlayerCard`'s `cardRef`. Make-loose flashes only the Ideas Column 1 row; the preview card never takes a landing flash.
+- **Timeline** — Place on Timeline (dialog and menu) and "Add to Timeline" show a gold outer glow (`flashGold` `look: 'outerGlow'`, `TIMELINE_LANDING_GLOW_ALPHA`); while flashing, the clip's section cell stops clipping and the clip lifts one layer. Bucket → timeline DRAG placement stays silent.
+- **Arrival links** — `?file=<id>` (Add to Song / Promote toasts) and `?clipId=` scroll to and flash the file in MediaBucket. The old 3-second `?file=` ring is gone.
 
 ---
 
@@ -746,6 +768,9 @@ These are things that need a decision before being built:
 - **Home "Your Songs" Delete shows no error toast** — a failed delete is silent there.
 - **437 foreign-key violations from older deletes** — orphan tracks/tasks/task comments; they block nothing.
 - **Ideas clips and loose files have no Download menu item** — `buildDownloadFilename` already handles their naming; adding one is a one-line call per menu.
+- **Organized or placed loose files show gold instead of their track's color** — possibly also cross-track version moves. Investigation in progress.
+- **Multi-file upload partial failure** — files that already landed stay in the pending list, so pressing Confirm again uploads them twice.
+- **activity-feed skill's `ActivityEvent` union is stale** — stops at the album types; refresh it from `storage.ts`.
 - **Escape can't cancel some Finder drags** — when the file wasn't already selected in Finder before the drag started (macOS drag-session behavior, outside the app).
 - **Timeline content pop-in on page load (parked, low priority)** — `tracks` starts as an empty array on mount; the entire track/clip grid (headers, section bands, clips, waveforms) appears in a single commit when `GET /api/songs/:id/timeline` resolves (~130–140ms locally; could be worse in production). No loading skeleton exists. Confirmed via real-browser testing to be pre-existing and independent of the scroll-persistence work (see "Timeline — session persistence" in `client/src/components/daw/CLAUDE.md`). A secondary, related effect: individual clip waveforms decode and render asynchronously per-clip after the grid appears, with no ordering guarantee tied to track position — decode time appears to scale with clip duration/file size rather than screen position, so a top-of-list track can render its waveform after a lower one. Proper fix (loading skeleton or suspense boundary) is a bigger scope decision, not a quick patch — not scheduled.
 
@@ -910,5 +935,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - ~~**More Info and Add Note for loose files**~~ **Resolved Oct 2026** — notes live in `loose_file_comments` and move with the file on organize; see `loose_files` in the Database table. Editable metadata for loose files followed (Oct 2026), via `PATCH /api/loose-files/:id/metadata`.
 - **Real-song clip deletion (a real `clips` row)** — Ideas-shelf clips can be deleted (`POST /api/clips/:clipId/delete`), but real-song versions only have Remove (soft, with the in-use check — see "Remove and the in-use check" in `client/src/components/daw/CLAUDE.md`). A real-song Delete is still planned (see Known Issues).
 - **Remove → Delete rename** — the version menu's "Remove" is planned to become "Delete" in a separate audit.
-- **Scroll and flash on drop** — after any drop (version moves, loose-file organize and assign-track, Ideas moves, Finder uploads), the landed file should scroll into view and briefly flash. Not started.
+- **Loose-file preview on song surfaces** — clicking a loose file in Workspace, SongHome or the Songs quick-browser shows a preview card in the Files column, modelled on the Ideas shelf. Open: effect on the selected section, where the selection is remembered, Workspace playback, whether moves B/C/D should open it. Planned in its own chat.
+- **Upload button parity** — the Songs quick-browser's Files-column Upload asks for a section; Workspace/SongHome's header Upload uploads loose files. Decide one model, likely alongside the loose-file preview.
+- **Feed comment links could scroll to the exact comment** — they open More Info but don't scroll to the comment. Not a bug; possible improvement.
 - **Timeline-clip drag ghost** — remove or replace; decide with the timeline rebuild's drag model.
