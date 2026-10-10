@@ -183,6 +183,7 @@ export interface ActivityEvent {
       | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
       | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
       | 'clip-made-loose' | 'clip-deleted' | 'clip-final-set' | 'clip-final-cleared'
+      | 'clip-moved-to-section'
       // Sort-only: a task outcome whose cause already has its own feed row.
       | 'task-auto-completed' | 'task-auto-reverted';
   description: string;
@@ -273,6 +274,7 @@ export interface IStorage {
   // A version leaving its section (Remove today, moves later). See releaseClipDependencies.
   getClipDependents(clipId: string): Promise<ClipDependents | undefined>;
   removeClip(clipId: string): Promise<Clip | undefined>;
+  moveClipToSection(clipId: string, destIdeaId: string): Promise<Clip | undefined>;
   getTaskByTrackSection(trackId: string, sectionName: string): Promise<ProductionTask | undefined>;
   countActiveClipsForIdea(ideaId: string): Promise<number>;
   hasActiveFinalClipInIdea(ideaId: string, excludeClipId?: string): Promise<boolean>;
@@ -1431,6 +1433,40 @@ export class SQLiteStorage implements IStorage {
       const moved = tx.select().from(clips).where(eq(clips.id, clipId)).get();
       if (!moved) throw new Error(`[moveClipToIdea] clip ${clipId} not found`);
       return moved;
+    });
+  }
+
+  // Real song: move a version (an active clips row) to another section of the same
+  // song — Move A. One transaction: release what depends on the version
+  // (releaseClipDependencies: its timeline copies, Final on this one row, any task's
+  // relatedClipId — the approved fourth isFinal write path), then re-parent it under
+  // the destination idea with the destination's "{track} {section} V{n}" name.
+  // landingClipName runs BEFORE ideaId changes, so the moving clip isn't counted, and
+  // fills metadata.originalFileName only when empty. id, createdAt, src, addedToSongs
+  // and notes (clip_comments, keyed on the id) are untouched. Validation (real song,
+  // active, no Full Take on either side, same song, different idea) and the in-use
+  // check are the route's; task recompute on both sides is the caller's, after commit.
+  // Separate from moveClipToIdea, which resolves its destination through the Ideas
+  // shelf's hidden default folder, keeps the name and has no Final/timeline/task side.
+  async moveClipToSection(clipId: string, destIdeaId: string): Promise<Clip | undefined> {
+    return db.transaction((tx) => {
+      const clip = tx.select().from(clips).where(eq(clips.id, clipId)).get();
+      if (!clip) return undefined;
+      const destIdea = tx.select().from(ideas).where(eq(ideas.id, destIdeaId)).get();
+      if (!destIdea) throw new Error(`[moveClipToSection] destination idea ${destIdeaId} not found`);
+      releaseClipDependencies(tx, clipId);
+      const landed = landingClipName(tx, destIdea.id, clip.name, clip.metadata);
+      tx.update(clips)
+        .set({
+          ideaId: destIdea.id,
+          sectionName: destIdea.sectionName,
+          name: landed.name,
+          metadata: landed.metadata,
+          isFinal: false,
+        })
+        .where(eq(clips.id, clipId))
+        .run();
+      return tx.select().from(clips).where(eq(clips.id, clipId)).get();
     });
   }
 

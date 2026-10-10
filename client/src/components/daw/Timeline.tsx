@@ -42,7 +42,9 @@ import {
   reportLooseFileDrop,
   resolveDeferredLooseFileDrop,
   BUCKET_CLIP_DRAG_TYPE,
+  useVersionMoveDnd,
 } from '@/hooks/use-loose-file-organize-dnd';
+import { VersionMoveInUseDialog } from './ClipInUseDialog';
 import { LooseFileDragOverlay } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
@@ -337,6 +339,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         detail: dest.action === 'organize'
           ? { trackId: dest.trackId, sectionName: dest.sectionName }
           : { trackId: dest.trackId },
+      }));
+    },
+  });
+  // Version (bucket-clip) moves to another section — Move A. The view follows the
+  // file through the same find-in-bucket event organize uses. Its in-use dialog is
+  // rendered below, at this level, since the dragged card leaves its section.
+  const versionMoveDnd = useVersionMoveDnd({
+    onMoved: (dest) => {
+      window.dispatchEvent(new CustomEvent('find-in-bucket', {
+        detail: { trackId: dest.trackId, sectionName: dest.sectionName },
       }));
     },
   });
@@ -2217,12 +2229,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     if (isBucketOrganizeDropId(overId)) {
       setInsertionPoint(null);
       if (looseFileHandled) return;
-      if (organizeDrag?.type === BUCKET_CLIP_DRAG_TYPE) {
-        // ── VERSION (bucket-clip) → BUCKET TARGET ROUTING GOES HERE ──────────────
-        // No version move exists yet: a version dropped on any bucket target does
-        // nothing (no mutation, no drop report, so a sprung selection is restored).
-        return;
-      }
+      // ── Version (bucket-clip) → bucket target: Move A (a Section row, or the Files
+      // column showing another section). Any other bucket target does nothing yet.
+      versionMoveDnd.handleDragEnd(event, organizeDrag);
       return;
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -3226,6 +3235,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           ) : null}
         </DragOverlay>
       )}
+
+      <VersionMoveInUseDialog dialogProps={versionMoveDnd.dialogProps} vars={versionMoveDnd.pendingVars} />
 
       {/* Timeline background right-click context menu */}
       {contextMenuPos && (

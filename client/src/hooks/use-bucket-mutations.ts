@@ -3,6 +3,8 @@ import {
   type ApiIdea, type ApiTrack, type ApiClip, type ApiTimelineClip, type ApiLooseFile,
   bucketKeys, looseFileKeys,
 } from '@/lib/bucket-api';
+import { useToast } from '@/hooks/use-toast';
+import { postClipLeave, useClipInUseAction } from '@/components/daw/ClipInUseDialog';
 
 // Shared by organize/place-on-timeline: invalidate the same set the loose-file
 // upload flow also invalidates, so all three actions keep every surface in sync.
@@ -521,5 +523,56 @@ export function useDeleteIdeaClip(
       opts?.onSuccess?.(vars);
     },
     onError: (err: Error) => opts?.onError?.(err.message),
+  });
+}
+
+// ─── Real-song versions ──────────────────────────────────────────────────────
+
+// Move A: a version to another section of the same song (POST
+// /api/clips/:clipId/move-to-section). Built on useClipInUseAction, so a version
+// with timeline copies or Final first opens ClipInUseDialog (render it at the
+// surface level with this action's dialogProps/pendingVars) and confirming repeats
+// the request with confirm: true. The display fields (clipName, destTrackName,
+// destSectionName) are for the dialog's wording and the caller's "view follows the
+// file"; the server reads only ideaId.
+export interface MoveClipToSectionVars {
+  clipId: string;
+  clipName: string;
+  songId: string;
+  // The track the version leaves — named in the dialog's task line.
+  sourceTrackName: string;
+  destIdeaId: string;
+  destTrackId: string;
+  destTrackName: string;
+  destSectionName: string;
+}
+
+export function useMoveClipToSection(opts?: {
+  onSuccess?: (clip: ApiClip, vars: MoveClipToSectionVars) => void;
+  onError?: (message: string, vars: MoveClipToSectionVars) => void;
+  onCancel?: (vars: MoveClipToSectionVars) => void;
+}) {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useClipInUseAction<ApiClip, MoveClipToSectionVars>({
+    request: (confirm, vars) =>
+      postClipLeave<ApiClip>(`/api/clips/${vars.clipId}/move-to-section`, { ideaId: vars.destIdeaId }, confirm),
+    onSuccess: (clip, vars) => {
+      // The bucket key is also the Songs quick-browser's file list (fileBucket).
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId) });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${vars.songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+      opts?.onSuccess?.(clip, vars);
+    },
+    onError: (message, vars) => {
+      console.error('[moveClipToSection] error:', message);
+      toast({ title: 'Failed to move file', description: message, variant: 'destructive' });
+      opts?.onError?.(message, vars);
+    },
+    onCancel: opts?.onCancel,
   });
 }

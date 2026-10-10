@@ -12,7 +12,7 @@ import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
-import { ClipInUseDialog, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
+import { ClipInUseDialog, describeLeaveDependents, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
 import { useToast } from '@/hooks/use-toast';
 import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
@@ -1862,6 +1862,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
 interface BucketClipProps {
   clip: Clip;
   trackId?: string;
+  trackName?: string;
   songId?: string;
   onAddToTimeline?: (clip: Clip, trackId?: string) => void;
   autoOpenInfo?: boolean;
@@ -1869,7 +1870,7 @@ interface BucketClipProps {
 
 import { useLocation } from 'wouter';
 
-export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo }: BucketClipProps) {
+export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo }: BucketClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1925,6 +1926,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     clip: { ...clip, isFinal, comments },
     type: BUCKET_CLIP_DRAG_TYPE,
     trackId: trackId ?? '',
+    trackName: trackName ?? '',
     ideaId: clip.ideaId ?? '',
     songId,
     isFullTake: clip.isFullTake ?? false,
@@ -2063,7 +2065,8 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
       <ClipInUseDialog
         {...removeAction.dialogProps}
         actionLabel="Remove anyway"
-        consequence="Removing it takes its placements off the timeline and clears Final."
+        intro={`Removing "${clip.name}" will:`}
+        describe={(d) => describeLeaveDependents(d, trackName ?? null)}
       />
 
       {showInfo && (

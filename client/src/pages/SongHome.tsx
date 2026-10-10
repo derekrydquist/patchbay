@@ -4,8 +4,9 @@ import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
-import { DndContext } from '@dnd-kit/core';
-import { useLooseFileOrganizeDnd } from '@/hooks/use-loose-file-organize-dnd';
+import { DndContext, type DragEndEvent } from '@dnd-kit/core';
+import { useLooseFileOrganizeDnd, useVersionMoveDnd } from '@/hooks/use-loose-file-organize-dnd';
+import { VersionMoveInUseDialog } from '@/components/daw/ClipInUseDialog';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
 import {
   ChevronRight, Circle, Clock, ArrowRight, Play, Pause,
@@ -2149,6 +2150,21 @@ export default function SongHome() {
     },
   });
 
+  // Version (bucket-clip) moves to another section — Move A, chained after the
+  // loose-file handler (which ignores versions). Same find-in-bucket view-follows.
+  const versionMoveDnd = useVersionMoveDnd({
+    onMoved: (dest) => {
+      window.dispatchEvent(new CustomEvent('find-in-bucket', {
+        detail: { trackId: dest.trackId, sectionName: dest.sectionName },
+      }));
+    },
+  });
+  const handleFilesDragEnd = (event: DragEndEvent) => {
+    // Read before the loose-file handler clears its drag-start snapshot.
+    const drag = looseFileOrganizeDnd.resolveDrag(event);
+    if (!looseFileOrganizeDnd.handleDragEnd(event)) versionMoveDnd.handleDragEnd(event, drag);
+  };
+
   const { data: song } = useQuery<Song>({
     queryKey: ['song', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
@@ -2411,12 +2427,13 @@ export default function SongHome() {
                 sensors={looseFileOrganizeDnd.sensors}
                 collisionDetection={looseFileOrganizeDnd.collisionDetection}
                 onDragStart={looseFileOrganizeDnd.handleDragStart}
-                onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+                onDragEnd={handleFilesDragEnd}
                 onDragCancel={looseFileOrganizeDnd.handleDragCancel}
               >
                 <MediaBucket songId={songId} />
                 <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
               </DndContext>
+              <VersionMoveInUseDialog dialogProps={versionMoveDnd.dialogProps} vars={versionMoveDnd.pendingVars} />
             </div>
           </div>
         )}

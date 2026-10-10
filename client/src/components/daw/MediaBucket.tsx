@@ -16,7 +16,7 @@ import {
 import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveOrganizeDrag,
-  organizeDropRules, type ActiveOrganizeDrag,
+  organizeDropRules, type ActiveOrganizeDrag, type SectionDropTarget,
   DRAG_SURFACE_GROUP, DRAG_SURFACE_ROW_HOVER, useDragSurfaceAttrs,
   useSpringLoadedTracks, useNativeSpringLoadedTracks, flashSpringOpenedColumn,
   type SpringLoadedTracksOptions,
@@ -63,17 +63,23 @@ interface SectionFolderRowProps {
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
   /** From MediaBucket's useActiveOrganizeDrag — null when no organize drag is active. */
   activeDrag: ActiveOrganizeDrag | null;
+  songId: string;
+  trackName: string;
 }
 
-function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeDrag }: SectionFolderRowProps) {
+function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeDrag, songId, trackName }: SectionFolderRowProps) {
   const hasFiles = idea.clips.length > 0;
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
+  const target: SectionDropTarget = {
+    trackId: idea.trackId, sectionName: idea.sectionName, ideaId: idea.id,
+    songId, isFullTake: idea.isFullTake ?? false, trackName,
+  };
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionDropId(idea.id),
-    data: { trackId: idea.trackId, sectionName: idea.sectionName },
+    data: target,
   });
   // Highlight only when this row accepts the active drag (organizeDropRules).
-  const accepts = organizeDropRules.sectionRow(activeDrag, { ideaId: idea.id, isFullTake: idea.isFullTake ?? false });
+  const accepts = organizeDropRules.sectionRow(activeDrag, target);
   const combinedRef = (node: HTMLButtonElement | null) => {
     setNodeRef(node);
     if (buttonRef) (buttonRef as React.MutableRefObject<HTMLButtonElement | null>).current = node;
@@ -606,14 +612,22 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // every row — see organizeDropRules for what each target accepts.
   const activeDrag = useActiveOrganizeDrag();
 
+  // Same SectionDropTarget as the selected section's own row.
+  const filesColumnTarget: SectionDropTarget | null = selectedIdea && selectedTrack
+    ? {
+        trackId: selectedIdea.trackId, sectionName: selectedIdea.sectionName, ideaId: selectedIdea.id,
+        songId, isFullTake: selectedIdea.isFullTake ?? false, trackName: selectedTrack.name,
+      }
+    : null;
   const { setNodeRef: setVersionsDroppableRef, isOver: isVersionsOver } = useDroppable({
     id: bucketVersionsDropId('media-bucket-files-column'),
-    disabled: !selectedIdea,
-    data: selectedIdea ? { trackId: selectedIdea.trackId, sectionName: selectedIdea.sectionName } : undefined,
+    disabled: !filesColumnTarget,
+    data: filesColumnTarget ?? undefined,
   });
   // A version drag starts INSIDE this column, so isOver is true from its first
-  // frame — only the rule decides whether that means anything.
-  const isVersionsDropTarget = isVersionsOver && organizeDropRules.filesColumn(activeDrag, { ideaId: selectedIdea?.id ?? null });
+  // frame — only the rule decides whether that means anything (its own section
+  // never accepts it).
+  const isVersionsDropTarget = isVersionsOver && organizeDropRules.filesColumn(activeDrag, filesColumnTarget);
 
   // Sections-column background organize drop target — a second entry point onto the
   // exact same Track-scoped resting tier as a Track row's own droppable (identical
@@ -857,6 +871,8 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                       onRemove={() => hideIdeaMutation.mutate(idea.id)}
                       buttonRef={selectedIdea?.id === idea.id ? selectedIdeaRef : undefined}
                       activeDrag={activeDrag}
+                      songId={songId}
+                      trackName={selectedTrack.name}
                     />
                   ))}
                   {/* Track-scoped resting tier — dragged off the Tracks column onto this
@@ -913,6 +929,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                         key={clip.id}
                         clip={apiClipToClip({ ...clip, isFullTake: selectedIdea?.isFullTake ?? false })}
                         trackId={selectedTrack?.id}
+                        trackName={selectedTrack?.name}
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}
                         autoOpenInfo={clip.id === autoOpenClipId}

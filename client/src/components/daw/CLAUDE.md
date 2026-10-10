@@ -60,7 +60,7 @@ There are two kinds of droppable zones in the clip-drag `DndContext`:
 
 **Collision detection** — the outer `DndContext` uses the custom `trackFirstCollision` function (defined module-level in `Timeline.tsx`). The outer `DndContext` also sets `measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}` to force dnd-kit to remeasure droppables on every render — necessary because gap zones mount and reposition mid-drag.
 
-Gap zones are checked **first** using a live `container.node.current?.getBoundingClientRect()` call (falls back to cached rect if the ref is null). This bypasses the stale `droppableRects` cache for freshly-mounted or repositioned zones. Track rows are checked **second** by vertical band only — any X position on the row matches, preventing `overId: null` in empty horizontal track space.
+While the pointer is inside MediaBucket's on-screen bounds (`[data-media-bucket]`), only MediaBucket's own targets can match (`matchOrganizeDropTarget`); gap zones and track rows are skipped. Otherwise gap zones are checked **first** using a live `container.node.current?.getBoundingClientRect()` call (falls back to cached rect if the ref is null). This bypasses the stale `droppableRects` cache for freshly-mounted or repositioned zones. MediaBucket's targets are checked **second** (precise X+Y). Track rows are checked **third** by vertical band only — any X position on the row matches, preventing `overId: null` in empty horizontal track space. The bounds guard exists because a track row scrolled out of view keeps its measured rect, so a release on bucket blank space could match it and place the clip.
 
 `handleDragMove` checks `overId.startsWith('gap||')` first. When over a gap, it sets `isOverGap = true` and clears `insertionPoint`. Otherwise it sets `isOverGap = false` and clears `insertionPoint`.
 
@@ -76,7 +76,7 @@ On a track-row drop, `overId` is the trackId directly — see clip reorder secti
 1. Calls `computeSectionLayout(tracks, sectionOrder)` to get each section's absolute start offset (widest track in that section determines section width)
 2. For each track, walks each section's clip array in order and sets `clip.start = sectionOffset + sum of preceding effective trimmed durations`
 
-**Effective duration** — everywhere clip length is used for layout (section width, snap position, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. `clip.duration` is the full file length and is never modified.
+**Effective duration** — everywhere clip length is used for layout (section width, snap position, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. (The drag overlay width applies to timeline-clip drags only; loose-file and version drags use the small `LooseFileDragOverlay` chip.) `clip.duration` is the full file length and is never modified.
 
 Call it after every insert, remove, or section reorder. It takes the full tracks array and the current `sectionOrder` and returns a new array with all starts updated. Because it is pure, it can be called inside `setTracks(prev => ...)` safely.
 
@@ -106,7 +106,7 @@ There is one active insertion indicator during drag:
 - `isDragging` is passed as a prop from `Timeline` (`activeDragData !== null`) to each `TimelineTrack` — not from `useDndMonitor` or any hook inside Track.tsx. This ensures all tracks receive the same drag state in the same render pass.
 - All overlay positioning uses explicit inline styles, not Tailwind `inset-0`, to avoid paint-clipping issues on wide scrollable containers.
 - **The track-level overlay is the single source of truth for all drag visual feedback.** `SectionCell` must never have drag-aware styling of any kind — no opacity, no grayscale, no filter, no className conditions that reference drag state. Clips and cells always render at full brightness regardless of drag state. (A previous `isInvalid && 'opacity-25 grayscale'` on `SectionCell` caused hard-to-trace clip dimming and was removed — do not reintroduce it.)
-- **`Clip.tsx` must have zero drag-aware styling.** No `isDragging &&` conditional classes on `TimelineClip` or `BucketClip`. The `DragOverlay` renders the floating ghost separately; the original clip element in the track must not change appearance during drag.
+- **`TimelineClip` must have zero drag-aware styling.** No `isDragging &&` conditional classes on it. The `DragOverlay` renders the floating ghost separately; the original clip element in the track must not change appearance during drag. (`BucketClip` is a file-browser card, not a track clip: it has no transform and dims to `opacity-40` while dragged, like every other file-browser drag source.)
 - **The timeline itself does not change during drag.** No ghost section columns are injected speculatively. `sectionLayout` is used directly for all rendering; the old `effectiveSectionLayout` speculative-injection memo has been removed.
 
 ### Clip reorder via track-row drop
@@ -126,7 +126,7 @@ After splicing, `recalcAllStarts(draft, sectionOrder)` is called inside `setTrac
 
 ### Drag data — `trackId` requirements
 
-**`BucketClip`** embeds `trackId` in its dnd-kit drag data: `{ clip: {...}, type: 'bucket-clip', trackId }`. `Timeline.handleDragStart` stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render, `gapZones` useMemo) uses this `trackId`. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
+**`BucketClip`** embeds `trackId` in its dnd-kit drag data: `{ clip: {...}, type: 'bucket-clip', trackId, ideaId, songId, isFullTake }` (`BucketClipDragData`; the last three are for the bucket drop targets — see "Version drags (groundwork)" in root `CLAUDE.md`). `Timeline.handleDragStart` stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render, `gapZones` useMemo) uses this `trackId`. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
 
 **`TimelineClip`** must also embed `trackId` in its drag data: `{ clip: {...}, type: 'clip', trackId }`. Without it, gap drops and track-row reorders fail silently because `dragData?.trackId` is undefined and the handlers bail early. `trackId` is threaded as a prop: `Timeline` → `TimelineTrack` (passes `trackId={track.id}`) → `SectionCell` (prop `trackId: string`) → `TimelineClip` (prop `trackId?: string`).
 
@@ -1056,8 +1056,10 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 - dnd-kit's `tabIndex={0}` side effect + Radix returning focus on Escape causes a stray focus-visible outline unless the trigger has `focus-visible:outline-none` (same fix as `TimelineClip`, now also on `BucketClip`).
 - **dnd-kit's `isOver` reflects pure geometric hover — it does not know about a droppable's `disabled` state.** Any highlight on a conditionally-disabled droppable must check `isOver && !disabledCondition` explicitly (e.g. the Tracks-column background: `isOver && !isTracksBackgroundDisabled`).
 - **`matchOrganizeDropTarget` (`client/src/hooks/use-loose-file-organize-dnd.ts`): column backgrounds are fallback-only.** Both the Tracks- and Sections-column backgrounds (`bucket-tracks-bg||`, `bucket-sections-bg||`) nest other targets (Track rows / Section rows); a background hit is remembered and returned only if nothing more specific matched. Any new nesting target must join `isBackgroundDropId`.
-- **Own-track loose-file drops cancel in `handleDragEnd`** (Track row or Sections background with `originTrackId === destTrackId`): no mutation, toast, or `onOrganized`. The own Track row stays an ENABLED droppable — dnd-kit drops disabled droppables from collision detection, so disabling it lets the drop fall through to the Tracks background and un-assign. Highlights for both are gated off via `isSameTrackDrag` / `isOwnTrackDrag`.
-- **`TrackFolderRow` gets the active drag from `useActiveLooseFileDrag` (`useDndMonitor`), not `useDndContext`** — `useDndContext` changes on every pointer move; the monitor only fires on start/end/cancel, so Track rows re-render twice per drag.
+- **Own-track loose-file drops cancel in `handleDragEnd`** (Track row or Sections background with `originTrackId === destTrackId`): no mutation, toast, or `onOrganized`. The own Track row stays an ENABLED droppable — dnd-kit drops disabled droppables from collision detection, so disabling it lets the drop fall through to the Tracks background and un-assign. Highlights for both are gated off by `organizeDropRules` (`trackRow` / `sectionsBackground`).
+- **Drop targets get the active drag from `useActiveOrganizeDrag` (`useDndMonitor`), not `useDndContext`** — `useDndContext` changes on every pointer move; the monitor only fires on start/end/cancel, so rows re-render twice per drag. MediaBucket calls it once and passes it to every row.
+- **Workspace mounts one `DragOverlay` at a time** — `LooseFileDragOverlay` for loose-file and version drags, Timeline's clip ghost for timeline clips. dnd-kit draws an overlay's wrapper during any drag, even with no children, so two mounted overlays left an invisible box under the cursor. The drag type is known in the same batched update as the drag start, so the right overlay is in place on the first frame.
+- **Timeline's `DndContext` needs `onDragCancel`** — Escape cancels a pointer drag; without the handler `activeDragData` outlived the drag (track overlays stayed up, the Delete shortcut stayed blocked).
 
 ---
 

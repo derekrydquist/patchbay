@@ -50,6 +50,7 @@ import { CornerBadge } from '@/components/daw/CornerBadge';
 import { UploadModal } from '@/components/daw/UploadModal';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow, looseFileToClip } from '@/components/daw/LooseFileRow';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
+import { VersionMoveInUseDialog } from '@/components/daw/ClipInUseDialog';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import {
@@ -62,6 +63,8 @@ import {
   useLooseFileOrganizeDnd,
   useActiveOrganizeDrag,
   organizeDropRules,
+  type SectionDropTarget,
+  useVersionMoveDnd,
   BUCKET_CLIP_DRAG_TYPE,
   type BucketClipDragData,
   useActiveDragSource,
@@ -683,18 +686,24 @@ interface SongsSectionRowProps {
   onSelect: () => void;
   /** Finder file drop — uploads into this section as a real clip. */
   onFileDrop: (files: File[]) => void;
+  songId: string;
+  trackName: string;
 }
 
-function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop }: SongsSectionRowProps) {
+function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, trackName }: SongsSectionRowProps) {
   const hasFiles = idea.clips.length > 0;
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
+  const target: SectionDropTarget = {
+    trackId: idea.trackId, sectionName: idea.sectionName, ideaId: idea.id,
+    songId, isFullTake: idea.isFullTake ?? false, trackName,
+  };
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionDropId(idea.id),
-    data: { trackId: idea.trackId, sectionName: idea.sectionName },
+    data: target,
   });
   // Highlight only when this row accepts the active drag (organizeDropRules).
   const activeDrag = useActiveOrganizeDrag();
-  const accepts = organizeDropRules.sectionRow(activeDrag, { ideaId: idea.id, isFullTake: idea.isFullTake ?? false });
+  const accepts = organizeDropRules.sectionRow(activeDrag, target);
 
   return (
     <button
@@ -896,6 +905,8 @@ function SongsSectionsColumnDropZone({ selectedTrackId, flashNonce, className, c
 // they're already separate child components rendered inside the DndContext tree.
 interface SongsFilesColumnDropZoneProps {
   selectedSection: ApiIdea | null;
+  songId: string | null;
+  trackName: string | null;
   className?: string;
   children: React.ReactNode;
   /** Finder file drop handlers (useNativeFileDrop). */
@@ -903,16 +914,24 @@ interface SongsFilesColumnDropZoneProps {
 }
 
 function SongsFilesColumnDropZone({
-  selectedSection, className, children, nativeDropHandlers,
+  selectedSection, songId, trackName, className, children, nativeDropHandlers,
 }: SongsFilesColumnDropZoneProps) {
+  // Same SectionDropTarget as the selected section's own row.
+  const target: SectionDropTarget | null = selectedSection && songId && trackName
+    ? {
+        trackId: selectedSection.trackId, sectionName: selectedSection.sectionName, ideaId: selectedSection.id,
+        songId, isFullTake: selectedSection.isFullTake ?? false, trackName,
+      }
+    : null;
   const { setNodeRef, isOver } = useDroppable({
     id: bucketVersionsDropId('songs-files-column'),
-    disabled: !selectedSection,
-    data: selectedSection ? { trackId: selectedSection.trackId, sectionName: selectedSection.sectionName } : undefined,
+    disabled: !target,
+    data: target ?? undefined,
   });
   // A version drag starts INSIDE this column, so isOver is true from its first
-  // frame — only the rule decides whether that means anything.
-  const accepts = organizeDropRules.filesColumn(useActiveOrganizeDrag(), { ideaId: selectedSection?.id ?? null });
+  // frame — only the rule decides whether that means anything (its own section
+  // never accepts it).
+  const accepts = organizeDropRules.filesColumn(useActiveOrganizeDrag(), target);
 
   return (
     <div
@@ -1369,6 +1388,23 @@ export default function Dashboard() {
       }
     },
   });
+
+  // Songs quick-browser: version (bucket-clip) moves to another section — Move A,
+  // chained after the loose-file handler (which ignores versions). The view follows
+  // the file through the same pending refs an organize uses, picked up by the
+  // fileBucket effect once the move's own invalidation refetches the bucket.
+  const versionMoveDnd = useVersionMoveDnd({
+    onMoved: (dest) => {
+      if (filesFilter !== 'songs') return;
+      pendingInstrumentIdRef.current = dest.trackId;
+      pendingSectionNameRef.current = dest.sectionName;
+    },
+  });
+  const handleSongsDragEnd = (event: DragEndEvent) => {
+    // Read before the loose-file handler clears its drag-start snapshot.
+    const drag = looseFileOrganizeDnd.resolveDrag(event);
+    if (!looseFileOrganizeDnd.handleDragEnd(event)) versionMoveDnd.handleDragEnd(event, drag);
+  };
 
   // Ideas shelf: select an Idea in Column 1 — the one path for both a row click and
   // the view following a file moved into another Idea.
@@ -2843,7 +2879,7 @@ export default function Dashboard() {
               sensors={looseFileOrganizeDnd.sensors}
               collisionDetection={looseFileOrganizeDnd.collisionDetection}
               onDragStart={looseFileOrganizeDnd.handleDragStart}
-              onDragEnd={looseFileOrganizeDnd.handleDragEnd}
+              onDragEnd={handleSongsDragEnd}
               onDragCancel={looseFileOrganizeDnd.handleDragCancel}
             >
             <SongsSpringLoadedTracks options={songsSpringOptions} />
@@ -3067,6 +3103,8 @@ export default function Dashboard() {
                             }
                           }}
                           onFileDrop={(files) => handleSongsSectionFileDrop(files, idea)}
+                          songId={selectedFile!.id}
+                          trackName={selectedInstrument!.name}
                         />
                       ))}
                       {/* Track-scoped resting tier — always below the Section list,
@@ -3082,6 +3120,8 @@ export default function Dashboard() {
               {/* Column 4 — Files */}
               <SongsFilesColumnDropZone
                 selectedSection={selectedSection}
+                songId={selectedFile?.id ?? null}
+                trackName={selectedInstrument?.name ?? null}
                 className={cn(
                   'flex-1 flex flex-col transition-colors',
                   songsFilesColumnDrop.isOver ? NATIVE_DROP_COLUMN_CLASS : 'bg-black/20'
@@ -3138,6 +3178,7 @@ export default function Dashboard() {
                             clip: apiClipToClip({ ...clip, isFullTake: selectedSection.isFullTake ?? false }),
                             type: BUCKET_CLIP_DRAG_TYPE,
                             trackId: selectedSection.trackId,
+                            trackName: selectedInstrument!.name,
                             ideaId: selectedSection.id,
                             songId: selectedFile!.id,
                             // From the idea, never the section name (see BucketClipDragData).
@@ -3156,6 +3197,7 @@ export default function Dashboard() {
 
             </SongsDragSurface>
             <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
+            <VersionMoveInUseDialog dialogProps={versionMoveDnd.dialogProps} vars={versionMoveDnd.pendingVars} />
             </DndContext>
             ) : filesFilter === 'ideas' ? (
             /* Ideas — 2-column browser. No Folder step: Column 2 is the selected

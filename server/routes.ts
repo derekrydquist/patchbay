@@ -396,6 +396,21 @@ async function applyTaskAfterVersionLeaves(
   }).catch(console.error);
 }
 
+// ─── advanceTaskOnVersionArrived ───────────────────────────────────────────────
+// The destination side of a real-song version move (move-to-section): the existing
+// "clip addition → task in-progress" rule (see advanceTaskOnClipAdded and the
+// isfinal-sync skill) — To Do advances to In Progress; In Progress, Complete and
+// Will Not Play are never touched. Looked up by track id, not track name, and
+// without reconcileSectionTaskStatus (which only acts on timeline clips). Like the
+// upload path, it writes no task comment and no activity row: the move's own
+// 'clip-moved-to-section' row is the record.
+async function advanceTaskOnVersionArrived(trackId: string, sectionName: string): Promise<void> {
+  const task = await storage.getTaskByTrackSection(trackId, sectionName);
+  if (task?.status === 'todo') {
+    await storage.updateTask(task.id, { status: 'in-progress' });
+  }
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -2226,6 +2241,117 @@ export async function registerRoutes(
     }).catch(console.error);
 
     res.json(clip);
+  });
+
+  /**
+   * POST /api/clips/:clipId/move-to-section — Move A: move a real-song version to
+   * another section of the same song (drag onto a Section row or the Files column).
+   * Body { ideaId: destination idea, confirm? }. Two-ID route: the clip's song and the
+   * destination idea's song are asserted independently. Same in-use flow as Remove: if
+   * the version has placed timeline copies or is Final and confirm isn't true, answers
+   * 409 { code: 'clip-in-use', message, dependents }. A task status change alone never
+   * does. On success the version is released (copies deleted, Final cleared) and
+   * renamed for its new section (storage.moveClipToSection); then the section it left
+   * gets applyTaskAfterVersionLeaves and the destination advanceTaskOnVersionArrived.
+   * One feed row: 'clip-moved-to-section'.
+   */
+  app.post("/api/clips/:clipId/move-to-section", requireBand, async (req, res) => {
+    const clipId = req.params.clipId as string;
+    const songId = clipSongId(clipId);
+    if (!songId) return res.status(404).json({ message: "Clip not found." });
+    if (!assertSongOwned(req, res, songId)) return;
+
+    const { ideaId: destIdeaId, confirm } = req.body as { ideaId?: string; confirm?: boolean };
+    if (!destIdeaId || typeof destIdeaId !== 'string') {
+      return res.status(400).json({ message: "ideaId is required." });
+    }
+    const destSongId = ideaSongId(destIdeaId);
+    if (!destSongId) return res.status(404).json({ message: "Section not found." });
+    if (!assertSongOwned(req, res, destSongId)) return;
+
+    const row = db.select({ clip: clips, idea: ideas, track: instrumentTracks, song: songs })
+      .from(clips)
+      .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(eq(clips.id, clipId))
+      .get();
+    if (!row) return res.status(404).json({ message: "Clip not found." });
+    const dest = db.select({ idea: ideas, track: instrumentTracks })
+      .from(ideas)
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .where(eq(ideas.id, destIdeaId))
+      .get();
+    if (!dest) return res.status(404).json({ message: "Section not found." });
+
+    // Full Take is always read from ideas.isFullTake, never from the section name.
+    if (row.song.type !== 'song') {
+      return res.status(400).json({ message: "Only files in a song can be moved to another section." });
+    }
+    if (!row.clip.active) return res.status(400).json({ message: "This file has been removed." });
+    if (row.idea.isFullTake) {
+      return res.status(400).json({ message: "Files in a Full Takes section can't be moved to another section." });
+    }
+    if (!dest.idea.active) return res.status(400).json({ message: "That section is hidden." });
+    if (!dest.track.active) return res.status(400).json({ message: "That track is hidden." });
+    if (dest.idea.isFullTake) {
+      return res.status(400).json({ message: "Files can't be moved into a Full Takes section." });
+    }
+    if (destSongId !== songId) {
+      return res.status(400).json({ message: "Files can only be moved within the same song." });
+    }
+    if (dest.idea.id === row.idea.id) {
+      return res.status(400).json({ message: "The file is already in this section." });
+    }
+
+    if (confirm !== true) {
+      const dependents = await storage.getClipDependents(clipId);
+      if (dependents && hasClipDependents(dependents)) {
+        return res.status(409).json({ code: CLIP_IN_USE_CODE, message: "This file is in use.", dependents });
+      }
+    }
+
+    let moved;
+    try {
+      moved = await storage.moveClipToSection(clipId, destIdeaId);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-section] move failed:", err);
+      return res.status(500).json({ message: "Failed to move file." });
+    }
+    if (!moved) return res.status(404).json({ message: "Clip not found." });
+
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    try {
+      // row.clip was read before the move, so isFinal is the pre-release value.
+      await applyTaskAfterVersionLeaves(row.track, row.idea.sectionName, row.idea.id, row.clip.isFinal, actor);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-section] failed to recompute the source task:", err);
+    }
+    try {
+      await advanceTaskOnVersionArrived(dest.track.id, dest.idea.sectionName);
+    } catch (err) {
+      console.error("[clips/:clipId/move-to-section] failed to advance the destination task:", err);
+    }
+
+    // The one feed row for the move. instrument/sectionName are the destination, so
+    // the feed link opens the file where it now lives.
+    const renamed = moved.name !== row.clip.name ? ` as ${moved.name}` : '';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'clip-moved-to-section',
+      description: `${actor} moved ${row.clip.name} to ${dest.track.name} → ${dest.idea.sectionName}${renamed}`,
+      timestamp: Date.now(),
+      instrument: dest.track.name,
+      sectionName: dest.idea.sectionName,
+      author: actor,
+      clipId: moved.id,
+    }).catch(console.error);
+
+    res.json(moved);
   });
 
   /**

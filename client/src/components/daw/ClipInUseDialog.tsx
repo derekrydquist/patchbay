@@ -35,30 +35,48 @@ export async function postClipLeave<T>(url: string, body: Record<string, unknown
   return data as T;
 }
 
-interface UseClipInUseActionOptions<T> {
+// V is the per-call variables: run(vars) passes them to request, and the dialog's
+// confirm repeats the request with the same vars. Remove uses no vars (run()); a
+// move passes its destination, so one surface-level instance serves every drop.
+interface UseClipInUseActionOptions<T, V> {
   // The leave request. Called with confirm=false first, then confirm=true from the dialog.
-  request: (confirm: boolean) => Promise<T>;
-  onSuccess?: (result: T) => void;
+  request: (confirm: boolean, vars: V) => Promise<T>;
+  onSuccess?: (result: T, vars: V) => void;
   // Any failure other than clip-in-use.
-  onError?: (message: string) => void;
+  onError?: (message: string, vars: V) => void;
+  // The dialog was dismissed (Cancel, Escape, outside click) — nothing was sent.
+  onCancel?: (vars: V) => void;
 }
 
-export function useClipInUseAction<T>({ request, onSuccess, onError }: UseClipInUseActionOptions<T>) {
+export function useClipInUseAction<T, V = void>({ request, onSuccess, onError, onCancel }: UseClipInUseActionOptions<T, V>) {
   const [dependents, setDependents] = useState<ClipDependents | null>(null);
+  // The vars of the request the dialog is asking about — state (for rendering the
+  // dialog's wording) and a ref (for the confirm handler, which must not read a
+  // stale render's value).
+  const [pendingVars, setPendingVars] = useState<V | null>(null);
+  const pendingVarsRef = useRef<V | null>(null);
   const [isPending, setIsPending] = useState(false);
 
-  const send = async (confirm: boolean) => {
+  const setPending = (vars: V | null) => {
+    pendingVarsRef.current = vars;
+    setPendingVars(vars);
+  };
+
+  const send = async (confirm: boolean, vars: V) => {
     setIsPending(true);
     try {
-      const result = await request(confirm);
+      const result = await request(confirm, vars);
       setDependents(null);
-      onSuccess?.(result);
+      setPending(null);
+      onSuccess?.(result, vars);
     } catch (err) {
       if (err instanceof ClipInUseError && !confirm) {
+        setPending(vars);
         setDependents(err.dependents);
       } else {
         setDependents(null);
-        onError?.(err instanceof Error ? err.message : String(err));
+        setPending(null);
+        onError?.(err instanceof Error ? err.message : String(err), vars);
       }
     } finally {
       setIsPending(false);
@@ -66,14 +84,20 @@ export function useClipInUseAction<T>({ request, onSuccess, onError }: UseClipIn
   };
 
   return {
-    run: () => { void send(false); },
+    run: (vars: V) => { void send(false, vars); },
     isPending,
+    pendingVars,
     dialogProps: {
       open: dependents !== null,
       dependents,
       pending: isPending,
-      onConfirm: () => { void send(true); },
-      onCancel: () => setDependents(null),
+      onConfirm: () => { void send(true, pendingVarsRef.current as V); },
+      onCancel: () => {
+        const vars = pendingVarsRef.current as V;
+        setDependents(null);
+        setPending(null);
+        onCancel?.(vars);
+      },
     },
   };
 }
@@ -85,22 +109,27 @@ const STATUS_WORDS: Record<TaskStatus, string> = {
   'will-not-play': 'Will Not Play',
 };
 
-// Plain-words list of what falls off: placements grouped by track > section,
-// Final, and any task status that changes.
-export function describeClipDependents(d: ClipDependents): string[] {
+// The bulleted list for every leave action (Remove, a move): each line says what the
+// action will do, after an intro like 'Removing "X" will:' or 'Moving "X" to
+// Track › Section will:'. sourceTrackName is the track the version leaves (the task
+// line names it); null drops the track from that line.
+export function describeLeaveDependents(d: ClipDependents, sourceTrackName: string | null): string[] {
   const lines: string[] = [];
   const placements = new Map<string, number>();
   for (const c of d.timelineCopies) {
-    const where = `${c.trackName} > ${c.sectionName ?? 'Full Take'}`;
+    const where = `${c.trackName} › ${c.sectionName ?? 'Full Take'}`;
     placements.set(where, (placements.get(where) ?? 0) + 1);
   }
   placements.forEach((n, where) => {
-    lines.push(`On the timeline in ${where} (${n} ${n === 1 ? 'placement' : 'placements'})`);
+    lines.push(n === 1
+      ? `Remove it from the timeline in ${where}`
+      : `Remove its ${n} placements from the timeline in ${where}`);
   });
-  if (d.isFinal) lines.push('Marked Final');
+  if (d.isFinal) lines.push('Clear its Final mark');
   for (const t of d.tasks) {
     if (t.willChangeTo !== t.status) {
-      lines.push(`The ${t.sectionName} task will go back to ${STATUS_WORDS[t.willChangeTo]}`);
+      const section = sourceTrackName ? `${sourceTrackName} › ${t.sectionName}` : t.sectionName;
+      lines.push(`Change the ${section} task from ${STATUS_WORDS[t.status]} to ${STATUS_WORDS[t.willChangeTo]}`);
     }
   }
   return lines;
@@ -114,13 +143,18 @@ interface ClipInUseDialogProps {
   onCancel: () => void;
   // Labels the confirm button for the action, e.g. "Remove anyway".
   actionLabel: string;
-  // One line on what happens to placements, e.g. "Removing it takes it off the timeline and clears Final."
-  consequence: string;
+  // Optional line above the dependents list, e.g. 'Moving "Bass Intro V2" to Bass › Verse 1 will:'.
+  intro?: string;
+  // Optional line on what happens to placements, e.g. "Removing it takes it off the timeline and clears Final."
+  consequence?: string;
+  // Builds the bulleted list from the dependents. Defaults to describeLeaveDependents
+  // with no track name; Remove and the move dialog pass it with the version's track.
+  describe?: (d: ClipDependents) => string[];
 }
 
-export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel, actionLabel, consequence }: ClipInUseDialogProps) {
+export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel, actionLabel, intro, consequence, describe = (d) => describeLeaveDependents(d, null) }: ClipInUseDialogProps) {
   const confirmRef = useRef<HTMLButtonElement>(null);
-  const lines = dependents ? describeClipDependents(dependents) : [];
+  const lines = dependents ? describe(dependents) : [];
   return (
     <AlertDialog open={open} onOpenChange={(o) => { if (!o) onCancel(); }}>
       <AlertDialogContent
@@ -132,10 +166,11 @@ export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel
           <AlertDialogTitle className="font-heading uppercase tracking-wider">This file is in use</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="space-y-3 text-sm text-muted-foreground">
+              {intro && <p>{intro}</p>}
               <ul className="list-disc pl-5 space-y-1 text-white/80">
                 {lines.map((line) => <li key={line}>{line}</li>)}
               </ul>
-              <p>{consequence} The audio file, notes and metadata are kept.</p>
+              <p>{consequence ? `${consequence} ` : ''}The audio file, notes and metadata are kept.</p>
             </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -152,5 +187,21 @@ export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+// The in-use dialog for a version move (Move A), worded for the move. Rendered once
+// per surface with useVersionMoveDnd's dialogProps and pendingVars.
+export function VersionMoveInUseDialog({ dialogProps, vars }: {
+  dialogProps: Omit<ClipInUseDialogProps, 'actionLabel' | 'intro' | 'consequence' | 'describe'>;
+  vars: { clipName: string; sourceTrackName: string; destTrackName: string; destSectionName: string } | null;
+}) {
+  return (
+    <ClipInUseDialog
+      {...dialogProps}
+      describe={(d) => describeLeaveDependents(d, vars?.sourceTrackName || null)}
+      actionLabel="Move"
+      intro={vars ? `Moving "${vars.clipName}" to ${vars.destTrackName} › ${vars.destSectionName} will:` : undefined}
+    />
   );
 }
