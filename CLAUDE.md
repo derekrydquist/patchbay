@@ -320,6 +320,9 @@ Files are stored in `uploads/` in the project root (git-ignored). Physical name:
 
 Video stripping (ffmpeg) is not yet implemented — audio-only uploads only for now.
 
+**Download names:** `{Song name}_{clip name}.{ext}` via `buildDownloadFilename` (`client/src/lib/download-name.ts`); spaces → `_`, illegal characters stripped, ~120-char cap, extension from `src` first.
+The original filename stays in `metadata.originalFileName` / More Info. Export builds its own names.
+
 ---
 
 ## UploadModal Architecture
@@ -709,6 +712,7 @@ These are things that need a decision before being built:
 - **Playhead release snap — suspected, unconfirmed** — a visible snap was reported at the moment of releasing the pointer during active edge-scroll. The fix believed responsible for this class of bug (deferring time-value updates to the rAF loop instead of firing on every pointermove event during active edge-scroll, to prevent render-scheduling contention) was confirmed still intact in the code after the later redesign, but the snap itself was not reproducible via headless Playwright automation (no main-thread stalls or frame gaps found near release across multiple targeted repro attempts). Same caveat as the visual-desync item above — treat as open pending real-browser confirmation.
 - **Songs browser URL after an organize drop** — the section is selected on screen but the URL has no `sectionId`.
 - **Song delete 500s on a Track-scoped loose file or an opened section** — `loose_files.track_id` and `bucket_folder_views.idea_id` have no cascade; `deleteSong` relies on cascades. Not fixed.
+- **Ideas clips and loose files have no Download menu item** — `buildDownloadFilename` already handles their naming; adding one is a one-line call per menu.
 - **Timeline content pop-in on page load (parked, low priority)** — `tracks` starts as an empty array on mount; the entire track/clip grid (headers, section bands, clips, waveforms) appears in a single commit when `GET /api/songs/:id/timeline` resolves (~130–140ms locally; could be worse in production). No loading skeleton exists. Confirmed via real-browser testing to be pre-existing and independent of the scroll-persistence work (see "Timeline — session persistence" in `client/src/components/daw/CLAUDE.md`). A secondary, related effect: individual clip waveforms decode and render asynchronously per-clip after the grid appears, with no ordering guarantee tied to track position — decode time appears to scale with clip duration/file size rather than screen position, so a top-of-list track can render its waveform after a lower one. Proper fix (loading skeleton or suspense boundary) is a bigger scope decision, not a quick patch — not scheduled.
 
 ---
@@ -844,6 +848,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Spring-loaded tracks (Oct 2026)** — holding a loose-file drag on a Track row opens it; see "Spring-loaded tracks" above.
 - **Shelf-file drops lost after the row unmounted (Oct 2026)** — dnd-kit discarded the drag data; drops now fall back to a drag-start snapshot.
 - **213 production tasks lost their track link (Jul 28, fixed Oct 9 2026)** — push-on-boot added `production_tasks.track_id` before `db.ts`'s fill-in, which only runs when the column is missing, so it skipped; eight songs showed empty Production cells. One-time `track_id`-only relink on production via `better-sqlite3` (backed up, tested on a fresh copy); the startup self-heal now covers it.
+- **Downloads saved under the raw upload name (Oct 2026)** — they now carry the song name and clip name; see "Download names" under File Uploads.
 
 ---
 

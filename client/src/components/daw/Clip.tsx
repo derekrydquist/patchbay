@@ -14,6 +14,7 @@ import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
 import { ClipInUseDialog, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
 import { useToast } from '@/hooks/use-toast';
+import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -102,6 +103,20 @@ export function hasUnreadComments(latestOthersCommentAt: string | null | undefin
   return !!latestOthersCommentAt && (!lastViewed || latestOthersCommentAt > lastViewed);
 }
 // ────────────────────────────────────────────────────────────────────────────
+
+// Both Download items: "{Song name}_{clip name}.{ext}". The song comes from the
+// ['song', songId] cache that Workspace and SongHome already fill.
+function downloadClip(clip: Clip, queryClient: ReturnType<typeof useQueryClient>, songId: string) {
+  if (!clip.src) return;
+  const songName = queryClient.getQueryData<{ name?: string }>(['song', songId])?.name;
+  downloadFile(clip.src, buildDownloadFilename({
+    prefix: songName,
+    base: clip.name,
+    src: clip.src,
+    format: clip.metadata?.format,
+    originalFileName: clip.metadata?.originalFileName,
+  }));
+}
 
 function formatRelativeTime(timestamp: number): string {
   const diff = Date.now() - timestamp;
@@ -1671,12 +1686,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           
           <ContextMenuItem onClick={(e) => {
             e.stopPropagation();
-            const link = document.createElement('a');
-            link.href = clip.src || '#'; // In a real app this would be the actual audio URL
-            link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            downloadClip(clip, queryClient, songId);
           }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Download size={14} className="text-primary" /> Download
           </ContextMenuItem>
@@ -2022,12 +2032,7 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
           <Separator className="my-1 bg-border/50" />
           <ContextMenuItem onClick={(e) => {
             e.stopPropagation();
-            const link = document.createElement('a');
-            link.href = clip.src || '#';
-            link.download = clip.metadata?.originalFileName || `${clip.name}.wav`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+            downloadClip(clip, queryClient, songId);
           }} className="gap-2 text-xs uppercase tracking-wider font-semibold">
             <Download size={14} className="text-primary" /> Download
           </ContextMenuItem>
