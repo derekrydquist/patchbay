@@ -46,7 +46,7 @@ POST   /api/songs                        — create a song; body: { name, bpm?, 
                                            always logs a `song-created` or `idea-created` activity
                                            event with the session-resolved username
 PATCH  /api/songs/:id                    — partial update of song metadata
-DELETE /api/songs/:id                    — delete a song and all associated data
+DELETE /api/songs/:id                    — delete a song or Idea and all associated data; logs song-deleted/idea-deleted in the same transaction
 
 PATCH  /api/songs/:id/lyrics             — body: { lyrics: string }; 400 if not a string;
                                            logs a `lyrics-edited` activity event with the

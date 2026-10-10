@@ -219,6 +219,7 @@ interface ActivityEvent {
   clipId?: string;
   reviewId?: string;
   commentId?: string;
+  songDeleted?: boolean; // the song is gone: plain text, no link
 }
 
 
@@ -500,9 +501,14 @@ interface IdeaListRowProps {
   onSelect: () => void;
   /** Finder file drop — uploads into this Idea. */
   onFileDrop: (files: File[]) => void;
+  /** Right-click "Delete Idea" — opens the confirmation; never changes the selection. */
+  onDelete: () => void;
 }
 
-function IdeaListRow({ idea, isSelected, onSelect, onFileDrop }: IdeaListRowProps) {
+function IdeaListRow({ idea, isSelected, onSelect, onFileDrop, onDelete }: IdeaListRowProps) {
+  // modal={false} + reopen nonce, same as the shelf's file menus: a modal menu would
+  // lock body pointer-events, and a right-click on another row should just move it.
+  const contextMenu = useReopenableContextMenu();
   const nativeDrop = useNativeFileDrop({
     enabled: !!idea.defaultTrackId && !!idea.defaultSectionName,
     onDrop: onFileDrop,
@@ -523,9 +529,12 @@ function IdeaListRow({ idea, isSelected, onSelect, onFileDrop }: IdeaListRowProp
   });
 
   return (
+    <ContextMenu modal={false}>
+    <ContextMenuTrigger asChild>
     <button
       ref={setNodeRef}
       onClick={onSelect}
+      onContextMenuCapture={contextMenu.onContextMenuCapture}
       {...nativeDrop.handlers}
       className={cn(
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
@@ -544,6 +553,16 @@ function IdeaListRow({ idea, isSelected, onSelect, onFileDrop }: IdeaListRowProp
       </div>
       <ChevronRight size={12} className="opacity-40 shrink-0 ml-1" />
     </button>
+    </ContextMenuTrigger>
+    <ContextMenuContent key={contextMenu.nonce} className="bg-[#0c0c0e] border-white/10 min-w-[160px] shadow-xl">
+      <ContextMenuItem
+        onClick={onDelete}
+        className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
+      >
+        <Trash2 size={13} /> Delete Idea
+      </ContextMenuItem>
+    </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -1789,6 +1808,56 @@ export default function Dashboard() {
     },
   });
 
+  // Library right-click "Delete Idea" (Ideas shelf) / "Delete Song" (Songs column).
+  // Reuses deleteSong above; the Home "Your Songs" ⋯ Delete keeps its own dialog.
+  // The item outlives the dialog's open state so its text doesn't change while the
+  // dialog animates out; it's cleared once the delete settles.
+  const [libraryItemToDelete, setLibraryItemToDelete] = useState<Song | null>(null);
+  const [isLibraryDeleteOpen, setIsLibraryDeleteOpen] = useState(false);
+  const openLibraryDelete = (item: Song) => { setLibraryItemToDelete(item); setIsLibraryDeleteOpen(true); };
+  const deleteLibraryItemButtonRef = useRef<HTMLButtonElement | null>(null);
+  // The Idea's active file count, for the confirmation. Same key the shelf uses when
+  // the Idea is selected, so a selected Idea's count is already cached.
+  const { data: libraryDeleteBucket } = useQuery<ApiTrack[]>({
+    queryKey: bucketKeys.bucket(libraryItemToDelete?.id),
+    queryFn: () => fetchBucket(libraryItemToDelete!.id),
+    enabled: libraryItemToDelete?.type === 'idea',
+  });
+  const libraryDeleteIdeaFileCount = libraryDeleteBucket
+    ?.reduce((n, t) => n + t.ideas.reduce((m, i) => m + i.clips.length, 0), 0);
+
+  const confirmLibraryDelete = () => {
+    const item = libraryItemToDelete;
+    if (!item) return;
+    const isIdea = item.type === 'idea';
+    deleteSong.mutate(item.id, {
+      onSettled: () => setLibraryItemToDelete(prev => (prev?.id === item.id ? null : prev)),
+      onSuccess: () => {
+        if (selectedFile?.id === item.id) {
+          setSelectedFile(null); setSelectedInstrument(null); setSelectedSection(null);
+          const s = `tab=files&filter=${isIdea ? 'ideas' : 'songs'}`;
+          appliedSearchRef.current = s; setLocation(`/?${s}`);
+        }
+        // The deleted song's own lists would only refetch into a 404 — drop them.
+        queryClient.removeQueries({ queryKey: bucketKeys.bucket(item.id) });
+        queryClient.removeQueries({ queryKey: looseFileKeys.list(item.id) });
+        queryClient.invalidateQueries({ queryKey: ['bucket'] });
+        queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
+        queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
+        queryClient.invalidateQueries({ queryKey: ['albums'] });
+        queryClient.invalidateQueries({ queryKey: ['album-songs'] });
+        queryClient.invalidateQueries({ queryKey: ['album-memberships'] });
+      },
+      onError: (err) => {
+        toast({
+          variant: 'destructive',
+          title: `Couldn't delete ${isIdea ? 'Idea' : 'song'}`,
+          description: err instanceof Error ? err.message : String(err),
+        });
+      },
+    });
+  };
+
   const markFinalMutation = useMutation({
     mutationFn: async (clipId: string) => {
       const res = await fetch(`/api/clips/${clipId}`, {
@@ -2618,7 +2687,7 @@ export default function Dashboard() {
                 {activityEvents.map((event: ActivityEvent, i: number) => (
                   <div
                     key={i}
-                    onClick={() => {
+                    onClick={event.songDeleted ? undefined : () => {
                       const url = activityUrl(event);
                       console.log('[Activity click]', {
                         type: event.type,
@@ -2634,10 +2703,13 @@ export default function Dashboard() {
                       });
                       setLocation(url);
                     }}
-                    className="flex items-start justify-between px-4 py-3 hover:bg-white/[0.02] transition-colors cursor-pointer group gap-3"
+                    className={cn(
+                      'flex items-start justify-between px-4 py-3 transition-colors group gap-3',
+                      !event.songDeleted && 'hover:bg-white/[0.02] cursor-pointer',
+                    )}
                   >
                     <div className="min-w-0">
-                      <p className="text-sm text-white/80 group-hover:text-white transition-colors leading-snug">
+                      <p className={cn('text-sm text-white/80 transition-colors leading-snug', !event.songDeleted && 'group-hover:text-white')}>
                         {capitalize(event.description)}
                       </p>
                       <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{event.songName}</p>
@@ -2827,6 +2899,13 @@ export default function Dashboard() {
                               </ContextMenuSubContent>
                             </ContextMenuSub>
                           )}
+                          <ContextMenuSeparator className="bg-white/5" />
+                          <ContextMenuItem
+                            onClick={() => openLibraryDelete(item)}
+                            className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
+                          >
+                            <Trash2 size={13} /> Delete Song
+                          </ContextMenuItem>
                         </ContextMenuContent>
                       </ContextMenu>
                     );
@@ -3079,6 +3158,7 @@ export default function Dashboard() {
                       isSelected={selectedFile?.id === idea.id}
                       onSelect={() => selectIdea(idea)}
                       onFileDrop={(files) => { void handleIdeaRowFileDrop(files, idea); }}
+                      onDelete={() => openLibraryDelete(idea)}
                     />
                   ))}
                   {unassignedLooseFiles.map(lf => (
@@ -3948,6 +4028,47 @@ export default function Dashboard() {
               {deleteSong.isPending ? 'Deleting…' : 'Delete'}
             </AlertDialogAction>
           </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Library right-click Delete Idea / Delete Song */}
+      <AlertDialog open={isLibraryDeleteOpen} onOpenChange={setIsLibraryDeleteOpen}>
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10 max-w-sm"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            deleteLibraryItemButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
+          {(() => {
+            const item = libraryItemToDelete;
+            const isIdea = item?.type === 'idea';
+            const n = libraryDeleteIdeaFileCount;
+            const tasks = item ? taskCountsBySong[item.id]?.total ?? 0 : 0;
+            return (
+              <>
+                <AlertDialogHeader>
+                  <AlertDialogTitle className="text-sm font-bold text-white">{isIdea ? 'Delete Idea' : 'Delete Song'}</AlertDialogTitle>
+                  <AlertDialogDescription className="text-xs text-muted-foreground">
+                    {isIdea
+                      ? <>Delete '{item?.name}' and its {n ?? '…'} {n === 1 ? 'file' : 'files'}? This can't be undone.</>
+                      : <>Delete '{item?.name}' and everything in it{tasks > 0 && <>, including {tasks} {tasks === 1 ? 'task' : 'tasks'}</>}? This can't be undone.</>}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel className="border-white/10 hover:bg-white/5 text-xs">Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    ref={deleteLibraryItemButtonRef}
+                    className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
+                    onClick={confirmLibraryDelete}
+                  >
+                    {isIdea ? 'Delete Idea' : 'Delete Song'}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </>
+            );
+          })()}
         </AlertDialogContent>
       </AlertDialog>
 

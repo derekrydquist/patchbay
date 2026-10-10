@@ -190,6 +190,13 @@ in route handlers.
 
 **`timeline_clips` vs `clips`:** These are intentionally separate tables. `clips` holds the uploaded source material (versions inside bucket ideas). `timeline_clips` holds the arranged instances placed on the timeline with a `start` time. Dragging from the bucket to the timeline creates a new `timeline_clips` row — it does not move the source clip.
 
+### Song and Idea deletion
+
+- `deleteSong` first deletes Track-scoped loose files and `bucket_folder_views` rows explicitly (no cascade on those FKs), in one transaction; another song's file pointing at its track only loses `trackId`.
+- Audio is unlinked after commit unless another row still uses it (`unlinkUploadIfUnreferenced`). Review mixes in `uploads/reviews/` are not cleaned up.
+- Logs `song-deleted` / `idea-deleted` inside the same transaction, with the band id; see the activity-feed skill for how deleted songs' rows render.
+- UI: right-click Delete Idea (Ideas shelf rows) and Delete Song (Library Songs rows), both confirmed, both through `DELETE /api/songs/:id`.
+
 ### Default song bootstrap
 
 `server/storage.ts` exports `DEFAULT_SONG_ID = "patchbay-default"`. The first call to `GET /api/songs/:id/timeline` auto-creates this song and its five default instrument tracks if they don't exist yet (using `INSERT OR IGNORE`). The default track IDs are stable strings: `track-drums`, `track-bass`, `track-guitar-1`, `track-guitar-2`, `track-vocals`.
@@ -718,7 +725,9 @@ These are things that need a decision before being built:
 - **Playhead visual position vs. scroll-state desync — suspected, unconfirmed** — during manual testing of the edge-scroll rebuild, two screenshots appeared to show the rendered playhead position and the actual scroll state disagreeing. Investigated via headless Playwright automation with frame-by-frame position sampling through a full held-drag-and-release cycle; no discontinuity exceeding normal per-frame movement was found in that environment. Per this project's own precedent with the Safari playback-start-failure investigation (never reproducible in headless WebKit despite being real on real hardware), a clean headless result is not proof the desync doesn't exist on real hardware — treat as open, not resolved, pending a deliberate real-browser reproduction attempt.
 - **Playhead release snap — suspected, unconfirmed** — a visible snap was reported at the moment of releasing the pointer during active edge-scroll. The fix believed responsible for this class of bug (deferring time-value updates to the rAF loop instead of firing on every pointermove event during active edge-scroll, to prevent render-scheduling contention) was confirmed still intact in the code after the later redesign, but the snap itself was not reproducible via headless Playwright automation (no main-thread stalls or frame gaps found near release across multiple targeted repro attempts). Same caveat as the visual-desync item above — treat as open pending real-browser confirmation.
 - **Songs browser URL after an organize drop** — the section is selected on screen but the URL has no `sectionId`.
-- **Song delete 500s on a Track-scoped loose file or an opened section** — `loose_files.track_id` and `bucket_folder_views.idea_id` have no cascade; `deleteSong` relies on cascades. Not fixed.
+- **Real-song file cards have no Delete** — only Remove; a dedicated delete session is planned.
+- **Home "Your Songs" Delete shows no error toast** — a failed delete is silent there.
+- **437 foreign-key violations from older deletes** — orphan tracks/tasks/task comments; they block nothing.
 - **Ideas clips and loose files have no Download menu item** — `buildDownloadFilename` already handles their naming; adding one is a one-line call per menu.
 - **Escape can't cancel some Finder drags** — when the file wasn't already selected in Finder before the drag started (macOS drag-session behavior, outside the app).
 - **Timeline content pop-in on page load (parked, low priority)** — `tracks` starts as an empty array on mount; the entire track/clip grid (headers, section bands, clips, waveforms) appears in a single commit when `GET /api/songs/:id/timeline` resolves (~130–140ms locally; could be worse in production). No loading skeleton exists. Confirmed via real-browser testing to be pre-existing and independent of the scroll-persistence work (see "Timeline — session persistence" in `client/src/components/daw/CLAUDE.md`). A secondary, related effect: individual clip waveforms decode and render asynchronously per-clip after the grid appears, with no ordering guarantee tied to track position — decode time appears to scale with clip duration/file size rather than screen position, so a top-of-list track can render its waveform after a lower one. Proper fix (loading skeleton or suspense boundary) is a bigger scope decision, not a quick patch — not scheduled.
@@ -861,6 +870,7 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **First Finder drag closed the sprung track (Oct 2026)** — Chrome's zero-movement `pointermove` ended the drag and restored the old selection; such moves are now ignored, and `dragover` re-arms the tracker.
 - **Copy (+) cursor badge lost after a spring (Oct 2026)** — `dropEffect` was never set; targets now set `'copy'`.
 - **A Finder file released outside a target opened in a new tab (Oct 2026)** — the browser's default drop; the window guard now cancels it (see "What To Avoid").
+- **Song delete 500'd; deletions never reached the feed (Oct 2026)** — non-cascading FKs now cleared first; delete rows logged in-transaction; Delete Idea / Delete Song menus added. See "Song and Idea deletion".
 
 ---
 

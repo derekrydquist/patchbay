@@ -582,20 +582,11 @@ export async function registerRoutes(
   app.delete("/api/songs/:id", requireBand, async (req, res) => {
     const id = req.params.id as string;
     if (!assertSongOwned(req, res, id)) return;
-    const songToDelete = db.select().from(songs).where(eq(songs.id, id)).get();
     const deleteSongActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
-    await storage.deleteSong(id);
-    if (songToDelete) {
-      storage.logActivity({
-        id: randomUUID(), songId: id,
-        type: 'song-deleted',
-        description: `${deleteSongActor} deleted song — ${songToDelete.name}`,
-        timestamp: Date.now(),
-        author: deleteSongActor,
-      }).catch(console.error);
-    }
+    // Logs its own song-deleted / idea-deleted row inside the delete transaction.
+    await storage.deleteSong(id, deleteSongActor);
     res.status(204).end();
   });
 

@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, ne, asc, desc, inArray, notInArray, count, and, gte, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { eq, ne, asc, desc, inArray, notInArray, count, and, or, gte, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db } from "./db";
 import {
   type User, type InsertUser,
@@ -169,7 +169,7 @@ export interface ActivityEvent {
       // Tier 2 (written verbatim via logActivity()) — kept in sync with the
       // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
       // last audited 2026-08-12:
-      | 'song-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
+      | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
       | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
@@ -198,6 +198,8 @@ export interface ActivityEvent {
   // review deep-link routing — present on review-shared, review-comment, review-reply events
   reviewId?: string;
   commentId?: string;
+  // the song no longer exists — the feed renders the row as plain text with no link
+  songDeleted?: boolean;
 }
 
 export interface IStorage {
@@ -213,7 +215,7 @@ export interface IStorage {
   getSongById(id: string): Promise<SongWithTracks | undefined>;
   createSong(data: InsertSong, bandId: string): Promise<Song>;
   updateSong(id: string, updates: Partial<InsertSong>): Promise<Song | undefined>;
-  deleteSong(id: string): Promise<void>;
+  deleteSong(id: string, actor: string): Promise<void>;
   seedSong(songId: string, instruments: string[], sections: string[]): Promise<void>;
 
   // Bootstrap
@@ -748,8 +750,64 @@ export class SQLiteStorage implements IStorage {
     return db.select().from(songs).where(eq(songs.id, id)).get();
   }
 
-  async deleteSong(id: string): Promise<void> {
-    db.delete(songs).where(eq(songs.id, id)).run();
+  // Most of a song's rows go by ON DELETE CASCADE from songs → instrument_tracks →
+  // ideas → clips (and their children), but two FKs into those rows have no cascade
+  // and would fail the whole delete: loose_files.track_id and
+  // bucket_folder_views.idea_id. Clear those first, in the same transaction. A loose
+  // file that belongs to a different song (or is band-wide) but points at one of
+  // this song's tracks only loses its trackId — it is never deleted with this song.
+  // Audio files are unlinked after commit, and only if no other row still uses them.
+  // The song-deleted / idea-deleted feed row is written in the same transaction, so a
+  // failed delete leaves no row; the name lives only in its text, since the song is gone.
+  async deleteSong(id: string, actor: string): Promise<void> {
+    const srcs = db.transaction((tx) => {
+      const song = tx.select({ name: songs.name, type: songs.type, bandId: songs.bandId })
+        .from(songs).where(eq(songs.id, id)).get();
+      const trackIds = tx.select({ id: instrumentTracks.id }).from(instrumentTracks)
+        .where(eq(instrumentTracks.songId, id)).all().map((t) => t.id);
+      const ideaIds = trackIds.length
+        ? tx.select({ id: ideas.id }).from(ideas)
+            .where(inArray(ideas.trackId, trackIds)).all().map((i) => i.id)
+        : [];
+
+      const srcs = new Set<string | null>();
+      if (ideaIds.length) {
+        for (const c of tx.select({ src: clips.src }).from(clips).where(inArray(clips.ideaId, ideaIds)).all()) srcs.add(c.src);
+      }
+      if (trackIds.length) {
+        for (const c of tx.select({ src: timelineClips.src }).from(timelineClips).where(inArray(timelineClips.trackId, trackIds)).all()) srcs.add(c.src);
+      }
+      for (const f of tx.select({ src: looseFiles.src }).from(looseFiles).where(eq(looseFiles.songId, id)).all()) srcs.add(f.src);
+
+      if (trackIds.length) {
+        tx.delete(looseFiles)
+          .where(and(eq(looseFiles.songId, id), inArray(looseFiles.trackId, trackIds))).run();
+        tx.update(looseFiles).set({ trackId: null })
+          .where(inArray(looseFiles.trackId, trackIds)).run();
+      }
+      if (ideaIds.length) {
+        tx.delete(bucketFolderViews).where(inArray(bucketFolderViews.ideaId, ideaIds)).run();
+      }
+      tx.delete(songs).where(eq(songs.id, id)).run();
+      if (song) {
+        const isIdea = song.type === 'idea';
+        tx.insert(activityLog).values({
+          id: randomUUID(),
+          songId: id,
+          bandId: song.bandId,
+          type: isIdea ? 'idea-deleted' : 'song-deleted',
+          description: `${actor} deleted the ${isIdea ? 'Idea' : 'song'} ${song.name}`,
+          timestamp: Date.now(),
+          author: actor,
+        }).run();
+      }
+      return srcs;
+    });
+    // Only /uploads/ files — the helper resolves by basename into uploads/, so a
+    // /demo/... src must never reach it.
+    for (const src of Array.from(srcs)) {
+      if (src?.startsWith('/uploads/')) unlinkUploadIfUnreferenced(src, '[deleteSong]');
+    }
   }
 
   async seedSong(songId: string, instruments: string[], sections: string[]): Promise<void> {
@@ -1813,9 +1871,16 @@ export class SQLiteStorage implements IStorage {
       'task-auto-completed',
       'task-auto-reverted',
     ]);
+    // activity_log has no FK to songs, so a deleted song's rows stay. LEFT JOIN keeps
+    // them in the feed, scoped by the row's own band_id (rows from before band_id was
+    // stamped fall back to the song's band, so they still need the song to exist).
+    const logBandCond = or(
+      eq(activityLog.bandId, bandId),
+      and(isNull(activityLog.bandId), eq(songs.bandId, bandId)),
+    );
     const logCond = songId
-      ? and(eq(activityLog.songId, songId), bandCond, sortOnlyCond)
-      : and(bandCond, sortOnlyCond);
+      ? and(eq(activityLog.songId, songId), logBandCond, sortOnlyCond)
+      : and(logBandCond, sortOnlyCond);
     const logRows = db
       .select({
         type: activityLog.type,
@@ -1825,13 +1890,40 @@ export class SQLiteStorage implements IStorage {
         sectionName: activityLog.sectionName,
         reviewId: activityLog.reviewId,
         commentId: activityLog.commentId,
-        songId: songs.id,
+        songId: activityLog.songId,
         songName: songs.name,
       })
       .from(activityLog)
-      .innerJoin(songs, eq(activityLog.songId, songs.id))
+      .leftJoin(songs, eq(activityLog.songId, songs.id))
       .where(logCond)
       .all();
+
+    // A deleted song has no songs row to name it. Recover the name from the text of
+    // its own deletion row (the name at deletion time), else its creation row. Stored
+    // rows are never edited.
+    const goneSongIds = Array.from(new Set(logRows.filter((r) => r.songName === null).map((r) => r.songId)));
+    const goneSongNames = new Map<string, string>();
+    if (goneSongIds.length) {
+      const nameMarkers: Record<string, string[]> = {
+        'song-deleted': [' deleted the song ', ' deleted song — '],
+        'idea-deleted': [' deleted the Idea '],
+        'song-created': [' created a new song — '],
+        'idea-created': [' created a new idea — '],
+      };
+      const nameRows = db
+        .select({ songId: activityLog.songId, type: activityLog.type, description: activityLog.description })
+        .from(activityLog)
+        .where(and(inArray(activityLog.songId, goneSongIds), inArray(activityLog.type, Object.keys(nameMarkers))))
+        .all()
+        .sort((a, b) => Number(!a.type.endsWith('-deleted')) - Number(!b.type.endsWith('-deleted')));
+      for (const r of nameRows) {
+        if (goneSongNames.has(r.songId)) continue;
+        for (const marker of nameMarkers[r.type]) {
+          const at = r.description.indexOf(marker);
+          if (at > 0) { goneSongNames.set(r.songId, r.description.slice(at + marker.length)); break; }
+        }
+      }
+    }
 
     for (const row of logRows) {
       // Older placement rows read "{user} added {clip} to {track} — {section}", the same
@@ -1859,7 +1951,8 @@ export class SQLiteStorage implements IStorage {
         description,
         timestamp: row.timestamp,
         songId: row.songId,
-        songName: row.songName,
+        songName: row.songName ?? goneSongNames.get(row.songId) ?? 'Deleted song',
+        songDeleted: row.songName === null ? true : undefined,
         instrument: row.instrument ?? undefined,
         sectionName: row.sectionName ?? undefined,
         reviewId: row.reviewId ?? undefined,

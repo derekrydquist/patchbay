@@ -18,7 +18,7 @@ interface ActivityEvent {
       | 'song-created' | 'idea-created'
       // Tier 2 (written verbatim via logActivity()) — kept in sync with the
       // "Tier 2 event types — full reference" table below; last audited 2026-08-12:
-      | 'song-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
+      | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
       | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
@@ -79,7 +79,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `clip-moved-to-idea` | Yes | Ideas shelf drag of an organized file to another Idea; logged once, against the destination song. |
 | `clip-made-loose` | Yes | Ideas shelf drag of an organized file onto Column 1's open space (back to a band-wide loose file); logged once, against the source song. |
 | `clip-deleted` | Yes | Ideas shelf Delete of an organized file; logged once, against the Idea. |
-| `song-deleted` | Yes | |
+| `song-deleted` / `idea-deleted` | Yes | Logged inside `deleteSong`'s transaction with the band id. Rendered with no link (`songDeleted`). |
 | `track-added` | Yes | |
 | `track-deleted` | Yes | |
 | `track-restored` | Yes | |
@@ -138,7 +138,7 @@ The numbered lists below retain per-event route and description detail not repea
 17. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description branches on parent song type: `"{user} added a part — {trackName}"` when `song.type === 'idea'`; `"{user} added an instrument — {trackName}"` when `song.type === 'song'`. Song is fetched via `storage.getSongById(req.params.songId)` after track creation.
 18. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"{user} deleted an instrument — {trackName}"`.
 19. **`track-restored`** — logged from `POST /api/tracks/:trackId/restore`. Description: `"{user} restored instrument — {trackName}"`.
-20. **`song-deleted`** — logged from `DELETE /api/songs/:id`. Song name is fetched BEFORE deletion so it survives the DELETE. Description: `"{user} deleted song — {songName}"`.
+20. **`song-deleted`** / **`idea-deleted`** — written by `storage.deleteSong` inside the delete transaction. Description: `"{user} deleted the song {name}"` / `"{user} deleted the Idea {name}"`. Older rows read `"{user} deleted song — {name}"` and have a NULL `band_id`, so they stay hidden.
 21. **`review-shared`** — logged from `POST /api/songs/:songId/reviews`. Description: `"{user} shared {name} to Review"`. (Also synthesized tier-1 from `song_reviews` rows — both coexist.)
 22. **`review-comment`** — logged from `POST /api/reviews/:reviewId/comments` (top-level). Description: `"{author} commented on {reviewName}"`.
 23. **`review-reply`** — logged from `POST /api/reviews/:reviewId/comments` (reply). Description: `"{author} replied to {parentAuthor}'s comment on {reviewName}"`.
@@ -182,6 +182,8 @@ This grouping predates the read-path filter and originally assumed every item he
    - All other comments → `task-comment`: `"You commented on {instrument} · {sectionName} task"`. Includes `source: 'task'` and `taskId`.
 
 **Implementation note — status-change author:** Status-change comments in `task_comments` are written by `PATCH /api/production-tasks/:id` with `author` set to the session user (resolved via `req.session.userId → storage.getUser()`), falling back to the `commentAuthor` from the request body, then `'Unknown'`. This stores the actual actor (not the assignee) so the activity feed can attribute the action correctly. Assignee/due-date system comments still use the same `author` resolution. Mark-final comments (e.g. `"Clip marked as final: ..."`) use `commentAuthor || 'Unknown'` from the request body — the client always sends `user.username` here.
+
+**Deleted songs:** `activity_log` is LEFT JOINed to `songs` and scoped by its own `band_id`, so a deleted song's rows still show, flagged `songDeleted` (plain text, no link on Home). Name: deletion row text, then creation row, then "Deleted song".
 
 **JS-level merge, no SQL UNION:** Each event type is fetched with a separate Drizzle query (or read from `activity_log`) and merged into a single `events[]` array in JavaScript, then sorted by `timestamp` descending. No SQL UNION needed.
 
