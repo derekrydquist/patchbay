@@ -350,7 +350,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const versionMoveDnd = useVersionMoveDnd({
     // The view follows the file: into its new section (Move A), or onto the track
     // whose shelf now holds it (Moves C/D — track selected, no section). A song-level
-    // move (Move B, "Move Out of Section") leaves the selection as is; the file shows
+    // move (Move B, "Remove from Section") leaves the selection as is; the file shows
     // in the Tracks column.
     onMoved: (dest) => {
       if (dest.kind === 'loose' && !dest.trackId) return;
@@ -361,7 +361,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       }));
     },
   });
-  // "Move Out of Section" is offered on version cards only for a real song (type
+  // "Remove from Section" is offered on version cards only for a real song (type
   // 'song') — same cache entry Workspace reads for the song name.
   const { data: songInfo } = useQuery<{ type?: string }>({
     queryKey: ['song', songId],

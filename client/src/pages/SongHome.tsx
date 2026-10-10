@@ -30,7 +30,7 @@ interface Song {
   name: string;
   bpm: number | null;
   lyrics: string | null;
-  // 'song' or 'idea' — the API always returns it; read for "Move Out of Section".
+  // 'song' or 'idea' — the API always returns it; read for "Remove from Section".
   type?: string;
 }
 
@@ -2163,7 +2163,7 @@ export default function SongHome() {
   const versionMoveDnd = useVersionMoveDnd({
     // The view follows the file: into its new section (Move A), or onto the track
     // whose shelf now holds it (Moves C/D — track selected, no section). A song-level
-    // move (Move B, "Move Out of Section") leaves the selection as is; the file shows
+    // move (Move B, "Remove from Section") leaves the selection as is; the file shows
     // in the Tracks column.
     onMoved: (dest) => {
       if (dest.kind === 'loose' && !dest.trackId) return;
@@ -2445,7 +2445,7 @@ export default function SongHome() {
                 onDragEnd={handleFilesDragEnd}
                 onDragCancel={looseFileOrganizeDnd.handleDragCancel}
               >
-                {/* "Move Out of Section" on version cards — real songs only. */}
+                {/* "Remove from Section" on version cards — real songs only. */}
                 <VersionMoveOutContext.Provider value={song?.type === 'song' ? versionMoveDnd.moveOutOfSection : null}>
                   <MediaBucket songId={songId} />
                 </VersionMoveOutContext.Provider>

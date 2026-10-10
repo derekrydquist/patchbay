@@ -848,7 +848,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
 // file moved, the view follows it (onMoved); failure, Cancel or Escape → the
 // drag-start selection comes back if a spring changed it.
 //
-// moveOutOfSection is the right-click "Move Out of Section" (same as Move B), shared
+// moveOutOfSection is the right-click "Remove from Section" (same as Move B), shared
 // with the cards through VersionMoveOutContext. The surface renders
 // VersionMoveInUseDialog with dialogProps/pendingVars — at the surface level, since
 // the card unmounts once the version leaves its section.
@@ -856,7 +856,7 @@ export type VersionMoveDestination =
   | { kind: 'section'; trackId: string; sectionName: string }
   | { kind: 'loose'; trackId: string | null };
 
-// "Move Out of Section" on a version card. Provided by the surface (null = the item
+// "Remove from Section" on a version card. Provided by the surface (null = the item
 // isn't offered there — not a real song, or no surface to host the dialog).
 export interface VersionMoveOutRequest {
   clipId: string;
@@ -935,7 +935,7 @@ export function useVersionMoveDnd(options?: { onMoved?: (dest: VersionMoveDestin
     return true;
   };
 
-  // Right-click "Move Out of Section" — Move B without a drag (nothing to report).
+  // Right-click "Remove from Section" — Move B without a drag (nothing to report).
   const moveOutOfSection = (req: VersionMoveOutRequest) => {
     move.run({ ...req, kind: 'loose', destTrackId: null });
   };

@@ -418,7 +418,7 @@ interface SongsClipContextMenuCardProps {
   onMoreInfo: () => void;
   onAddNote: () => void;
   onMarkFinal: () => void;
-  // "Move Out of Section" (song-level loose file, Move B). Omitted where it isn't
+  // "Remove from Section" (song-level loose file, Move B). Omitted where it isn't
   // offered — an Idea, or a Full Take version.
   onMoveOut?: () => void;
   // Comment badge — the card's notes badge, rendered only when present.
@@ -476,7 +476,7 @@ function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMar
               onClick={onMoveOut}
               className="text-xs text-white/80 focus:bg-white/8 focus:text-white cursor-pointer flex items-center gap-2"
             >
-              <FolderOutput size={13} className="text-white/50" /> Move Out of Section
+              <FolderOutput size={13} className="text-white/50" /> Remove from Section
             </ContextMenuItem>
           </>
         )}
@@ -1436,7 +1436,7 @@ export default function Dashboard() {
       }
       // Moves C/D: select the track (no section) so its shelf shows the file —
       // directly, like an assign-track drop, since the track already exists in the
-      // loaded bucket. Move B / "Move Out of Section": selection stays as is.
+      // loaded bucket. Move B / "Remove from Section": selection stays as is.
       if (!dest.trackId) return;
       const track = fileBucket.find(t => t.id === dest.trackId);
       if (track) selectSongsTrack(track);

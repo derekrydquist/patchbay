@@ -191,7 +191,7 @@ export function ClipInUseDialog({ open, dependents, pending, onConfirm, onCancel
 }
 
 // The in-use dialog for a version move — to another section (Move A) or out to a
-// loose file (Moves B/C/D, "Move Out of Section"). Rendered once per surface with
+// loose file (Moves B/C/D, "Remove from Section"). Rendered once per surface with
 // useVersionMoveDnd's dialogProps and pendingVars.
 type VersionMoveDialogVars =
   | { kind: 'section'; clipName: string; sourceTrackName: string; destTrackName: string; destSectionName: string }

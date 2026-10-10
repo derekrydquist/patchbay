@@ -532,7 +532,7 @@ export function useDeleteIdeaClip(
 // action, so each surface hosts a single in-use dialog:
 //   'section' — Move A: to another section of the same song
 //               (POST /api/clips/:clipId/move-to-section).
-//   'loose'   — Moves B/C/D and "Move Out of Section": back to a loose file of the
+//   'loose'   — Moves B/C/D and "Remove from Section": back to a loose file of the
 //               same song, song-level (destTrackId null) or on a track's shelf
 //               (POST /api/clips/:clipId/move-to-loose).
 // Built on useClipInUseAction, so a version with timeline copies or Final first opens

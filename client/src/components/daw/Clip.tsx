@@ -1992,7 +1992,7 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
   });
   const handleRemove = () => removeAction.run();
 
-  // "Move Out of Section" — the version becomes a song-level loose file (Move B). The
+  // "Remove from Section" — the version becomes a song-level loose file (Move B). The
   // surface provides it (and hosts its in-use dialog, since this card unmounts once
   // the version leaves); null where it isn't offered (not a real song). Never for a
   // Full Take version.
@@ -2074,7 +2074,7 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
               }}
               className="gap-2 text-xs uppercase tracking-wider font-semibold"
             >
-              <FolderOutput size={14} className="text-primary" /> Move Out of Section
+              <FolderOutput size={14} className="text-primary" /> Remove from Section
             </ContextMenuItem>
           )}
           <ContextMenuItem
