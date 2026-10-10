@@ -362,15 +362,21 @@ interface UploadModalProps {
 
 ---
 
-## Spring-loaded tracks (loose-file drags)
+## Spring-loaded tracks (loose-file and Finder drags)
 
-All in `use-loose-file-organize-dnd.ts`; mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedTracks`), not the Ideas shelf.
+All in `use-loose-file-organize-dnd.ts` (Finder-drag timing and tracker in `use-native-file-drop.tsx`); mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedTracks`), not the Ideas shelf.
 
 - **Spring** — `useSpringLoadedTracks`: a loose-file drag held over a Track row for 800ms (`SPRING_LOAD_DELAY_MS`) selects that track, as a click does. Applies to drags from the Tracks column and from a track's shelf; never springs the file's own track.
 - **Flash** — `flashSpringOpenedColumn` flashes the Sections column gold on a spring (150ms rise, 150ms hold, 900ms fade). Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
 - **Restore** — a drag that ends without moving the file (Escape, release over nothing, own-track drop, cancelled placement dialog) restores the drag-start selection, only if a spring changed it.
 - **Drop report** — `handleDragEnd` calls `reportLooseFileDrop(id, 'moved')` before each mutation; Timeline reports `'deferred'` when the placement dialog opens. No report = no move.
 - **Drag snapshot** — `{ clip, type, songId, trackId }` + active id, saved at drag start: a dragged row can unmount mid-drag when the Sections column changes, and dnd-kit then discards its data. Drops read live data first, then the snapshot; Timeline's `handleDragEnd` falls back to its own drag-start copy the same way.
+- **Finder drags** — Track rows pass `hold` to `useNativeFileDrop` (`useNativeSpringLoadedTracks`); `createHoldTimer` is shared with the in-app spring. After `SPRING_LOAD_DELAY_MS` the hold is due; the track opens on the next `dragover`, as a click does, and the Sections column flashes.
+- **Finder drag end** — a window capture-phase tracker in `use-native-file-drop.tsx` ends the drag on a drop, the page-wide enter/leave counter reaching 0, or the first `pointermove` with non-zero movement. No accepted drop → the drag-start selection is restored. No timeouts.
+- **Tracker self-heal** — every `dragover` re-arms it (active, counter ≥ 1); the start selection lasts the whole drag, cleared only by a drop or a fresh drag (`dragenter` with null `relatedTarget`, unreliable in Safari).
+- **Chrome quirks** — a real Finder drag sends one zero-movement `pointermove` after a spring re-renders the Sections column (ignored). Escape fires no event at all, so the restore lands on the next real mouse move.
+- **Copy cursor** — every `useNativeFileDrop` target sets `dropEffect = 'copy'` on each `dragover`; left unset, the + badge vanished after a spring.
+- **Testing** — drag COPIES of audio files: a drag out of the browser window can move the Finder original.
 
 ---
 
@@ -713,6 +719,7 @@ These are things that need a decision before being built:
 - **Songs browser URL after an organize drop** — the section is selected on screen but the URL has no `sectionId`.
 - **Song delete 500s on a Track-scoped loose file or an opened section** — `loose_files.track_id` and `bucket_folder_views.idea_id` have no cascade; `deleteSong` relies on cascades. Not fixed.
 - **Ideas clips and loose files have no Download menu item** — `buildDownloadFilename` already handles their naming; adding one is a one-line call per menu.
+- **Escape can't cancel some Finder drags** — when the file wasn't already selected in Finder before the drag started (macOS drag-session behavior, outside the app).
 - **Timeline content pop-in on page load (parked, low priority)** — `tracks` starts as an empty array on mount; the entire track/clip grid (headers, section bands, clips, waveforms) appears in a single commit when `GET /api/songs/:id/timeline` resolves (~130–140ms locally; could be worse in production). No loading skeleton exists. Confirmed via real-browser testing to be pre-existing and independent of the scroll-persistence work (see "Timeline — session persistence" in `client/src/components/daw/CLAUDE.md`). A secondary, related effect: individual clip waveforms decode and render asynchronously per-clip after the grid appears, with no ordering guarantee tied to track position — decode time appears to scale with clip duration/file size rather than screen position, so a top-of-list track can render its waveform after a lower one. Proper fix (loading skeleton or suspense boundary) is a bigger scope decision, not a quick patch — not scheduled.
 
 ---
@@ -849,6 +856,9 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Shelf-file drops lost after the row unmounted (Oct 2026)** — dnd-kit discarded the drag data; drops now fall back to a drag-start snapshot.
 - **213 production tasks lost their track link (Jul 28, fixed Oct 9 2026)** — push-on-boot added `production_tasks.track_id` before `db.ts`'s fill-in, which only runs when the column is missing, so it skipped; eight songs showed empty Production cells. One-time `track_id`-only relink on production via `better-sqlite3` (backed up, tested on a fresh copy); the startup self-heal now covers it.
 - **Downloads saved under the raw upload name (Oct 2026)** — they now carry the song name and clip name; see "Download names" under File Uploads.
+- **Finder drags never sprang tracks open (Oct 2026)** — native drags don't reach dnd-kit; see "Finder drags" under Spring-loaded tracks.
+- **First Finder drag closed the sprung track (Oct 2026)** — Chrome's zero-movement `pointermove` ended the drag and restored the old selection; such moves are now ignored, and `dragover` re-arms the tracker.
+- **Copy (+) cursor badge lost after a spring (Oct 2026)** — `dropEffect` was never set; targets now set `'copy'`.
 
 ---
 

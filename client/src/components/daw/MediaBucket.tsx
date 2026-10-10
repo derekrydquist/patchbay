@@ -15,10 +15,12 @@ import {
 import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveLooseFileDrag,
-  useSpringLoadedTracks, flashSpringOpenedColumn,
+  useSpringLoadedTracks, useNativeSpringLoadedTracks, flashSpringOpenedColumn,
+  type SpringLoadedTracksOptions,
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
   useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
+  type NativeFileHold,
 } from '@/hooks/use-native-file-drop';
 import { BucketClip, useLiveClipCommentSummary } from './Clip';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
@@ -148,10 +150,12 @@ interface TrackFolderRowProps {
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
   /** From MediaBucket's useActiveLooseFileDrag — null when no loose-file drag is active. */
   activeLooseFileDrag: { trackId: string | null } | null;
+  /** Finder-drag spring (useNativeSpringLoadedTracks) — undefined for the selected Track. */
+  nativeHold?: NativeFileHold;
 }
 
-function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeLooseFileDrag }: TrackFolderRowProps) {
-  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
+function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeLooseFileDrag, nativeHold }: TrackFolderRowProps) {
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   // Any content beneath the track counts — an organized clip in any of its ideas,
   // OR a Track-scoped loose file resting below the Section list (not yet organized
   // into a clip). See ApiTrack.hasLooseFiles / storage.getBucket.
@@ -664,8 +668,10 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // exactly like a click (selects the Track, clears the Section). The selection is
   // this component's own state, so it's set directly. A drag that ends without
   // moving the file puts the drag-start Track + Section back (by id, re-resolved
-  // from fresh bucket data), with the same setters.
-  useSpringLoadedTracks({
+  // from fresh bucket data), with the same setters. The same options drive both the
+  // in-app (dnd-kit) spring and the Finder-drag spring (nativeTrackHold, passed to
+  // each TrackFolderRow).
+  const springOptions: SpringLoadedTracksOptions<{ trackId: string | null; ideaId: string | null }> = {
     selectedTrackId: selectedTrack?.id ?? null,
     onOpenTrack: (trackId) => {
       const track = tracksRef.current.find(t => t.id === trackId);
@@ -680,7 +686,9 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
       setSelectedTrack(track);
       setSelectedIdea(track && ideaId ? track.ideas.find(i => i.id === ideaId) ?? null : null);
     },
-  });
+  };
+  useSpringLoadedTracks(springOptions);
+  const nativeTrackHold = useNativeSpringLoadedTracks(springOptions);
 
   // Sections-background highlight: no glow when the dragged file is already scoped to
   // the selected track — that drop is a cancel in handleDragEnd. Highlight-only; the
@@ -790,6 +798,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                     onRemove={() => deleteTrackMutation.mutate(track.id)}
                     buttonRef={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
                     activeLooseFileDrag={activeLooseFileDrag}
+                    nativeHold={nativeTrackHold(track.id)}
                   />
                 ))}
               {looseFiles.map(lf => (

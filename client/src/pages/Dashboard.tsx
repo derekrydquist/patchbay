@@ -63,7 +63,9 @@ import {
   useActiveLooseFileDrag,
   useActiveDragSource,
   useSpringLoadedTracks,
+  useNativeSpringLoadedTracks,
   flashSpringOpenedColumn,
+  type SpringLoadedTracksOptions,
   IDEA_CLIP_DRAG_TYPE,
   bucketSectionDropId,
   bucketVersionsDropId,
@@ -75,7 +77,7 @@ import {
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
   useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
-  type NativeFileDropHandlers,
+  type NativeFileDropHandlers, type NativeFileHold,
 } from '@/hooks/use-native-file-drop';
 import { DndContext, useDroppable, useDraggable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
@@ -685,10 +687,12 @@ interface SongsTrackRowProps {
   onSelect: () => void;
   /** Finder file drop — a loose file on THIS track (Track-scoped tier). */
   onFileDrop: (files: File[]) => void;
+  /** Finder-drag spring (useNativeSpringLoadedTracks) — undefined for the selected Track. */
+  nativeHold?: NativeFileHold;
 }
 
-function SongsTrackRow({ track, isSelected, onSelect, onFileDrop }: SongsTrackRowProps) {
-  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
+function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: SongsTrackRowProps) {
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
   const activeLooseFileDrag = useActiveLooseFileDrag();
@@ -722,24 +726,17 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop }: SongsTrackRo
 
 // ─── Songs quick-browser spring-loaded Track rows ──────────────────────────────
 // Renders nothing — mounts useSpringLoadedTracks inside the Songs DndContext
-// (Dashboard() itself sits outside it, so the hook can't be called there).
-// onOpenTrack selects the Track exactly like a click (selectSongsTrack).
-// A drag that ends without moving the file puts the drag-start Track + Section
-// (and URL) back via restoreSelection.
-function SongsSpringLoadedTracks({ selectedTrackId, selectedSectionId, onOpenTrack, restoreSelection }: {
-  selectedTrackId: string | null;
-  selectedSectionId: string | null;
-  onOpenTrack: (trackId: string) => void;
-  restoreSelection: (trackId: string | null, sectionId: string | null) => void;
+// (Dashboard() itself sits outside it, so the hook can't be called there). The
+// options are Dashboard's songsSpringOptions, shared with the Finder-drag spring
+// (useNativeSpringLoadedTracks, which needs no DndContext and runs in Dashboard()).
+function SongsSpringLoadedTracks({ options }: {
+  options: SpringLoadedTracksOptions<SongsSpringSelection>;
 }) {
-  useSpringLoadedTracks({
-    selectedTrackId,
-    onOpenTrack,
-    captureSelection: () => ({ trackId: selectedTrackId, sectionId: selectedSectionId }),
-    restoreSelection: ({ trackId, sectionId }) => restoreSelection(trackId, sectionId),
-  });
+  useSpringLoadedTracks(options);
   return null;
 }
+
+type SongsSpringSelection = { trackId: string | null; sectionId: string | null };
 
 // ─── Songs quick-browser Column 2 (Tracks) background drop target ────────────
 // Un-assign target, same as MediaBucket's Tracks-column background: a Track-scoped
@@ -1356,6 +1353,25 @@ export default function Dashboard() {
   const ideasColumnDrop = useNativeFileDrop({ onDrop: handleIdeasColumnFileDrop });
   // While a loose-file preview shows, Column 2 is no destination: the drop is caught
   // (the browser never opens the file) but there's no highlight, upload or toast.
+  // Songs quick-browser spring-loaded Track rows. onOpenTrack selects the Track
+  // exactly like a click (selectSongsTrack) and flashes the Sections column; a drag
+  // that ends without moving/dropping the file puts the drag-start Track + Section
+  // (and URL) back. One options object for both springs: the in-app (dnd-kit) one
+  // via SongsSpringLoadedTracks, the Finder-drag one via songsNativeTrackHold.
+  const songsSpringOptions: SpringLoadedTracksOptions<SongsSpringSelection> = {
+    selectedTrackId: selectedInstrument?.id ?? null,
+    onOpenTrack: (trackId) => {
+      const track = fileBucket.find(t => t.id === trackId);
+      if (track) { selectSongsTrack(track); setSongsSectionsFlashNonce(n => n + 1); }
+    },
+    captureSelection: () => ({ trackId: selectedInstrument?.id ?? null, sectionId: selectedSection?.id ?? null }),
+    restoreSelection: ({ trackId, sectionId }) => {
+      const track = trackId ? fileBucket.find(t => t.id === trackId) ?? null : null;
+      selectSongsTrackAndSection(track, track && sectionId ? track.ideas.find(i => i.id === sectionId) ?? null : null);
+    },
+  };
+  const songsNativeTrackHold = useNativeSpringLoadedTracks(songsSpringOptions);
+
   const ideaFilesColumnDrop = useNativeFileDrop({
     enabled: !!selectedFile && !previewLooseFile,
     onDrop: (files) => {
@@ -2710,18 +2726,7 @@ export default function Dashboard() {
               onDragEnd={looseFileOrganizeDnd.handleDragEnd}
               onDragCancel={looseFileOrganizeDnd.handleDragCancel}
             >
-            <SongsSpringLoadedTracks
-              selectedTrackId={selectedInstrument?.id ?? null}
-              selectedSectionId={selectedSection?.id ?? null}
-              onOpenTrack={(trackId) => {
-                const track = fileBucket.find(t => t.id === trackId);
-                if (track) { selectSongsTrack(track); setSongsSectionsFlashNonce(n => n + 1); }
-              }}
-              restoreSelection={(trackId, sectionId) => {
-                const track = trackId ? fileBucket.find(t => t.id === trackId) ?? null : null;
-                selectSongsTrackAndSection(track, track && sectionId ? track.ideas.find(i => i.id === sectionId) ?? null : null);
-              }}
-            />
+            <SongsSpringLoadedTracks options={songsSpringOptions} />
             <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
               {/* Column 1 — Songs */}
@@ -2880,6 +2885,7 @@ export default function Dashboard() {
                           isSelected={selectedInstrument?.id === track.id}
                           onSelect={() => selectSongsTrack(track)}
                           onFileDrop={(files) => handleSongsTrackFileDrop(files, track)}
+                          nativeHold={songsNativeTrackHold(track.id)}
                         />
                       ))}
                       {selectedFileLooseFiles.map(lf => (

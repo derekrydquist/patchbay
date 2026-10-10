@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   useSensor,
   useSensors,
@@ -18,6 +18,7 @@ import {
 import { type Clip } from '@/lib/daw-data';
 import { useOrganizeLooseFile, useAssignLooseFileTrack, useUnassignLooseFileTrack } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
+import { createHoldTimer, onNativeFileDrag, type NativeFileHold } from '@/hooks/use-native-file-drop';
 
 // Shared drag/organize interaction for loose files — a song-scoped upload with no
 // Track/Section yet, draggable onto a Section row or Versions column to organize it
@@ -251,7 +252,7 @@ export function resolveDeferredLooseFileDrop(placed: boolean): void {
   window.dispatchEvent(new CustomEvent(LOOSE_PLACEMENT_RESOLVED_EVENT, { detail: { placed } }));
 }
 
-interface SpringLoadedTracksOptions<S> {
+export interface SpringLoadedTracksOptions<S> {
   selectedTrackId: string | null;
   /** Select the Track exactly like a click (also clears the Section). */
   onOpenTrack: (trackId: string) => void;
@@ -288,7 +289,7 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
   // Read at event time, so the listener below never needs re-subscribing.
   const latest = useRef(options);
   latest.current = options;
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const timerRef = useRef(createHoldTimer());
   const eligibleRef = useRef(false);
   const originTrackIdRef = useRef<string | null>(null);
   // Selection at drag start, and whether a spring changed it during this drag.
@@ -298,12 +299,7 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
   const pendingRestoreRef = useRef<{ selection: S } | null>(null);
 
   const listener = useMemo(() => {
-    const clear = () => {
-      if (timerRef.current !== null) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
-      }
-    };
+    const clear = () => timerRef.current.cancel();
     const finish = () => {
       clear();
       eligibleRef.current = false;
@@ -330,8 +326,7 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
         if (!String(over.id).startsWith(BUCKET_TRACK_DROP_PREFIX)) return;
         const trackId = (over.data.current as { trackId?: string } | undefined)?.trackId;
         if (!trackId || trackId === latest.current.selectedTrackId || trackId === originTrackIdRef.current) return;
-        timerRef.current = setTimeout(() => {
-          timerRef.current = null;
+        timerRef.current.arm(() => {
           if (trackId === latest.current.selectedTrackId) return;
           sprungRef.current = true;
           latest.current.onOpenTrack(trackId);
@@ -369,6 +364,60 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
     window.addEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
     return () => window.removeEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
   }, []);
+}
+
+// Spring-loaded Track rows for a native (Finder) file drag — the same behavior as
+// useSpringLoadedTracks above, for drags dnd-kit never sees. Same options, same
+// call-site callbacks, same delay. Doesn't need a DndContext (call it anywhere on
+// the surface). Returns holdFor(trackId), passed to each Track row's
+// useNativeFileDrop as its `hold`: the row times the rest (armed on dragenter,
+// cancelled on dragleave / drop / drag end) and holdFor decides what firing does.
+//
+// - A Track that's already selected gets no hold (nothing to open); the fire also
+//   re-checks, as the dnd spring does.
+// - The selection is captured at the FIRST spring of a drag rather than at drag
+//   start: nothing else can change it during a native drag (no clicks), so it's
+//   the same value, and it needs no reliable "drag started" signal.
+// - Restore: when the drag ends (onNativeFileDrag onEnd) with no accepted drop —
+//   Escape, release over a non-target or a disabled target, leaving the window —
+//   the captured selection comes back, with no flash. Chromium fires nothing on
+//   Escape, so there it lands on the next real mouse movement (see the tracker's
+//   end detection in use-native-file-drop.tsx). An accepted drop leaves the
+//   drop handler's own selection in place. A drag that never sprung does nothing.
+// - The start selection is kept for the WHOLE drag, not per end: a false end
+//   restores, but if the tracker then resumes (onBegin fresh=false — dragover kept
+//   arriving), the drag is still the same one, so a later spring keeps the
+//   original start and a later real end restores to it. It's cleared only by an
+//   accepted drop or a fresh drag entering the page.
+export function useNativeSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>): (trackId: string) => NativeFileHold | undefined {
+  const latest = useRef(options);
+  latest.current = options;
+  const startSelectionRef = useRef<{ selection: S } | null>(null);
+
+  useEffect(() => onNativeFileDrag({
+    onBegin: ({ fresh }) => {
+      if (fresh) startSelectionRef.current = null;
+    },
+    onEnd: ({ dropped }) => {
+      const start = startSelectionRef.current;
+      if (dropped) startSelectionRef.current = null;
+      else if (start) latest.current.restoreSelection(start.selection);
+    },
+  }), []);
+
+  const { selectedTrackId } = options;
+  return useCallback((trackId: string) => {
+    if (trackId === selectedTrackId) return undefined;
+    return {
+      ms: SPRING_LOAD_DELAY_MS,
+      onHold: () => {
+        const o = latest.current;
+        if (trackId === o.selectedTrackId) return;
+        if (!startSelectionRef.current) startSelectionRef.current = { selection: o.captureSelection() };
+        o.onOpenTrack(trackId);
+      },
+    };
+  }, [selectedTrackId]);
 }
 
 // Spring-open flash timing and strength: a quick rise to a soft peak, a short hold,
