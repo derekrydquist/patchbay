@@ -187,20 +187,74 @@ export type OrganizeDestination =
   | { action: 'assign-track'; trackId: string }
   | { action: 'unassign-track'; originTrackId: string };
 
-// Narrow view of the active drag for droppables that only need to know "is a loose
-// file being dragged, and which Track (if any) is it scoped to?". Returns null when
-// no loose-file drag is active, otherwise { trackId } (null trackId = a plain
-// Tracks-column file). Uses useDndMonitor (drag start/end/cancel events only)
-// instead of useDndContext, whose value changes on every pointer move during a drag
-// and re-renders every consumer each frame. Must be called inside a DndContext.
-export function useActiveLooseFileDrag(): { trackId: string | null } | null {
-  const [drag, setDrag] = useState<{ trackId: string | null } | null>(null);
+// ── Organize drag types ──────────────────────────────────────────────────────
+// Two kinds of drag can reach the bucket drop targets (Section rows, Track rows,
+// Files column, Sections/Tracks backgrounds):
+//   'loose-file'  — LooseFileRow / the Ideas shelf preview card.
+//   'bucket-clip' — a version already in a section of a real song: BucketClip in
+//                   MediaBucket, SongsClipContextMenuCard in the Songs quick-browser.
+// Every other drag (timeline clips, Ideas shelf idea-clips) is neither.
+export const BUCKET_CLIP_DRAG_TYPE = 'bucket-clip';
+
+// The drag data LooseFileRow (and the Ideas shelf preview card) put on a loose-file
+// draggable — everything handleDragEnd reads from active.data.current.
+export interface LooseFileDragData {
+  clip: Clip;
+  type: 'loose-file';
+  songId: string | null;
+  trackId: string | null;
+}
+
+// The drag data every version card puts on its draggable. Timeline.tsx reads
+// clip/type/trackId for the bucket → timeline drop; the rest identifies where the
+// version lives now. isFullTake comes from the idea (ideas.isFullTake), never from
+// the section name — Full Take sections are named both "Full Take" and "Full Takes",
+// and some Full Take clips have a null sectionName.
+export interface BucketClipDragData {
+  clip: Clip;
+  type: typeof BUCKET_CLIP_DRAG_TYPE;
+  trackId: string;
+  ideaId: string;
+  songId: string;
+  isFullTake: boolean;
+}
+
+export type OrganizeDragData = LooseFileDragData | BucketClipDragData;
+
+function isOrganizeDragData(data: unknown): data is OrganizeDragData {
+  const d = data as Partial<OrganizeDragData> | undefined;
+  return !!d?.clip && (d.type === 'loose-file' || d.type === BUCKET_CLIP_DRAG_TYPE);
+}
+
+// What a drop target needs to know about the active drag. ideaId is null for a
+// loose file (it has no section yet); trackId is null for a loose file with no Track.
+export interface ActiveOrganizeDrag {
+  type: OrganizeDragData['type'];
+  trackId: string | null;
+  ideaId: string | null;
+  songId: string | null;
+  isFullTake: boolean;
+}
+
+function toActiveOrganizeDrag(data: OrganizeDragData): ActiveOrganizeDrag {
+  return data.type === 'loose-file'
+    ? { type: data.type, trackId: data.trackId, ideaId: null, songId: data.songId, isFullTake: false }
+    : { type: data.type, trackId: data.trackId, ideaId: data.ideaId, songId: data.songId, isFullTake: data.isFullTake };
+}
+
+// The active organize drag (loose file or version), or null when none — including
+// while a timeline clip or an Ideas shelf idea-clip is dragged. Uses useDndMonitor
+// (drag start/end/cancel events only) instead of useDndContext, whose value changes
+// on every pointer move during a drag and re-renders every consumer each frame.
+// Must be called inside a DndContext.
+export function useActiveOrganizeDrag(): ActiveOrganizeDrag | null {
+  const [drag, setDrag] = useState<ActiveOrganizeDrag | null>(null);
   // Memoized so useDndMonitor's effect (keyed on the listener object) doesn't
   // unsubscribe/resubscribe on every render.
   const listener = useMemo(() => ({
     onDragStart: ({ active }: DragStartEvent) => {
-      const data = active.data.current as { type?: string; trackId?: string | null } | undefined;
-      setDrag(data?.type === 'loose-file' ? { trackId: data.trackId ?? null } : null);
+      const data = active.data.current;
+      setDrag(isOrganizeDragData(data) ? toActiveOrganizeDrag(data) : null);
     },
     onDragEnd: () => setDrag(null),
     onDragCancel: () => setDrag(null),
@@ -208,6 +262,54 @@ export function useActiveLooseFileDrag(): { trackId: string | null } | null {
   useDndMonitor(listener);
   return drag;
 }
+
+// ── Per-target drop rules ────────────────────────────────────────────────────
+// Whether a bucket drop target accepts the active drag. A target highlights only
+// when isOver AND its rule says yes — never on isOver alone (dnd-kit's isOver is
+// pure geometry and ignores `disabled`), so only valid targets ever light up. One
+// rule per target, shared by MediaBucket (Workspace, SongHome) and the Songs
+// quick-browser; each has a branch per drag type, so a later change can switch a
+// target on for one type without touching the other. A drag that is neither type
+// (null) is never accepted.
+//
+// The rules decide highlighting. The drops themselves are decided in handleDragEnd
+// below (loose files) and in each surface's onDragEnd (versions — none built yet).
+export const organizeDropRules = {
+  // A Section row (or an Ideas-shelf-style row with the same id prefix).
+  sectionRow(drag: ActiveOrganizeDrag | null, _target: { ideaId: string; isFullTake: boolean }): boolean {
+    if (!drag) return false;
+    if (drag.type === 'loose-file') return true;
+    return false; // bucket-clip: no move into a section yet
+  },
+  // A Track row. A loose file already scoped to this track: own-track drop, which
+  // handleDragEnd cancels — no highlight.
+  trackRow(drag: ActiveOrganizeDrag | null, target: { trackId: string }): boolean {
+    if (!drag) return false;
+    if (drag.type === 'loose-file') return drag.trackId !== target.trackId;
+    return false; // bucket-clip: no move to a track's loose files yet
+  },
+  // The Files column of the selected section (null = no section selected).
+  filesColumn(drag: ActiveOrganizeDrag | null, target: { ideaId: string | null }): boolean {
+    if (!drag || !target.ideaId) return false;
+    if (drag.type === 'loose-file') return true;
+    return false; // bucket-clip: no move into a section yet (and its own section is a cancel)
+  },
+  // The Sections column's open background, scoped to the selected track. A loose
+  // file already scoped to that track is a cancel — no highlight.
+  sectionsBackground(drag: ActiveOrganizeDrag | null, target: { trackId: string | null }): boolean {
+    if (!drag || !target.trackId) return false;
+    if (drag.type === 'loose-file') return !(drag.trackId && drag.trackId === target.trackId);
+    return false; // bucket-clip: no move to a track's loose files yet
+  },
+  // The Tracks column's open background. Also decides whether the droppable is
+  // enabled at all (it nests every Track row, so an enabled-but-invalid background
+  // could swallow drops): only a Track-scoped loose file can be un-assigned.
+  tracksBackground(drag: ActiveOrganizeDrag | null): boolean {
+    if (!drag) return false;
+    if (drag.type === 'loose-file') return !!drag.trackId;
+    return false; // bucket-clip: no move to song-level loose files yet
+  },
+};
 
 // How long a loose-file drag must rest on a Track row before that Track opens.
 export const SPRING_LOAD_DELAY_MS = 800;
@@ -273,18 +375,20 @@ export interface SpringLoadedTracksOptions<S> {
 // events arrive and the timer runs; entering another row (or leaving to nothing)
 // fires once and restarts or clears it.
 //
-// Every loose-file drag is eligible. A Track-scoped (shelf) file lives in the
-// selected Track's Sections column, which unmounts when another Track opens; dnd-kit
+// Every loose-file and version (bucket-clip) drag is eligible. A Track-scoped
+// (shelf) file lives in the selected Track's Sections column, and a version in the
+// selected section's Files column; both unmount when another Track opens. dnd-kit
 // then drops the row's data, so handleDragEnd falls back to the snapshot taken at
-// drag start (see useLooseFileOrganizeDnd). A shelf file never springs its own
-// origin Track open.
+// drag start (see useLooseFileOrganizeDnd). A drag never springs its own origin
+// Track open (a shelf file's Track, a version's Track).
 //
 // Restore: if a spring changed the selection and the drag ends without moving the
 // file (Escape or any other cancel, a release over no target, a drop the handler
 // cancels), the selection captured at drag start comes back — for a shelf file that
 // is its origin Track, so its shelf is visible again. A drag that moved the file
 // leaves the selection to the existing "view follows the file" handling. A drag
-// that never sprung never touches the selection.
+// that never sprung never touches the selection. No version move exists yet, so a
+// version drag never reports 'moved' and always restores.
 export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>): void {
   // Read at event time, so the listener below never needs re-subscribing.
   const latest = useRef(options);
@@ -312,9 +416,9 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
         clear();
         clearLooseFileDropReport();
         pendingRestoreRef.current = null;
-        const data = active.data.current as { type?: string; trackId?: string | null } | undefined;
-        eligibleRef.current = data?.type === 'loose-file';
-        originTrackIdRef.current = data?.trackId ?? null;
+        const data = active.data.current;
+        eligibleRef.current = isOrganizeDragData(data);
+        originTrackIdRef.current = isOrganizeDragData(data) ? data.trackId ?? null : null;
         startSelectionRef.current = eligibleRef.current
           ? { selection: latest.current.captureSelection() }
           : null;
@@ -466,7 +570,7 @@ export const IDEA_CLIP_DRAG_TYPE = 'idea-clip';
 
 // Kind + origin of whatever is being dragged, for drop targets that need to tell drag
 // types apart (e.g. an Idea row suppressing its highlight for a clip dragged out of
-// that same Idea). Same useDndMonitor approach as useActiveLooseFileDrag above, for
+// that same Idea). Same useDndMonitor approach as useActiveOrganizeDrag above, for
 // the same per-frame re-render reason. Must be called inside a DndContext.
 export function useActiveDragSource(): { type: string | null; sourceSongId: string | null } | null {
   const [drag, setDrag] = useState<{ type: string | null; sourceSongId: string | null } | null>(null);
@@ -482,13 +586,26 @@ export function useActiveDragSource(): { type: string | null; sourceSongId: stri
   return drag;
 }
 
-// The drag data LooseFileRow (and the Ideas shelf preview card) put on a loose-file
-// draggable — everything handleDragEnd reads from active.data.current.
-interface LooseFileDragData {
-  clip: Clip;
-  type: 'loose-file';
-  songId: string | null;
-  trackId: string | null;
+// ── No hover styling during a drag ───────────────────────────────────────────
+// A file-browser surface (MediaBucket, the Songs quick-browser, the Ideas shelf's
+// Column 1) wraps its rows in an element carrying DRAG_SURFACE_GROUP and the
+// attributes from useDragSurfaceAttrs(): data-dnd-active is set during ANY dnd-kit
+// drag. Rows style their hover with not-group-data-[dnd-active]/drag-surface:hover:*
+// (DRAG_SURFACE_ROW_HOVER for the standard row), so plain hover is off mid-drag and
+// only real drop highlights (organizeDropRules) light up. Outside a drag-surface
+// group the variant still matches, so hover works normally there.
+//
+// One shared group name, not one per surface: Tailwind needs the group name written
+// literally in each class, and shared rows (LooseFileRow, WaveformPlayerCard) appear
+// on several surfaces.
+export const DRAG_SURFACE_GROUP = 'group/drag-surface';
+export const DRAG_SURFACE_ROW_HOVER =
+  'not-group-data-[dnd-active]/drag-surface:hover:bg-white/5 not-group-data-[dnd-active]/drag-surface:hover:text-white';
+
+// Must be called inside a DndContext.
+export function useDragSurfaceAttrs(): { 'data-dnd-active': '' | undefined } {
+  const drag = useActiveDragSource();
+  return { 'data-dnd-active': drag ? '' : undefined };
 }
 
 interface UseLooseFileOrganizeDndOptions {
@@ -497,13 +614,14 @@ interface UseLooseFileOrganizeDndOptions {
 }
 
 export function useLooseFileOrganizeDnd(songId: string | undefined, options?: UseLooseFileOrganizeDndOptions) {
+  // The dragged loose file or version, for the surface's LooseFileDragOverlay ghost.
   const [activeDrag, setActiveDrag] = useState<Clip | null>(null);
-  // Copy of the loose-file drag data, taken at drag start. If the dragged row
-  // unmounts mid-drag (a spring-loaded Track replaced the Sections column holding
-  // it), dnd-kit keeps active.id but swaps active.data.current for an empty object;
+  // Copy of the loose-file or version drag data, taken at drag start. If the dragged
+  // row unmounts mid-drag (a spring-loaded Track replaced the column holding it),
+  // dnd-kit keeps active.id but swaps active.data.current for an empty object;
   // handleDragEnd then reads this instead. Keyed by the draggable id so a stale copy
   // never applies to a different drag.
-  const dragSnapshotRef = useRef<{ activeId: UniqueIdentifier; data: LooseFileDragData } | null>(null);
+  const dragSnapshotRef = useRef<{ activeId: UniqueIdentifier; data: OrganizeDragData } | null>(null);
   const sensors = useLooseFileOrganizeSensors();
   const { toast } = useToast();
   const organizeLooseFileMutation = useOrganizeLooseFile(songId, {
@@ -529,16 +647,23 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
   });
 
   const handleDragStart = (event: DragStartEvent) => {
-    const data = event.active.data.current as Partial<LooseFileDragData> | undefined;
-    const isLooseFile = data?.type === 'loose-file' && !!data.clip;
-    setActiveDrag(isLooseFile ? data.clip! : null);
+    const data = event.active.data.current;
+    const organizeData = isOrganizeDragData(data) ? data : null;
+    setActiveDrag(organizeData ? organizeData.clip : null);
     clearLooseFileDropReport();
-    dragSnapshotRef.current = isLooseFile
-      ? {
-          activeId: event.active.id,
-          data: { clip: data.clip!, type: 'loose-file', songId: data.songId ?? null, trackId: data.trackId ?? null },
-        }
+    dragSnapshotRef.current = organizeData
+      ? { activeId: event.active.id, data: { ...organizeData } }
       : null;
+  };
+
+  // The drag's data: live when the dragged row is still mounted, otherwise the
+  // drag-start copy. Doesn't clear anything — callers that route a version drop
+  // (Timeline.tsx) read it before handleDragEnd, which clears the snapshot.
+  const resolveDrag = (event: DragEndEvent): OrganizeDragData | undefined => {
+    const live = event.active.data.current;
+    if (isOrganizeDragData(live)) return live;
+    const snapshot = dragSnapshotRef.current;
+    return snapshot && snapshot.activeId === event.active.id ? snapshot.data : undefined;
   };
 
   // Escape / sensor cancel. Without this the ghost's clip outlived a cancelled
@@ -559,15 +684,12 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
   // useSpringLoadedTracks, which restores the pre-drag selection on no move.
   const handleDragEnd = (event: DragEndEvent): boolean => {
     const { active, over } = event;
-    setActiveDrag(null);
-    const snapshot = dragSnapshotRef.current;
-    dragSnapshotRef.current = null;
     // Live data when the dragged row is still mounted; otherwise the drag-start copy.
-    const live = active.data.current as Partial<LooseFileDragData> | undefined;
-    const drag: Partial<LooseFileDragData> | undefined = live?.type
-      ? live
-      : snapshot && snapshot.activeId === active.id ? snapshot.data : undefined;
+    const drag = resolveDrag(event);
+    setActiveDrag(null);
+    dragSnapshotRef.current = null;
     if (!over) return false;
+    // Versions (bucket-clip) aren't handled here — the surface routes them itself.
     if (drag?.type !== 'loose-file') return false;
     if (!isBucketOrganizeDropId(over.id)) return false;
     // Idea-clip-only target (make-loose) — not a loose-file destination. It is
@@ -660,6 +782,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
     handleDragStart,
     handleDragEnd,
     handleDragCancel,
+    resolveDrag,
     activeDrag,
     isPending:
       organizeLooseFileMutation.isPending ||

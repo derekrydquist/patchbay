@@ -123,8 +123,10 @@ export function WaveformPlayerCard({
   };
 
   return (
+    // Hover is off inside a drag surface while any drag is active — see
+    // DRAG_SURFACE_GROUP in use-loose-file-organize-dnd.ts. Plain hover elsewhere.
     <div className={cn(
-      'flex flex-col rounded-lg bg-white/[0.03] border border-white/5 hover:bg-white/[0.05] transition-colors relative overflow-hidden',
+      'flex flex-col rounded-lg bg-white/[0.03] border border-white/5 not-group-data-[dnd-active]/drag-surface:hover:bg-white/[0.05] transition-colors relative overflow-hidden',
       isFinal && 'border-primary/30 bg-primary/[0.04]',
       className,
     )}>
@@ -139,7 +141,7 @@ export function WaveformPlayerCard({
         <button
           onPointerDown={e => { if (e.button !== 2) e.stopPropagation(); }}
           onClick={toggle}
-          className="relative z-10 w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 hover:bg-primary/30 transition-colors"
+          className="relative z-10 w-7 h-7 rounded-full bg-primary/20 border border-primary/30 flex items-center justify-center shrink-0 not-group-data-[dnd-active]/drag-surface:hover:bg-primary/30 transition-colors"
         >
           {isPlaying
             ? <Pause size={11} className="text-primary" />

@@ -55,13 +55,19 @@ import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import {
   type ApiClip, type ApiIdea, type ApiTrack, type ApiLooseFile,
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
-  fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary,
+  fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary, apiClipToClip,
 } from '@/lib/bucket-api';
 import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip } from '@/hooks/use-bucket-mutations';
 import {
   useLooseFileOrganizeDnd,
-  useActiveLooseFileDrag,
+  useActiveOrganizeDrag,
+  organizeDropRules,
+  BUCKET_CLIP_DRAG_TYPE,
+  type BucketClipDragData,
   useActiveDragSource,
+  DRAG_SURFACE_GROUP,
+  DRAG_SURFACE_ROW_HOVER,
+  useDragSurfaceAttrs,
   useSpringLoadedTracks,
   useNativeSpringLoadedTracks,
   flashSpringOpenedColumn,
@@ -387,8 +393,17 @@ function IdeaFileContextMenu({
 // Extracted out of the Songs-mode VERSIONS column's clips.map so the reopen
 // hook below can be called per-card, not once for the whole list (hooks
 // can't be called inside a .map callback).
+//
+// Also a version drag source, modelled on IdeaClipCard: useDraggable on the <div>
+// the context menu clones as its trigger, same 'bucket-clip' payload as MediaBucket's
+// BucketClip (see BucketClipDragData). No transform on the source card —
+// LooseFileDragOverlay renders the ghost; the card just dims in place. The play
+// button, waveform canvas and comment badge stop left-button pointerdown, so a drag
+// starts from the rest of the card. The drag id ('songs-clip-{id}') is distinct from
+// BucketClip's ('bucket-{id}') and loose-file rows' ('loose-{id}').
 interface SongsClipContextMenuCardProps {
   clip: ApiClip;
+  dragData: BucketClipDragData;
   onMoreInfo: () => void;
   onAddNote: () => void;
   onMarkFinal: () => void;
@@ -396,12 +411,24 @@ interface SongsClipContextMenuCardProps {
   notesBadge?: React.ReactNode;
 }
 
-function SongsClipContextMenuCard({ clip, onMoreInfo, onAddNote, onMarkFinal, notesBadge }: SongsClipContextMenuCardProps) {
+function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMarkFinal, notesBadge }: SongsClipContextMenuCardProps) {
   const contextMenu = useReopenableContextMenu();
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `songs-clip-${clip.id}`,
+    data: dragData,
+  });
   return (
     <ContextMenu modal={false}>
       <ContextMenuTrigger asChild>
-        <div onContextMenuCapture={contextMenu.onContextMenuCapture}>
+        <div
+          ref={setNodeRef}
+          {...listeners}
+          {...attributes}
+          onContextMenuCapture={contextMenu.onContextMenuCapture}
+          // focus-visible:outline-none — the dnd-kit attributes make this div focusable
+          // (tabIndex 0); same fix as BucketClip and TimelineClip.
+          className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity focus-visible:outline-none', isDragging && 'opacity-40')}
+        >
           <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
             {notesBadge}
           </WaveformPlayerCard>
@@ -541,9 +568,9 @@ function IdeaListRow({ idea, isSelected, onSelect, onFileDrop, onDelete }: IdeaL
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
           // Plain hover is off while any dnd-kit drag is active (the Column 1 wrapper
-          // carries data-dnd-active — see IdeasShelfBackgroundDropZone). During a drag
+          // is a drag surface — see IdeasShelfBackgroundDropZone). During a drag
           // the drop highlight below is the only feedback, so hover never overrides it.
-          : 'text-muted-foreground not-group-data-[dnd-active]/ideas-list:hover:bg-white/5 not-group-data-[dnd-active]/ideas-list:hover:text-white',
+          : cn('text-muted-foreground', DRAG_SURFACE_ROW_HOVER),
         ((isOver && !isOwnIdea) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
@@ -597,7 +624,9 @@ function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCa
         ref={setNodeRef}
         {...listeners}
         {...attributes}
-        className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity', isDragging && 'opacity-40')}
+        // focus-visible:outline-none — the dnd-kit attributes make this div focusable
+        // (tabIndex 0); same fix as BucketClip and TimelineClip.
+        className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity focus-visible:outline-none', isDragging && 'opacity-40')}
       >
         {children}
       </div>
@@ -663,6 +692,9 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop }: SongsSectio
     id: bucketSectionDropId(idea.id),
     data: { trackId: idea.trackId, sectionName: idea.sectionName },
   });
+  // Highlight only when this row accepts the active drag (organizeDropRules).
+  const activeDrag = useActiveOrganizeDrag();
+  const accepts = organizeDropRules.sectionRow(activeDrag, { ideaId: idea.id, isFullTake: idea.isFullTake ?? false });
 
   return (
     <button
@@ -673,8 +705,8 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop }: SongsSectio
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-          : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        (isOver || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
+          : cn('text-muted-foreground', DRAG_SURFACE_ROW_HOVER),
+        ((isOver && accepts) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -698,8 +730,8 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop }: SongsSectio
 // droppable (so it still beats the Tracks-column background, which would otherwise
 // un-assign it) with no highlight — handleDragEnd in use-loose-file-organize-dnd
 // cancels that drop. isOver ignores disabled/own-track state, so the highlight is
-// gated explicitly. useActiveLooseFileDrag (useDndMonitor) rather than useDndContext
-// so rows re-render only on drag start/end, not every pointer move.
+// gated on organizeDropRules.trackRow. useActiveOrganizeDrag (useDndMonitor) rather
+// than useDndContext so rows re-render only on drag start/end, not every pointer move.
 interface SongsTrackRowProps {
   track: ApiTrack;
   isSelected: boolean;
@@ -714,8 +746,7 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: 
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
-  const activeLooseFileDrag = useActiveLooseFileDrag();
-  const isSameTrackDrag = activeLooseFileDrag !== null && activeLooseFileDrag.trackId === track.id;
+  const accepts = organizeDropRules.trackRow(useActiveOrganizeDrag(), { trackId: track.id });
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTrackDropId(track.id),
     data: { trackId: track.id },
@@ -730,8 +761,8 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: 
         'w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent',
         isSelected
           ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-          : 'text-muted-foreground hover:bg-white/5 hover:text-white',
-        ((isOver && !isSameTrackDrag) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
+          : cn('text-muted-foreground', DRAG_SURFACE_ROW_HOVER),
+        ((isOver && accepts) || nativeDrop.isOver) && NATIVE_DROP_ROW_CLASS
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
@@ -757,6 +788,19 @@ function SongsSpringLoadedTracks({ options }: {
 
 type SongsSpringSelection = { trackId: string | null; sectionId: string | null };
 
+// ─── Songs quick-browser root ──────────────────────────────────────────────────
+// The browser's outer box, as a drag surface (useDragSurfaceAttrs): during any
+// dnd-kit drag, rows drop their plain hover so only real drop targets light up. A
+// child component because the hook must run inside the Songs DndContext.
+function SongsDragSurface({ className, children }: { className?: string; children: React.ReactNode }) {
+  const dragSurfaceAttrs = useDragSurfaceAttrs();
+  return (
+    <div {...dragSurfaceAttrs} className={cn(DRAG_SURFACE_GROUP, className)}>
+      {children}
+    </div>
+  );
+}
+
 // ─── Songs quick-browser Column 2 (Tracks) background drop target ────────────
 // Un-assign target, same as MediaBucket's Tracks-column background: a Track-scoped
 // loose file dropped on open column space has its trackId cleared and returns to
@@ -775,8 +819,8 @@ interface SongsTracksColumnDropZoneProps {
 function SongsTracksColumnDropZone({
   className, children, nativeDropHandlers,
 }: SongsTracksColumnDropZoneProps) {
-  const activeLooseFileDrag = useActiveLooseFileDrag();
-  const disabled = !activeLooseFileDrag?.trackId;
+  // organizeDropRules.tracksBackground decides both enabled and highlight.
+  const disabled = !organizeDropRules.tracksBackground(useActiveOrganizeDrag());
   const { setNodeRef, isOver } = useDroppable({
     id: bucketTracksBackgroundDropId('songs-browser-tracks-column'),
     disabled,
@@ -799,7 +843,8 @@ function SongsTracksColumnDropZone({
 // Second assign-track entry point for the selected Track, same as MediaBucket's
 // Sections-column background. Disabled with no Track selected. Nests every Section
 // row (Section rows win — fallback-only in matchOrganizeDropTarget). Own-track
-// drags cancel in handleDragEnd, so the highlight is suppressed for them.
+// drags cancel in handleDragEnd, so organizeDropRules.sectionsBackground suppresses
+// the highlight for them.
 interface SongsSectionsColumnDropZoneProps {
   selectedTrackId: string | null;
   /** Bumped by Dashboard each time a Track springs open (never on a click); each
@@ -812,8 +857,7 @@ interface SongsSectionsColumnDropZoneProps {
 }
 
 function SongsSectionsColumnDropZone({ selectedTrackId, flashNonce, className, children, nativeDropHandlers }: SongsSectionsColumnDropZoneProps) {
-  const activeLooseFileDrag = useActiveLooseFileDrag();
-  const isOwnTrackDrag = !!activeLooseFileDrag?.trackId && activeLooseFileDrag.trackId === selectedTrackId;
+  const accepts = organizeDropRules.sectionsBackground(useActiveOrganizeDrag(), { trackId: selectedTrackId });
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionsBackgroundDropId('songs-browser-sections-column'),
     disabled: !selectedTrackId,
@@ -831,7 +875,7 @@ function SongsSectionsColumnDropZone({ selectedTrackId, flashNonce, className, c
   }, [flashNonce]);
 
   return (
-    <div ref={setColumnRef} className={cn(className, isOver && !isOwnTrackDrag && 'bg-primary/5')} {...nativeDropHandlers}>
+    <div ref={setColumnRef} className={cn(className, isOver && accepts && 'bg-primary/5')} {...nativeDropHandlers}>
       {children}
     </div>
   );
@@ -866,11 +910,14 @@ function SongsFilesColumnDropZone({
     disabled: !selectedSection,
     data: selectedSection ? { trackId: selectedSection.trackId, sectionName: selectedSection.sectionName } : undefined,
   });
+  // A version drag starts INSIDE this column, so isOver is true from its first
+  // frame — only the rule decides whether that means anything.
+  const accepts = organizeDropRules.filesColumn(useActiveOrganizeDrag(), { ideaId: selectedSection?.id ?? null });
 
   return (
     <div
       ref={setNodeRef}
-      className={cn(className, isOver && 'bg-primary/5')}
+      className={cn(className, isOver && accepts && 'bg-primary/5')}
       {...nativeDropHandlers}
     >
       {children}
@@ -945,6 +992,7 @@ interface IdeasShelfBackgroundDropZoneProps {
 function IdeasShelfBackgroundDropZone({ className, children, onBlankClick }: IdeasShelfBackgroundDropZoneProps) {
   const pressedOnBlankRef = useRef(false);
   const activeDrag = useActiveDragSource();
+  const dragSurfaceAttrs = useDragSurfaceAttrs();
   const disabled = activeDrag?.type !== IDEA_CLIP_DRAG_TYPE;
   const { setNodeRef, isOver } = useDroppable({
     id: ideasShelfBackgroundDropId('ideas-shelf-ideas-column'),
@@ -953,15 +1001,15 @@ function IdeasShelfBackgroundDropZone({ className, children, onBlankClick }: Ide
   });
 
   return (
-    // isOver ignores disabled — gate the highlight on both. data-dnd-active (any
-    // dnd-kit drag) turns off plain row hover inside this list: rows style their
-    // hover with not-group-data-[dnd-active]/ideas-list:hover:*, so only real drop
+    // isOver ignores disabled — gate the highlight on both. This list is a drag
+    // surface (useDragSurfaceAttrs): during any dnd-kit drag, rows' plain hover
+    // (not-group-data-[dnd-active]/drag-surface:hover:*) is off, so only real drop
     // targets light up. A loose-file row is never a target itself — an organized-
     // card drop on one lands on this background, which shows its own ring.
     <div
       ref={setNodeRef}
-      data-dnd-active={activeDrag ? '' : undefined}
-      className={cn('group/ideas-list', className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}
+      {...dragSurfaceAttrs}
+      className={cn(DRAG_SURFACE_GROUP, className, isOver && !disabled && 'bg-primary/5 ring-1 ring-inset ring-primary/40')}
       onPointerDown={(e) => { pressedOnBlankRef.current = e.button === 0 && e.target === e.currentTarget; }}
       onClick={(e) => {
         const pressedOnBlank = pressedOnBlankRef.current;
@@ -2799,7 +2847,7 @@ export default function Dashboard() {
               onDragCancel={looseFileOrganizeDnd.handleDragCancel}
             >
             <SongsSpringLoadedTracks options={songsSpringOptions} />
-            <div className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
+            <SongsDragSurface className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
 
               {/* Column 1 — Songs */}
               <div className="w-52 shrink-0 border-r border-white/5 flex flex-col">
@@ -2831,7 +2879,7 @@ export default function Dashboard() {
                               'w-full flex items-center justify-between p-2 rounded text-xs transition-all',
                               selectedFile?.id === item.id
                                 ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
-                                : 'text-muted-foreground hover:bg-white/5 hover:text-white'
+                                : cn('text-muted-foreground', DRAG_SURFACE_ROW_HOVER)
                             )}
                           >
                             <div className="flex items-center gap-2 min-w-0">
@@ -3086,6 +3134,15 @@ export default function Dashboard() {
                         <SongsClipContextMenuCard
                           key={clip.id}
                           clip={clip}
+                          dragData={{
+                            clip: apiClipToClip({ ...clip, isFullTake: selectedSection.isFullTake ?? false }),
+                            type: BUCKET_CLIP_DRAG_TYPE,
+                            trackId: selectedSection.trackId,
+                            ideaId: selectedSection.id,
+                            songId: selectedFile!.id,
+                            // From the idea, never the section name (see BucketClipDragData).
+                            isFullTake: selectedSection.isFullTake ?? false,
+                          }}
                           onMoreInfo={() => openClipInfo(clip)}
                           onAddNote={() => openClipInfo(clip, { focusNotes: true })}
                           onMarkFinal={() => markFinalMutation.mutate(clip.id)}
@@ -3097,7 +3154,7 @@ export default function Dashboard() {
                 </div>
               </SongsFilesColumnDropZone>
 
-            </div>
+            </SongsDragSurface>
             <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
             </DndContext>
             ) : filesFilter === 'ideas' ? (

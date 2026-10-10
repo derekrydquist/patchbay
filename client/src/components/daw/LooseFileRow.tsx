@@ -7,6 +7,7 @@ import {
 } from '@/components/ui/context-menu';
 import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from './Clip';
 import { useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
+import { DRAG_SURFACE_ROW_HOVER } from '@/hooks/use-loose-file-organize-dnd';
 import { type ApiLooseFile, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
 import { type Clip } from '@/lib/daw-data';
 import { cn } from '@/lib/utils';
@@ -226,10 +227,10 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
           isSelected
             ? 'bg-primary/20 text-primary shadow-[inset_0_0_10px_rgba(212,175,55,0.05)]'
             : 'text-muted-foreground/80',
-          // Hover is suppressed inside the Ideas shelf's Column 1 while a drag is
-          // active (group/ideas-list[data-dnd-active], set in Dashboard.tsx) — a row
-          // is never a drop target. Outside that group this is a plain hover.
-          onClick && !isSelected && 'not-group-data-[dnd-active]/ideas-list:hover:bg-white/5 not-group-data-[dnd-active]/ideas-list:hover:text-white',
+          // Hover is suppressed inside a drag surface while a drag is active
+          // (DRAG_SURFACE_ROW_HOVER) — a row is never a drop target. Outside a drag
+          // surface this is a plain hover.
+          onClick && !isSelected && DRAG_SURFACE_ROW_HOVER,
           isDragging && 'opacity-40'
         )}
         title={looseFile.name}

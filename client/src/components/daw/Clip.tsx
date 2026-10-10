@@ -14,6 +14,7 @@ import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
 import { ClipInUseDialog, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
 import { useToast } from '@/hooks/use-toast';
+import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
 import {
   ContextMenu,
@@ -1914,16 +1915,28 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
     if (showInfo) markCommentsViewed(clip.id, queryClient);
   }, [showInfo, clip.id, queryClient]);
 
-  const { attributes, listeners, setNodeRef, transform } = useDraggable({
+  // Version drag. Timeline.tsx reads clip/type/trackId for the bucket → timeline
+  // drop; ideaId/songId/isFullTake tell the bucket drop targets where the version
+  // lives (see BucketClipDragData). isFullTake comes from the idea via MediaBucket's
+  // toClip, never from the section name. No transform on the source card — the
+  // surface's DragOverlay renders the ghost; the card just dims in place (a moving
+  // source card widened the Files column's scroll area, the same bug LooseFileRow had).
+  const dragData: BucketClipDragData = {
+    clip: { ...clip, isFinal, comments },
+    type: BUCKET_CLIP_DRAG_TYPE,
+    trackId: trackId ?? '',
+    ideaId: clip.ideaId ?? '',
+    songId,
+    isFullTake: clip.isFullTake ?? false,
+  };
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `bucket-${clip.id}`,
-    data: { clip: { ...clip, isFinal, comments }, type: 'bucket-clip', trackId },
+    data: dragData,
   });
 
   const handleUpdateComments = (newComments: Comment[]) => {
     setComments(newComments);
   };
-
-  const style = { transform: CSS.Translate.toString(transform) };
 
   const executeMark = async (newIsFinal: boolean) => {
     setIsFinal(newIsFinal);
@@ -1983,11 +1996,13 @@ export function BucketClip({ clip, trackId, songId = 'patchbay-default', onAddTo
         <ContextMenuTrigger asChild>
           <div
             ref={setNodeRef}
-            style={style}
             {...listeners}
             {...attributes}
             onContextMenuCapture={contextMenu.onContextMenuCapture}
-            className="select-none touch-none cursor-grab active:cursor-grabbing focus-visible:outline-none"
+            className={cn(
+              'select-none touch-none cursor-grab active:cursor-grabbing focus-visible:outline-none transition-opacity',
+              isDragging && 'opacity-40'
+            )}
           >
             <WaveformPlayerCard
               src={clip.src}

@@ -42,6 +42,9 @@ export interface Clip {
   trimStart?: number;
   trimEnd?: number | null;
   bucketClipId?: string;
+  // Bucket versions only: the ideas row (section) the version lives in. Carried so a
+  // version drag knows its own section; timeline clips never set it.
+  ideaId?: string;
 }
 
 export interface Idea {

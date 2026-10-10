@@ -134,6 +134,27 @@ export interface ApiTimelineClip {
   isFullTake: boolean;
 }
 
+// ─── ApiClip → daw-data Clip ──────────────────────────────────────────────────
+// The shape BucketClip and the version drag payload use. Shared by MediaBucket and
+// the Songs quick-browser so both build the same 'bucket-clip' drag data.
+export function apiClipToClip(apiClip: ApiClip): DawClip {
+  return {
+    id: apiClip.id,
+    name: apiClip.name,
+    type: apiClip.type as DawClip['type'],
+    color: apiClip.color,
+    start: apiClip.start,
+    duration: apiClip.duration,
+    src: apiClip.src ?? undefined,
+    isFinal: apiClip.isFinal,
+    isFullTake: apiClip.isFullTake ?? false,
+    sectionName: apiClip.sectionName ?? undefined,
+    metadata: apiClip.metadata as unknown as DawClip['metadata'],
+    // The version's own section — carried into its drag data (BucketClip).
+    ideaId: apiClip.ideaId,
+  };
+}
+
 // ─── Fetch helpers ────────────────────────────────────────────────────────────
 
 export async function fetchBucket(songId: string): Promise<ApiTrack[]> {

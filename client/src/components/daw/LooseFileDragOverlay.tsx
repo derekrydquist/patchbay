@@ -7,9 +7,8 @@ import { type Clip } from '@/lib/daw-data';
 // Floating drag ghost for a loose file being dragged onto a Section row or Versions
 // column, for any DndContext built around useLooseFileOrganizeDnd. Styled to match
 // Timeline.tsx's own clip-drag DragOverlay (the reference implementation) so the drag
-// feel is identical everywhere. Timeline itself doesn't need this component — its
-// existing DragOverlay already renders a ghost for every drag type it handles,
-// loose files included.
+// feel is identical everywhere. Timeline (Workspace) renders it too, for loose-file
+// and version (bucket-clip) drags; timeline-clip drags keep Timeline's own ghost.
 //
 // Also renders the Ideas shelf's organized-clip drags (move to another Idea) — only
 // the name is shown, so any object with one works.
@@ -24,7 +23,15 @@ import { type Clip } from '@/lib/daw-data';
 // sat on top of the row being targeted, so the row under the cursor looked like
 // the drop target while a different row was actually highlighted. Pointer events
 // are off on DragOverlay's own wrapper, not just the ghost inside it.
-const CURSOR_GAP_PX = 12;
+//
+// The wrapper is sized to the ghost (width max-content, height auto). dnd-kit gives
+// it the dragged source's width and height by default, and restrictToWindowEdges
+// clamps that wrapper, not the ghost: a wide source (a version card spanning the
+// Files column) was clamped against the right window edge, which held the ghost far
+// to the left of the cursor until the cursor crossed the Files column border. Our
+// `style` is applied after dnd-kit's own (PositionedOverlay spreads it last), so
+// these sizes win.
+const CURSOR_GAP_PX = 4;
 
 // Moves the overlay's top-left corner to the cursor plus CURSOR_GAP_PX on both
 // axes. Same shape as @dnd-kit/modifiers' snapCenterToCursor, which would center
@@ -45,7 +52,7 @@ export function LooseFileDragOverlay({ clip }: { clip: Pick<Clip, 'name'> | null
     <DragOverlay
       modifiers={[anchorBelowRightOfCursor, restrictToWindowEdges]}
       dropAnimation={null}
-      style={{ pointerEvents: 'none' }}
+      style={{ pointerEvents: 'none', width: 'max-content', height: 'auto' }}
     >
       {clip ? (
         <div className="opacity-90 cursor-grabbing pointer-events-none z-[9999]">

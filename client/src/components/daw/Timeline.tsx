@@ -41,7 +41,9 @@ import {
   matchOrganizeDropTarget,
   reportLooseFileDrop,
   resolveDeferredLooseFileDrop,
+  BUCKET_CLIP_DRAG_TYPE,
 } from '@/hooks/use-loose-file-organize-dnd';
+import { LooseFileDragOverlay } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
@@ -203,13 +205,33 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
   return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
 }
 
+// Whether the pointer is inside MediaBucket's on-screen bounds (its root carries
+// data-media-bucket). Read live on every collision pass — the bucket pane can be
+// resized, and this must follow the pointer, never the drag overlay's rect.
+function isPointerInMediaBucket(x: number, y: number): boolean {
+  const el = document.querySelector('[data-media-bucket]');
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+}
+
 // Custom collision detection: gap zones require precise pointer intersection (they are narrow);
 // track rows match by vertical overlap only — any X position on the row resolves to that track.
 // Gap zones read live getBoundingClientRect() directly so freshly-mounted zones are never skipped
 // due to a stale/missing entry in dnd-kit's droppableRects cache.
+//
+// While the pointer is over MediaBucket, only the bucket's own targets can match. Track rows
+// match on Y alone and their rects stay measured when scrolled out of view, so without this a
+// release on MediaBucket's blank space could match a timeline track row hidden behind it and
+// place the clip on the timeline.
 const trackFirstCollision: CollisionDetection = ({ droppableContainers, droppableRects, pointerCoordinates }) => {
   if (!pointerCoordinates) return [];
   const { x, y } = pointerCoordinates;
+
+  if (isPointerInMediaBucket(x, y)) {
+    const bucketMatch = matchOrganizeDropTarget(droppableContainers, droppableRects, x, y);
+    return bucketMatch ? [bucketMatch] : [];
+  }
 
   // First pass — gap zones only, live bounds check.
   for (const container of droppableContainers) {
@@ -2000,6 +2022,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // ─────────────────────────────────────────────────────────────────────────
 
   const handleDragStart = (event: DragStartEvent) => {
+    // The shared organize hook takes its drag-start snapshot (loose files and
+    // versions) here, the same as SongHome and the Songs quick-browser.
+    looseFileOrganizeDnd.handleDragStart(event);
     const clip = event.active.data.current?.clip as Clip;
     const type = event.active.data.current?.type as string;
     const dragTrackId = event.active.data.current?.trackId as string | undefined;
@@ -2008,7 +2033,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       let enrichedClip = { ...clip };
       if (type === 'bucket-clip' && !clip.sectionName) {
         // Fallback for mock clips that don't carry sectionName: derive from MOCK_SONG idea name.
-        // Real API clips always have sectionName set via toClip(), so this branch won't run for them.
+        // Real API clips always have sectionName set via apiClipToClip(), so this branch won't run for them.
         outer: for (const inst of MOCK_SONG.instruments) {
           for (const idea of inst.ideas) {
             if (idea.versions.some((v) => v.id === clip.id)) {
@@ -2169,6 +2194,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
     setActiveDragData(null);
 
+    // The organize drag (loose file or version), live or from the hook's drag-start
+    // snapshot — read before handleDragEnd below clears that snapshot.
+    const organizeDrag = looseFileOrganizeDnd.resolveDrag(event);
+    // Runs on every drop so the hook always clears its snapshot. It acts only on a
+    // loose file released over a bucket target, and returns true when it did.
+    const looseFileHandled = looseFileOrganizeDnd.handleDragEnd(event);
+
     if (!over) { setInsertionPoint(null); return; }
 
     // dragData (captured at drag start) covers a source row that unmounted mid-drag —
@@ -2177,13 +2209,20 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const clip = (active.data.current?.clip ?? dragData?.clip) as Clip;
     const overId = over.id as string;
 
-    // ── MediaBucket Section-row / Versions-column drop: organize a loose file directly
-    // (no confirmation — only place-on-timeline requires one). Delegated to the shared
-    // hook (use-loose-file-organize-dnd) — same handler Dashboard's Ideas shelf and
-    // Songs quick-browser use. ────────────────────────────────────────────────────
+    // ── MediaBucket drop (Section row, Track row, Files column, column backgrounds).
+    // Checked ahead of every timeline branch. Two handlers chained, as on the Ideas
+    // shelf: the shared hook (use-loose-file-organize-dnd) organizes a loose file
+    // directly (no confirmation — only place-on-timeline requires one); a version
+    // goes to the bucket-clip branch below. ─────────────────────────────────────
     if (isBucketOrganizeDropId(overId)) {
       setInsertionPoint(null);
-      looseFileOrganizeDnd.handleDragEnd(event);
+      if (looseFileHandled) return;
+      if (organizeDrag?.type === BUCKET_CLIP_DRAG_TYPE) {
+        // ── VERSION (bucket-clip) → BUCKET TARGET ROUTING GOES HERE ──────────────
+        // No version move exists yet: a version dropped on any bucket target does
+        // nothing (no mutation, no drop report, so a sprung selection is restored).
+        return;
+      }
       return;
     }
     // ─────────────────────────────────────────────────────────────────────────
@@ -2437,6 +2476,15 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         sectionName: targetSection?.name ?? '',
       });
     }
+  };
+
+  // Escape / sensor cancel. Without this, activeDragData outlived the drag: the
+  // track overlays stayed up and the Delete shortcut stayed blocked until the next
+  // drag. The spring-loaded restore runs from its own useDndMonitor (MediaBucket).
+  const handleDragCancel = () => {
+    setActiveDragData(null);
+    setInsertionPoint(null);
+    looseFileOrganizeDnd.handleDragCancel();
   };
 
   const handleDeleteTrack = (trackId: string) => {
@@ -2843,6 +2891,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       onDragStart={handleDragStart}
       onDragMove={handleDragMove}
       onDragEnd={handleDragEnd}
+      onDragCancel={handleDragCancel}
     >
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden relative" ref={containerRef}>
         <LooseFilePlacementProvider value={openLooseFilePlacement}>
@@ -3149,21 +3198,34 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         </div>
       </div>
 
-      <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
-        {activeDragData ? (
-          <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
-            <div
-              className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e] pointer-events-none"
-              style={{ width: Math.max(160, ((activeDragData.clip.trimEnd ?? activeDragData.clip.duration) - (activeDragData.clip.trimStart ?? 0)) * zoom) }}
-            >
-              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
-              <span className="text-xs font-bold text-white truncate tracking-tight">
-                {activeDragData.clip.name}
-              </span>
+      {/* Exactly one DragOverlay is mounted. dnd-kit renders an overlay's wrapper box
+          (sized to the dragged source) whenever ANY drag is active, even with no
+          children, so mounting both would leave an empty box following the cursor.
+          File-browser drags (a version or a loose file) get the small
+          LooseFileDragOverlay chip below-right of the pointer; timeline clips keep the
+          clip-shaped ghost. activeDragData is set in onDragStart, which dnd-kit batches
+          with the drag start itself, so the right overlay is already in place on the
+          drag's first frame. Nothing reads the overlay's rect: collisions and the
+          loose-file Place on Timeline pre-fill use the pointer (see handleDragEnd). */}
+      {activeDragData?.type === BUCKET_CLIP_DRAG_TYPE || activeDragData?.type === 'loose-file' ? (
+        <LooseFileDragOverlay clip={activeDragData.clip} />
+      ) : (
+        <DragOverlay modifiers={[restrictToWindowEdges]} dropAnimation={null}>
+          {activeDragData ? (
+            <div className="opacity-90 scale-105 rotate-1 cursor-grabbing pointer-events-none z-[9999]">
+              <div
+                className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e] pointer-events-none"
+                style={{ width: Math.max(160, ((activeDragData.clip.trimEnd ?? activeDragData.clip.duration) - (activeDragData.clip.trimStart ?? 0)) * zoom) }}
+              >
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
+                <span className="text-xs font-bold text-white truncate tracking-tight">
+                  {activeDragData.clip.name}
+                </span>
+              </div>
             </div>
-          </div>
-        ) : null}
-      </DragOverlay>
+          ) : null}
+        </DragOverlay>
+      )}
 
       {/* Timeline background right-click context menu */}
       {contextMenuPos && (
