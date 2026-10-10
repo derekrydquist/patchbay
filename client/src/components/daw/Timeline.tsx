@@ -369,10 +369,18 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   });
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
     // The view follows the file, same find-in-bucket event organize fires above.
+    // Only reached from the Place on Timeline dialog (opened by a drop or by the
+    // loose-file "Add to Timeline" menu item), so the placed clip gets the same white
+    // halo as a version's context-menu Add to Timeline. It mounts with isFlash already
+    // set once live sync merges it (the timeline query is invalidated on success).
+    // Bucket → timeline DRAG placement doesn't come through here and stays silent.
     onSuccess: ({ timelineClip }) => {
       window.dispatchEvent(new CustomEvent('find-in-bucket', {
         detail: { trackId: timelineClip.trackId, sectionName: timelineClip.sectionName ?? undefined },
       }));
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      setFlashClipId(timelineClip.id);
+      flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
     },
     // The dialog closes on confirm, before the server answers — without a toast a
     // failed placement looks like nothing happened.

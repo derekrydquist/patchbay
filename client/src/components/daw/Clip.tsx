@@ -16,6 +16,7 @@ import { ClipInUseDialog, describeLeaveDependents, postClipLeave, useClipInUseAc
 import { useToast } from '@/hooks/use-toast';
 import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
+import { useLandingFlash, clipLandingZone, flashGold, TIMELINE_LANDING_GLOW_ALPHA } from '@/hooks/use-landing-flash';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -1031,10 +1032,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   const tcLastViewed = viewedMap[tcEffectiveId];
   const tcHasUnread = hasUnreadComments(tcCommentInfo?.latestOthersCommentAt, tcLastViewed);
 
-  // Scroll this clip into view (and trigger the ring highlight) when placed via context-menu.
+  // Scroll this clip into view and play the shared gold landing flash when it was
+  // just placed (context-menu Add to Timeline, Place on Timeline). A ring + glow
+  // outside the clip's edge, never a tint — Drums clips are gold. While isFlash is
+  // set the clip sits one layer above its neighbours (positionStyle) and its
+  // SectionCell stops clipping (Track.tsx), so the glow isn't cut off.
   useEffect(() => {
     if (!isFlash || !clipContainerRef.current) return;
     clipContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    flashGold(clipContainerRef.current, {
+      peakAlpha: TIMELINE_LANDING_GLOW_ALPHA,
+      reducedMotion: 'ring',
+      look: 'outerGlow',
+    });
   }, [isFlash]);
 
   useEffect(() => {
@@ -1355,7 +1365,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     width: displayWidth,
     left: (clip.start - sectionStart) * zoom,
     position: 'absolute',
-    zIndex: 1,
+    // One above neighbouring clips while the landing glow plays, so it isn't covered.
+    zIndex: isFlash ? 2 : 1,
     ...(isTrimDragging ? {} : style),
     ...(trimEdge !== null || isTrimDragging ? { cursor: 'ew-resize' } : {}),
   };
@@ -1567,16 +1578,6 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             {/* Selection indicator — persistent gold border + tint; same inset-border technique as flash halo */}
             {!isOverlay && isSelected && (
               <div className="pointer-events-none absolute inset-0 rounded-md border-2 border-primary bg-primary/10 z-[19]" />
-            )}
-
-            {/* Flash halo — outside overflow-hidden's clip path so border is fully visible */}
-            {!isOverlay && (
-              <div
-                className={cn(
-                  'pointer-events-none absolute inset-0 rounded-md border-2 border-white/90 shadow-[0_0_12px_rgba(255,255,255,0.6)] transition-opacity duration-700 z-20',
-                  isFlash ? 'opacity-100' : 'opacity-0'
-                )}
-              />
             )}
 
             {/* Hover glow — gold inset box-shadow; separate child div so it composites above the color fill */}
@@ -1868,8 +1869,6 @@ interface BucketClipProps {
   autoOpenInfo?: boolean;
 }
 
-import { useLocation } from 'wouter';
-
 export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo }: BucketClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
@@ -1877,10 +1876,13 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
   const [focusComments, setFocusComments] = useState(false);
   const [isFinal, setIsFinal] = useState(clip.isFinal ?? false);
   const [comments, setComments] = useState(clip.comments || []);
-  const [location] = useLocation();
-  const [isHighlighted, setIsHighlighted] = useState(false);
   const queryClient = useQueryClient();
   const contextMenu = useReopenableContextMenu();
+  // Landing flash (use-landing-flash.ts): scrolls this card into view in its Files
+  // column and flashes it after it lands here, or when a ?file= / ?clipId= link
+  // names it. Zone from the clip's own section, so a stale copy elsewhere never matches.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useLandingFlash(clip.id, clip.ideaId ? clipLandingZone(clip.ideaId) : '', cardRef);
 
   const { data: clipCommentSummary = {} } = useQuery<ClipCommentSummary>({
     queryKey: ['clip-comment-summary', songId],
@@ -1901,16 +1903,6 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
       setFocusNotes(true);
     }
   }, [autoOpenInfo]);
-
-  useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    const urlFile = searchParams.get('file');
-    if (urlFile === clip.id) {
-      setIsHighlighted(true);
-      const timer = setTimeout(() => setIsHighlighted(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [location, clip.id]);
 
   useEffect(() => {
     if (showInfo) markCommentsViewed(clip.id, queryClient);
@@ -2020,9 +2012,7 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
               isFinal={isFinal}
               color={clip.color}
               waveformHeight={20}
-              className={cn(
-                isHighlighted && 'ring-1 ring-primary/50 shadow-[inset_0_0_15px_rgba(212,175,55,0.2)]'
-              )}
+              cardRef={cardRef}
             >
               {commentInfo && (
                 <CornerBadge

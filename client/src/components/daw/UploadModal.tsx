@@ -12,6 +12,9 @@ import {
 } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { extractAudioFromVideo } from '@/lib/extractAudioFromVideo';
+import {
+  requestLandingFlash, clipLandingZone, looseLandingZone, type LandingFlashItem,
+} from '@/hooks/use-landing-flash';
 
 async function uploadFile(
   file: File,
@@ -106,6 +109,18 @@ async function createClip(ideaId: string, payload: {
   return res.json();
 }
 
+// What a successful upload reports to onUploadSuccess. destTrackId/destIdeaId are
+// set only for 'placed' (the section the clips landed in). `landed` lists every
+// file that landed, in upload order, with the zone it now renders in — UploadModal
+// already passes these to requestLandingFlash itself; they're here for any caller
+// that needs the ids.
+export interface UploadSuccessResult {
+  mode: 'placed' | 'loose' | 'band-loose';
+  destTrackId: string | null;
+  destIdeaId: string | null;
+  landed: LandingFlashItem[];
+}
+
 type PendingFile = {
   name: string;
   size: string;
@@ -138,7 +153,7 @@ export interface UploadModalProps {
   // ("Adding to Drums" / "Adding to Drums > Intro"). In 'placed' mode for a song the
   // name follows the Destination dropdown, so it never goes stale if changed.
   announceDestination?: boolean;
-  onUploadSuccess?: (result: { destTrackId: string; destIdeaId: string }) => void;
+  onUploadSuccess?: (result: UploadSuccessResult) => void;
 }
 
 export function UploadModal({
@@ -250,9 +265,10 @@ export function UploadModal({
   })();
 
   const uploadMutation = useMutation({
-    mutationFn: async (): Promise<{ destTrackId: string; destIdeaId: string } | { loose: true } | { bandLoose: true } | undefined> => {
+    mutationFn: async (): Promise<UploadSuccessResult | undefined> => {
       if (uploadFiles.length === 0) return;
       setUploadError(null);
+      const landed: LandingFlashItem[] = [];
 
       // ── Band-loose mode: no destination AND no songId — every file lands in
       // loose_files with songId: null, scoped only to the session's band. Never
@@ -262,14 +278,15 @@ export function UploadModal({
           if (status !== 'ready') continue;
           const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
             await uploadFile(file, 'loose', 'unplaced', '');
-          await createBandLooseFile({
+          const looseFile = await createBandLooseFile({
             name: originalFileName || file.name,
             type: 'audio',
             color: 'hsl(var(--primary))',
             duration, src: url, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
           });
+          landed.push({ id: looseFile.id, zone: looseLandingZone(looseFile) });
         }
-        return { bandLoose: true };
+        return { mode: 'band-loose', destTrackId: null, destIdeaId: null, landed };
       }
 
       // ── Loose mode: no destination — every file lands in loose_files instead
@@ -280,14 +297,15 @@ export function UploadModal({
           if (status !== 'ready') continue;
           const { url, duration, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate } =
             await uploadFile(file, 'loose', 'unplaced', '');
-          await createLooseFile(songId!, looseTrackId, {
+          const looseFile = await createLooseFile(songId!, looseTrackId, {
             name: originalFileName || file.name,
             type: 'audio',
             color: 'hsl(var(--primary))',
             duration, src: url, format, originalFileName, sampleRate, bitDepth, channels, uploadedDate,
           });
+          landed.push({ id: looseFile.id, zone: looseLandingZone(looseFile) });
         }
-        return { loose: true };
+        return { mode: 'loose', destTrackId: null, destIdeaId: null, landed };
       }
 
       const destId = uploadDestination;
@@ -310,7 +328,7 @@ export function UploadModal({
         const clipName = songType === 'idea'
           ? (originalFileName || file.name)
           : `${destTrack.name} ${destIdea.sectionName} V${versionNum}`;
-        await createClip(destIdea.id, {
+        const clip = await createClip(destIdea.id, {
           id: nanoid(),
           name: clipName,
           type: destTrack.type === 'vocal' ? 'vocal' : 'audio',
@@ -322,17 +340,20 @@ export function UploadModal({
             peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
           },
         });
+        landed.push({ id: clip.id, zone: clipLandingZone(clip.ideaId) });
         destIdea = { ...destIdea, clips: [...destIdea.clips, {} as ApiClip] };
       }
-      return { destTrackId: destTrack.id, destIdeaId: destId };
+      return { mode: 'placed', destTrackId: destTrack.id, destIdeaId: destId, landed };
     },
     onSuccess: (result) => {
       if (!result) return;
-      if ('bandLoose' in result) {
+      requestLandingFlash(result.landed);
+      if (result.mode === 'band-loose') {
         queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
         onOpenChange(false);
         setUploadFiles([]);
         setUploadDestination('');
+        onUploadSuccess?.(result);
         return;
       }
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
@@ -345,7 +366,7 @@ export function UploadModal({
       onOpenChange(false);
       setUploadFiles([]);
       setUploadDestination('');
-      if ('destTrackId' in result) onUploadSuccess?.(result);
+      onUploadSuccess?.(result);
     },
     onError: (err: Error) => setUploadError(err.message),
   });

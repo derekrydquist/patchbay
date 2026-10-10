@@ -59,6 +59,7 @@ import {
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary, apiClipToClip,
 } from '@/lib/bucket-api';
 import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip } from '@/hooks/use-bucket-mutations';
+import { useLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import {
   useLooseFileOrganizeDnd,
   useActiveOrganizeDrag,
@@ -431,6 +432,9 @@ function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMar
     id: `songs-clip-${clip.id}`,
     data: dragData,
   });
+  // Landing flash (use-landing-flash.ts) — zone from the clip's own section.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useLandingFlash(clip.id, clipLandingZone(clip.ideaId), cardRef);
   return (
     <ContextMenu modal={false}>
       <ContextMenuTrigger asChild>
@@ -443,7 +447,7 @@ function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMar
           // (tabIndex 0); same fix as BucketClip and TimelineClip.
           className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity focus-visible:outline-none', isDragging && 'opacity-40')}
         >
-          <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+          <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} cardRef={cardRef}>
             {notesBadge}
           </WaveformPlayerCard>
         </div>
@@ -635,7 +639,9 @@ interface IdeaClipCardProps extends Omit<IdeaFileContextMenuProps, 'children' | 
   onDelete: () => void;
   clip: ApiClip;
   sourceSongId: string;
-  children: React.ReactNode;
+  // Render prop: receives the ref for the WaveformPlayerCard's root (cardRef), which
+  // the landing flash animates — the card is built at the call site.
+  children: (cardRef: React.Ref<HTMLDivElement>) => React.ReactNode;
 }
 
 function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCardProps) {
@@ -643,6 +649,9 @@ function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCa
     id: `idea-clip-${clip.id}`,
     data: { type: IDEA_CLIP_DRAG_TYPE, clip, sourceSongId },
   });
+  // Landing flash (use-landing-flash.ts) — zone from the clip's own Idea.
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  useLandingFlash(clip.id, clipLandingZone(clip.ideaId), cardRef);
   return (
     <IdeaFileContextMenu {...menuProps}>
       <div
@@ -653,7 +662,7 @@ function IdeaClipCard({ clip, sourceSongId, children, ...menuProps }: IdeaClipCa
         // (tabIndex 0); same fix as BucketClip and TimelineClip.
         className={cn('cursor-grab active:cursor-grabbing select-none transition-opacity focus-visible:outline-none', isDragging && 'opacity-40')}
       >
-        {children}
+        {children(cardRef)}
       </div>
     </IdeaFileContextMenu>
   );
@@ -2171,7 +2180,7 @@ export default function Dashboard() {
           <ToastAction
             altText="Open Workspace"
             className="bg-primary text-black border-primary hover:bg-primary/90 font-bold text-xs"
-            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}`)}
+            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}&file=${encodeURIComponent(newClipId)}`)}
           >
             Open Workspace →
           </ToastAction>
@@ -2319,7 +2328,7 @@ export default function Dashboard() {
           <ToastAction
             altText="Open Workspace"
             className="bg-primary text-black border-primary hover:bg-primary/90 font-bold text-xs"
-            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}`)}
+            onClick={() => setLocation(`/songs/${navSongId}/workspace?instrument=${encodeURIComponent(instrName)}&section=${encodeURIComponent(sectName)}&file=${encodeURIComponent(newClipId)}`)}
           >
             Open Workspace →
           </ToastAction>
@@ -3471,7 +3480,8 @@ export default function Dashboard() {
                             onRemoveFromIdea={() => makeIdeaClipLoose(clip.id, selectedFile.id)}
                             onDelete={() => deleteIdeaClip.mutate({ clipId: clip.id, songId: selectedFile.id })}
                           >
-                            <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20}>
+                            {(cardRef) => (
+                            <WaveformPlayerCard src={clip.src} name={clip.name} duration={clip.duration} isFinal={clip.isFinal} waveformHeight={20} cardRef={cardRef}>
                               {clipNotesBadge(clip)}
                               {clip.addedToSongs && clip.addedToSongs.length > 0 && (
                                 <div className={cn('flex flex-wrap gap-1 px-2.5 pb-1.5 pt-0.5 border-t border-white/[0.04]', clipCommentSummary[clip.id] && 'pr-6')}>
@@ -3483,6 +3493,7 @@ export default function Dashboard() {
                                 </div>
                               )}
                             </WaveformPlayerCard>
+                            )}
                           </IdeaClipCard>
                         ))}
                       </>
@@ -3848,8 +3859,20 @@ export default function Dashboard() {
           songType: filesFilter === 'ideas' ? 'idea' as const : 'song' as const,
         })}
         initialFiles={uploadInitialFiles}
-        onUploadSuccess={() => {
+        onUploadSuccess={({ mode, destTrackId, destIdeaId }) => {
           if (filesFilter === 'ideas') queryClient.invalidateQueries({ queryKey: ['songs'] });
+          // Songs quick-browser: a placed upload's destination can differ from the
+          // selection (the Upload button's Destination dropdown), so follow it — select
+          // its Track and Section from fresh bucket data, as MediaBucket does — so the
+          // landed files are on screen and their landing flash can play.
+          if (filesFilter !== 'songs' || mode !== 'placed' || !destTrackId || !selectedFile) return;
+          const songId = selectedFile.id;
+          queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) })
+            .then(fresh => {
+              const track = fresh.find(t => t.id === destTrackId);
+              if (track) selectSongsTrackAndSection(track, track.ideas.find(i => i.id === destIdeaId) ?? null);
+            })
+            .catch(err => console.error('[upload] follow destination failed:', err));
         }}
       />
 

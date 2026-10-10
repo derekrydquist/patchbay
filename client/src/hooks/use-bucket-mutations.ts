@@ -5,6 +5,7 @@ import {
 } from '@/lib/bucket-api';
 import { useToast } from '@/hooks/use-toast';
 import { postClipLeave, useClipInUseAction } from '@/components/daw/ClipInUseDialog';
+import { requestLandingFlash, clipLandingZone, looseLandingZone } from '@/hooks/use-landing-flash';
 
 // Shared by organize/place-on-timeline: invalidate the same set the loose-file
 // upload flow also invalidates, so all three actions keep every surface in sync.
@@ -280,6 +281,8 @@ export function useOrganizeLooseFile(
       return res.json() as Promise<ApiClip>;
     },
     onSuccess: (clip, vars) => {
+      // The loose file is now a clip card (same id) in its destination section.
+      requestLandingFlash([{ id: clip.id, zone: clipLandingZone(clip.ideaId) }]);
       invalidateAfterLooseFilePlacement(queryClient, songId, vars.trackId, { destSongId: vars.destSongId, clipId: clip.id });
       opts?.onSuccess?.(clip);
     },
@@ -312,6 +315,8 @@ export function useAssignLooseFileTrack(
       return res.json() as Promise<ApiLooseFile>;
     },
     onSuccess: (looseFile, vars) => {
+      // Lands on the destination track's shelf (track:<trackId>).
+      requestLandingFlash([{ id: looseFile.id, zone: looseLandingZone(looseFile) }]);
       queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.unassigned() });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.trackId) });
@@ -361,6 +366,7 @@ export function useUnassignLooseFileTrack(
     onSuccess: (looseFile, vars) => {
       // Destination: the Tracks-column list. Origin: that track's Sections-column
       // list. Bucket: the origin track's hasLooseFiles may flip back to false.
+      requestLandingFlash([{ id: looseFile.id, zone: looseLandingZone(looseFile) }]);
       queryClient.invalidateQueries({ queryKey: looseFileKeys.list(songId) });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.byTrack(vars.originTrackId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
@@ -454,6 +460,8 @@ export function useMoveClipToIdea(
       return res.json() as Promise<ApiClip>;
     },
     onSuccess: (clip, vars) => {
+      // The response carries the destination Idea's ideas-row id.
+      requestLandingFlash([{ id: clip.id, zone: clipLandingZone(clip.ideaId) }]);
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.sourceSongId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.destSongId) });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -486,6 +494,9 @@ export function useMakeClipLoose(
       return res.json() as Promise<ApiLooseFile>;
     },
     onSuccess: (looseFile, vars) => {
+      // Flashes the Column 1 row ('band'). The Column 2 preview card for the same file
+      // doesn't take landing flashes at all.
+      requestLandingFlash([{ id: looseFile.id, zone: looseLandingZone(looseFile) }]);
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.sourceSongId) });
       queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -574,6 +585,14 @@ export function useMoveVersion(opts?: {
       ? postClipLeave<ApiClip>(`/api/clips/${vars.clipId}/move-to-section`, { ideaId: vars.destIdeaId }, confirm)
       : postClipLeave<ApiLooseFile>(`/api/clips/${vars.clipId}/move-to-loose`, { trackId: vars.destTrackId }, confirm),
     onSuccess: (_result, vars) => {
+      // Same id afterwards. Move A: a card in the destination section. Moves C/D: the
+      // destination track's shelf. Move B / "Remove from Section": song-level.
+      requestLandingFlash([{
+        id: vars.clipId,
+        zone: vars.kind === 'section'
+          ? clipLandingZone(vars.destIdeaId)
+          : looseLandingZone({ trackId: vars.destTrackId, songId: vars.songId }),
+      }]);
       // The bucket key is also the Songs quick-browser's file list (fileBucket), and
       // carries hasLooseFiles for the Tracks-column folder icons.
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId) });

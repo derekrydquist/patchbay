@@ -19,6 +19,7 @@ import { type Clip } from '@/lib/daw-data';
 import { useOrganizeLooseFile, useAssignLooseFileTrack, useUnassignLooseFileTrack, useMoveVersion } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
 import { createHoldTimer, onNativeFileDrag, type NativeFileHold } from '@/hooks/use-native-file-drop';
+import { flashGold } from '@/hooks/use-landing-flash';
 
 // Shared drag/organize interaction for loose files — a song-scoped upload with no
 // Track/Section yet, draggable onto a Section row or Versions column to organize it
@@ -566,8 +567,7 @@ export function useNativeSpringLoadedTracks<S>(options: SpringLoadedTracksOption
 }
 
 // Spring-open flash timing and strength: a quick rise to a soft peak, a short hold,
-// then a long ease-out fade so the tail stays visible. Total duration is the sum;
-// the keyframe offsets are derived from these in flashSpringOpenedColumn.
+// then a long ease-out fade so the tail stays visible (see flashGold).
 export const SPRING_FLASH_RISE_MS = 150;
 export const SPRING_FLASH_HOLD_MS = 150;
 export const SPRING_FLASH_FADE_MS = 900;
@@ -575,33 +575,16 @@ export const SPRING_FLASH_FADE_MS = 900;
 export const SPRING_FLASH_PEAK_ALPHA = 0.18;
 
 // Gold flash over a Sections column when useSpringLoadedTracks opens a Track —
-// never on a click or a restore. Web Animations API on the existing node: no
-// remount (which would re-register the column's drop target), no inserted element,
-// no size change. Only the peak keyframe is given; the start and end are implicit,
-// so the flash rises from and fades back into the column's LIVE background/
-// box-shadow — a drop highlight that turns on mid-flash shows through as it fades
-// instead of being overwritten. A second spring cancels the running flash and
-// restarts it.
-const springFlashes = new WeakMap<Element, Animation>();
-
+// never on a click or a restore. The shared flashGold (use-landing-flash.ts) with
+// the column's own softer peak; nothing at all under prefers-reduced-motion.
 export function flashSpringOpenedColumn(el: HTMLElement | null): void {
-  if (!el || typeof el.animate !== 'function') return;
-  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-  springFlashes.get(el)?.cancel();
-  const gold = `rgba(212, 175, 55, ${SPRING_FLASH_PEAK_ALPHA})`;
-  const peak = { backgroundColor: gold, boxShadow: `inset 0 0 0 2px ${gold}` };
-  const duration = SPRING_FLASH_RISE_MS + SPRING_FLASH_HOLD_MS + SPRING_FLASH_FADE_MS;
-  // Offsets 0 and 1 are implicit (the column's own live values). A keyframe's
-  // easing applies to the segment that starts at it: the rise (implicit 0 → peak
-  // start) is linear, the hold is flat, only the fade (peak end → implicit 1) eases out.
-  const animation = el.animate(
-    [
-      { offset: SPRING_FLASH_RISE_MS / duration, ...peak },
-      { offset: (SPRING_FLASH_RISE_MS + SPRING_FLASH_HOLD_MS) / duration, ...peak, easing: 'ease-out' },
-    ],
-    { duration, easing: 'linear' }
-  );
-  springFlashes.set(el, animation);
+  flashGold(el, {
+    peakAlpha: SPRING_FLASH_PEAK_ALPHA,
+    riseMs: SPRING_FLASH_RISE_MS,
+    holdMs: SPRING_FLASH_HOLD_MS,
+    fadeMs: SPRING_FLASH_FADE_MS,
+    reducedMotion: 'skip',
+  });
 }
 
 // Drag payload type for an organized clip dragged out of the Ideas shelf's Column 2

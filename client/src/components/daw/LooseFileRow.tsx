@@ -1,4 +1,4 @@
-import { type ReactNode, createContext, useCallback, useContext, useState } from 'react';
+import { type ReactNode, createContext, useCallback, useContext, useRef, useState } from 'react';
 import { useDraggable } from '@dnd-kit/core';
 import { useQueryClient } from '@tanstack/react-query';
 import { FileAudio, Info, MessageCircle, MessageSquare, Plus, Trash2 } from 'lucide-react';
@@ -8,6 +8,7 @@ import {
 import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedComments } from './Clip';
 import { useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import { DRAG_SURFACE_ROW_HOVER } from '@/hooks/use-loose-file-organize-dnd';
+import { useLandingFlash, looseLandingZone } from '@/hooks/use-landing-flash';
 import { type ApiLooseFile, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
 import { type Clip } from '@/lib/daw-data';
 import { cn } from '@/lib/utils';
@@ -211,6 +212,16 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
   // (which treats overflow-y: scroll as scrollable on both axes) then scrolled the
   // column sideways, clipping the track names.
 
+  // Landing flash (use-landing-flash.ts): scrolls into view in its column and flashes
+  // after the file lands here. Zone from the file's own trackId/songId — the Tracks
+  // column, a track's shelf or Ideas Column 1 — so a stale row elsewhere never matches.
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const setRowRef = useCallback((node: HTMLDivElement | null) => {
+    rowRef.current = node;
+    setNodeRef(node);
+  }, [setNodeRef]);
+  useLandingFlash(looseFile.id, looseLandingZone(looseFile), rowRef);
+
   const { data: viewedMap = {} } = useLastViewedComments();
   const commentCount = looseFile.commentCount ?? 0;
   const hasUnread = hasUnreadComments(looseFile.latestOthersCommentAt, viewedMap[looseFile.id]);
@@ -218,7 +229,7 @@ export function LooseFileRow({ looseFile, songId, onClick, isSelected, onDeleted
   return (
     <LooseFileContextMenu looseFile={looseFile} songId={songId} onDeleted={onDeleted}>
       <div
-        ref={setNodeRef}
+        ref={setRowRef}
         {...listeners}
         {...attributes}
         onClick={onClick}

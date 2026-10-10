@@ -77,9 +77,12 @@ function SectionCell({
   flashClipId,
   selectedClipId,
 }: SectionCellProps) {
+  // While one of this cell's clips plays its landing glow (flashClipId), the cell stops
+  // clipping so the glow outside the clip's edge shows. Not drag-related.
+  const hasFlashingClip = !!flashClipId && clips.some((c) => c.id === flashClipId);
   return (
     <div
-      className="relative h-full border-r border-border/20 overflow-hidden"
+      className={cn('relative h-full border-r border-border/20', hasFlashingClip ? 'overflow-visible' : 'overflow-hidden')}
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
       {clips.map((clip) => {

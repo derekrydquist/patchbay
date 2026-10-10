@@ -25,6 +25,7 @@ import {
   useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
   type NativeFileHold,
 } from '@/hooks/use-native-file-drop';
+import { requestLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import { BucketClip, useLiveClipCommentSummary } from './Clip';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -389,6 +390,14 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     const urlOpenComments = params.get('openComments');
     if (urlClipId && urlOpenComments === 'true') {
       setAutoOpenClipId(urlClipId);
+    }
+    // A link that names one file — ?file= (Add to Song / Promote to Song toasts) or
+    // ?clipId= (comment feed rows) — scrolls it into view and flashes it once its
+    // section's Files column renders it (shared landing flash, see BucketClip).
+    const linkedClipId = urlFile ?? urlClipId;
+    if (linkedClipId) {
+      const linkedIdea = tracks.flatMap(t => t.ideas).find(i => i.clips.some(c => c.id === linkedClipId));
+      if (linkedIdea) requestLandingFlash([{ id: linkedClipId, zone: clipLandingZone(linkedIdea.id) }]);
     }
 
     // URL params win — used when navigating from task clicks or external links
@@ -968,7 +977,10 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         defaultInstrumentName={uploadInitialIdeaId ? tracks.find(t => t.ideas.some(i => i.id === uploadInitialIdeaId))?.name : undefined}
         defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}
         initialFiles={uploadInitialFiles}
-        onUploadSuccess={({ destTrackId, destIdeaId }) => {
+        onUploadSuccess={({ mode, destTrackId, destIdeaId }) => {
+          // Loose uploads land where they were aimed (Tracks column, or the Track a
+          // Finder drop already selected); only a placed upload moves the view.
+          if (mode !== 'placed' || !destTrackId) return;
           queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
             const track = fresh.find(t => t.id === destTrackId);
             if (track) {

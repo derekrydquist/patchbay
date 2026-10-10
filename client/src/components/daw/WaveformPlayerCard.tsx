@@ -12,10 +12,12 @@ export interface WaveformPlayerCardProps {
   waveformHeight?: number;
   className?: string;
   children?: React.ReactNode;
+  /** The card's root element — the landing flash animates this, not a drag wrapper. */
+  cardRef?: React.Ref<HTMLDivElement>;
 }
 
 export function WaveformPlayerCard({
-  src, name, duration, isFinal, color, waveformHeight = 20, className, children,
+  src, name, duration, isFinal, color, waveformHeight = 20, className, children, cardRef,
 }: WaveformPlayerCardProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -125,7 +127,7 @@ export function WaveformPlayerCard({
   return (
     // Hover is off inside a drag surface while any drag is active — see
     // DRAG_SURFACE_GROUP in use-loose-file-organize-dnd.ts. Plain hover elsewhere.
-    <div className={cn(
+    <div ref={cardRef} className={cn(
       'flex flex-col rounded-lg bg-white/[0.03] border border-white/5 not-group-data-[dnd-active]/drag-surface:hover:bg-white/[0.05] transition-colors relative overflow-hidden',
       isFinal && 'border-primary/30 bg-primary/[0.04]',
       className,
