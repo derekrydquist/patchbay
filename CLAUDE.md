@@ -378,19 +378,23 @@ interface UploadSuccessResult {
 
 ---
 
-## Spring-loaded tracks (loose-file, version and Finder drags)
+## Spring-loaded tracks and sections (loose-file, version and Finder drags)
 
-All in `use-loose-file-organize-dnd.ts` (Finder-drag timing and tracker in `use-native-file-drop.tsx`); mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedTracks`), not the Ideas shelf.
+All in `use-loose-file-organize-dnd.ts` (`useSpringLoadedRows`, `useNativeSpringLoadedRows`; Finder-drag timing and tracker in `use-native-file-drop.tsx`); mounted in MediaBucket (Workspace, SongHome) and the Songs browser (`SongsSpringLoadedRows`), not the Ideas shelf.
 
-- **Spring** — `useSpringLoadedTracks`: a loose-file or version (`bucket-clip`) drag held over a Track row for 800ms (`SPRING_LOAD_DELAY_MS`) selects that track, as a click does. Applies to loose-file drags (Tracks column, a track's shelf) and version drags (Files column); never springs the file's own track.
-- **Flash** — `flashSpringOpenedColumn` flashes the Sections column gold on a spring (150ms rise, 150ms hold, 900ms fade). A thin wrapper over `flashGold` (`use-landing-flash.ts`): Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
-- **Restore** — a drag that ends without moving the file (Escape, release over nothing, own-track drop, cancelled placement dialog) restores the drag-start selection, only if a spring changed it.
+- **Track spring** — a loose-file or version (`bucket-clip`) drag held over a Track row for 800ms (`SPRING_LOAD_DELAY_MS`) selects that track, as a click does. Applies to loose-file drags (Tracks column, a track's shelf) and version drags (Files column); never springs the file's own track.
+- **Section spring** — a Section row of the selected track, held the same 800ms, selects that section, as a click does, so the Files column shows it and takes the drop. Only when `organizeDropRules.sectionRow` accepts the drag (springing and highlighting always agree: never a version's own section or a Full Take for a version); never the selected section.
+- **One timer, one start selection** — both kinds of row share one timer, one `sprungRef` and one drag-start selection (track + section), so a track-then-section spring restores both.
+- **Scroll guard (in-app drags only)** — when the timer fires, the pointer (tracked by the hook) must still be inside the row's live rect, or nothing opens; a list scrolled under a resting pointer can leave dnd-kit's `over` stale. Rows are found by `data-spring-row` (`springRowAttrs(dropId)`), since `over` carries no DOM node.
+- **Flash** — `flashSpringOpenedColumn` flashes gold the column a spring fills: the Sections column for a track, the Files column for a section (150ms rise, 150ms hold, 900ms fade). A thin wrapper over `flashGold` (`use-landing-flash.ts`): Web Animations API, no remount, skipped under `prefers-reduced-motion`; never on a click or restore.
+- **Songs browser selection** — `selectSongsSection(idea)` (state + URL with `sectionId`) is shared by the Section-row click, the Finder section drop and the spring; `selectSongsTrack` as before for tracks.
+- **Restore** — a drag that ends without moving the file (Escape, release over nothing, own-track drop, cancelled placement dialog) restores the drag-start track and section, only if a spring changed them.
 - **Drop report** — `handleDragEnd` calls `reportLooseFileDrop(id, 'moved')` before each mutation; Timeline reports `'deferred'` when the placement dialog opens. Version drops always report `'deferred'`, then resolve: success follows the file; failure, Cancel or Escape in the in-use dialog restores the drag-start selection. No report = no move.
 - **Drag snapshot** — the drag data (`LooseFileDragData`, or `BucketClipDragData` `{ clip, type, trackId, trackName, ideaId, songId, isFullTake }`) + active id, saved at drag start by the hook's `handleDragStart` on every surface, Workspace included (Timeline's `handleDragStart` calls it): a dragged row can unmount mid-drag when a column changes, and dnd-kit then discards its data. Drops read live data first, then the snapshot (`resolveDrag`); Timeline's `handleDragEnd` falls back to its own drag-start copy the same way.
-- **Finder drags** — Track rows pass `hold` to `useNativeFileDrop` (`useNativeSpringLoadedTracks`); `createHoldTimer` is shared with the in-app spring. After `SPRING_LOAD_DELAY_MS` the hold is due; the track opens on the next `dragover`, as a click does, and the Sections column flashes.
+- **Finder drags** — `useNativeSpringLoadedRows` returns `{ trackHold, sectionHold }`, sharing one start-selection ref (a track-then-section Finder drag restores both); Track and Section rows pass theirs as `hold` to `useNativeFileDrop`, undefined for the selected row. `createHoldTimer` is shared with the in-app spring. After `SPRING_LOAD_DELAY_MS` the hold is due; the row opens on the next `dragover`, as a click does, and its column flashes. No scroll guard needed: `dragenter`/`dragleave` are geometric.
 - **Finder drag end** — a window capture-phase tracker in `use-native-file-drop.tsx` ends the drag on a drop, the page-wide enter/leave counter reaching 0, or the first `pointermove` with non-zero movement. No accepted drop → the drag-start selection is restored. No timeouts.
 - **Tracker self-heal** — every `dragover` re-arms it (active, counter ≥ 1); the start selection lasts the whole drag, cleared only by a drop or a fresh drag (`dragenter` with null `relatedTarget`, unreliable in Safari).
-- **Chrome quirks** — a real Finder drag sends one zero-movement `pointermove` after a spring re-renders the Sections column (ignored). Escape fires no event at all, so the restore lands on the next real mouse move.
+- **Chrome quirks** — a real Finder drag sends one zero-movement `pointermove` after a spring re-renders a column (ignored). Escape fires no event at all, so the restore lands on the next real mouse move.
 - **Copy cursor** — every `useNativeFileDrop` target sets `dropEffect = 'copy'` on each `dragover`; left unset, the + badge vanished after a spring.
 - **Testing** — drag COPIES of audio files: a drag out of the browser window can move the Finder original.
 
@@ -401,7 +405,7 @@ All in `use-loose-file-organize-dnd.ts` (Finder-drag timing and tracker in `use-
 A version (a clip in a real song's section) can be dragged out of the Files column in Workspace, SongHome and the Library Songs quick-browser (drag type `'bucket-clip'`). Plumbing in `use-loose-file-organize-dnd.ts` (`organizeDropRules`, `useVersionMoveDnd`); routes in `routes.ts`, writes in `storage.ts`.
 
 - **Sources** — `BucketClip` (id `bucket-{id}`) and `SongsClipContextMenuCard` (id `songs-clip-{id}`). No transform; the source dims.
-- **Move A, to another section** — drop on a Section row, or on the Files column showing another section (same song; cross-track via spring-loading). `POST /api/clips/:clipId/move-to-section` `{ ideaId }` (`moveClipToSection`). Renamed by `landingClipName`; Final cleared; id, `createdAt`, notes, metadata and `addedToSongs` kept.
+- **Move A, to another section** — drop on a Section row, or on the Files column showing another section (same song; cross-track and cross-section via track and section springs). `POST /api/clips/:clipId/move-to-section` `{ ideaId }` (`moveClipToSection`). Renamed by `landingClipName`; Final cleared; id, `createdAt`, notes, metadata and `addedToSongs` kept.
 - **Moves B/C/D, back to a loose file** — Tracks background → song-level (`trackId` null); Sections background → the track it shows; Track row → that track, **including the version's own track** (a real move, unlike loose files). Right-click "Remove from Section" = B. `POST /api/clips/:clipId/move-to-loose` `{ trackId: string | null }` (`moveClipToLoose`). Same id, original `createdAt`, named by `metadata.originalFileName` (current name if empty), notes moved to `loose_file_comments` with the same ids, audio never unlinked.
 - **In-use check** — both routes answer 409 `clip-in-use` only for timeline copies or Final, never for a task change alone. Confirming releases them via `releaseClipDependencies`. One dialog per surface (`VersionMoveInUseDialog`), since the source card can unmount.
 - **Tasks** — the section left: `applyTaskAfterVersionLeaves` (pre-move `isFinal`). A Move A destination: `advanceTaskOnVersionArrived` (To Do → In Progress only, by track id). A version arriving never un-completes a Complete task — Final is the user's choice.
@@ -904,11 +908,11 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Organized Ideas files had no Delete or menu "move out" (Oct 2026)** — the menu now has Remove from Idea and Delete; feed: `clip-deleted`.
 - **Loose-file preview card couldn't be dragged (Oct 2026)** — only the Column 1 row could; the card now drags onto an Idea row.
 - **Column 1 rows showed hover during drags (Oct 2026)** — invalid rows lit up and hover hid Idea rows' drop tint; hover is now off during a drag (now the shared `drag-surface` pattern, also in MediaBucket and the Songs browser).
-- **Spring-loaded tracks (Oct 2026)** — holding a loose-file drag on a Track row opens it; see "Spring-loaded tracks" above.
+- **Spring-loaded tracks (Oct 2026)** — holding a loose-file drag on a Track row opens it; see "Spring-loaded tracks and sections" above.
 - **Shelf-file drops lost after the row unmounted (Oct 2026)** — dnd-kit discarded the drag data; drops now fall back to a drag-start snapshot.
 - **213 production tasks lost their track link (Jul 28, fixed Oct 9 2026)** — push-on-boot added `production_tasks.track_id` before `db.ts`'s fill-in, which only runs when the column is missing, so it skipped; eight songs showed empty Production cells. One-time `track_id`-only relink on production via `better-sqlite3` (backed up, tested on a fresh copy); the startup self-heal now covers it.
 - **Downloads saved under the raw upload name (Oct 2026)** — they now carry the song name and clip name; see "Download names" under File Uploads.
-- **Finder drags never sprang tracks open (Oct 2026)** — native drags don't reach dnd-kit; see "Finder drags" under Spring-loaded tracks.
+- **Finder drags never sprang tracks open (Oct 2026)** — native drags don't reach dnd-kit; see "Finder drags" under Spring-loaded tracks and sections.
 - **First Finder drag closed the sprung track (Oct 2026)** — Chrome's zero-movement `pointermove` ended the drag and restored the old selection; such moves are now ignored, and `dragover` re-arms the tracker.
 - **Copy (+) cursor badge lost after a spring (Oct 2026)** — `dropEffect` was never set; targets now set `'copy'`.
 - **A Finder file released outside a target opened in a new tab (Oct 2026)** — the browser's default drop; the window guard now cancels it (see "What To Avoid").
@@ -918,6 +922,9 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Stale drag state after Escape in Workspace (Oct 2026)** — no `onDragCancel`, so track overlays stayed up and Delete stayed blocked until the next drag.
 - **Release over MediaBucket blank space could hit the timeline (Oct 2026)** — matched a hidden timeline track row and placed or reordered a clip.
 - **Real-song versions can be moved out of a section (Oct 2026)** — see "Moving real-song versions".
+- **Spring-loaded section rows (Oct 2026)** — holding a drag on a Section row opens it in the Files column; see "Spring-loaded tracks and sections".
+- **Arrival links reopened More Info on every refresh and remount (Oct 2026)** — feed comment links and `?file=` re-triggered on each MediaBucket mount (obvious once springs remounted cards). Now one-shot; `clipId`/`openComments`/`file` are removed from the URL after handling.
+- **Finder drops sometimes opened the file in a new tab (Oct 2026)** — when a release lands on an element change, Chrome uses `dragenter`'s result, and nothing cancelled `dragenter`. Targets, the window guard and UploadModal's drop box now cancel it (see "What To Avoid").
 
 ---
 
@@ -939,3 +946,6 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Upload button parity** — the Songs quick-browser's Files-column Upload asks for a section; Workspace/SongHome's header Upload uploads loose files. Decide one model, likely alongside the loose-file preview.
 - **Feed comment links could scroll to the exact comment** — they open More Info but don't scroll to the comment. Not a bug; possible improvement.
 - **Timeline-clip drag ghost** — remove or replace; decide with the timeline rebuild's drag model.
+- **Spring-loaded Idea rows (Ideas shelf)** — its own piece of work: Column 2 isn't ready when a spring fires (the Idea's bucket loads after selection), idea-clip drags have no drag-start snapshot, and restore has three states (an Idea, a loose preview, nothing).
+- **Spring restore scrolls with `scrollIntoView`** — restoring a selection scrolls the selected row into view, which can scroll ancestors; switch to the landing flash's own-scroller helper.
+- **`instrument`/`section` URL params after Timeline scrolls** — decide whether to consume them too (they stay after the arrival-link cleanup), so a refresh falls back to the saved selection.
