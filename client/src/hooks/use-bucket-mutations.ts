@@ -620,3 +620,37 @@ export function useMoveVersion(opts?: {
     onCancel: opts?.onCancel,
   });
 }
+
+// Remove (soft) a version through POST /api/clips/:clipId/remove. If it's in use
+// (timeline copies or Final) the server answers clip-in-use; render ClipInUseDialog
+// with dialogProps, and confirming repeats the request with confirm: true. run(vars)
+// takes the version, so one surface-level instance can serve every card (the Songs
+// quick-browser); BucketClip keeps its own instance, dialog inside the card.
+// clipName / trackName are only for the dialog's wording.
+export interface RemoveVersionVars {
+  clipId: string;
+  clipName: string;
+  songId: string;
+  trackName: string | null;
+}
+
+export function useRemoveVersion() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useClipInUseAction<unknown, RemoveVersionVars>({
+    request: (confirm, vars) => postClipLeave(`/api/clips/${vars.clipId}/remove`, {}, confirm),
+    onSuccess: (_result, vars) => {
+      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(vars.songId) });
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${vars.songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', vars.songId] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+    },
+    onError: (message) => {
+      console.error('[removeClip] error:', message);
+      toast({ title: 'Failed to remove file', description: message, variant: 'destructive' });
+    },
+  });
+}

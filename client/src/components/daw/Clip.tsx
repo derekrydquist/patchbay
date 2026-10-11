@@ -12,7 +12,8 @@ import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { MentionText } from '@/components/MentionText';
-import { ClipInUseDialog, describeLeaveDependents, postClipLeave, useClipInUseAction } from './ClipInUseDialog';
+import { ClipInUseDialog, describeLeaveDependents } from './ClipInUseDialog';
+import { useRemoveVersion } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
 import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
@@ -1967,27 +1968,11 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
     executeMark(!isFinal);
   };
 
-  // Remove (soft) through POST /api/clips/:clipId/remove. If the version is in use
-  // (timeline placements or Final), the server answers
+  // Remove (soft) through POST /api/clips/:clipId/remove (useRemoveVersion). If the
+  // version is in use (timeline placements or Final), the server answers
   // clip-in-use and ClipInUseDialog asks before repeating with confirm: true.
-  const { toast } = useToast();
-  const removeAction = useClipInUseAction({
-    request: (confirm) => postClipLeave(`/api/clips/${clip.id}/remove`, {}, confirm),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
-      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
-      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-    },
-    onError: (msg) => {
-      console.error('[removeClip] error:', msg);
-      toast({ title: 'Failed to remove file', description: msg, variant: 'destructive' });
-    },
-  });
-  const handleRemove = () => removeAction.run();
+  const removeAction = useRemoveVersion();
+  const handleRemove = () => removeAction.run({ clipId: clip.id, clipName: clip.name, songId, trackName: trackName ?? null });
 
   // "Remove from Section" — the version becomes a song-level loose file (Move B). The
   // surface provides it (and hosts its in-use dialog, since this card unmounts once

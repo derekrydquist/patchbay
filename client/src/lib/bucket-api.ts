@@ -189,6 +189,8 @@ export async function fetchTrackLooseFiles(trackId: string): Promise<ApiLooseFil
 // factories everywhere makes drift impossible.
 
 export const bucketKeys = {
+  // Prefix of every bucket key — invalidates all songs' buckets at once.
+  all: () => ['bucket'] as const,
   bucket: (songId: string | undefined) => ['bucket', songId] as const,
   hiddenIdeas: (trackId: string | undefined) => ['hidden-ideas', trackId] as const,
   hiddenTracks: (songId: string | undefined) => ['hidden-tracks', songId] as const,

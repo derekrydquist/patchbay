@@ -3,7 +3,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil, FolderOutput } from 'lucide-react';
+import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight, Circle, Search, ArrowUpDown, Check, Folder, Upload, Info, MessageSquare, CheckCircle2, Share2, Sparkles, Disc, ArrowUp, ArrowDown, Pencil, FolderOutput, Minus } from 'lucide-react';
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { cn } from '@/lib/utils';
@@ -50,7 +50,7 @@ import { CornerBadge } from '@/components/daw/CornerBadge';
 import { UploadModal } from '@/components/daw/UploadModal';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow, looseFileToClip } from '@/components/daw/LooseFileRow';
 import { LooseFileDragOverlay } from '@/components/daw/LooseFileDragOverlay';
-import { VersionMoveInUseDialog } from '@/components/daw/ClipInUseDialog';
+import { VersionMoveInUseDialog, ClipInUseDialog, describeLeaveDependents } from '@/components/daw/ClipInUseDialog';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import {
@@ -58,7 +58,7 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary, apiClipToClip,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip, useRemoveVersion } from '@/hooks/use-bucket-mutations';
 import { useLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import {
   useLooseFileOrganizeDnd,
@@ -423,11 +423,14 @@ interface SongsClipContextMenuCardProps {
   // "Remove from Section" (song-level loose file, Move B). Omitted where it isn't
   // offered — an Idea, or a Full Take version.
   onMoveOut?: () => void;
+  // "Remove" (soft remove, with the in-use check). Hosted by Dashboard() so its
+  // dialog survives this card unmounting.
+  onRemove: () => void;
   // Comment badge — the card's notes badge, rendered only when present.
   notesBadge?: React.ReactNode;
 }
 
-function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMarkFinal, onMoveOut, notesBadge }: SongsClipContextMenuCardProps) {
+function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMarkFinal, onMoveOut, onRemove, notesBadge }: SongsClipContextMenuCardProps) {
   const contextMenu = useReopenableContextMenu();
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `songs-clip-${clip.id}`,
@@ -485,6 +488,13 @@ function SongsClipContextMenuCard({ clip, dragData, onMoreInfo, onAddNote, onMar
             </ContextMenuItem>
           </>
         )}
+        {!onMoveOut && <ContextMenuSeparator className="bg-white/5" />}
+        <ContextMenuItem
+          onClick={onRemove}
+          className="text-xs text-red-400 focus:text-red-400 focus:bg-red-500/10 cursor-pointer flex items-center gap-2"
+        >
+          <Minus size={13} /> Remove
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -1480,6 +1490,11 @@ export default function Dashboard() {
       if (track) selectSongsTrack(track);
     },
   });
+  // Songs quick-browser: version card "Remove" (soft remove, same as MediaBucket's
+  // BucketClip). One instance here rather than per card, so its in-use dialog
+  // survives the card unmounting (a spring, a live refetch, a selection change).
+  // No selection change and no landing flash afterwards, same as MediaBucket.
+  const removeVersion = useRemoveVersion();
   const handleSongsDragEnd = (event: DragEndEvent) => {
     // Read before the loose-file handler clears its drag-start snapshot.
     const drag = looseFileOrganizeDnd.resolveDrag(event);
@@ -2012,7 +2027,7 @@ export default function Dashboard() {
         // The deleted song's own lists would only refetch into a 404 — drop them.
         queryClient.removeQueries({ queryKey: bucketKeys.bucket(item.id) });
         queryClient.removeQueries({ queryKey: looseFileKeys.list(item.id) });
-        queryClient.invalidateQueries({ queryKey: ['bucket'] });
+        queryClient.invalidateQueries({ queryKey: bucketKeys.all() });
         queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
         queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
         queryClient.invalidateQueries({ queryKey: ['albums'] });
@@ -3282,6 +3297,12 @@ export default function Dashboard() {
                                 sourceSectionName: selectedSection.sectionName,
                               })
                             : undefined}
+                          onRemove={() => removeVersion.run({
+                            clipId: clip.id,
+                            clipName: clip.name,
+                            songId: selectedFile!.id,
+                            trackName: selectedInstrument?.name ?? null,
+                          })}
                           notesBadge={clipNotesBadge(clip)}
                         />
                       ))}
@@ -3293,6 +3314,12 @@ export default function Dashboard() {
             </SongsDragSurface>
             <LooseFileDragOverlay clip={looseFileOrganizeDnd.activeDrag} />
             <VersionMoveInUseDialog dialogProps={versionMoveDnd.dialogProps} vars={versionMoveDnd.pendingVars} />
+            <ClipInUseDialog
+              {...removeVersion.dialogProps}
+              actionLabel="Remove anyway"
+              intro={removeVersion.pendingVars ? `Removing "${removeVersion.pendingVars.clipName}" will:` : undefined}
+              describe={(d) => describeLeaveDependents(d, removeVersion.pendingVars?.trackName ?? null)}
+            />
             </DndContext>
             ) : filesFilter === 'ideas' ? (
             /* Ideas — 2-column browser. No Folder step: Column 2 is the selected
