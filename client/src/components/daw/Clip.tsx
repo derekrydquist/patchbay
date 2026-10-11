@@ -1867,9 +1867,11 @@ interface BucketClipProps {
   songId?: string;
   onAddToTimeline?: (clip: Clip, trackId?: string) => void;
   autoOpenInfo?: boolean;
+  /** Called once More Info has been opened from autoOpenInfo, so the parent can clear it. */
+  onAutoOpenHandled?: () => void;
 }
 
-export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo }: BucketClipProps) {
+export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo, onAutoOpenHandled }: BucketClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1898,9 +1900,12 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
   }, [clip.isFinal]);
 
   useEffect(() => {
+    // One-shot: tell the parent it was handled so a later remount (spring, section
+    // change, restore) doesn't open it again.
     if (autoOpenInfo) {
       setShowInfo(true);
       setFocusNotes(true);
+      onAutoOpenHandled?.();
     }
   }, [autoOpenInfo]);
 

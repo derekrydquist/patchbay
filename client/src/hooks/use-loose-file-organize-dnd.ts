@@ -353,11 +353,12 @@ export const organizeDropRules = {
   },
 };
 
-// How long a loose-file drag must rest on a Track row before that Track opens.
+// How long a loose-file, version or Finder drag must rest on a Track or Section row
+// before it opens.
 export const SPRING_LOAD_DELAY_MS = 800;
 
 // ── Drop report: did a loose-file drop start a move? ──────────────────────────
-// The spring hook below restores the pre-drag selection when a drag ends WITHOUT
+// The spring hook below (useSpringLoadedRows) restores the pre-drag selection when a drag ends WITHOUT
 // moving the file, but the drop itself is decided elsewhere — in the surface's
 // DndContext onDragEnd (useLooseFileOrganizeDnd's handleDragEnd, and Timeline's for
 // place-on-timeline). dnd-kit calls that onDragEnd prop first and then notifies
@@ -396,131 +397,236 @@ export function resolveDeferredLooseFileDrop(placed: boolean): void {
   window.dispatchEvent(new CustomEvent(LOOSE_PLACEMENT_RESOLVED_EVENT, { detail: { placed } }));
 }
 
-export interface SpringLoadedTracksOptions<S> {
+export interface SpringLoadedRowsOptions<S> {
   selectedTrackId: string | null;
+  /** The selected section's ideas-row id (null = none). */
+  selectedSectionId: string | null;
   /** Select the Track exactly like a click (also clears the Section). */
   onOpenTrack: (trackId: string) => void;
+  /** Select a section of the selected Track exactly like a click. */
+  onOpenSection: (ideaId: string) => void;
   /** The surface's current selection, snapshotted at drag start. */
   captureSelection: () => S;
   /** Put a snapshot back with the same setters a click uses. No flash. */
   restoreSelection: (selection: S) => void;
+  /** A drag that sprung a row is over for good — after its restore, its accepted
+   *  drop, or the deferred move it started resolving. Fires after restoreSelection,
+   *  in the same tick. MediaBucket uses it to mark a sprung section viewed only once
+   *  the drag has settled. */
+  onSpringSettled?: () => void;
 }
 
-// Spring-loaded Track rows: holding a loose-file drag over a Track row for
-// SPRING_LOAD_DELAY_MS selects that Track (onOpenTrack), so its Sections column
-// fills in and the file can be dropped onto a Section row in the same drag. Drops
-// are untouched — this only changes selection mid-drag. Mount once per DndContext,
-// inside it (MediaBucket, the Songs quick-browser); not on the Ideas shelf.
+// ── Scroll guard: is the pointer still on the row? ───────────────────────────
+// dnd-kit recomputes collisions on pointer movement and rect re-measures, not
+// continuously, so a list that scrolls under a resting pointer (wheel, auto-scroll)
+// can leave `over` naming a row that has slid away. Before a spring opens anything,
+// useSpringLoadedRows re-checks the pointer against the row's live rect. A dnd-kit
+// `over` carries no DOM node, so every spring-loaded row tags itself with
+// springRowAttrs(its drop id) and the check finds it by that attribute. A row
+// without the attribute (or no longer rendered) never springs.
+const SPRING_ROW_ATTR = 'data-spring-row';
+
+export function springRowAttrs(dropId: string): { 'data-spring-row': string } {
+  return { [SPRING_ROW_ATTR]: dropId } as { 'data-spring-row': string };
+}
+
+function isPointerOnSpringRow(dropId: string, pointer: { x: number; y: number } | null): boolean {
+  // No pointer position known (no move since drag start) — nothing to contradict.
+  if (!pointer) return true;
+  const el = document.querySelector(`[${SPRING_ROW_ATTR}="${CSS.escape(dropId)}"]`);
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  return pointer.x >= r.left && pointer.x <= r.right && pointer.y >= r.top && pointer.y <= r.bottom;
+}
+
+// Client coordinates of a pointer/mouse/touch event, or null.
+function eventPoint(e: Event | null | undefined): { x: number; y: number } | null {
+  if (!e) return null;
+  if ('touches' in e) {
+    const t = (e as TouchEvent).touches[0] ?? (e as TouchEvent).changedTouches[0];
+    return t ? { x: t.clientX, y: t.clientY } : null;
+  }
+  if ('clientX' in e) return { x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY };
+  return null;
+}
+
+// Spring-loaded Track and Section rows: holding a loose-file or version drag over
+// a Track row for SPRING_LOAD_DELAY_MS selects that Track (onOpenTrack), so its
+// Sections column fills in; holding it over a Section row of the selected Track
+// selects that section (onOpenSection), so the Files column shows it and takes the
+// drop. One drag can spring a Track and then a Section. Drops are untouched — this
+// only changes selection mid-drag. Mount once per DndContext, inside it
+// (MediaBucket, the Songs quick-browser); not on the Ideas shelf.
 //
 // Driven by useDndMonitor's onDragOver, which dnd-kit fires only when the collision
-// result's id changes — so while the pointer rests on one Track row no further
-// events arrive and the timer runs; entering another row (or leaving to nothing)
-// fires once and restarts or clears it.
+// result's id changes — so while the pointer rests on one row no further events
+// arrive and the timer runs; entering another row (or leaving to nothing) fires
+// once and restarts or clears it. One timer for both kinds of row.
 //
-// Every loose-file and version (bucket-clip) drag is eligible. A Track-scoped
-// (shelf) file lives in the selected Track's Sections column, and a version in the
-// selected section's Files column; both unmount when another Track opens. dnd-kit
-// then drops the row's data, so handleDragEnd falls back to the snapshot taken at
-// drag start (see useLooseFileOrganizeDnd). A drag never springs its own origin
-// Track open (a shelf file's Track, a version's Track).
+// Track rows: every loose-file and version (bucket-clip) drag is eligible. A drag
+// never springs its own origin Track open (a shelf file's Track, a version's Track).
+// Section rows: only a row of the selected Track, not the selected section, and
+// only when organizeDropRules.sectionRow accepts the drag — the same rule as the
+// row's highlight, so a row springs exactly when it lights up (a version's own
+// section and Full Takes never do).
+//
+// A Track-scoped (shelf) file lives in the selected Track's Sections column, and a
+// version in the selected section's Files column; both unmount when another row
+// opens. dnd-kit then drops the row's data, so handleDragEnd falls back to the
+// snapshot taken at drag start (see useLooseFileOrganizeDnd).
 //
 // Restore: if a spring changed the selection and the drag ends without moving the
 // file (Escape or any other cancel, a release over no target, a drop the handler
-// cancels), the selection captured at drag start comes back — for a shelf file that
-// is its origin Track, so its shelf is visible again. A drag that moved the file
-// leaves the selection to the existing "view follows the file" handling. A drag
-// that never sprung never touches the selection. No version move exists yet, so a
-// version drag never reports 'moved' and always restores.
-export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>): void {
+// cancels), the Track + Section captured at drag start come back — for a shelf file
+// that is its origin Track, so its shelf is visible again. A drag that moved the
+// file leaves the selection to the existing "view follows the file" handling. A
+// 'deferred' drop (version move, Place on Timeline dialog) waits for its outcome. A
+// drag that never sprung never touches the selection.
+//
+// Scroll guard: when the timer fires, the pointer (tracked here from window
+// pointermove/touchmove during the drag) must still be inside the row's live rect
+// (isPointerOnSpringRow), or nothing opens.
+export function useSpringLoadedRows<S>(options: SpringLoadedRowsOptions<S>): void {
   // Read at event time, so the listener below never needs re-subscribing.
   const latest = useRef(options);
   latest.current = options;
   const timerRef = useRef(createHoldTimer());
-  const eligibleRef = useRef(false);
-  const originTrackIdRef = useRef<string | null>(null);
+  // The active drag (null = not a loose-file/version drag, so nothing springs).
+  const dragRef = useRef<ActiveOrganizeDrag | null>(null);
   // Selection at drag start, and whether a spring changed it during this drag.
   const startSelectionRef = useRef<{ selection: S } | null>(null);
   const sprungRef = useRef(false);
-  // A Place on Timeline dialog is open over a sprung selection: restore on cancel.
+  // A deferred drop is pending over a sprung selection: restore if it doesn't happen.
   const pendingRestoreRef = useRef<{ selection: S } | null>(null);
+  // Live pointer position during a drag, for the scroll guard.
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
 
   const listener = useMemo(() => {
+    const onMove = (e: Event) => {
+      const p = eventPoint(e);
+      if (p) pointerRef.current = p;
+    };
+    const trackPointer = (on: boolean) => {
+      const method = on ? 'addEventListener' : 'removeEventListener';
+      window[method]('pointermove', onMove, { capture: true });
+      window[method]('touchmove', onMove, { capture: true });
+    };
     const clear = () => timerRef.current.cancel();
     const finish = () => {
       clear();
-      eligibleRef.current = false;
-      originTrackIdRef.current = null;
+      trackPointer(false);
+      pointerRef.current = null;
+      dragRef.current = null;
       startSelectionRef.current = null;
       sprungRef.current = false;
     };
+    const settle = () => latest.current.onSpringSettled?.();
+    const spring = (open: () => void) => {
+      sprungRef.current = true;
+      open();
+    };
     return {
-      onDragStart: ({ active }: DragStartEvent) => {
+      onDragStart: ({ active, activatorEvent }: DragStartEvent) => {
         clear();
         clearLooseFileDropReport();
-        pendingRestoreRef.current = null;
+        // A deferred drop whose outcome never arrived: nothing will restore it now.
+        if (pendingRestoreRef.current) { pendingRestoreRef.current = null; settle(); }
         const data = active.data.current;
-        eligibleRef.current = isOrganizeDragData(data);
-        originTrackIdRef.current = isOrganizeDragData(data) ? data.trackId ?? null : null;
-        startSelectionRef.current = eligibleRef.current
+        dragRef.current = isOrganizeDragData(data) ? toActiveOrganizeDrag(data) : null;
+        startSelectionRef.current = dragRef.current
           ? { selection: latest.current.captureSelection() }
           : null;
         sprungRef.current = false;
+        pointerRef.current = dragRef.current ? eventPoint(activatorEvent) : null;
+        trackPointer(!!dragRef.current);
       },
       onDragOver: ({ over }: DragOverEvent) => {
         clear();
-        if (!eligibleRef.current || !over) return;
-        if (!String(over.id).startsWith(BUCKET_TRACK_DROP_PREFIX)) return;
-        const trackId = (over.data.current as { trackId?: string } | undefined)?.trackId;
-        if (!trackId || trackId === latest.current.selectedTrackId || trackId === originTrackIdRef.current) return;
-        timerRef.current.arm(() => {
-          if (trackId === latest.current.selectedTrackId) return;
-          sprungRef.current = true;
-          latest.current.onOpenTrack(trackId);
-        }, SPRING_LOAD_DELAY_MS);
+        const drag = dragRef.current;
+        if (!drag || !over) return;
+        const id = String(over.id);
+        if (id.startsWith(BUCKET_TRACK_DROP_PREFIX)) {
+          const trackId = (over.data.current as { trackId?: string } | undefined)?.trackId;
+          if (!trackId || trackId === latest.current.selectedTrackId || trackId === drag.trackId) return;
+          timerRef.current.arm(() => {
+            if (trackId === latest.current.selectedTrackId) return;
+            if (!isPointerOnSpringRow(id, pointerRef.current)) return;
+            spring(() => latest.current.onOpenTrack(trackId));
+          }, SPRING_LOAD_DELAY_MS);
+          return;
+        }
+        if (id.startsWith(BUCKET_SECTION_DROP_PREFIX)) {
+          const target = over.data.current as SectionDropTarget | undefined;
+          if (!target?.ideaId) return;
+          const isOpenable = () => {
+            const o = latest.current;
+            return target.trackId === o.selectedTrackId && target.ideaId !== o.selectedSectionId;
+          };
+          if (!isOpenable() || !organizeDropRules.sectionRow(drag, target)) return;
+          timerRef.current.arm(() => {
+            if (!isOpenable()) return;
+            if (!isPointerOnSpringRow(id, pointerRef.current)) return;
+            spring(() => latest.current.onOpenSection(target.ideaId));
+          }, SPRING_LOAD_DELAY_MS);
+        }
       },
       onDragEnd: ({ active }: DragEndEvent) => {
         const report = takeLooseFileDropReport(active.id);
         const start = startSelectionRef.current;
         if (sprungRef.current && start) {
-          if (report === 'deferred') pendingRestoreRef.current = start;
-          else if (report !== 'moved') latest.current.restoreSelection(start.selection);
+          if (report === 'deferred') {
+            pendingRestoreRef.current = start;
+          } else {
+            if (report !== 'moved') latest.current.restoreSelection(start.selection);
+            settle();
+          }
         }
         finish();
       },
       onDragCancel: () => {
         clearLooseFileDropReport();
         const start = startSelectionRef.current;
-        if (sprungRef.current && start) latest.current.restoreSelection(start.selection);
+        if (sprungRef.current && start) {
+          latest.current.restoreSelection(start.selection);
+          settle();
+        }
         finish();
       },
       clear,
+      unmount: () => { clear(); trackPointer(false); },
     };
   }, []);
   useDndMonitor(listener);
-  useEffect(() => listener.clear, [listener]);
+  useEffect(() => listener.unmount, [listener]);
 
   useEffect(() => {
     const handler = (e: Event) => {
       const pending = pendingRestoreRef.current;
       pendingRestoreRef.current = null;
-      if (pending && !(e as CustomEvent<{ placed: boolean }>).detail.placed) {
+      if (!pending) return;
+      if (!(e as CustomEvent<{ placed: boolean }>).detail.placed) {
         latest.current.restoreSelection(pending.selection);
       }
+      latest.current.onSpringSettled?.();
     };
     window.addEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
     return () => window.removeEventListener(LOOSE_PLACEMENT_RESOLVED_EVENT, handler);
   }, []);
 }
 
-// Spring-loaded Track rows for a native (Finder) file drag — the same behavior as
-// useSpringLoadedTracks above, for drags dnd-kit never sees. Same options, same
-// call-site callbacks, same delay. Doesn't need a DndContext (call it anywhere on
-// the surface). Returns holdFor(trackId), passed to each Track row's
-// useNativeFileDrop as its `hold`: the row times the rest (armed on dragenter,
-// cancelled on dragleave / drop / drag end) and holdFor decides what firing does.
+// Spring-loaded Track and Section rows for a native (Finder) file drag — the same
+// behavior as useSpringLoadedRows above, for drags dnd-kit never sees. Same options,
+// same call-site callbacks, same delay. Doesn't need a DndContext (call it anywhere
+// on the surface). Returns trackHold(trackId) and sectionHold(ideaId), passed to
+// each Track / Section row's useNativeFileDrop as its `hold`: the row times the rest
+// (armed on dragenter, cancelled on dragleave / drop / drag end) and the hold
+// decides what firing does. Both share ONE start selection, so a drag that springs
+// a Track and then a Section restores to the original Track and Section.
 //
-// - A Track that's already selected gets no hold (nothing to open); the fire also
-//   re-checks, as the dnd spring does.
+// - A Track or Section that's already selected gets no hold (nothing to open); the
+//   fire also re-checks, as the dnd spring does. Every Section row accepts a Finder
+//   upload, so there is no other rule. Section rows are only ever rendered for the
+//   selected Track.
 // - The selection is captured at the FIRST spring of a drag rather than at drag
 //   start: nothing else can change it during a native drag (no clicks), so it's
 //   the same value, and it needs no reliable "drag started" signal.
@@ -535,7 +641,12 @@ export function useSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>):
 //   arriving), the drag is still the same one, so a later spring keeps the
 //   original start and a later real end restores to it. It's cleared only by an
 //   accepted drop or a fresh drag entering the page.
-export function useNativeSpringLoadedTracks<S>(options: SpringLoadedTracksOptions<S>): (trackId: string) => NativeFileHold | undefined {
+export interface NativeSpringHolds {
+  trackHold: (trackId: string) => NativeFileHold | undefined;
+  sectionHold: (ideaId: string) => NativeFileHold | undefined;
+}
+
+export function useNativeSpringLoadedRows<S>(options: SpringLoadedRowsOptions<S>): NativeSpringHolds {
   const latest = useRef(options);
   latest.current = options;
   const startSelectionRef = useRef<{ selection: S } | null>(null);
@@ -546,24 +657,40 @@ export function useNativeSpringLoadedTracks<S>(options: SpringLoadedTracksOption
     },
     onEnd: ({ dropped }) => {
       const start = startSelectionRef.current;
+      if (!start) return;
       if (dropped) startSelectionRef.current = null;
-      else if (start) latest.current.restoreSelection(start.selection);
+      else latest.current.restoreSelection(start.selection);
+      latest.current.onSpringSettled?.();
     },
   }), []);
 
-  const { selectedTrackId } = options;
-  return useCallback((trackId: string) => {
+  const { selectedTrackId, selectedSectionId } = options;
+  const spring = (open: (o: SpringLoadedRowsOptions<S>) => void) => {
+    const o = latest.current;
+    if (!startSelectionRef.current) startSelectionRef.current = { selection: o.captureSelection() };
+    open(o);
+  };
+  const trackHold = useCallback((trackId: string): NativeFileHold | undefined => {
     if (trackId === selectedTrackId) return undefined;
     return {
       ms: SPRING_LOAD_DELAY_MS,
       onHold: () => {
-        const o = latest.current;
-        if (trackId === o.selectedTrackId) return;
-        if (!startSelectionRef.current) startSelectionRef.current = { selection: o.captureSelection() };
-        o.onOpenTrack(trackId);
+        if (trackId === latest.current.selectedTrackId) return;
+        spring(o => o.onOpenTrack(trackId));
       },
     };
   }, [selectedTrackId]);
+  const sectionHold = useCallback((ideaId: string): NativeFileHold | undefined => {
+    if (ideaId === selectedSectionId) return undefined;
+    return {
+      ms: SPRING_LOAD_DELAY_MS,
+      onHold: () => {
+        if (ideaId === latest.current.selectedSectionId) return;
+        spring(o => o.onOpenSection(ideaId));
+      },
+    };
+  }, [selectedSectionId]);
+  return useMemo(() => ({ trackHold, sectionHold }), [trackHold, sectionHold]);
 }
 
 // Spring-open flash timing and strength: a quick rise to a soft peak, a short hold,
@@ -574,7 +701,8 @@ export const SPRING_FLASH_FADE_MS = 900;
 /** Gold alpha at the peak, for both the background and the inset ring. */
 export const SPRING_FLASH_PEAK_ALPHA = 0.18;
 
-// Gold flash over a Sections column when useSpringLoadedTracks opens a Track —
+// Gold flash over the column a spring fills in — the Sections column when
+// useSpringLoadedRows opens a Track, the Files column when it opens a Section —
 // never on a click or a restore. The shared flashGold (use-landing-flash.ts) with
 // the column's own softer peak; nothing at all under prefers-reduced-motion.
 export function flashSpringOpenedColumn(el: HTMLElement | null): void {
@@ -705,7 +833,7 @@ export function useLooseFileOrganizeDnd(songId: string | undefined, options?: Us
   // Whether the file actually moves is reported separately: each branch that fires a
   // mutation calls reportLooseFileDrop(..., 'moved') first; every other return
   // (warnings, own-track cancel, not-a-target) reports nothing — see
-  // useSpringLoadedTracks, which restores the pre-drag selection on no move.
+  // useSpringLoadedRows, which restores the pre-drag selection on no move.
   const handleDragEnd = (event: DragEndEvent): boolean => {
     const { active, over } = event;
     // Live data when the dragged row is still mounted; otherwise the drag-start copy.

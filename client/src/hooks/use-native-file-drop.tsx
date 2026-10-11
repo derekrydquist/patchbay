@@ -27,9 +27,9 @@ export function isNativeFileDrag(e: React.DragEvent): boolean {
 
 // ─── Hold timer ───────────────────────────────────────────────────────────────
 // One pending "fire after N ms" callback; arming again replaces it. Shared by both
-// spring-loaded Track mechanisms — the dnd-kit one (useSpringLoadedTracks) and the
-// native one (useNativeFileDrop's `hold` option, driven by
-// useNativeSpringLoadedTracks) — so the two springs time out identically.
+// spring-loaded row mechanisms (Track and Section rows) — the dnd-kit one
+// (useSpringLoadedRows) and the native one (useNativeFileDrop's `hold` option,
+// driven by useNativeSpringLoadedRows) — so the two springs time out identically.
 export interface HoldTimer {
   arm: (fire: () => void, ms: number) => void;
   cancel: () => void;

@@ -18,8 +18,8 @@ import {
   bucketSectionsBackgroundDropId, bucketTracksBackgroundDropId, useActiveOrganizeDrag,
   organizeDropRules, type ActiveOrganizeDrag, type SectionDropTarget, type TrackDropTarget, type TracksDropTarget,
   DRAG_SURFACE_GROUP, DRAG_SURFACE_ROW_HOVER, useDragSurfaceAttrs,
-  useSpringLoadedTracks, useNativeSpringLoadedTracks, flashSpringOpenedColumn,
-  type SpringLoadedTracksOptions,
+  useSpringLoadedRows, useNativeSpringLoadedRows, flashSpringOpenedColumn, springRowAttrs,
+  type SpringLoadedRowsOptions,
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
   useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
@@ -66,17 +66,20 @@ interface SectionFolderRowProps {
   activeDrag: ActiveOrganizeDrag | null;
   songId: string;
   trackName: string;
+  /** Finder-drag spring (useNativeSpringLoadedRows) — undefined for the selected section. */
+  nativeHold?: NativeFileHold;
 }
 
-function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeDrag, songId, trackName }: SectionFolderRowProps) {
+function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, buttonRef, activeDrag, songId, trackName, nativeHold }: SectionFolderRowProps) {
   const hasFiles = idea.clips.length > 0;
-  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop });
+  const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   const target: SectionDropTarget = {
     trackId: idea.trackId, sectionName: idea.sectionName, ideaId: idea.id,
     songId, isFullTake: idea.isFullTake ?? false, trackName,
   };
+  const dropId = bucketSectionDropId(idea.id);
   const { setNodeRef, isOver } = useDroppable({
-    id: bucketSectionDropId(idea.id),
+    id: dropId,
     data: target,
   });
   // Highlight only when this row accepts the active drag (organizeDropRules).
@@ -93,6 +96,7 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
           ref={combinedRef}
           onClick={onSelect}
           {...nativeDrop.handlers}
+          {...springRowAttrs(dropId)}
           className={cn(
             "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
             isSelected
@@ -147,7 +151,7 @@ interface TrackFolderRowProps {
   buttonRef?: React.RefObject<HTMLButtonElement | null>;
   /** From MediaBucket's useActiveOrganizeDrag — null when no organize drag is active. */
   activeDrag: ActiveOrganizeDrag | null;
-  /** Finder-drag spring (useNativeSpringLoadedTracks) — undefined for the selected Track. */
+  /** Finder-drag spring (useNativeSpringLoadedRows) — undefined for the selected Track. */
   nativeHold?: NativeFileHold;
 }
 
@@ -172,8 +176,9 @@ function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, but
   // pointer move during any drag, which re-rendered every Track row each frame.
   const target: TrackDropTarget = { trackId: track.id, songId: track.songId, trackName: track.name };
   const accepts = organizeDropRules.trackRow(activeDrag, target);
+  const dropId = bucketTrackDropId(track.id);
   const { setNodeRef, isOver } = useDroppable({
-    id: bucketTrackDropId(track.id),
+    id: dropId,
     data: target,
   });
   const combinedRef = (node: HTMLButtonElement | null) => {
@@ -188,6 +193,7 @@ function TrackFolderRow({ track, isSelected, onSelect, onFileDrop, onRemove, but
           ref={combinedRef}
           onClick={onSelect}
           {...nativeDrop.handlers}
+          {...springRowAttrs(dropId)}
           className={cn(
             "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
             isSelected
@@ -399,6 +405,22 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
       const linkedIdea = tracks.flatMap(t => t.ideas).find(i => i.clips.some(c => c.id === linkedClipId));
       if (linkedIdea) requestLandingFlash([{ id: linkedClipId, zone: clipLandingZone(linkedIdea.id) }]);
     }
+    // Arrival params are one-shot: consume them so a refresh, the Arrangement/Production
+    // switch (which copies the query string) or a later remount never re-triggers them.
+    // replaceState adds no history entry and leaves the pathname (wouter's `location`)
+    // alone, so no [location] effect re-runs. instrument/section stay — Timeline still
+    // reads section to scroll once its layout loads.
+    if (params.has('clipId') || params.has('openComments') || params.has('file')) {
+      params.delete('clipId');
+      params.delete('openComments');
+      params.delete('file');
+      const query = params.toString();
+      window.history.replaceState(
+        window.history.state,
+        '',
+        `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
+      );
+    }
 
     // URL params win — used when navigating from task clicks or external links
     if (urlInstrument || urlFile) {
@@ -448,10 +470,22 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   }, [selectedIdea?.id]);
 
   // ── Mark idea as viewed whenever a section is selected ───────────────────────
+  // Not while a spring holds it: a drag that springs a Track or Section open sets
+  // springViewHeldRef, and nothing is marked until the drag settles
+  // (onSpringSettled clears it and bumps viewSettleNonce). Then the section still
+  // selected is marked if it differs from the last one seen outside a spring — the
+  // sprung section when the drop kept it, nothing when the restore put the
+  // drag-start section back.
+  const springViewHeldRef = useRef(false);
+  const lastSeenIdeaIdRef = useRef<string | null>(null);
+  const [viewSettleNonce, setViewSettleNonce] = useState(0);
 
   useEffect(() => {
-    if (selectedIdea) viewIdeaMutation.mutate(selectedIdea.id);
-  }, [selectedIdea?.id]);
+    if (springViewHeldRef.current) return;
+    const id = selectedIdea?.id ?? null;
+    if (id && id !== lastSeenIdeaIdRef.current) viewIdeaMutation.mutate(id);
+    lastSeenIdeaIdRef.current = id;
+  }, [selectedIdea?.id, viewSettleNonce]);
 
   // ── Bucket mutations (add/delete/restore instrument and section) ─────────────
 
@@ -634,6 +668,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     disabled: !filesColumnTarget,
     data: filesColumnTarget ?? undefined,
   });
+  // Same node, also held for the spring-open flash when a Section springs open. The
+  // column div never unmounts on a section change (only its contents swap).
+  const filesColumnRef = useRef<HTMLDivElement | null>(null);
+  const setFilesColumnRef = useCallback((node: HTMLDivElement | null) => {
+    filesColumnRef.current = node;
+    setVersionsDroppableRef(node);
+  }, [setVersionsDroppableRef]);
   // A version drag starts INSIDE this column, so isOver is true from its first
   // frame — only the rule decides whether that means anything (its own section
   // never accepts it).
@@ -691,20 +732,33 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // isOver doesn't know about `disabled` — gate the highlight on both.
   const isTracksBackgroundDropTarget = isTracksBackgroundOver && !isTracksBackgroundDisabled;
 
-  // Spring-loaded Track rows: resting a loose-file drag on a Track row opens it,
-  // exactly like a click (selects the Track, clears the Section). The selection is
-  // this component's own state, so it's set directly. A drag that ends without
-  // moving the file puts the drag-start Track + Section back (by id, re-resolved
-  // from fresh bucket data), with the same setters. The same options drive both the
-  // in-app (dnd-kit) spring and the Finder-drag spring (nativeTrackHold, passed to
-  // each TrackFolderRow).
-  const springOptions: SpringLoadedTracksOptions<{ trackId: string | null; ideaId: string | null }> = {
+  // Spring-loaded Track and Section rows: resting a drag on a Track row opens it,
+  // exactly like a click (selects the Track, clears the Section) and flashes the
+  // Sections column; resting on a Section row of the selected Track selects that
+  // section, as a click does, and flashes the Files column. The selection is this
+  // component's own state, so it's set directly. A drag that ends without moving
+  // the file puts the drag-start Track + Section back (by id, re-resolved from
+  // fresh bucket data), with the same setters. Every spring holds off "mark
+  // viewed" until the drag settles (see springViewHeldRef). The same options drive
+  // both the in-app (dnd-kit) spring and the Finder-drag spring (nativeHolds,
+  // passed to each TrackFolderRow and SectionFolderRow).
+  const springOptions: SpringLoadedRowsOptions<{ trackId: string | null; ideaId: string | null }> = {
     selectedTrackId: selectedTrack?.id ?? null,
+    selectedSectionId: selectedIdea?.id ?? null,
     onOpenTrack: (trackId) => {
       const track = tracksRef.current.find(t => t.id === trackId);
       if (track) {
+        springViewHeldRef.current = true;
         setSelectedTrack(track); setSelectedIdea(null);
         flashSpringOpenedColumn(sectionsColumnRef.current);
+      }
+    },
+    onOpenSection: (ideaId) => {
+      const idea = tracksRef.current.find(t => t.id === selectedTrack?.id)?.ideas.find(i => i.id === ideaId);
+      if (idea) {
+        springViewHeldRef.current = true;
+        setSelectedIdea(idea);
+        flashSpringOpenedColumn(filesColumnRef.current);
       }
     },
     captureSelection: () => ({ trackId: selectedTrack?.id ?? null, ideaId: selectedIdea?.id ?? null }),
@@ -713,9 +767,14 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
       setSelectedTrack(track);
       setSelectedIdea(track && ideaId ? track.ideas.find(i => i.id === ideaId) ?? null : null);
     },
+    onSpringSettled: () => {
+      if (!springViewHeldRef.current) return;
+      springViewHeldRef.current = false;
+      setViewSettleNonce(n => n + 1);
+    },
   };
-  useSpringLoadedTracks(springOptions);
-  const nativeTrackHold = useNativeSpringLoadedTracks(springOptions);
+  useSpringLoadedRows(springOptions);
+  const nativeHolds = useNativeSpringLoadedRows(springOptions);
 
   // Sections-background highlight (organizeDropRules.sectionsBackground): no glow when
   // the dragged file is already scoped to the selected track — that drop is a cancel
@@ -830,7 +889,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                     onRemove={() => deleteTrackMutation.mutate(track.id)}
                     buttonRef={selectedTrack?.id === track.id ? selectedTrackRef : undefined}
                     activeDrag={activeDrag}
-                    nativeHold={nativeTrackHold(track.id)}
+                    nativeHold={nativeHolds.trackHold(track.id)}
                   />
                 ))}
               {looseFiles.map(lf => (
@@ -887,6 +946,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                       activeDrag={activeDrag}
                       songId={songId}
                       trackName={selectedTrack.name}
+                      nativeHold={nativeHolds.sectionHold(idea.id)}
                     />
                   ))}
                   {/* Track-scoped resting tier — dragged off the Tracks column onto this
@@ -907,7 +967,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
         {/* ── Versions column ── */}
         <div
-          ref={setVersionsDroppableRef}
+          ref={setFilesColumnRef}
           className={cn('flex-1 flex flex-col bg-black/20 transition-colors', isVersionsDropTarget && 'bg-primary/5', filesColumnDrop.isOver && NATIVE_DROP_COLUMN_CLASS)}
           {...filesColumnDrop.handlers}
         >
@@ -947,6 +1007,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}
                         autoOpenInfo={clip.id === autoOpenClipId}
+                        onAutoOpenHandled={() => setAutoOpenClipId(null)}
                       />
                     ))
                   )}
