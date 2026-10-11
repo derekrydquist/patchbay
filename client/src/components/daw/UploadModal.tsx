@@ -415,6 +415,9 @@ export function UploadModal({
             </div>
           ))}
           <div
+            // dragenter too, or the window file-drop guard rejects a release on the
+            // update that enters this box (use-native-file-drop.tsx).
+            onDragEnter={e => e.preventDefault()}
             onDragOver={e => e.preventDefault()}
             onDrop={handleFileDrop}
             onClick={() => fileInputRef.current?.click()}

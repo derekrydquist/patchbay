@@ -18,8 +18,14 @@ import { toast } from '@/hooks/use-toast';
 //   onto a child icon or label fires dragenter(child) before dragleave(parent), so
 //   the count never touches 0 inside the target. (relatedTarget is often null on
 //   dragleave in Safari, which made the old containment check flicker.)
-// - enabled = false still calls preventDefault on dragover/drop, so the browser
-//   never opens the dropped file, but shows no highlight and does nothing.
+// - Cancels dragenter as well as dragover (and drop). Chromium decides what a
+//   release does from the last drag update it processed, and an update where the
+//   pointer crosses into a new element fires ONLY dragenter/dragleave, no dragover —
+//   that update is judged by dragenter's result. An uncancelled dragenter there
+//   means "the page isn't handling this drag": a release on that exact update
+//   opened the file in a new tab and never sent the page a drop event.
+// - enabled = false still calls preventDefault on dragenter/dragover/drop, so the
+//   browser never opens the dropped file, but shows no highlight and does nothing.
 
 export function isNativeFileDrag(e: React.DragEvent): boolean {
   return Array.from(e.dataTransfer?.types ?? []).includes('Files');
@@ -194,9 +200,9 @@ export function onNativeFileDragEnd(listener: (end: NativeFileDragEnd) => void):
 // covers every page, the login page included.
 //
 // Listens on window in the BUBBLE phase, so it only ever sees what no target took:
-// - useNativeFileDrop targets call stopPropagation on dragover and drop, so their
-//   events never reach window — they keep their own preventDefault, 'copy' cursor
-//   and drop handling, untouched.
+// - useNativeFileDrop targets call stopPropagation on dragenter, dragover and drop,
+//   so their events never reach window — they keep their own preventDefault, 'copy'
+//   cursor and drop handling, untouched.
 // - A drop zone that calls preventDefault without stopping propagation (UploadModal's
 //   "Click or drag files here" box) does reach window; e.defaultPrevented marks it
 //   as handled and the guard leaves it alone.
@@ -205,18 +211,23 @@ export function onNativeFileDragEnd(listener: (end: NativeFileDragEnd) => void):
 // - Only native file drags ('Files' in dataTransfer.types). dnd-kit drags are
 //   pointer events and never fire drag events; a dragged link or text selection
 //   isn't a file and passes through.
-// What remains is a non-target: dragover is cancelled with dropEffect 'none' — the
-// cursor shows the no-drop state and the browser treats a release there as a
-// cancelled drag (no drop event, nothing opens) — and a drop that arrives anyway
-// is cancelled too. Nothing visible happens. The page-wide tracker above still sees
-// both events (it listens in the capture phase) and ends the drag as "no drop".
+// What remains is a non-target: dragenter and dragover are cancelled with dropEffect
+// 'none' — the cursor shows the no-drop state and the browser treats a release
+// there as a cancelled drag (no drop event, nothing opens) — and a drop that
+// arrives anyway is cancelled too. Nothing visible happens. dragenter matters as
+// much as dragover: on an update where the pointer crosses into a new element,
+// Chromium fires dragenter and no dragover, so an uncancelled dragenter let a
+// release on that update open the file (see the dragenter note at the top). The
+// page-wide tracker above still sees every event (it listens in the capture phase)
+// and ends the drag as "no drop".
 function isInsideFileInput(t: EventTarget | null): boolean {
   return t instanceof Element && !!t.closest('input[type="file"]');
 }
 function isUnhandledFileDragEvent(e: DragEvent): boolean {
   return isFilesEvent(e) && !e.defaultPrevented && !isInsideFileInput(e.target);
 }
-const onGuardDragOver = (e: DragEvent) => {
+// dragenter and dragover: the same rule.
+const onGuardDragEnterOrOver = (e: DragEvent) => {
   if (!isUnhandledFileDragEvent(e)) return;
   e.preventDefault();
   if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
@@ -228,10 +239,12 @@ const onGuardDrop = (e: DragEvent) => {
 
 export function useWindowFileDropGuard(): void {
   useEffect(() => {
-    window.addEventListener('dragover', onGuardDragOver);
+    window.addEventListener('dragenter', onGuardDragEnterOrOver);
+    window.addEventListener('dragover', onGuardDragEnterOrOver);
     window.addEventListener('drop', onGuardDrop);
     return () => {
-      window.removeEventListener('dragover', onGuardDragOver);
+      window.removeEventListener('dragenter', onGuardDragEnterOrOver);
+      window.removeEventListener('dragover', onGuardDragEnterOrOver);
       window.removeEventListener('drop', onGuardDrop);
     };
   }, []);
@@ -284,7 +297,11 @@ export function useNativeFileDrop({ enabled = true, onDrop, hold }: UseNativeFil
   const handlers = {
     onDragEnter: (e: React.DragEvent) => {
       if (!isNativeFileDrag(e)) return;
+      // Cancelled like dragover (see the dragenter note at the top): a release on
+      // the update that enters this target must still be a drop here.
+      e.preventDefault();
       e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
       depthRef.current += 1;
       if (depthRef.current === 1) {
         setIsOver(true);
