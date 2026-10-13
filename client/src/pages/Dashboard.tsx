@@ -58,7 +58,7 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary, apiClipToClip,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip, useRemoveVersion } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip, useRemoveVersion, useDeleteTrack, useHideIdea, useRestoreTrack, useRestoreSectionSongWide } from '@/hooks/use-bucket-mutations';
 import { useLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import {
   useLooseFileOrganizeDnd,
@@ -732,9 +732,11 @@ interface SongsSectionRowProps {
   trackName: string;
   /** Finder-drag spring (useNativeSpringLoadedRows) — undefined for the selected section. */
   nativeHold?: NativeFileHold;
+  /** Right-click "Remove Section" (opens Dashboard's confirmation). Omitted = no menu (an Idea). */
+  onRemove?: () => void;
 }
 
-function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, trackName, nativeHold }: SongsSectionRowProps) {
+function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, trackName, nativeHold, onRemove }: SongsSectionRowProps) {
   const hasFiles = idea.clips.length > 0;
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   const target: SectionDropTarget = {
@@ -750,7 +752,7 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, track
   const activeDrag = useActiveOrganizeDrag();
   const accepts = organizeDropRules.sectionRow(activeDrag, target);
 
-  return (
+  const row = (
     <button
       ref={setNodeRef}
       onClick={onSelect}
@@ -772,6 +774,22 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, track
         <span className="text-[9px] text-muted-foreground/50 shrink-0 ml-1 tabular-nums">{idea.clips.length}</span>
       )}
     </button>
+  );
+  if (!onRemove) return row;
+  // Same item as MediaBucket's SectionFolderRow. Right-click doesn't select the row
+  // (as there); the trigger's Slot merges its ref with useDroppable's setNodeRef.
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={onRemove}
+        >
+          Remove Section
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -795,9 +813,11 @@ interface SongsTrackRowProps {
   onFileDrop: (files: File[]) => void;
   /** Finder-drag spring (useNativeSpringLoadedRows) — undefined for the selected Track. */
   nativeHold?: NativeFileHold;
+  /** Right-click "Remove Track" (opens Dashboard's confirmation). Omitted = no menu (an Idea). */
+  onRemove?: () => void;
 }
 
-function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: SongsTrackRowProps) {
+function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold, onRemove }: SongsTrackRowProps) {
   const nativeDrop = useNativeFileDrop({ onDrop: onFileDrop, hold: nativeHold });
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
@@ -809,7 +829,7 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: 
     data: target,
   });
 
-  return (
+  const row = (
     <button
       ref={setNodeRef}
       onClick={onSelect}
@@ -829,6 +849,22 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold }: 
       </div>
       <ChevronRight size={12} className="opacity-40 shrink-0" />
     </button>
+  );
+  if (!onRemove) return row;
+  // Same item as MediaBucket's TrackFolderRow. Right-click doesn't select the row
+  // (as there); the trigger's Slot merges its ref with useDroppable's setNodeRef.
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={onRemove}
+        >
+          Remove Track
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
@@ -2067,6 +2103,65 @@ export default function Dashboard() {
     refetchOnWindowFocus: false,
   });
 
+  // Songs quick-browser: the selected Track's hidden sections, for Add Section's
+  // restore list — same query MediaBucket uses.
+  const { data: dashboardHiddenIdeas = [] } = useQuery<{ id: string; sectionName: string }[]>({
+    queryKey: bucketKeys.hiddenIdeas(selectedInstrument?.id),
+    queryFn: () => fetch(`/api/tracks/${selectedInstrument!.id}/hidden-ideas`).then(r => r.json()),
+    enabled: isAddSectionOpen && !!selectedInstrument?.id && filesFilter === 'songs',
+  });
+
+  const restoreTrackSongMutation = useRestoreTrack(selectedFile?.id ?? '', {
+    onSuccess: () => setIsAddInstrumentOpen(false),
+    onError: (msg) => setAddInstrumentError(msg),
+  });
+  const restoreSectionSongMutation = useRestoreSectionSongWide(selectedFile?.id ?? '', {
+    onSuccess: () => setIsAddSectionOpen(false),
+    onError: (msg) => setAddSectionError(msg),
+  });
+
+  // Songs quick-browser: right-click Remove Track / Remove Section. Same hooks as
+  // MediaBucket, but confirmed first (Library only) — the removal also deletes the
+  // row's timeline copies, and there's no timeline on screen here. The target
+  // outlives the dialog's open state so its text doesn't change while it animates
+  // out. Selection is cleared only when the removed row is the selected one.
+  const [removeTrackTarget, setRemoveTrackTarget] = useState<ApiTrack | null>(null);
+  const [isRemoveTrackOpen, setIsRemoveTrackOpen] = useState(false);
+  const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [removeSectionTarget, setRemoveSectionTarget] = useState<{ idea: ApiIdea; trackName: string } | null>(null);
+  const [isRemoveSectionOpen, setIsRemoveSectionOpen] = useState(false);
+  const removeSectionButtonRef = useRef<HTMLButtonElement | null>(null);
+  const deleteTrackSongMutation = useDeleteTrack(selectedFile?.id ?? '');
+  const hideIdeaSongMutation = useHideIdea(selectedFile?.id ?? '', selectedInstrument?.id);
+
+  const confirmRemoveTrack = () => {
+    const track = removeTrackTarget;
+    if (!track) return;
+    deleteTrackSongMutation.mutate(track.id, {
+      onSuccess: () => {
+        if (selectedInstrument?.id === track.id) selectSongsTrackAndSection(null, null);
+        setIsRemoveTrackOpen(false);
+      },
+      onError: (err) => {
+        toast({ variant: 'destructive', title: 'Failed to remove track', description: err.message });
+      },
+    });
+  };
+
+  const confirmRemoveSection = () => {
+    const target = removeSectionTarget;
+    if (!target) return;
+    hideIdeaSongMutation.mutate(target.idea.id, {
+      onSuccess: () => {
+        if (selectedSection?.id === target.idea.id) selectSongsTrackAndSection(selectedInstrument, null);
+        setIsRemoveSectionOpen(false);
+      },
+      onError: (err) => {
+        toast({ variant: 'destructive', title: 'Failed to remove section', description: err.message });
+      },
+    });
+  };
+
   const addInstrumentSongMutation = useAddInstrument(selectedFile?.id, {
     onCreated: (newTrack) => {
       pendingInstrumentIdRef.current = newTrack.id;
@@ -3152,6 +3247,9 @@ export default function Dashboard() {
                           onSelect={() => selectSongsTrack(track)}
                           onFileDrop={(files) => handleSongsTrackFileDrop(files, track)}
                           nativeHold={songsNativeHolds.trackHold(track.id)}
+                          onRemove={selectedFile.type === 'song'
+                            ? () => { setRemoveTrackTarget(track); setIsRemoveTrackOpen(true); }
+                            : undefined}
                         />
                       ))}
                       {selectedFileLooseFiles.map(lf => (
@@ -3205,6 +3303,9 @@ export default function Dashboard() {
                           songId={selectedFile!.id}
                           trackName={selectedInstrument!.name}
                           nativeHold={songsNativeHolds.sectionHold(idea.id)}
+                          onRemove={selectedFile?.type === 'song'
+                            ? () => { setRemoveSectionTarget({ idea, trackName: selectedInstrument!.name }); setIsRemoveSectionOpen(true); }
+                            : undefined}
                         />
                       ))}
                       {/* Track-scoped resting tier — always below the Section list,
@@ -4206,14 +4307,8 @@ export default function Dashboard() {
         isPending={addInstrumentSongMutation.isPending}
         error={addInstrumentError}
         hiddenTracks={dashboardHiddenTracks}
-        onRestoreTrack={(id) => fetch(`/api/tracks/${id}/restore`, { method: 'POST' }).then(() => {
-          queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(selectedFile?.id) });
-          queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(selectedFile?.id) });
-          queryClient.invalidateQueries({ queryKey: [`/api/songs/${selectedFile?.id}/timeline`] });
-          queryClient.invalidateQueries({ queryKey: ['activity'] });
-          queryClient.invalidateQueries({ queryKey: ['songs'] });
-          setIsAddInstrumentOpen(false);
-        })}
+        onRestoreTrack={(id) => restoreTrackSongMutation.mutate(id)}
+        isRestoring={restoreTrackSongMutation.isPending}
       />
 
       <AddSectionModal
@@ -4236,7 +4331,67 @@ export default function Dashboard() {
         }}
         isPending={addSectionSongMutation.isPending}
         error={addSectionError}
+        hiddenSections={dashboardHiddenIdeas}
+        onRestoreSection={(id) => {
+          const section = dashboardHiddenIdeas.find(h => h.id === id);
+          if (section) restoreSectionSongMutation.mutate(section.sectionName);
+        }}
+        isRestoring={restoreSectionSongMutation.isPending}
       />
+
+      {/* Songs quick-browser right-click Remove Track — Library only (MediaBucket is unconfirmed) */}
+      <AlertDialog open={isRemoveTrackOpen} onOpenChange={open => { if (!open && !deleteTrackSongMutation.isPending) setIsRemoveTrackOpen(false); }}>
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => { e.preventDefault(); removeTrackButtonRef.current?.focus(); }}
+          onKeyDown={trapDialogTab}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Track?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Remove track "{removeTrackTarget?.name}"? It will be hidden from this song, and any of its clips on the timeline will be removed. You can restore it from Add Track.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteTrackSongMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              ref={removeTrackButtonRef}
+              disabled={deleteTrackSongMutation.isPending}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={(e) => { e.preventDefault(); confirmRemoveTrack(); }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Songs quick-browser right-click Remove Section — Library only (MediaBucket is unconfirmed) */}
+      <AlertDialog open={isRemoveSectionOpen} onOpenChange={open => { if (!open && !hideIdeaSongMutation.isPending) setIsRemoveSectionOpen(false); }}>
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-white/10"
+          onOpenAutoFocus={(e) => { e.preventDefault(); removeSectionButtonRef.current?.focus(); }}
+          onKeyDown={trapDialogTab}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Section?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Remove section "{removeSectionTarget?.idea.sectionName}" from {removeSectionTarget?.trackName}? It will be hidden for this track only, and any of its clips on the timeline will be removed. You can restore it from Add Section.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={hideIdeaSongMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              ref={removeSectionButtonRef}
+              disabled={hideIdeaSongMutation.isPending}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={(e) => { e.preventDefault(); confirmRemoveSection(); }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!songToDelete} onOpenChange={open => { if (!open) setSongToDelete(null); }}>
         <AlertDialogContent

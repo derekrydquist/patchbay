@@ -133,6 +133,9 @@ export function useRestoreSectionSongWide(
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
+      // Song-wide: the section may have been hidden on any of the song's tracks, so
+      // drop every track's hidden-sections list (Add Section's restore list).
+      queryClient.invalidateQueries({ queryKey: bucketKeys.allHiddenIdeas() });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -159,6 +162,11 @@ export function useDeleteTrack(
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
+      // Hiding a track hard-deletes its timeline_clips, which can include Final
+      // copies — the task status, final list and comment badges can all change.
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
@@ -200,12 +208,22 @@ export function useHideIdea(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (ideaId: string) =>
-      fetch(`/api/ideas/${ideaId}`, { method: 'PATCH' }),
+    mutationFn: async (ideaId: string) => {
+      const res = await fetch(`/api/ideas/${ideaId}`, { method: 'PATCH' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to remove section' }));
+        throw new Error(err.message ?? 'Failed to remove section');
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      // Hiding a section hard-deletes its timeline_clips on this track, which can
+      // include Final copies — same knock-on refreshes as useDeleteTrack.
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
+      queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();

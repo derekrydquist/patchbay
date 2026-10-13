@@ -193,6 +193,8 @@ export const bucketKeys = {
   all: () => ['bucket'] as const,
   bucket: (songId: string | undefined) => ['bucket', songId] as const,
   hiddenIdeas: (trackId: string | undefined) => ['hidden-ideas', trackId] as const,
+  // Prefix of every hiddenIdeas key — every track's hidden-sections list at once.
+  allHiddenIdeas: () => ['hidden-ideas'] as const,
   hiddenTracks: (songId: string | undefined) => ['hidden-tracks', songId] as const,
 };
 
