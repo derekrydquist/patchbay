@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, KeyboardEvent } from 'react';
+import React, { useState, useRef, useEffect, useCallback, createContext, useContext, KeyboardEvent } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
@@ -63,6 +63,7 @@ import { useLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import {
   useLooseFileOrganizeDnd,
   useActiveOrganizeDrag,
+  type ActiveOrganizeDrag,
   organizeDropRules,
   type SectionDropTarget,
   type TrackDropTarget,
@@ -748,8 +749,10 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, track
     id: dropId,
     data: target,
   });
-  // Highlight only when this row accepts the active drag (organizeDropRules).
-  const activeDrag = useActiveOrganizeDrag();
+  // Highlight only when this row accepts the active drag (organizeDropRules). Read
+  // from SongsDragSurface, not useActiveOrganizeDrag: this row mounts mid-drag
+  // after a track spring and would miss onDragStart.
+  const activeDrag = useSongsActiveDrag();
   const accepts = organizeDropRules.sectionRow(activeDrag, target);
 
   const row = (
@@ -803,8 +806,8 @@ function SongsSectionRow({ idea, isSelected, onSelect, onFileDrop, songId, track
 // droppable (so it still beats the Tracks-column background, which would otherwise
 // un-assign it) with no highlight — handleDragEnd in use-loose-file-organize-dnd
 // cancels that drop. isOver ignores disabled/own-track state, so the highlight is
-// gated on organizeDropRules.trackRow. useActiveOrganizeDrag (useDndMonitor) rather
-// than useDndContext so rows re-render only on drag start/end, not every pointer move.
+// gated on organizeDropRules.trackRow. The active drag comes from SongsDragSurface
+// (useSongsActiveDrag), which re-renders rows only on drag start/end.
 interface SongsTrackRowProps {
   track: ApiTrack;
   isSelected: boolean;
@@ -822,7 +825,7 @@ function SongsTrackRow({ track, isSelected, onSelect, onFileDrop, nativeHold, on
   // Organized clips OR a Track-scoped loose file both count as content.
   const hasFiles = track.ideas.some(i => i.clips.length > 0) || track.hasLooseFiles;
   const target: TrackDropTarget = { trackId: track.id, songId: track.songId, trackName: track.name };
-  const accepts = organizeDropRules.trackRow(useActiveOrganizeDrag(), target);
+  const accepts = organizeDropRules.trackRow(useSongsActiveDrag(), target);
   const dropId = bucketTrackDropId(track.id);
   const { setNodeRef, isOver } = useDroppable({
     id: dropId,
@@ -886,12 +889,27 @@ type SongsSpringSelection = { trackId: string | null; sectionId: string | null }
 // The browser's outer box, as a drag surface (useDragSurfaceAttrs): during any
 // dnd-kit drag, rows drop their plain hover so only real drop targets light up. A
 // child component because the hook must run inside the Songs DndContext.
+//
+// Also the one owner of the active organize drag for every Songs-browser drop
+// target (SongsActiveDragContext), same as MediaBucket passing its single
+// useActiveOrganizeDrag value to every row. It stays mounted for the whole drag;
+// rows that mount mid-drag (Section rows after a track spring) never see
+// onDragStart, so a per-row useActiveOrganizeDrag would stay null for them.
+const SongsActiveDragContext = createContext<ActiveOrganizeDrag | null>(null);
+
+function useSongsActiveDrag(): ActiveOrganizeDrag | null {
+  return useContext(SongsActiveDragContext);
+}
+
 function SongsDragSurface({ className, children }: { className?: string; children: React.ReactNode }) {
   const dragSurfaceAttrs = useDragSurfaceAttrs();
+  const activeDrag = useActiveOrganizeDrag();
   return (
-    <div {...dragSurfaceAttrs} className={cn(DRAG_SURFACE_GROUP, className)}>
-      {children}
-    </div>
+    <SongsActiveDragContext.Provider value={activeDrag}>
+      <div {...dragSurfaceAttrs} className={cn(DRAG_SURFACE_GROUP, className)}>
+        {children}
+      </div>
+    </SongsActiveDragContext.Provider>
   );
 }
 
@@ -916,7 +934,7 @@ function SongsTracksColumnDropZone({
   songId, className, children, nativeDropHandlers,
 }: SongsTracksColumnDropZoneProps) {
   // organizeDropRules.tracksBackground decides both enabled and highlight.
-  const activeDrag = useActiveOrganizeDrag();
+  const activeDrag = useSongsActiveDrag();
   const target: TracksDropTarget | null = songId ? { unassign: true, songId } : null;
   const disabled = !target || !organizeDropRules.tracksBackground(activeDrag, target);
   const { setNodeRef, isOver } = useDroppable({
@@ -961,7 +979,7 @@ function SongsSectionsColumnDropZone({ selectedTrackId, selectedTrackName, songI
   const target: TrackDropTarget | null = selectedTrackId && songId && selectedTrackName
     ? { trackId: selectedTrackId, songId, trackName: selectedTrackName }
     : null;
-  const accepts = organizeDropRules.sectionsBackground(useActiveOrganizeDrag(), target);
+  const accepts = organizeDropRules.sectionsBackground(useSongsActiveDrag(), target);
   const { setNodeRef, isOver } = useDroppable({
     id: bucketSectionsBackgroundDropId('songs-browser-sections-column'),
     disabled: !target,
@@ -1039,7 +1057,7 @@ function SongsFilesColumnDropZone({
   // A version drag starts INSIDE this column, so isOver is true from its first
   // frame — only the rule decides whether that means anything (its own section
   // never accepts it).
-  const accepts = organizeDropRules.filesColumn(useActiveOrganizeDrag(), target);
+  const accepts = organizeDropRules.filesColumn(useSongsActiveDrag(), target);
 
   return (
     <div
