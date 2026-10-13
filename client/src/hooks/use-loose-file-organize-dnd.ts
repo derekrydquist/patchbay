@@ -463,8 +463,10 @@ function eventPoint(e: Event | null | undefined): { x: number; y: number } | nul
 // arrive and the timer runs; entering another row (or leaving to nothing) fires
 // once and restarts or clears it. One timer for both kinds of row.
 //
-// Track rows: every loose-file and version (bucket-clip) drag is eligible. A drag
-// never springs its own origin Track open (a shelf file's Track, a version's Track).
+// Track rows: every loose-file and version (bucket-clip) drag is eligible. Only the
+// selected Track never springs (it's already open). A drag's own origin Track (a
+// shelf file's Track, a version's Track) does spring once the drag has sprung away
+// from it, so there's a way back; dropping on it still does what it always did.
 // Section rows: only a row of the selected Track, not the selected section, and
 // only when organizeDropRules.sectionRow accepts the drag — the same rule as the
 // row's highlight, so a row springs exactly when it lights up (a version's own
@@ -547,7 +549,7 @@ export function useSpringLoadedRows<S>(options: SpringLoadedRowsOptions<S>): voi
         const id = String(over.id);
         if (id.startsWith(BUCKET_TRACK_DROP_PREFIX)) {
           const trackId = (over.data.current as { trackId?: string } | undefined)?.trackId;
-          if (!trackId || trackId === latest.current.selectedTrackId || trackId === drag.trackId) return;
+          if (!trackId || trackId === latest.current.selectedTrackId) return;
           timerRef.current.arm(() => {
             if (trackId === latest.current.selectedTrackId) return;
             if (!isPointerOnSpringRow(id, pointerRef.current)) return;
