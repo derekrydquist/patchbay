@@ -10,7 +10,7 @@ import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { bucketKeys, type ApiTrack, type ApiProductionTask } from '@/lib/bucket-api';
 import {
   useAddSection, useAddInstrument,
-  useDeleteTrack, useRestoreTrack,
+  useDeleteTrack, useRestoreTrack, useRestoreSectionSongWide,
 } from '@/hooks/use-bucket-mutations';
 import { AddSectionModal } from '@/components/daw/modals/AddSectionModal';
 import { AddInstrumentModal } from '@/components/daw/modals/AddInstrumentModal';
@@ -212,6 +212,8 @@ function CellModal({
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      // My Tasks and the progress counts read /api/tasks.
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
@@ -845,8 +847,6 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
   const removeSectionButtonRef = useRef<HTMLButtonElement | null>(null);
   const [isAddChoiceOpen, setIsAddChoiceOpen] = useState(false);
 
-  const firstTrackId = bucket[0]?.id;
-
   const { data: hiddenTracks = [] } = useQuery<{ id: string; name: string }[]>({
     queryKey: bucketKeys.hiddenTracks(songId),
     queryFn: () => fetch(`/api/songs/${songId}/hidden-tracks`).then(r => r.json()),
@@ -855,11 +855,13 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     refetchOnWindowFocus: false,
   });
 
-  // Uses first track as proxy for song-wide hidden sections (sections are hidden/restored together)
+  // Every section hidden on ANY active track (de-duplicated, id = section name) — a
+  // section hidden for one track in MediaBucket or the Library shows up here too.
+  // Restoring from this list is song-wide.
   const { data: hiddenSections = [] } = useQuery<{ id: string; sectionName: string }[]>({
-    queryKey: bucketKeys.hiddenIdeas(firstTrackId),
-    queryFn: () => fetch(`/api/tracks/${firstTrackId}/hidden-ideas`).then(r => r.json()),
-    enabled: isAddSectionOpen && !!firstTrackId,
+    queryKey: bucketKeys.hiddenSections(songId),
+    queryFn: () => fetch(`/api/songs/${songId}/hidden-sections`).then(r => r.json()),
+    enabled: isAddSectionOpen,
     refetchOnMount: true,
     refetchOnWindowFocus: false,
   });
@@ -901,27 +903,16 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     onSuccess: () => { setIsAddInstrumentOpen(false); setNewInstrumentName(''); setAddInstrumentError(null); },
     onError: (msg) => setAddInstrumentError(msg),
   });
-  // Song-wide section restore: reactivates hidden ideas on all tracks and backfills
-  // ideas+tasks for instruments added while the section was hidden.
-  const restoreSectionMutation = useMutation({
-    mutationFn: async (sectionName: string) => {
-      const res = await fetch(`/api/songs/${songId}/sections/restore`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sectionName }),
-      });
-      if (!res.ok) throw new Error('Failed to restore section');
-    },
+  // Song-wide section restore (Production's Remove Section is song-wide): reactivates
+  // the section's hidden ideas on every active track, backfills idea + task for a track
+  // added while it was hidden, and recomputes the restored tasks server-side.
+  const restoreSectionMutation = useRestoreSectionSongWide(songId, {
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
-      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
       setIsAddSectionOpen(false);
       setNewSectionName('');
       setAddSectionError(null);
     },
+    onError: (msg) => setAddSectionError(msg),
   });
 
   // Hide section song-wide: PATCH each track's matching idea active=false
@@ -940,8 +931,12 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(firstTrackId) });
+      // Every track's hidden list and the song-wide one (same prefix).
+      queryClient.invalidateQueries({ queryKey: bucketKeys.allHiddenIdeas() });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      // The section's tasks become sectionHidden (disabled cells, My Tasks, progress).
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
     },
@@ -1170,7 +1165,7 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
                         className="relative border-t border-l border-white/5 min-h-[78px] p-3 flex flex-col justify-center gap-1 bg-black/30 select-none"
                       >
                         <span className="text-[10px] font-semibold text-white/30 leading-snug">Section removed for this track</span>
-                        <span className="text-[9px] text-white/20 leading-snug">Restore it from Add Section in Arrangement</span>
+                        <span className="text-[9px] text-white/20 leading-snug">Restore it from Add Section</span>
                       </div>
                     );
                   }

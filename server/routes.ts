@@ -16,10 +16,10 @@ import bcrypt from "bcrypt";
 import multer from "multer";
 import { z } from "zod";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte, max, inArray, isNull, not } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
 import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql } from "./storage";
-import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, type TaskStatus } from "@shared/clip-dependents";
+import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
   insertSongSchema,
@@ -399,6 +399,50 @@ async function applyTaskAfterVersionLeaves(
   // Sort-only, like reconcile's outcomes after a clip-level Final change: the file's own
   // 'clip-removed' row is the feed record of the action. Still counted by the Your Songs
   // sort. Both outcomes here (In Progress, To Do) are reverts.
+  storage.logActivity({
+    id: randomUUID(),
+    songId: track.songId,
+    type: 'task-auto-reverted',
+    description: `${actor} changed status to ${label.replace(/^Status changed to /, '')} — ${track.name} · ${sectionName}`,
+    timestamp: Date.now(),
+    instrument: track.name,
+    sectionName,
+    author: actor,
+  }).catch(console.error);
+}
+
+// ─── applyTaskAfterRestore ─────────────────────────────────────────────────────
+// Recomputes the task of a section just brought back for a track (per-track restore,
+// song-wide section restore, track restore), after the restore has committed. Hiding
+// deleted the section's timeline copies, so taskStatusAfterRestore applies the
+// timeline rule: Complete needs a placement. Same System comment + sort-only activity
+// row as applyTaskAfterVersionLeaves; the restore's own row is the feed record. Never
+// touches clips.isFinal.
+async function applyTaskAfterRestore(
+  track: InstrumentTrack,
+  sectionName: string,
+  ideaId: string,
+  actor: string,
+): Promise<void> {
+  const task = await storage.getTaskByTrackSection(track.id, sectionName);
+  if (!task) return;
+  const hasTimelineClips = !!db.select({ id: timelineClips.id }).from(timelineClips)
+    .where(and(eq(timelineClips.trackId, track.id), eq(timelineClips.sectionName, sectionName)))
+    .get();
+  const hasActiveVersions = (await storage.countActiveClipsForIdea(ideaId)) > 0;
+  const next = taskStatusAfterRestore(task.status as TaskStatus, hasTimelineClips, hasActiveVersions);
+  if (next === task.status) return;
+  await storage.updateTask(task.id, { status: next });
+  const label = STATUS_LABELS[next];
+  await storage.addTaskComment({
+    id: randomUUID(),
+    taskId: task.id,
+    author: 'System',
+    text: next === 'todo'
+      ? `${label} — section restored with no files`
+      : `${label} — section restored with nothing on the timeline`,
+    timestamp: Date.now(),
+  });
   storage.logActivity({
     id: randomUUID(),
     songId: track.songId,
@@ -849,6 +893,21 @@ export async function registerRoutes(
     const restoreTrackActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
+    // Hiding the track deleted all its timeline copies — recompute the task of every
+    // section that comes back with it. Its own hidden sections stay hidden (their
+    // tasks stay disabled) and are recomputed when they're restored.
+    if (!trackToRestore.active) {
+      const restoredIdeas = db.select().from(ideas)
+        .where(and(eq(ideas.trackId, trackId), eq(ideas.active, true)))
+        .all();
+      for (const idea of restoredIdeas) {
+        try {
+          await applyTaskAfterRestore(trackToRestore, idea.sectionName, idea.id, restoreTrackActor);
+        } catch (err) {
+          console.error("[tracks/:trackId/restore] failed to recompute task:", err);
+        }
+      }
+    }
     storage.logActivity({
       id: randomUUID(),
       songId: trackToRestore.songId,
@@ -1040,6 +1099,20 @@ export async function registerRoutes(
       .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
       .all();
 
+    const restoreSectionActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+
+    // The section's position: its sortOrder on the song's other tracks (the lowest if
+    // they differ), for a track that never had this section. Read before any insert.
+    const sectionSortOrder = db.select({ minOrder: min(ideas.sortOrder) })
+      .from(ideas)
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .where(and(eq(instrumentTracks.songId, songId), eq(ideas.sectionName, sectionName)))
+      .get()?.minOrder ?? null;
+
+    // Ideas actually brought back, for the task recompute after the loop.
+    const restored: { track: InstrumentTrack; ideaId: string }[] = [];
     for (const track of activeTracks) {
       const existing = db
         .select()
@@ -1048,24 +1121,33 @@ export async function registerRoutes(
         .get();
 
       if (existing) {
-        db.update(ideas).set({ active: true }).where(eq(ideas.id, existing.id)).run();
+        // Only touch an idea that was actually hidden — an active one is left alone.
+        if (!existing.active) {
+          db.update(ideas).set({ active: true }).where(eq(ideas.id, existing.id)).run();
+          restored.push({ track, ideaId: existing.id });
+        }
       } else {
-        // Track was added after this section was hidden — create idea + task.
+        // Track was added after this section was hidden — create idea + task, at the
+        // section's position on the other tracks (fallback: end of this track's list).
         const { cnt } = db.select({ cnt: count() }).from(ideas).where(eq(ideas.trackId, track.id)).get() ?? { cnt: 0 };
         await storage.createIdea({
           id: randomUUID(),
           trackId: track.id,
           name: `${track.name} ${sectionName}`,
           sectionName,
-          sortOrder: cnt,
+          sortOrder: sectionSortOrder ?? cnt,
         });
         insertProductionTaskForSection({ songId, trackId: track.id, instrument: track.name, sectionName });
       }
     }
 
-    const restoreSectionActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
+    for (const { track, ideaId } of restored) {
+      try {
+        await applyTaskAfterRestore(track, sectionName, ideaId, restoreSectionActor);
+      } catch (err) {
+        console.error("[sections/restore] failed to recompute task:", err);
+      }
+    }
     storage.logActivity({
       id: randomUUID(),
       songId,
@@ -1661,6 +1743,14 @@ export async function registerRoutes(
     const restoreIdeaActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
+    // Only a section that was actually hidden gets its task recomputed.
+    if (restoreIdeaRow && !restoreIdeaRow.active && restoreIdeaTrack) {
+      try {
+        await applyTaskAfterRestore(restoreIdeaTrack, restoreIdeaRow.sectionName, restoreIdeaRow.id, restoreIdeaActor);
+      } catch (err) {
+        console.error("[ideas/:ideaId/restore] failed to recompute task:", err);
+      }
+    }
     storage.logActivity({
       id: randomUUID(),
       songId,
@@ -1672,6 +1762,22 @@ export async function registerRoutes(
       author: restoreIdeaActor,
     }).catch(console.error);
     res.status(200).json({ ok: true });
+  });
+
+  // Every section name hidden on ANY active track of the song, de-duplicated — the
+  // Production tab's song-wide restore list. Shape matches hidden-ideas
+  // ({ id, sectionName }) with the section name as the id.
+  app.get("/api/songs/:songId/hidden-sections", requireBand, (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const rows = db.select({ sectionName: ideas.sectionName, minOrder: min(ideas.sortOrder) })
+      .from(ideas)
+      .innerJoin(instrumentTracks, and(eq(ideas.trackId, instrumentTracks.id), eq(instrumentTracks.active, true)))
+      .where(and(eq(instrumentTracks.songId, songId), eq(ideas.active, false)))
+      .groupBy(ideas.sectionName)
+      .orderBy(asc(min(ideas.sortOrder)))
+      .all();
+    res.json(rows.map(r => ({ id: r.sectionName, sectionName: r.sectionName })));
   });
 
   app.get("/api/tracks/:trackId/hidden-ideas", requireBand, async (req, res) => {

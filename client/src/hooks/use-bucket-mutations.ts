@@ -137,6 +137,8 @@ export function useRestoreSectionSongWide(
       // drop every track's hidden-sections list (Add Section's restore list).
       queryClient.invalidateQueries({ queryKey: bucketKeys.allHiddenIdeas() });
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      // Restored tasks stop being sectionHidden (My Tasks, progress counts).
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
@@ -165,6 +167,8 @@ export function useDeleteTrack(
       // Hiding a track hard-deletes its timeline_clips, which can include Final
       // copies — the task status, final list and comment badges can all change.
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      // The track's tasks drop out of My Tasks and the progress counts.
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
@@ -192,7 +196,10 @@ export function useRestoreTrack(
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
       queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenTracks(songId) });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      // The restore recomputes the track's tasks server-side, and they rejoin My
+      // Tasks and the progress counts.
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
@@ -217,11 +224,14 @@ export function useHideIdea(
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
+      // This track's hidden list and Production's song-wide one (same prefix).
+      queryClient.invalidateQueries({ queryKey: bucketKeys.allHiddenIdeas() });
       queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
       // Hiding a section hard-deletes its timeline_clips on this track, which can
       // include Final copies — same knock-on refreshes as useDeleteTrack.
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      // The task becomes sectionHidden — out of My Tasks and the progress counts.
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
       queryClient.invalidateQueries({ queryKey: ['clip-comment-summary', songId] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
@@ -256,22 +266,35 @@ export function useAddFullTake(
   });
 }
 
+// Per-track restore: brings one hidden section back for ITS track only
+// (POST /api/ideas/:ideaId/restore — Add Section's restore list in MediaBucket and the
+// Library Songs browser, which are per track). The server recomputes that section's
+// task. Production's own restore is song-wide (useRestoreSectionSongWide's route).
 export function useRestoreSection(
-  trackId: string | undefined,
   songId: string,
-  opts?: { onSuccess?: () => void }
+  opts?: { onSuccess?: () => void; onError?: (message: string) => void }
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (ideaId: string) =>
-      fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' }),
+    mutationFn: async (ideaId: string) => {
+      const res = await fetch(`/api/ideas/${ideaId}/restore`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to restore section' }));
+        throw new Error(err.message ?? 'Failed to restore section');
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) });
-      queryClient.invalidateQueries({ queryKey: bucketKeys.hiddenIdeas(trackId) });
+      // This track's hidden list and Production's song-wide one (same prefix).
+      queryClient.invalidateQueries({ queryKey: bucketKeys.allHiddenIdeas() });
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      // The task stops being sectionHidden (My Tasks, progress counts).
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       opts?.onSuccess?.();
     },
+    onError: (err: Error) => opts?.onError?.(err.message),
   });
 }
 

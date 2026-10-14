@@ -11,7 +11,7 @@ import {
 import {
   useAddInstrument, useAddSection, useAddFullTake,
   useDeleteTrack, useRestoreTrack,
-  useHideIdea, useRestoreSectionSongWide,
+  useHideIdea, useRestoreSection,
 } from '@/hooks/use-bucket-mutations';
 import {
   bucketSectionDropId, bucketVersionsDropId, bucketTrackDropId,
@@ -534,8 +534,11 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     onError: (msg) => console.error('[hideIdea] error:', msg),
   });
 
-  const restoreSectionMutation = useRestoreSectionSongWide(songId, {
+  // Per-track: brings the section back for the selected track only (the hidden list
+  // is that track's).
+  const restoreSectionMutation = useRestoreSection(songId, {
     onSuccess: () => { setIsAddSectionOpen(false); },
+    onError: (msg) => setAddSectionError(msg),
   });
 
   const addFullTakeMutation = useAddFullTake(songId, {
@@ -1104,10 +1107,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
         isPending={addSectionMutation.isPending}
         error={addSectionError}
         hiddenSections={hiddenIdeas}
-        onRestoreSection={(id) => {
-            const section = hiddenIdeas.find(h => h.id === id);
-            if (section) restoreSectionMutation.mutate(section.sectionName);
-          }}
+        onRestoreSection={(id) => restoreSectionMutation.mutate(id)}
         isRestoring={restoreSectionMutation.isPending}
       />
       {looseFileInfo.infoWindow}

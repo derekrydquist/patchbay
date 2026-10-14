@@ -39,6 +39,26 @@ export function taskStatusAfterVersionLeaves(
   return status;
 }
 
+// The decided rule for the task of a section brought back for a track (per-track
+// restore, song-wide section restore, track restore). Hiding deleted the section's
+// timeline copies, so the "timeline rule" applies: Complete needs a placement.
+//   - will-not-play and todo: always left alone.
+//   - complete with no timeline clips for the track + section: In Progress if the
+//     section still has active versions, else To Do.
+//   - in-progress with no active versions: To Do.
+//   - anything else: unchanged.
+// Never touches clips.isFinal — a Final version keeps its badge.
+export function taskStatusAfterRestore(
+  status: TaskStatus,
+  hasTimelineClips: boolean,
+  hasActiveVersions: boolean,
+): TaskStatus {
+  if (status === "will-not-play" || status === "todo") return status;
+  if (status === "complete" && !hasTimelineClips) return hasActiveVersions ? "in-progress" : "todo";
+  if (status === "in-progress" && !hasActiveVersions) return "todo";
+  return status;
+}
+
 // A placed copy or Final makes the leave a confirmed action. A task status change
 // alone doesn't — placing a file moves its task silently, so taking one out does too.
 // The task change is still applied on every leave, and listed in the dialog when the

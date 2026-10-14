@@ -58,7 +58,7 @@ import {
   fetchBucket, bucketKeys, fetchLooseFiles, fetchUnassignedLooseFiles, fetchTrackLooseFiles, looseFileKeys,
   fetchClipCommentSummary, liveCommentRefetch, type ClipCommentSummary, apiClipToClip,
 } from '@/lib/bucket-api';
-import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip, useRemoveVersion, useDeleteTrack, useHideIdea, useRestoreTrack, useRestoreSectionSongWide } from '@/hooks/use-bucket-mutations';
+import { useAddInstrument, useAddSection, useDeleteLooseFile, useMoveClipToIdea, useMakeClipLoose, useDeleteIdeaClip, useRemoveVersion, useDeleteTrack, useHideIdea, useRestoreTrack, useRestoreSection } from '@/hooks/use-bucket-mutations';
 import { useLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
 import {
   useLooseFileOrganizeDnd,
@@ -2138,7 +2138,9 @@ export default function Dashboard() {
     onSuccess: () => setIsAddInstrumentOpen(false),
     onError: (msg) => setAddInstrumentError(msg),
   });
-  const restoreSectionSongMutation = useRestoreSectionSongWide(selectedFile?.id ?? '', {
+  // Per-track: brings the section back for the selected track only (the hidden list
+  // is that track's).
+  const restoreSectionSongMutation = useRestoreSection(selectedFile?.id ?? '', {
     onSuccess: () => setIsAddSectionOpen(false),
     onError: (msg) => setAddSectionError(msg),
   });
@@ -4355,10 +4357,7 @@ export default function Dashboard() {
         isPending={addSectionSongMutation.isPending}
         error={addSectionError}
         hiddenSections={dashboardHiddenIdeas}
-        onRestoreSection={(id) => {
-          const section = dashboardHiddenIdeas.find(h => h.id === id);
-          if (section) restoreSectionSongMutation.mutate(section.sectionName);
-        }}
+        onRestoreSection={(id) => restoreSectionSongMutation.mutate(id)}
         isRestoring={restoreSectionSongMutation.isPending}
       />
 
