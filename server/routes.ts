@@ -16,9 +16,9 @@ import bcrypt from "bcrypt";
 import multer from "multer";
 import { z } from "zod";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte, max, inArray, isNull } from "drizzle-orm";
+import { eq, and, ne, count, asc, gte, max, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -205,6 +205,21 @@ function timelineClipSongId(clipId: string): string | null {
 function taskSongId(taskId: string): string | null {
   return db.select({ songId: productionTasks.songId }).from(productionTasks)
     .where(eq(productionTasks.id, taskId)).get()?.songId ?? null;
+}
+// Write backstop for a task whose section is hidden for its track (the Production
+// tab shows it disabled). User-facing task routes only — call it after the ownership
+// check and before any write. Server-internal writes (System comments, reconcile,
+// release/remove flows) call storage directly and never go through this.
+function assertTaskEditable(res: Response, taskId: string): boolean {
+  if (storage.isTaskSectionHidden(taskId)) {
+    res.status(409).json({ message: "This section has been removed for this track. Restore it to edit this task." });
+    return false;
+  }
+  return true;
+}
+function taskCommentTaskId(commentId: string): string | null {
+  return db.select({ taskId: taskComments.taskId }).from(taskComments)
+    .where(eq(taskComments.id, commentId)).get()?.taskId ?? null;
 }
 function taskCommentSongId(commentId: string): string | null {
   const row = db.select({ songId: productionTasks.songId })
@@ -2992,7 +3007,8 @@ export async function registerRoutes(
         eq(instrumentTracks.id, productionTasks.trackId),
         eq(instrumentTracks.active, true),
       ))
-      .where(eq(productionTasks.songId, songId))
+      // A task whose section is hidden for its track doesn't count toward progress.
+      .where(and(eq(productionTasks.songId, songId), not(taskSectionHiddenSql)))
       .all();
     const total = rows.length;
     const completed = rows.filter(r => r.status === 'complete' || r.status === 'will-not-play').length;
@@ -3056,6 +3072,7 @@ export async function registerRoutes(
     const taskId = req.params.id as string;
     const songId = taskSongId(taskId);
     if (!songId || !assertSongOwned(req, res, songId)) return;
+    if (!assertTaskEditable(res, taskId)) return;
     // `author` in the body is ignored (stripped so it never reaches the update). User
     // actions are attributed to the session user; automatic comments to 'System'.
     const { author: _ignoredAuthor, ...taskUpdates } = req.body;
@@ -3218,7 +3235,8 @@ export async function registerRoutes(
       }
     }
 
-    res.json(task);
+    // Same row shape as the task list routes (sectionHidden — see ProductionTaskWithHidden).
+    res.json({ ...task, sectionHidden: storage.isTaskSectionHidden(task.id) });
   });
 
   app.get("/api/production-tasks/:id/comments", requireBand, async (req, res) => {
@@ -3233,6 +3251,7 @@ export async function registerRoutes(
     const tId = req.params.id as string;
     const sId = taskSongId(tId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
+    if (!assertTaskEditable(res, tId)) return;
     const { text, parentId } = req.body as { author?: string; text: string; parentId?: string };
     if (parentId) {
       const parent = db.select().from(taskComments).where(eq(taskComments.id, parentId)).get();
@@ -3268,6 +3287,7 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const sId = taskCommentSongId(commentId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
+    if (!assertTaskEditable(res, taskCommentTaskId(commentId)!)) return;
     const comment = await storage.updateTaskComment(commentId, req.body.text);
     if (!comment) return res.status(404).json({ message: "Comment not found" });
     const editTaskCommentActor = req.session.userId
@@ -3288,6 +3308,7 @@ export async function registerRoutes(
     const commentId = req.params.id as string;
     const sId = taskCommentSongId(commentId);
     if (!sId || !assertSongOwned(req, res, sId)) return;
+    if (!assertTaskEditable(res, taskCommentTaskId(commentId)!)) return;
     const deleteTaskCommentActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';

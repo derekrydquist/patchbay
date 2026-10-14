@@ -203,6 +203,25 @@ export interface ActivityEvent {
   songDeleted?: boolean;
 }
 
+// A task row as returned to the client: sectionHidden is true when the task's section
+// is hidden for its track (an ideas row for that trackId + sectionName with active =
+// false). The Production tab shows such a cell disabled, and the task routes refuse
+// edits to it (assertTaskEditable in routes.ts). No idea row at all → false.
+export type ProductionTaskWithHidden = ProductionTask & { sectionHidden: boolean };
+
+// Correlated EXISTS rather than a LEFT JOIN: nothing in the schema makes
+// (ideas.trackId, ideas.sectionName) unique, so a join could repeat a task row.
+// Evaluates to 1/0 in SQLite — coerce with Boolean() when reading it.
+// Written with explicit table names on purpose: Drizzle renders ${column} inside a
+// sql`` template unqualified ("track_id" = "track_id"), which would compare the ideas
+// column with itself. Only valid in a query whose FROM is production_tasks, unaliased.
+export const taskSectionHiddenSql = sql<number>`exists (
+  select 1 from "ideas" as "hidden_idea"
+  where "hidden_idea"."track_id" = "production_tasks"."track_id"
+    and "hidden_idea"."section_name" = "production_tasks"."section_name"
+    and "hidden_idea"."active" = 0
+)`;
+
 export interface IStorage {
   // Users
   getUser(id: string): Promise<User | undefined>;
@@ -291,8 +310,9 @@ export interface IStorage {
   logActivity(entry: InsertActivityLog): Promise<void>;
 
   // Production Tasks
-  getAllTasks(bandId: string): Promise<(ProductionTask & { songName: string })[]>;
-  getTasksForSong(songId: string): Promise<ProductionTask[]>;
+  getAllTasks(bandId: string): Promise<(ProductionTaskWithHidden & { songName: string })[]>;
+  getTasksForSong(songId: string): Promise<ProductionTaskWithHidden[]>;
+  isTaskSectionHidden(taskId: string): boolean;
   getTaskByInstrumentSection(songId: string, instrument: string, sectionName: string): Promise<ProductionTask | undefined>;
   getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined>;
   getTimelineClipForTask(instrument: string, sectionName: string, songId: string): Promise<TimelineClip | undefined>;
@@ -2065,9 +2085,9 @@ export class SQLiteStorage implements IStorage {
     db.insert(activityLog).values(entry).run();
   }
 
-  async getAllTasks(bandId: string): Promise<(ProductionTask & { songName: string })[]> {
+  async getAllTasks(bandId: string): Promise<(ProductionTaskWithHidden & { songName: string })[]> {
     const rows = db
-      .select({ task: productionTasks, songName: songs.name })
+      .select({ task: productionTasks, songName: songs.name, sectionHidden: taskSectionHiddenSql })
       .from(productionTasks)
       .innerJoin(songs, and(eq(productionTasks.songId, songs.id), eq(songs.bandId, bandId)))
       .innerJoin(instrumentTracks, and(
@@ -2075,12 +2095,12 @@ export class SQLiteStorage implements IStorage {
         eq(instrumentTracks.active, true),
       ))
       .all();
-    return rows.map(r => ({ ...r.task, songName: r.songName }));
+    return rows.map(r => ({ ...r.task, songName: r.songName, sectionHidden: Boolean(r.sectionHidden) }));
   }
 
-  async getTasksForSong(songId: string): Promise<ProductionTask[]> {
+  async getTasksForSong(songId: string): Promise<ProductionTaskWithHidden[]> {
     const rows = db
-      .select({ task: productionTasks })
+      .select({ task: productionTasks, sectionHidden: taskSectionHiddenSql })
       .from(productionTasks)
       .innerJoin(instrumentTracks, and(
         eq(instrumentTracks.id, productionTasks.trackId),
@@ -2088,7 +2108,17 @@ export class SQLiteStorage implements IStorage {
       ))
       .where(eq(productionTasks.songId, songId))
       .all();
-    return rows.map(r => r.task);
+    return rows.map(r => ({ ...r.task, sectionHidden: Boolean(r.sectionHidden) }));
+  }
+
+  // Whether this task's section is hidden for its track (see ProductionTaskWithHidden).
+  // False for an unknown task id.
+  isTaskSectionHidden(taskId: string): boolean {
+    const row = db.select({ hidden: taskSectionHiddenSql })
+      .from(productionTasks)
+      .where(eq(productionTasks.id, taskId))
+      .get();
+    return Boolean(row?.hidden);
   }
 
   async getFinalClipForTask(instrument: string, sectionName: string, songId: string): Promise<Clip | undefined> {
