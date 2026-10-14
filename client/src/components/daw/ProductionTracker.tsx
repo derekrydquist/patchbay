@@ -915,18 +915,18 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     onError: (msg) => setAddSectionError(msg),
   });
 
-  // Hide section song-wide: PATCH each track's matching idea active=false
+  // Hide section song-wide: one server call hides it on every active track and logs a
+  // single 'section-hidden' feed row for the whole action.
   const hideSectionMutation = useMutation({
     mutationFn: async (sectionName: string) => {
-      const ideasToHide = bucket.flatMap(track =>
-        track.ideas.filter(idea => idea.sectionName === sectionName)
-      );
-      const results = await Promise.all(
-        ideasToHide.map(idea => fetch(`/api/ideas/${idea.id}`, { method: 'PATCH' }))
-      );
-      const failed = results.filter(r => !r.ok);
-      if (failed.length > 0) {
-        throw new Error(`Failed to remove section (${failed.length} of ${results.length} requests failed)`);
+      const res = await fetch(`/api/songs/${songId}/sections/hide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sectionName }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Failed to remove section' }));
+        throw new Error(err.message ?? 'Failed to remove section');
       }
     },
     onSuccess: () => {

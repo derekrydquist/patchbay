@@ -170,7 +170,7 @@ export interface ActivityEvent {
       // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
       // last audited 2026-08-12:
       | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
-      | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
       | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
@@ -1954,7 +1954,6 @@ export class SQLiteStorage implements IStorage {
       'clip-trim-adjusted',
       'timeline-reordered',
       'clip-metadata-edited',
-      'idea-hidden',
       'clip-comment-edited',
       'clip-comment-deleted',
       'clip-comment-reply',

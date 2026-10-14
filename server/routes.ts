@@ -1087,6 +1087,41 @@ export async function registerRoutes(
 
   // Song-wide section restore: reactivate hidden ideas for every active track, and
   // backfill missing ideas+tasks for tracks added after the section was hidden.
+  // Song-wide section hide — Production Tracker's Remove Section. Hides the section on
+  // every active track (same per-idea hideIdea as PATCH /api/ideas/:ideaId, so each
+  // track's timeline copies go too) and logs ONE 'section-hidden' row for the action
+  // instead of an 'idea-hidden' row per track. Restorable through /sections/restore.
+  // Not 'section-deleted': that type belongs to the permanent song-wide delete.
+  app.post("/api/songs/:songId/sections/hide", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const { sectionName } = req.body as { sectionName?: string };
+    if (!sectionName) return res.status(400).json({ message: "sectionName required" });
+
+    const toHide = db.select({ id: ideas.id })
+      .from(ideas)
+      .innerJoin(instrumentTracks, and(eq(ideas.trackId, instrumentTracks.id), eq(instrumentTracks.active, true)))
+      .where(and(eq(instrumentTracks.songId, songId), eq(ideas.sectionName, sectionName), eq(ideas.active, true)))
+      .all();
+    if (!toHide.length) return res.status(404).json({ message: "Section not found" });
+    for (const { id } of toHide) await storage.hideIdea(id);
+
+    const hideSectionActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'section-hidden',
+      description: `${hideSectionActor} removed section ${sectionName} from all tracks`,
+      timestamp: Date.now(),
+      sectionName,
+      author: hideSectionActor,
+    }).catch(console.error);
+
+    res.status(200).json({ ok: true, hidden: toHide.length });
+  });
+
   app.post("/api/songs/:songId/sections/restore", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
@@ -1152,7 +1187,7 @@ export async function registerRoutes(
       id: randomUUID(),
       songId,
       type: 'section-restored',
-      description: `${restoreSectionActor} restored section ${sectionName}`,
+      description: `${restoreSectionActor} restored section ${sectionName} on all tracks`,
       timestamp: Date.now(),
       sectionName,
       author: restoreSectionActor,
@@ -1722,7 +1757,7 @@ export async function registerRoutes(
       id: randomUUID(),
       songId,
       type: 'idea-hidden',
-      description: `${hideIdeaActor} hid section ${hideIdeaRow?.sectionName ?? ideaId} from ${hideIdeaTrack?.name ?? 'a track'}`,
+      description: `${hideIdeaActor} removed section ${hideIdeaRow?.sectionName ?? ideaId} from ${hideIdeaTrack?.name ?? 'a track'}`,
       timestamp: Date.now(),
       instrument: hideIdeaTrack?.name,
       sectionName: hideIdeaRow?.sectionName ?? undefined,

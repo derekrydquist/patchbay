@@ -204,6 +204,15 @@ function activityUrl(event: ActivityEvent): string {
   if (event.type === 'clip-made-loose') {
     return '/?tab=files&filter=ideas';
   }
+  // Section removed for one track: open Arrangement on that track only — the section
+  // itself is hidden, so there's nothing to select (Add Section restores it there).
+  if (event.type === 'idea-hidden' && event.instrument) {
+    return `${base}?instrument=${encodeURIComponent(event.instrument)}`;
+  }
+  // Song-wide remove / restore came from (and are undone in) Production.
+  if (event.type === 'section-hidden' || event.type === 'section-restored') {
+    return `${base}?tab=production`;
+  }
   if (event.instrument && event.sectionName) {
     return `${base}?instrument=${encodeURIComponent(event.instrument)}&section=${encodeURIComponent(event.sectionName)}`;
   }
