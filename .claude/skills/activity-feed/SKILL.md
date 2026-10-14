@@ -9,7 +9,7 @@ The activity feed aggregates recent events across the app into a unified timelin
 
 **`ActivityEvent` interface (in `storage.ts`):**
 ```ts
-interface ActivityEvent {
+export interface ActivityEvent {
   // Tier 1 (synthesized at read time):
   type: 'file-added' | 'marked-final' | 'clip-comment' | 'task-comment' | 'status-change'
       | 'review-shared' | 'clip-unmarked-final' | 'clip-replaced' | 'clip-added-to-timeline'
@@ -17,29 +17,40 @@ interface ActivityEvent {
       | 'track-added' | 'track-deleted' | 'review-comment' | 'review-reply'
       | 'song-created' | 'idea-created'
       // Tier 2 (written verbatim via logActivity()) — kept in sync with the
-      // "Tier 2 event types — full reference" table below; last audited 2026-08-12:
+      // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
+      // last audited 2026-08-12:
       | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
-      | 'section-restored' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
       | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
       | 'clip-comment-deleted' | 'task-status-change' | 'task-comment-added'
       | 'task-comment-reply' | 'task-comment-edited' | 'task-comment-deleted'
       | 'review-comment-edited' | 'review-comment-deleted' | 'review-comment-resolved'
-      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album';
+      | 'review-comment-unresolved' | 'song-added-to-album' | 'song-removed-from-album'
+      | 'lyrics-edited' | 'lyrics-comment-added' | 'lyrics-comment-reply'
+      | 'lyrics-comment-edited' | 'lyrics-comment-deleted' | 'lyrics-comment-resolved'
+      | 'lyrics-comment-unresolved' | 'loose-file-comment-added' | 'loose-file-comment-reply'
+      | 'loose-file-comment-edited' | 'loose-file-comment-deleted' | 'clip-moved-to-idea'
+      | 'clip-made-loose' | 'clip-deleted' | 'clip-final-set' | 'clip-final-cleared'
+      | 'clip-moved-to-section' | 'clip-moved-to-loose'
+      // Sort-only: a task outcome whose cause already has its own feed row.
+      | 'task-auto-completed' | 'task-auto-reverted';
   description: string;
-  timestamp: number;
+  timestamp: number; // ms since epoch
   songId: string;
   songName: string;
   instrument?: string;
   sectionName?: string;
   taskId?: string;
-  // present on clip-comment and task-comment events for differentiated routing
+  // comment source routing — present on clip-comment and task-comment events
   source?: 'clip' | 'task';
   clipId?: string;
-  // present on review-shared, review-comment, review-reply for deep-link routing
+  // review deep-link routing — present on review-shared, review-comment, review-reply events
   reviewId?: string;
   commentId?: string;
+  // the song no longer exists — the feed renders the row as plain text with no link
+  songDeleted?: boolean;
 }
 ```
 
@@ -60,7 +71,7 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 
 **Loose-file events (`loose-file-uploaded` / `loose-file-organized` / `loose-file-placed`, logged from `server/routes.ts`)** are not yet fully catalogued in the reference table below — noted here as a known gap. The one detail worth knowing: `loose-file-organized` (from `POST /api/loose-files/:id/organize`) fetches the destination song and branches the same way `file-added` does above — idea-type songs get `"{actor} organized {clipName} into {ideaName}"` instead of the redundant `"...into Files → Files"`; real songs keep the full `"into {trackName} → {sectionName}"` form. `loose-file-uploaded` (song-scoped upload landing unorganized) reads `"{actor} added {looseFileName}"` — no destination, since nothing has been organized yet. `loose-file-placed` (place-on-timeline) is untouched by this branching — idea-type songs have no Timeline surface, so it can never hit the redundant case.
 
-**Read-path filtering (added 2026-08-12):** `activity_log` had never had type-based filtering — every write, including types intended as "sort-only" (meant only to feed `getSongsWithLastActive`'s ranking, never to render), rendered as a visible Activity Feed row. This is now corrected inside `getActivity()` (`server/storage.ts`): a `notInArray(activityLog.type, [...])` condition excludes sort-only types from the `events[]` array returned to the client. The filter is read-path only — `logActivity()` still writes every type unconditionally, and `getSongsWithLastActive` (a separate function, separate query, no `type` condition) is untouched and still sees the full unfiltered table. Sort-only events continue to influence the Dashboard "Your Songs" ranking; they just never appear as feed rows. This also means the "Feed-visible?" column below is no longer just documentation intent — it is enforced in code for the first time. Two classifications changed as a result of actually auditing this (see the numbered lists below for detail): `idea-hidden` (item 15) turned out to be sort-only despite living in the old "Structural events" grouping, and the old single `clip-trimmed` type was split into `clip-trim-adjusted` (sort-only) and `clip-trim-applied-to-instances` (feed-visible) — they were previously indistinguishable in the log.
+**Read-path filtering (added 2026-08-12):** `activity_log` had never had type-based filtering — every write, including types intended as "sort-only" (meant only to feed `getSongsWithLastActive`'s ranking, never to render), rendered as a visible Activity Feed row. This is now corrected inside `getActivity()` (`server/storage.ts`): a `notInArray(activityLog.type, [...])` condition excludes sort-only types from the `events[]` array returned to the client. The filter is read-path only — `logActivity()` still writes every type unconditionally, and `getSongsWithLastActive` (a separate function, separate query, no `type` condition) is untouched and still sees the full unfiltered table. Sort-only events continue to influence the Dashboard "Your Songs" ranking; they just never appear as feed rows. This also means the "Feed-visible?" column below is no longer just documentation intent — it is enforced in code for the first time. Two classifications changed as a result of actually auditing this (see the numbered lists below for detail): `idea-hidden` (item 15) turned out to be sort-only despite living in the old "Structural events" grouping (made feed-visible again in Oct 2026: a hide now deletes timeline copies and disables Production cells), and the old single `clip-trimmed` type was split into `clip-trim-adjusted` (sort-only) and `clip-trim-applied-to-instances` (feed-visible) — they were previously indistinguishable in the log.
 
 **One row per user action (Oct 2026):**
 - Rows a single action also produces are logged but sort-only, or hidden in `getActivity`. They still count for the Your Songs sort, which reads every row regardless of type.
@@ -89,19 +100,20 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `pan-changed` | No — sort-only | Discrete on L/C/R button click. New type, split out from `volume-changed`. |
 | `section-added` | Yes | Two independent call sites (song section add; per-track idea/section bootstrap) both dedup via a 5-second lookback window against `activity_log` so simultaneous per-track calls collapse to one row. |
 | `section-deleted` | Yes | |
-| `section-restored` | Yes | Two independent client mutations hit this same server route (MediaBucket's `useRestoreSectionSongWide`, Production Tracker's `restoreSectionMutation`) — both are now wired to invalidate the feed; previously only one was. |
+| `section-restored` | Yes | Only Production uses it now (`useRestoreSectionSongWide`); MediaBucket and the Library switched to the per-idea route (`idea-restored`). New rows read "restored section X on all tracks". |
+| `section-hidden` | Yes | Production Tracker's song-wide Remove Section via `POST /api/songs/:songId/sections/hide`; one row per action (it used to be one `idea-hidden` row per track). Not `section-deleted`, which is the permanent hard delete. |
 | `clip-added-to-timeline` | Yes | Reads "placed X on the timeline in T — S" (older rows reworded in `getActivity`). |
 | `clip-removed-from-timeline` | Yes | Reads "removed X from the timeline in T — S" (older rows reworded). |
 | `clip-final-set` / `clip-final-cleared` | Yes | "X marked/unmarked {clip} as Final", from `PATCH /api/clips` and `PATCH /api/timeline-clips` when the value changes (not Replace). |
-| `task-auto-completed` / `task-auto-reverted` | No — sort-only | Task outcome whose cause has its own row: a clip-level Final change, or Remove. |
+| `task-auto-completed` / `task-auto-reverted` | No — sort-only | Task outcome whose cause has its own row: a clip-level Final change, Remove, or a restore (`applyTaskAfterRestore`). |
 | `clip-replaced` | Yes | |
 | `timeline-reordered` | No — sort-only | A single drag reorder PATCHes every sibling clip whose `start` shifted. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (reorders are section-locked, so this is a correct proxy key) so one drag produces one row, not one per shifted clip. |
 | `clip-removed-from-timeline` | Yes | |
 | `clip-trim-adjusted` | No — sort-only | Single-clip drag trim. Split from the old shared `clip-trimmed` type this session. |
 | `clip-trim-applied-to-instances` | Yes | Explicit bulk "Apply Trim to All Instances" action. Split from `clip-trimmed`; distinct from the drag-trim case above — was previously indistinguishable in the log. |
 | `timeline-cleared` | Yes | |
-| `idea-hidden` | No — sort-only | Per-instrument section hide is a personal decluttering action, not band-visible news. |
-| `idea-restored` | Yes | |
+| `idea-hidden` | Yes | Per-track Remove Section (MediaBucket, Library). Reads "removed section X from Track"; rows before Oct 2026 read "hid section X from Track". |
+| `idea-restored` | Yes | MediaBucket / Library per-track restore (`POST /api/ideas/:ideaId/restore`); unused before Oct 2026. |
 | `clip-metadata-edited` | No — sort-only | Fires once per blur-to-save field edit in `ClipInfoWindow` — too granular for the feed. |
 | `clip-removed` | Yes | Bucket soft-delete. |
 | `file-uploaded` | No — sort-only | Repeated the clip-built `file-added` row. |
@@ -134,8 +146,8 @@ The numbered lists below retain per-event route and description detail not repea
 11. **`task-status-change`** — logged from `PATCH /api/production-tasks/:id` when `status` changes. Description: `"{user} changed {instrument} · {sectionName} to {label}"`. Tier-1 synthesis of `status-change` from `task_comments` rows is suppressed to avoid duplication.
 12. **`section-added`** — logged from `POST /api/tracks/:trackId/ideas` with 5-second dedup. Description: `"{user} added section {sectionName}"`. **Skipped entirely when the parent song has `type='idea'`** — sub-bucket creation for idea Parts is an invisible implementation detail. The type check fetches the song via `storage.getSongById(ideaTrack.songId)` after the dedup check.
 13. **`section-deleted`** — logged from `DELETE /api/songs/:songId/sections/:sectionName`. Description: `"{user} deleted section {sectionName}"`.
-14. **`section-restored`** — logged from `POST /api/songs/:songId/sections/restore`. Description: `"{user} restored section {sectionName}"`.
-15. **`idea-hidden`** — logged from `PATCH /api/ideas/:ideaId` (active=false). Description: `"{user} hid section {sectionName} on {trackName}"`. **Reclassified sort-only as of 2026-08-12** — despite living in this "Structural events" grouping historically, it's excluded by the read-path filter (see "Tier 2 event types — full reference" above): a per-instrument section hide is a personal decluttering action, not band-visible news.
+14. **`section-restored`** — logged from `POST /api/songs/:songId/sections/restore`. Description: `"{user} restored section {sectionName} on all tracks"`.
+15. **`idea-hidden`** — logged from `PATCH /api/ideas/:ideaId` (active=false). Description: `"{user} removed section {sectionName} from {trackName}"` (this list used to say "on {trackName}"; stored rows always said "from").
 16. **`idea-restored`** — logged from `POST /api/ideas/:ideaId/restore`. Description: `"{user} restored section {sectionName} on {trackName}"`.
 17. **`track-added`** — logged from `POST /api/songs/:songId/tracks`. Description branches on parent song type: `"{user} added a part — {trackName}"` when `song.type === 'idea'`; `"{user} added an instrument — {trackName}"` when `song.type === 'song'`. Song is fetched via `storage.getSongById(req.params.songId)` after track creation.
 18. **`track-deleted`** — logged from `DELETE /api/tracks/:trackId`. Description: `"{user} deleted an instrument — {trackName}"`.
@@ -175,6 +187,7 @@ This grouping predates the read-path filter and originally assumed every item he
 45. **`clip-deleted`** — logged from `POST /api/clips/:clipId/delete`, once, against the Idea. Description: `"{user} deleted {clipName} from {idea}"` (never "Files"). The clip's built `file-added` and comment rows vanish with it; older text-only rows stay as history.
 46. **`clip-moved-to-section`** — logged from `POST /api/clips/:clipId/move-to-section`, once. Description: `"{user} moved {oldName} to {track} → {section} as {newName}"` (" as …" dropped when the name didn't change). `instrument`/`sectionName` are the destination.
 47. **`clip-moved-to-loose`** — logged from `POST /api/clips/:clipId/move-to-loose`, once. Description: `"{user} moved {oldName} out of {track} → {section}"`, plus `" to {track}"` for a track shelf (C/D) and `" as {newName}"` when the loose file's name differs. `instrument` is the destination track for C/D, unset for B; no `sectionName`.
+48. **`section-hidden`** — logged from `POST /api/songs/:songId/sections/hide`. Description: `"{user} removed section {sectionName} from all tracks"`.
 
 **Album lifecycle events not implemented:** `album-created` / `album-renamed` / `album-deleted` have no logging path — `activity_log.songId` is `NOT NULL`, and albums have no song to attach an event to. Implementing these would need a nullable `songId` (or a new `albumId` column), a `LEFT JOIN` change in `getActivity()`, and client `ActivityEvent`/`activityUrl()` changes to route song-less events. Scoped as a future schema decision.
 
@@ -251,6 +264,8 @@ function activityUrl(event: ActivityEvent): string {
 - **`clip-made-loose`** navigates to `/?tab=files&filter=ideas` with no `ideaId` — the file is band-wide now, sitting in Column 1.
 - **`clip-moved-to-section`** has no special case: `instrument` + `sectionName` (the destination) route it to Workspace at the new section, like `clip-removed`.
 - **`clip-moved-to-loose`** with `instrument` (C/D) navigates to `/songs/:songId/workspace?instrument=X` (the destination track, no section); without it (B) to the song. Same case in Dashboard's and SongHome's `activityUrl`.
+- **`idea-hidden`** with `instrument` navigates to `/songs/:songId/workspace?instrument=X` — the track only, because the section is hidden. Checked before the generic instrument + section rule. Same in Dashboard's and SongHome's `activityUrl`.
+- **`section-hidden`** and **`section-restored`** navigate to `/songs/:songId/workspace?tab=production` (`section-restored` used to open Song Home). Same in Dashboard's and SongHome's `activityUrl`.
 - All other events (`file-added`, `marked-final`) open the workspace File Browser via `?instrument=` + `?section=`.
 
 **`autoOpenInfo` — clip inspection modal auto-open:**

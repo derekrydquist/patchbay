@@ -112,17 +112,34 @@ DELETE /api/songs/:songId/timeline-clips/non-final — deletes all non-final tim
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
 POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server
-                                           generates id, sets type "audio", color, sortOrder 999;
-                                           also creates one idea per DEFAULT_SECTION automatically
+                                           generates id, sets type "audio", color, sortOrder =
+                                           the song's highest track sortOrder + 1; also creates one
+                                           idea + production task per section currently active on
+                                           the song's other active tracks (Full Takes excluded),
+                                           idea sortOrder = its position in that list
 DELETE /api/tracks/:trackId              — hide a track (active=false); also deletes its timeline clips
-POST   /api/tracks/:trackId/restore      — restore a hidden track (active=true)
+POST   /api/tracks/:trackId/restore      — restore a hidden track (active=true); if it was hidden,
+                                           recomputes the task of each of its active sections
+                                           (taskStatusAfterRestore)
 GET    /api/songs/:songId/hidden-tracks  — list hidden tracks for a song
 POST   /api/tracks/:trackId/ideas        — create an idea (section slot) under a track;
                                            server generates id and defaults sortOrder to 0
 PATCH  /api/ideas/:ideaId               — hide an idea (active=false); also deletes timeline clips
                                            for that track+section
-POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true)
+POST   /api/ideas/:ideaId/restore        — restore a hidden idea (active=true) for its track only;
+                                           if it was hidden, recomputes its task
+                                           (taskStatusAfterRestore); logs idea-restored
 GET    /api/tracks/:trackId/hidden-ideas — list hidden ideas for a track
+POST   /api/songs/:songId/sections/hide  — song-wide hide (Production): body { sectionName };
+                                           hides the section's active ideas on every active track
+                                           (deleting their timeline clips); 404 if none; logs ONE
+                                           section-hidden row
+POST   /api/songs/:songId/sections/restore — song-wide restore (Production): body { sectionName };
+                                           flips only ideas that were hidden, recomputing their
+                                           tasks; a track added while hidden gets a new idea + task
+                                           at the section's lowest sortOrder; logs section-restored
+GET    /api/songs/:songId/hidden-sections — sections hidden on ANY active track, de-duplicated,
+                                           as [{ id: sectionName, sectionName }]
 POST   /api/ideas/:ideaId/clips          — attach a clip record to an idea; also advances
                                            the linked production task from todo to in-progress
                                            via getTaskByInstrumentSection (no-op if already
@@ -206,7 +223,8 @@ POST   /api/upload                       — upload an audio file; multipart fie
 
 GET    /api/songs/:songId/task-counts             — returns { completed: number, total: number } for
                                                      a song; counts `complete` and `will-not-play` both
-                                                     as completed; `will-not-play` is a final decision
+                                                     as completed; `will-not-play` is a final decision;
+                                                     excludes hidden-section tasks
 
 GET    /api/songs/:songId/clip-comment-summary      — map of { clipId → { count, latestCommentAt,
                                                      latestOthersCommentAt } } — the last is the newest
@@ -221,12 +239,17 @@ GET    /api/songs/:songId/clip-comment-summary      — map of { clipId → { co
 GET    /api/songs/:songId/task-comment-counts      — map of { taskId → count } for human comments
                                                      (excludes author = "System" or "Unknown")
 
-GET    /api/songs/:songId/production-tasks        — list all tasks for a song
-PATCH  /api/production-tasks/:id                  — partial update of a task (status, assignee, dueDate, etc.)
+GET    /api/songs/:songId/production-tasks        — list all tasks for a song; each row carries a
+                                                     computed sectionHidden (also on GET /api/tasks)
+PATCH  /api/production-tasks/:id                  — partial update of a task (status, assignee, dueDate, etc.);
+                                                     response includes sectionHidden. This route and the
+                                                     task comment create/edit/delete routes return 409
+                                                     when the task's section is hidden (assertTaskEditable)
 GET    /api/production-tasks/:id/comments         — list comments on a task; returns
                                                      TaskCommentWithReplies[] (top-level comments
                                                      with a `replies` array); ordered by timestamp asc
-POST   /api/production-tasks/:id/comments         — add a comment; body: { author, text, parentId? };
+POST   /api/production-tasks/:id/comments         — add a comment; body: { text, parentId? } (author
+                                                     is resolved from the session);
                                                      if parentId provided, validates it references a
                                                      top-level comment (no grandchild replies → 400)
 PATCH  /api/task-comments/:id                     — edit a comment's text; body: { text }

@@ -59,12 +59,14 @@ On success, `TimelineClip.handleMarkFinal` invalidates: `['production-tasks', so
 
 See "Complete status guard" section below.
 
-**Task changed away from "complete" → clip unmarked**
+**Task changed away from "complete" → clips unmarked**
 
-In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete"` and the previous status was `"complete"`:
-1. Call `storage.getFinalClipForTask(task.instrument, task.sectionName, task.songId)` — three sequential DB lookups: track by songId+name → idea by trackId+sectionName → clip where isFinal=true
-2. If found, call `storage.updateClip(clip.id, { isFinal: false })`
-3. Call `storage.addTaskComment()` with text: `Clip unmarked as final: "{clip.name}". Status changed to {new status label}.`
+In `PATCH /api/production-tasks/:id`, when `status` changes away from `"complete"` and the previous status was `"complete"` (this runs after `updateTask()`):
+1. Look up the task's track by song + `task.instrument` name, then every timeline clip in the task's section with `isFinal = true`.
+2. For each distinct clip name among them, set `isFinal = false` on every timeline clip with that name on the track (same-name rule — this includes same-named copies in other sections of that track) and call `storage.syncFinalClipFromTimeline(trackId, sectionName, name, false)`, which clears Final on the section's bucket clip with that name (only if it is currently Final; differently-named clips are left alone).
+3. If any names were unmarked, add one System task comment: `Clips unmarked as final: "A", "B". Status changed to {To Do | In Progress | Will Not Play}.`
+
+A failure in this step is logged and doesn't undo the status change.
 
 **Author field**
 
@@ -82,25 +84,11 @@ All three use `'in taskUpdates'` checks (not truthiness) to distinguish "field w
 
 ### Complete status guard
 
-`PATCH /api/production-tasks/:id` enforces a rule when `status === "complete"`: at least one of these conditions must be true or the request is rejected with 400.
+`PATCH /api/production-tasks/:id` enforces a rule when `status === "complete"`: the task's track (looked up by song + `task.instrument` name) must have at least one `timeline_clips` row in the task's section, or the request is rejected with `400 { message: "Cannot mark as complete — no clip in the timeline for this track and section." }` (no matching track → `400 "Cannot mark as complete — track not found."`). A Final bucket clip alone does not satisfy it, and there is no auto-promote step.
 
-**Condition A** — a clip exists in the timeline for this instrument+section (query `timelineClips` joined to `instrumentTracks` by trackId, filtered by `instrumentTracks.name = task.instrument`, `instrumentTracks.songId = task.songId`, `timelineClips.sectionName = task.sectionName`). Storage method: `getTimelineClipForTask(instrument, sectionName, songId)`.
+When the guard passes, the route marks the section's timeline clips Final before `updateTask()`: for each distinct clip name among them, it sets `isFinal = true` on every timeline clip with that name on the track (same-name rule — this includes same-named copies in other sections of that track) and calls `storage.syncFinalClipFromTimeline(trackId, sectionName, name, true)`, which marks the section's bucket clip with that name Final (falling back to the most recently created clip in the idea). It then adds one System task comment: `All clips marked final: "A", "B"`. A failure in this step is logged and doesn't block the status change.
 
-**Condition B** — a bucket clip with `isFinal = true` exists for this instrument+section. Storage method: `getFinalClipForTask(instrument, sectionName, songId)`.
-
-If **neither** passes → `400 { message: "Cannot mark as complete — no clip in the timeline or marked as final for this instrument and section." }`
-
-If **A passes but B does not** (clip on timeline, nothing yet marked final in bucket) → the route auto-promotes a bucket clip to final:
-1. Looks up the track → idea → first clip for that idea
-2. Calls `storage.updateClip(bucketClip.id, { isFinal: true })`
-3. Calls `storage.updateTimelineClip(timelineClipForTask.id, { isFinal: true })` to sync the timeline clip
-4. Clears `isFinal` on all other timeline clips with the same `trackId + sectionName`
-5. Logs `Clip marked as final: "{bucketClip.name}"` as a session note
-6. Then proceeds with `updateTask()` as normal
-
-If **B passes** (final clip already exists) → proceeds directly with `updateTask()`.
-
-The guard runs **before** `updateTask()` is called, so a rejected request makes no DB changes.
+The guard runs **before** any write, so a rejected request makes no DB changes.
 
 **Frontend** — `CellModal.patchTask.mutationFn` throws on non-OK responses. `onError` calls `useToast()` with `variant: 'destructive'` and the server's message. The optimistic update is rolled back via `context.prev`. `<Toaster />` is mounted in `App.tsx` at the app root.
 
