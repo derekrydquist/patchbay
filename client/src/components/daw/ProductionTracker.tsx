@@ -749,19 +749,26 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     return map;
   }, [finalClipsTracks]);
 
-  // Deduplicated sections in first-appearance order across all tracks
+  // Deduplicated sections, ordered by the smallest sortOrder any active track gives
+  // the section, first appearance as the tiebreak. First appearance alone put a
+  // section hidden on the first track below every other row (it only appeared via a
+  // later track).
   const sections = useMemo(() => {
-    const seen = new Set<string>();
-    const result: string[] = [];
+    const minOrder = new Map<string, number>();
+    const firstSeen: string[] = [];
     for (const track of bucket) {
       for (const idea of track.ideas) {
-        if (!seen.has(idea.sectionName)) {
-          seen.add(idea.sectionName);
-          result.push(idea.sectionName);
+        const prev = minOrder.get(idea.sectionName);
+        if (prev === undefined) {
+          firstSeen.push(idea.sectionName);
+          minOrder.set(idea.sectionName, idea.sortOrder);
+        } else if (idea.sortOrder < prev) {
+          minOrder.set(idea.sectionName, idea.sortOrder);
         }
       }
     }
-    return result;
+    // Array.prototype.sort is stable, so equal sortOrders keep first-appearance order.
+    return firstSeen.sort((a, b) => minOrder.get(a)! - minOrder.get(b)!);
   }, [bucket]);
 
   const activeTask = tasks.find(t => t.id === activeTaskId) ?? null;
