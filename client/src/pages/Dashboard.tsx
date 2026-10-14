@@ -140,6 +140,8 @@ interface Task {
   status: string;
   assignee: string;
   dueDate: string | null;
+  // The task's section is hidden for its track — left out of My Tasks and progress counts.
+  sectionHidden: boolean;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -1909,8 +1911,11 @@ export default function Dashboard() {
 
   const CURRENT_USER = user?.username ?? '';
 
+  // A task whose section is hidden for its track (sectionHidden) isn't real work: left
+  // out of My Tasks (and so the overdue / due-soon counts) and the progress counts below.
+  const liveTasks = allTasks.filter(t => !t.sectionHidden);
   const activeTasks = sortByDueDate(
-    allTasks.filter(t =>
+    liveTasks.filter(t =>
       (t.status === 'todo' || t.status === 'in-progress') &&
       t.assignee.toLowerCase() === CURRENT_USER.toLowerCase()
     )
@@ -1962,7 +1967,7 @@ export default function Dashboard() {
     );
   })();
 
-  const taskCountsBySong = allTasks.reduce<Record<string, { completed: number; total: number }>>((acc, t) => {
+  const taskCountsBySong = liveTasks.reduce<Record<string, { completed: number; total: number }>>((acc, t) => {
     if (!acc[t.songId]) acc[t.songId] = { completed: 0, total: 0 };
     acc[t.songId].total += 1;
     if (t.status === 'complete' || t.status === 'will-not-play') acc[t.songId].completed += 1;

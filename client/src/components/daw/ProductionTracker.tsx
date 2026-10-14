@@ -7,7 +7,7 @@ import {
   CheckCircle2, Circle, Clock, Ban, Music2, Plus, Minus, MessageSquare, Pencil, Trash2, Check, ChevronDown, ChevronUp, LayoutList,
 } from 'lucide-react';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
-import { bucketKeys, type ApiTrack } from '@/lib/bucket-api';
+import { bucketKeys, type ApiTrack, type ApiProductionTask } from '@/lib/bucket-api';
 import {
   useAddSection, useAddInstrument,
   useDeleteTrack, useRestoreTrack,
@@ -26,7 +26,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import type { ProductionTask, TaskComment } from '@shared/schema';
+import type { TaskComment } from '@shared/schema';
 
 
 const AVATAR_COLORS = [
@@ -74,6 +74,25 @@ function formatTimestamp(ts: number): string {
 
 // ── CellModal ─────────────────────────────────────────────────────────────────
 
+// A failed task request, with its HTTP status so a 409 (the task's section was hidden
+// for its track since this view loaded — see ApiProductionTask.sectionHidden) can
+// refresh the task lists.
+class TaskRequestError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'TaskRequestError';
+  }
+}
+
+async function taskRequest(url: string, init: RequestInit, fallback: string): Promise<Response> {
+  const r = await fetch(url, init);
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new TaskRequestError(r.status, body.message ?? fallback);
+  }
+  return r;
+}
+
 function CellModal({
   open,
   onOpenChange,
@@ -85,7 +104,7 @@ function CellModal({
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  task: ProductionTask;
+  task: ApiProductionTask;
   songId: string;
   currentUser: string;
   assignees: string[];
@@ -156,22 +175,18 @@ function CellModal({
   });
 
   const patchTask = useMutation({
-    mutationFn: async (updates: Partial<ProductionTask>) => {
-      const r = await fetch(`/api/production-tasks/${task.id}`, {
+    mutationFn: async (updates: Partial<ApiProductionTask>) => {
+      const r = await taskRequest(`/api/production-tasks/${task.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...updates, author: currentUser }),
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({}));
-        throw new Error(body.message ?? 'Failed to update task');
-      }
+      }, 'Failed to update task');
       return r.json();
     },
     onMutate: async (updates) => {
       await queryClient.cancelQueries({ queryKey: ['production-tasks', songId] });
-      const prev = queryClient.getQueryData<ProductionTask[]>(['production-tasks', songId]);
-      queryClient.setQueryData<ProductionTask[]>(['production-tasks', songId], (old) =>
+      const prev = queryClient.getQueryData<ApiProductionTask[]>(['production-tasks', songId]);
+      queryClient.setQueryData<ApiProductionTask[]>(['production-tasks', songId], (old) =>
         old?.map(t => t.id === task.id ? { ...t, ...updates } : t)
       );
       return { prev };
@@ -190,6 +205,10 @@ function CellModal({
         description: err instanceof Error ? err.message : 'An error occurred.',
         variant: 'destructive',
       });
+      // onSettled already refreshes this song's tasks; a 409 also refreshes My Tasks.
+      if (err instanceof TaskRequestError && err.status === 409) {
+        queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
+      }
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
@@ -202,13 +221,26 @@ function CellModal({
     },
   });
 
+  // Comment writes: a refused request (e.g. 409 — the section was hidden for this
+  // track) toasts the server's message, and a 409 refreshes the task lists so the
+  // stale view catches up (the modal closes once the task comes back hidden).
+  const onCommentError = (err: Error) => {
+    toast({ title: 'Cannot update task', description: err.message, variant: 'destructive' });
+    if (err instanceof TaskRequestError && err.status === 409) {
+      queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] });
+      queryClient.invalidateQueries({ queryKey: ['all-tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
+    }
+  };
+
   const addComment = useMutation({
     mutationFn: (text: string) =>
-      fetch(`/api/production-tasks/${task.id}/comments`, {
+      taskRequest(`/api/production-tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
-      }).then(r => r.json()),
+      }, 'Failed to add comment').then(r => r.json()),
+    onError: onCommentError,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
@@ -220,11 +252,12 @@ function CellModal({
 
   const editComment = useMutation({
     mutationFn: ({ id, text }: { id: string; text: string }) =>
-      fetch(`/api/task-comments/${id}`, {
+      taskRequest(`/api/task-comments/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
-      }).then(r => r.json()),
+      }, 'Failed to edit comment').then(r => r.json()),
+    onError: onCommentError,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -233,7 +266,8 @@ function CellModal({
   });
 
   const deleteComment = useMutation({
-    mutationFn: (id: string) => fetch(`/api/task-comments/${id}`, { method: 'DELETE' }),
+    mutationFn: (id: string) => taskRequest(`/api/task-comments/${id}`, { method: 'DELETE' }, 'Failed to delete comment'),
+    onError: onCommentError,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -242,11 +276,12 @@ function CellModal({
 
   const addReply = useMutation({
     mutationFn: ({ parentId, text }: { parentId: string; text: string }) =>
-      fetch(`/api/production-tasks/${task.id}/comments`, {
+      taskRequest(`/api/production-tasks/${task.id}/comments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, parentId }),
-      }).then(r => r.json()),
+      }, 'Failed to add reply').then(r => r.json()),
+    onError: onCommentError,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['task-comments', task.id] });
       queryClient.invalidateQueries({ queryKey: ['task-comment-counts', songId] });
@@ -693,16 +728,30 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
   });
   const assignees = usersData.map(u => u.username);
 
-  const { data: tasks = [] } = useQuery<ProductionTask[]>({
+  const { data: tasks = [] } = useQuery<ApiProductionTask[]>({
     queryKey: ['production-tasks', songId],
     queryFn: () => fetch(`/api/songs/${songId}/production-tasks`).then(r => r.json()),
   });
 
-  // Auto-open task modal when taskId is in the URL
+  // Auto-open task modal when taskId is in the URL. A task whose section is hidden for
+  // its track (sectionHidden) never opens: it toasts instead and the param is consumed
+  // (same replaceState pattern as MediaBucket's arrival links), so a refresh or a later
+  // task refetch doesn't toast again.
   useEffect(() => {
-    if (taskIdFromUrl && tasks.length > 0 && !activeTaskId) {
-      setActiveTaskId(taskIdFromUrl);
+    if (!taskIdFromUrl || tasks.length === 0 || activeTaskId) return;
+    if (tasks.find(t => t.id === taskIdFromUrl)?.sectionHidden) {
+      toast({ description: 'This section was removed for this track.' });
+      const params = new URLSearchParams(window.location.search);
+      params.delete('taskId');
+      const query = params.toString();
+      window.history.replaceState(
+        window.history.state,
+        '',
+        `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
+      );
+      return;
     }
+    setActiveTaskId(taskIdFromUrl);
   }, [taskIdFromUrl, tasks.length]);
 
   const { data: bucket = [] } = useQuery<ApiTrack[]>({
@@ -771,9 +820,11 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     return firstSeen.sort((a, b) => minOrder.get(a)! - minOrder.get(b)!);
   }, [bucket]);
 
-  const activeTask = tasks.find(t => t.id === activeTaskId) ?? null;
+  // A hidden-section task never shows its modal — also closes one that was open when a
+  // refetch (or a 409) brings the task back hidden.
+  const activeTask = tasks.find(t => t.id === activeTaskId && !t.sectionHidden) ?? null;
 
-  function findTask(trackName: string, section: string): ProductionTask | null {
+  function findTask(trackName: string, section: string): ApiProductionTask | null {
     return tasks.find(t => t.instrument === trackName && t.sectionName === section) ?? null;
   }
 
@@ -1107,6 +1158,22 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
                 </ContextMenu>
                 {bucket.map((track) => {
                   const task = findTask(track.name, section);
+                  // The section is hidden for this track: the task stands for something
+                  // that doesn't exist. A plain, unfocusable div (not the status button) —
+                  // no status, badges or modal. Same border and min height so the grid
+                  // doesn't shift.
+                  if (task?.sectionHidden) {
+                    return (
+                      <div
+                        key={track.id}
+                        aria-disabled="true"
+                        className="relative border-t border-l border-white/5 min-h-[78px] p-3 flex flex-col justify-center gap-1 bg-black/30 select-none"
+                      >
+                        <span className="text-[10px] font-semibold text-white/30 leading-snug">Section removed for this track</span>
+                        <span className="text-[9px] text-white/20 leading-snug">Restore it from Add Section in Arrangement</span>
+                      </div>
+                    );
+                  }
                   const status = (task?.status ?? 'todo') as TaskStatus;
                   const cfg = STATUS_CONFIG[status];
                   const Icon = cfg.icon;

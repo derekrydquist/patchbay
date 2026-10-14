@@ -4,6 +4,7 @@ import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
+import type { ApiProductionTask } from '@/lib/bucket-api';
 import { DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { useLooseFileOrganizeDnd, useVersionMoveDnd, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { VersionMoveInUseDialog } from '@/components/daw/ClipInUseDialog';
@@ -21,7 +22,6 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import type { ProductionTask } from '@shared/schema';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -2185,7 +2185,7 @@ export default function SongHome() {
     queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
 
-  const { data: tasks = [] } = useQuery<ProductionTask[]>({
+  const { data: tasks = [] } = useQuery<ApiProductionTask[]>({
     queryKey: ['production-tasks', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}/production-tasks`).then(r => r.json()),
   });
@@ -2208,8 +2208,9 @@ export default function SongHome() {
 
   const CURRENT_USER = user?.username ?? '';
 
+  // Tasks whose section is hidden for their track (sectionHidden) aren't real work — never listed.
   const activeTasks = [...tasks.filter(t =>
-    (t.status === 'todo' || t.status === 'in-progress') && t.assignee === CURRENT_USER
+    !t.sectionHidden && (t.status === 'todo' || t.status === 'in-progress') && t.assignee === CURRENT_USER
   )]
     .sort((a, b) => {
       if (!a.dueDate && !b.dueDate) return 0;

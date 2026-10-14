@@ -1,4 +1,5 @@
 import type { Clip as DawClip } from '@/lib/daw-data';
+import type { ProductionTask } from '@shared/schema';
 
 // ─── Wire types for GET /api/songs/:id/bucket ────────────────────────────────
 // Single source of truth. Union of all fields the API returns; both Dashboard
@@ -39,6 +40,12 @@ export interface ApiIdea {
   clips: ApiClip[];
   hasNew: boolean;
 }
+
+// A production task row as the task routes return it (GET /api/songs/:id/production-tasks,
+// GET /api/tasks, the task PATCH response). sectionHidden: the task's section is hidden
+// for its track — the Production tab shows the cell disabled, task lists and progress
+// counts leave it out, and the server refuses edits to it (409).
+export type ApiProductionTask = ProductionTask & { sectionHidden: boolean };
 
 export interface ApiTrack {
   id: string;
