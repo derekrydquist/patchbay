@@ -9,7 +9,7 @@ import {
   type Song, type InsertSong,
   type InstrumentTrack, type InsertInstrumentTrack,
   type Idea, type InsertIdea,
-  type Clip, type InsertClip,
+  type Clip, type InsertClip, type ClipMetadata,
   type LooseFile, type InsertLooseFile,
   type TimelineClip, type InsertTimelineClip,
   type ProductionTask, type InsertProductionTask,
@@ -50,6 +50,37 @@ export class ClipNotLooseableError extends Error {
 
 // Thrown by storage.deleteIdeaClip when the clip can't be deleted (not in an Idea,
 // final, or placed on a timeline) — the route translates this to a 409.
+// ─── Upload undo ──────────────────────────────────────────────────────────────
+// One file a client just uploaded, with where it landed as the client knew it.
+export type UndoUploadItem =
+  | { kind: 'clip'; id: string; ideaId: string; taskAdvanced: boolean }
+  | { kind: 'loose-file'; id: string; songId: string | null; trackId: string | null };
+
+export interface UndoUploadContext {
+  bandId: string;
+  username: string | null;
+  now: number; // ms since epoch
+}
+
+export interface UndoUploadResult {
+  id: string;
+  status: 'undone' | 'refused';
+  reason?: string;
+}
+
+/** How long after landing an upload can still be undone — a backstop behind the toast. */
+export const UPLOAD_UNDO_WINDOW_MS = 2 * 60 * 1000;
+
+// True while a file's metadata still has the as-uploaded empty Musical Intelligence
+// fields (every upload path writes bpm 0 and empty key / time signature / description
+// / tags). Any edit through More Info leaves one of them set. An edit cleared back to
+// empty can't be told apart — harmless, nothing is lost. Technical fields (format,
+// sample rate, …) aren't editable, so they're not checked.
+function isUploadMetadataUntouched(m: ClipMetadata | null | undefined): boolean {
+  if (!m) return true;
+  return !m.bpm && !m.key && !m.timeSignature && !m.description && !(m.tags?.length);
+}
+
 export class ClipNotDeletableError extends Error {
   constructor(message: string) {
     super(message);
@@ -287,6 +318,8 @@ export interface IStorage {
   getLooseFile(id: string): Promise<LooseFile | undefined>;
   deleteLooseFile(id: string): Promise<void>;
   deleteIdeaClip(clipId: string): Promise<Clip>;
+  // Undo a just-finished upload (POST /api/uploads/undo) — see undoUpload below.
+  undoUpload(item: UndoUploadItem, ctx: UndoUploadContext): UndoUploadResult;
   materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip>;
   moveClipToIdea(clipId: string, destSongId: string): Promise<Clip>;
   makeClipLoose(clipId: string, bandId: string): Promise<LooseFile>;
@@ -1477,6 +1510,99 @@ export class SQLiteStorage implements IStorage {
     });
     if (deleted.src) unlinkUploadIfUnreferenced(deleted.src, '[deleteIdeaClip]');
     return deleted;
+  }
+
+  // Undo of a just-finished upload (a Finder drop's toast). Refused unless the file is
+  // exactly as it landed: same band, uploaded by this user, under UPLOAD_UNDO_WINDOW_MS
+  // old, still where it landed, no notes, no addedToSongs, no metadata edits, and for a
+  // clip: active, not Final and not on a timeline. Passing that, one transaction
+  // hard-deletes the row and the upload's own feed row (matched on clip_id), writing no
+  // new activity. A clip whose upload advanced its task (taskAdvanced) puts the task
+  // back to To Do when it is still In Progress and the section has no other active
+  // clip — a plain update, no task comment or activity. Because the row is deleted, not
+  // hidden, landingClipName gives the next upload the freed V-number if this was the
+  // highest. The audio is unlinked after commit, only if nothing else uses it.
+  // Checks and writes share the transaction, so nothing can change between them.
+  undoUpload(item: UndoUploadItem, ctx: UndoUploadContext): UndoUploadResult {
+    const refuse = (reason: string): UndoUploadResult => ({ id: item.id, status: 'refused', reason });
+    const isUploader = (uploadedBy: string | null | undefined) =>
+      !!ctx.username && !!uploadedBy && uploadedBy.toLowerCase() === ctx.username.toLowerCase();
+    const isRecent = (createdAt: string) => {
+      const t = Date.parse(createdAt);
+      return Number.isFinite(t) && ctx.now - t <= UPLOAD_UNDO_WINDOW_MS;
+    };
+
+    const outcome = db.transaction((tx): { result: UndoUploadResult; src: string | null } => {
+      if (item.kind === 'clip') {
+        const row = tx.select({ clip: clips, idea: ideas, track: instrumentTracks, bandId: songs.bandId })
+          .from(clips)
+          .innerJoin(ideas, eq(clips.ideaId, ideas.id))
+          .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+          .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+          .where(eq(clips.id, item.id))
+          .get();
+        if (!row || row.bandId !== ctx.bandId) return { result: refuse("This file no longer exists."), src: null };
+        const { clip } = row;
+        if (!isUploader(clip.metadata?.uploadedBy)) return { result: refuse("Only the person who uploaded this file can undo it."), src: null };
+        if (!isRecent(clip.createdAt)) return { result: refuse("It's too late to undo this upload."), src: null };
+        if (clip.ideaId !== item.ideaId || !clip.active) return { result: refuse("This file has been moved or removed since it was uploaded."), src: null };
+        if (clip.isFinal) return { result: refuse("This file is marked Final."), src: null };
+        if (tx.select({ id: timelineClips.id }).from(timelineClips).where(eq(timelineClips.bucketClipId, clip.id)).get()) {
+          return { result: refuse("This file has been placed on the timeline."), src: null };
+        }
+        if (tx.select({ id: clipComments.id }).from(clipComments).where(eq(clipComments.clipId, clip.id)).get()) {
+          return { result: refuse("This file has notes."), src: null };
+        }
+        if (clip.addedToSongs?.length) return { result: refuse("This file has been added to a song."), src: null };
+        if (!isUploadMetadataUntouched(clip.metadata)) return { result: refuse("This file's details have been edited."), src: null };
+
+        tx.delete(clips).where(eq(clips.id, clip.id)).run();
+        tx.delete(activityLog)
+          .where(and(eq(activityLog.clipId, clip.id), eq(activityLog.type, 'file-uploaded')))
+          .run();
+        if (item.taskAdvanced) {
+          // The same task advanceTaskOnClipAdded moved (looked up by song + track name + section).
+          const task = tx.select().from(productionTasks).where(and(
+            eq(productionTasks.songId, row.track.songId),
+            eq(productionTasks.instrument, row.track.name),
+            eq(productionTasks.sectionName, row.idea.sectionName),
+          )).get();
+          const otherActive = tx.select({ id: clips.id }).from(clips)
+            .where(and(eq(clips.ideaId, row.idea.id), eq(clips.active, true)))
+            .get();
+          if (task?.status === 'in-progress' && !otherActive) {
+            tx.update(productionTasks).set({ status: 'todo' }).where(eq(productionTasks.id, task.id)).run();
+          }
+        }
+        return { result: { id: item.id, status: 'undone' }, src: clip.src };
+      }
+
+      const lf = tx.select().from(looseFiles).where(eq(looseFiles.id, item.id)).get();
+      const lfBandId = lf?.songId
+        ? tx.select({ bandId: songs.bandId }).from(songs).where(eq(songs.id, lf.songId)).get()?.bandId
+        : lf?.bandId;
+      if (!lf || lfBandId !== ctx.bandId) return { result: refuse("This file no longer exists."), src: null };
+      if (!isUploader(lf.uploadedBy)) return { result: refuse("Only the person who uploaded this file can undo it."), src: null };
+      if (!isRecent(lf.createdAt)) return { result: refuse("It's too late to undo this upload."), src: null };
+      if (lf.songId !== item.songId || lf.trackId !== item.trackId) {
+        return { result: refuse("This file has been moved since it was uploaded."), src: null };
+      }
+      if (tx.select({ id: looseFileComments.id }).from(looseFileComments).where(eq(looseFileComments.looseFileId, lf.id)).get()) {
+        return { result: refuse("This file has notes."), src: null };
+      }
+      if (lf.addedToSongs?.length) return { result: refuse("This file has been added to a song."), src: null };
+      if (!isUploadMetadataUntouched(lf.metadata)) return { result: refuse("This file's details have been edited."), src: null };
+
+      tx.delete(looseFiles).where(eq(looseFiles.id, lf.id)).run();
+      // Band-wide files never wrote one; the delete is then a no-op.
+      tx.delete(activityLog)
+        .where(and(eq(activityLog.clipId, lf.id), eq(activityLog.type, 'loose-file-uploaded')))
+        .run();
+      return { result: { id: item.id, status: 'undone' }, src: lf.src };
+    });
+
+    if (outcome.src) unlinkUploadIfUnreferenced(outcome.src, '[undoUpload]');
+    return outcome.result;
   }
 
   async materializeLooseFile(looseFileId: string, trackId: string, sectionName: string): Promise<Clip> {

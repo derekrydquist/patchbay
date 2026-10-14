@@ -29,6 +29,8 @@ import {
   insertClipSchema,
   insertLooseFileSchema,
   type ClipMetadata,
+  type Clip,
+  type LooseFile,
   insertProductionTaskSchema,
   insertTaskCommentSchema,
   songs,
@@ -113,6 +115,213 @@ function buildFilename(
   const sec = slug(section);
   const token = randomUUID().slice(0, 8);
   return `${inst}_${sec}_v${versionNum}_${token}${ext}`;
+}
+
+// ─── Stored uploads ───────────────────────────────────────────────────────────
+// The file half of every upload: POST /api/upload (two-step flow, still used by
+// UploadModal) and the one-request upload-and-create routes (Finder drops) share it.
+
+/** buildFilename's output resolved outside uploads/ — answered with a 400. */
+class UploadPathError extends Error {
+  constructor() {
+    super("Invalid upload destination.");
+    this.name = "UploadPathError";
+  }
+}
+
+/** A one-request upload's row could not be built from the request — answered with a 400. */
+class UploadRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UploadRequestError";
+  }
+}
+
+interface StoredUpload {
+  destPath: string;
+  url: string;
+  duration: number;
+  format: string;
+  originalFileName: string;
+  sampleRate: string;
+  bitDepth: string;
+  channels: string;
+  uploadedDate: string;
+}
+
+/**
+ * Write a multer upload to uploads/ under a unique name (buildFilename) and read
+ * its duration and technical metadata. Throws UploadPathError before writing if the
+ * name would land outside uploads/; the "wx" write throws rather than overwrite.
+ */
+async function storeUploadedFile(
+  file: Express.Multer.File,
+  instrument: string,
+  section: string,
+  versionNum: number,
+): Promise<StoredUpload> {
+  const filename = buildFilename(instrument, section, versionNum, file.originalname);
+  const destPath = path.join(UPLOADS_DIR, filename);
+  // Second line of defense behind buildFilename's slugging.
+  if (path.dirname(path.resolve(destPath)) !== path.resolve(UPLOADS_DIR)) {
+    throw new UploadPathError();
+  }
+
+  // Write buffer to disk. "wx" fails if the file exists — an upload must never
+  // overwrite audio another row points at; a token collision fails the upload instead.
+  fs.writeFileSync(destPath, file.buffer, { flag: "wx" });
+
+  // Extract duration and technical metadata using music-metadata
+  let duration = 0;
+  let format = path.extname(file.originalname).replace(".", "").toUpperCase() || "WAV";
+  let sampleRateHz: number | undefined;
+  let bitDepth: number | undefined;
+  let numChannels: number | undefined;
+  try {
+    // Try with mimetype string first
+    let meta = await parseBuffer(file.buffer, file.mimetype, { duration: true });
+    duration = meta.format.duration ?? 0;
+
+    // If that returns 0, try without mimetype hint (let music-metadata auto-detect)
+    if (duration === 0) {
+      meta = await parseBuffer(file.buffer, undefined, { duration: true });
+      duration = meta.format.duration ?? 0;
+    }
+
+    if (meta.format.container) format = meta.format.container;
+    sampleRateHz = meta.format.sampleRate;
+    bitDepth = meta.format.bitsPerSample;
+    numChannels = meta.format.numberOfChannels;
+  } catch {
+    console.warn("[upload] could not parse metadata for", file.originalname);
+  }
+
+  // If duration is still 0, fall back to a default so the clip is visible on the timeline
+  if (duration < 1) {
+    duration = 5;
+  }
+
+  // Format technical fields into display strings
+  const sampleRateStr = sampleRateHz
+    ? (sampleRateHz % 1000 === 0 ? `${sampleRateHz / 1000}kHz` : `${(sampleRateHz / 1000).toFixed(1)}kHz`)
+    : '';
+  const bitDepthStr = bitDepth ? `${bitDepth}-bit` : '';
+  const channelsStr = numChannels === 1 ? 'Mono' : numChannels === 2 ? 'Stereo' : numChannels === 6 ? '5.1' : '';
+
+  return {
+    destPath,
+    // The URL the browser's <audio> tag will use
+    url: `/uploads/${filename}`,
+    duration,
+    format,
+    originalFileName: file.originalname,
+    sampleRate: sampleRateStr,
+    bitDepth: bitDepthStr,
+    channels: channelsStr,
+    uploadedDate: new Date().toISOString().split('T')[0],
+  };
+}
+
+/** Remove a stored upload whose row was never created. Best-effort. */
+function discardStoredUpload(stored: StoredUpload): void {
+  try {
+    fs.unlinkSync(stored.destPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      console.error("[upload] failed to remove orphaned upload:", err);
+    }
+  }
+}
+
+/**
+ * Store the file, then create its row with `create`. If `create` throws, the file
+ * is unlinked before the error propagates — a one-request upload never leaves audio
+ * on disk without a row. Anything that runs after the row exists (activity, tasks)
+ * belongs outside `create`, so its failure can't unlink a file a row points at.
+ */
+async function storeUploadThenCreate<T>(
+  file: Express.Multer.File,
+  instrument: string,
+  section: string,
+  versionNum: number,
+  create: (stored: StoredUpload) => Promise<T>,
+): Promise<T> {
+  const stored = await storeUploadedFile(file, instrument, section, versionNum);
+  try {
+    return await create(stored);
+  } catch (err) {
+    discardStoredUpload(stored);
+    throw err;
+  }
+}
+
+/** Error response for a one-request upload route. */
+function sendUploadError(res: Response, err: unknown, logTag: string): void {
+  if (err instanceof UploadPathError || err instanceof UploadRequestError) {
+    res.status(400).json({ message: err.message });
+    return;
+  }
+  console.error(`${logTag} error:`, err);
+  res.status(500).json({ message: "Upload failed" });
+}
+
+/**
+ * The metadata a loose file is created with — the shape POST /api/songs/:songId/
+ * loose-files and POST /api/loose-files/unassigned build from the upload fields.
+ */
+function looseFileUploadMetadata(fields: {
+  format?: string; originalFileName?: string; uploadedDate?: string;
+  sampleRate?: string; bitDepth?: string; channels?: string;
+}, uploadedBy: string): ClipMetadata {
+  return {
+    format: fields.format ?? '',
+    originalFileName: fields.originalFileName ?? '',
+    uploadedBy,
+    uploadedDate: fields.uploadedDate ?? new Date().toISOString().split('T')[0],
+    sampleRate: fields.sampleRate ?? '',
+    bitDepth: fields.bitDepth ?? '',
+    channels: fields.channels === 'Mono' || fields.channels === '5.1' ? fields.channels : 'Stereo',
+    peakLevel: '',
+    timeSignature: '',
+    key: '',
+    bpm: 0,
+    description: '',
+    tags: [],
+  };
+}
+
+/**
+ * The loose-file fields a one-request upload fills in — UploadModal's loose and
+ * band-loose bodies (name = original filename, type 'audio', gold) plus the
+ * metadata the create routes build. Callers add id and songId / trackId / bandId.
+ */
+function looseFileUploadRow(stored: StoredUpload, file: Express.Multer.File, uploadedBy: string) {
+  return {
+    name: stored.originalFileName || file.originalname,
+    type: 'audio' as const,
+    color: 'hsl(var(--primary))',
+    duration: stored.duration,
+    src: stored.url,
+    metadata: looseFileUploadMetadata(stored, uploadedBy),
+    uploadedBy,
+  };
+}
+
+/**
+ * The 'loose-file-uploaded' feed row for a song-scoped loose file. clip_id carries
+ * the loose file's id so an upload's Undo can delete the row. Band-wide files log
+ * nothing (activity_log.songId is NOT NULL).
+ */
+function logLooseFileUploaded(songId: string, looseFile: LooseFile, actor: string): void {
+  storage.logActivity({
+    id: randomUUID(),
+    songId,
+    type: 'loose-file-uploaded',
+    description: `${actor} added ${looseFile.name}`,
+    timestamp: Date.now(),
+    author: actor,
+    clipId: looseFile.id,
+  }).catch(console.error);
 }
 
 // ─── Band session enrichment ──────────────────────────────────────────────────
@@ -353,13 +562,55 @@ async function reconcileSectionTaskStatus(
 // organize/place-on-timeline routes: advances the matching production task from
 // "todo" to "in-progress" when a clip first lands in a section, then reconciles
 // full section status (handles the case where clips already exist and this one
-// completes the set).
-async function advanceTaskOnClipAdded(track: InstrumentTrack, sectionName: string, actor: string): Promise<void> {
+// completes the set). Returns true only if it moved the task from To Do to In
+// Progress itself (what an upload's Undo may revert); reconcile's outcomes don't count.
+async function advanceTaskOnClipAdded(track: InstrumentTrack, sectionName: string, actor: string): Promise<boolean> {
   const task = await storage.getTaskByInstrumentSection(track.songId, track.name, sectionName);
+  let advanced = false;
   if (task?.status === "todo") {
     await storage.updateTask(task.id, { status: "in-progress" });
+    advanced = true;
   }
   await reconcileSectionTaskStatus(track.id, sectionName, actor);
+  return advanced;
+}
+
+// ─── afterClipUploaded ─────────────────────────────────────────────────────────
+// What follows an uploaded clip's insert, for POST /api/ideas/:ideaId/clips and the
+// one-request POST /api/ideas/:ideaId/clips/upload: the sort-only 'file-uploaded'
+// row (clip_id set, so an upload's Undo can delete it) and the task advance. Never
+// throws — a failure is logged and the upload still succeeds, as it always has.
+// Returns advanceTaskOnClipAdded's result.
+async function afterClipUploaded(req: Request, songId: string, ideaId: string, clip: Clip, logTag: string): Promise<boolean> {
+  // Advance task from "todo" → "in-progress" when the first clip lands in the bucket
+  const uploadActor = req.session.userId
+    ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+    : 'Someone';
+  try {
+    const idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
+    if (idea?.sectionName && idea.trackId) {
+      const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
+      if (track) {
+        storage.logActivity({
+          id: randomUUID(), songId,
+          type: 'file-uploaded',
+          description: `${uploadActor} uploaded ${clip.name}`,
+          timestamp: Date.now(),
+          instrument: track.name,
+          sectionName: idea.sectionName,
+          author: uploadActor,
+          clipId: clip.id,
+        }).catch(console.error);
+        // Keep direct todo→in-progress for bucket-only uploads (reconcile returns early
+        // when there are zero timeline clips, so this is the only path that fires then),
+        // and also reconcile in case timeline clips already exist for this section.
+        return await advanceTaskOnClipAdded(track, idea.sectionName, uploadActor);
+      }
+    }
+  } catch (err) {
+    console.error(`${logTag} failed to advance task status:`, err);
+  }
+  return false;
 }
 
 // ─── applyTaskAfterVersionLeaves ───────────────────────────────────────────────
@@ -1950,36 +2201,89 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     const clip = await storage.createClip(parsed.data);
+    await afterClipUploaded(req, songId, ideaId, clip, "[ideas/:ideaId/clips]");
+    res.status(201).json(clip);
+  });
 
-    // Advance task from "todo" → "in-progress" when the first clip lands in the bucket
-    const uploadActor = req.session.userId
-      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
-      : 'Someone';
-    try {
-      const idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get();
-      if (idea?.sectionName && idea.trackId) {
-        const track = db.select().from(instrumentTracks).where(eq(instrumentTracks.id, idea.trackId)).get();
-        if (track) {
-          storage.logActivity({
-            id: randomUUID(), songId,
-            type: 'file-uploaded',
-            description: `${uploadActor} uploaded ${clip.name}`,
-            timestamp: Date.now(),
-            instrument: track.name,
-            sectionName: idea.sectionName,
-            author: uploadActor,
-          }).catch(console.error);
-          // Keep direct todo→in-progress for bucket-only uploads (reconcile returns early
-          // when there are zero timeline clips, so this is the only path that fires then),
-          // and also reconcile in case timeline clips already exist for this section.
-          await advanceTaskOnClipAdded(track, idea.sectionName, uploadActor);
-        }
-      }
-    } catch (err) {
-      console.error("[ideas/:ideaId/clips] failed to advance task status:", err);
+  /**
+   * POST /api/ideas/:ideaId/clips/upload — Finder drops: upload a file and create its
+   * clip in one request (multipart, `file` field). Same result as POST /api/upload
+   * then POST /api/ideas/:ideaId/clips with UploadModal's placed-mode body, with
+   * uploadedBy from the session. Optional `id` field: the clip id (UploadModal picks
+   * the clip id client-side too). Answers the clip plus taskAdvanced (this upload
+   * moved the section's task from To Do to In Progress).
+   */
+  app.post("/api/ideas/:ideaId/clips/upload", requireBand, upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+    const file = req.file;
+    const ideaId = req.params.ideaId as string;
+    const songId = ideaSongId(ideaId);
+    if (!songId) return res.status(404).json({ message: "Not found" });
+    if (!assertSongOwned(req, res, songId)) return;
+
+    const clipId = (req.body as { id?: unknown }).id;
+    if (clipId !== undefined && (typeof clipId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(clipId))) {
+      return res.status(400).json({ message: "id must be 1–64 letters, digits, '-' or '_'." });
     }
 
-    res.status(201).json(clip);
+    const dest = db.select({ idea: ideas, track: instrumentTracks, song: songs })
+      .from(ideas)
+      .innerJoin(instrumentTracks, eq(ideas.trackId, instrumentTracks.id))
+      .innerJoin(songs, eq(instrumentTracks.songId, songs.id))
+      .where(eq(ideas.id, ideaId))
+      .get();
+    if (!dest) return res.status(404).json({ message: "Not found" });
+    const isIdeaSong = dest.song.type === 'idea';
+
+    // Physical name: what UploadModal sends as instrument/section — the track and
+    // section for a song; for an Idea, the Idea's name and its hidden section.
+    const uploadedBy = (await sessionUsername(req)) ?? 'Unknown';
+    const versionNum = (await storage.countClipsForIdea(ideaId)) + 1;
+    let clip: Clip;
+    try {
+      clip = await storeUploadThenCreate(
+        file,
+        isIdeaSong ? dest.song.name : dest.track.name,
+        dest.idea.sectionName,
+        versionNum,
+        async (stored) => {
+          // UploadModal's name: the filename for an Idea; for a song a placeholder
+          // that createClip's landingClipName replaces (Full Takes keep it).
+          const activeCount = await storage.countActiveClipsForIdea(ideaId);
+          const name = isIdeaSong
+            ? (stored.originalFileName || file.originalname)
+            : `${dest.track.name} ${dest.idea.sectionName} V${activeCount + 1}`;
+          const parsed = insertClipSchema.safeParse({
+            id: clipId ?? randomUUID(),
+            name,
+            type: dest.track.type === 'vocal' ? 'vocal' : 'audio',
+            color: dest.track.color ?? 'hsl(var(--primary))',
+            duration: stored.duration,
+            src: stored.url,
+            sectionName: dest.idea.sectionName,
+            isFinal: false,
+            metadata: {
+              format: stored.format,
+              originalFileName: stored.originalFileName,
+              uploadedBy,
+              uploadedDate: stored.uploadedDate,
+              sampleRate: stored.sampleRate,
+              bitDepth: stored.bitDepth,
+              channels: (stored.channels as ClipMetadata['channels']) || 'Stereo',
+              peakLevel: '', timeSignature: '', key: '', bpm: 0, description: '', tags: [],
+            },
+            ideaId,
+          });
+          if (!parsed.success) throw new UploadRequestError(parsed.error.issues[0].message);
+          return storage.createClip(parsed.data);
+        },
+      );
+    } catch (err) {
+      return sendUploadError(res, err, "[ideas/:ideaId/clips/upload]");
+    }
+
+    const taskAdvanced = await afterClipUploaded(req, songId, ideaId, clip, "[ideas/:ideaId/clips/upload]");
+    res.status(201).json({ ...clip, taskAdvanced });
   });
 
   // ─── Loose Files (song-scoped, unplaced uploads) ──────────────────────────────
@@ -2040,21 +2344,10 @@ export async function registerRoutes(
       color,
       duration,
       src: url ?? null,
-      metadata: {
-        format: format ?? '',
-        originalFileName: originalFileName ?? '',
-        uploadedBy: looseFileActor,
-        uploadedDate: uploadedDate ?? new Date().toISOString().split('T')[0],
-        sampleRate: sampleRate ?? '',
-        bitDepth: bitDepth ?? '',
-        channels: channels === 'Mono' || channels === '5.1' ? channels : 'Stereo',
-        peakLevel: '',
-        timeSignature: '',
-        key: '',
-        bpm: 0,
-        description: '',
-        tags: [],
-      },
+      metadata: looseFileUploadMetadata(
+        { format, originalFileName, uploadedDate, sampleRate, bitDepth, channels },
+        looseFileActor,
+      ),
       uploadedBy: looseFileActor,
     });
     if (!parsed.success) {
@@ -2062,16 +2355,52 @@ export async function registerRoutes(
     }
 
     const looseFile = await storage.createLooseFile(parsed.data);
+    logLooseFileUploaded(songId, looseFile, looseFileActor);
+    res.status(201).json(looseFile);
+  });
 
-    storage.logActivity({
-      id: randomUUID(),
-      songId,
-      type: 'loose-file-uploaded',
-      description: `${looseFileActor} added ${looseFile.name}`,
-      timestamp: Date.now(),
-      author: looseFileActor,
-    }).catch(console.error);
+  /**
+   * POST /api/songs/:songId/loose-files/upload — Finder drops: upload a file and
+   * create its song-scoped loose file in one request (multipart, `file` field; optional
+   * `trackId` field for the Track-scoped tier, validated as above). Same result as
+   * POST /api/upload then POST /api/songs/:songId/loose-files with UploadModal's
+   * loose-mode body.
+   */
+  app.post("/api/songs/:songId/loose-files/upload", requireBand, upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+    const file = req.file;
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
 
+    // Validated before anything is written.
+    const trackId = (req.body as { trackId?: unknown }).trackId;
+    if (trackId !== undefined) {
+      if (typeof trackId !== 'string' || !trackId) {
+        return res.status(400).json({ message: "trackId must be a non-empty string." });
+      }
+      if (trackSongId(trackId) !== songId) {
+        return res.status(400).json({ message: "Track not found in this song." });
+      }
+    }
+
+    const looseFileActor = (await sessionUsername(req)) ?? 'Unknown';
+    let looseFile: LooseFile;
+    try {
+      looseFile = await storeUploadThenCreate(file, 'loose', 'unplaced', 1, async (stored) => {
+        const parsed = insertLooseFileSchema.safeParse({
+          id: randomUUID(),
+          songId,
+          ...(trackId ? { trackId } : {}),
+          ...looseFileUploadRow(stored, file, looseFileActor),
+        });
+        if (!parsed.success) throw new UploadRequestError(parsed.error.issues[0].message);
+        return storage.createLooseFile(parsed.data);
+      });
+    } catch (err) {
+      return sendUploadError(res, err, "[songs/:songId/loose-files/upload]");
+    }
+
+    logLooseFileUploaded(songId, looseFile, looseFileActor);
     res.status(201).json(looseFile);
   });
 
@@ -2196,21 +2525,10 @@ export async function registerRoutes(
       color,
       duration,
       src: url ?? null,
-      metadata: {
-        format: format ?? '',
-        originalFileName: originalFileName ?? '',
-        uploadedBy: looseFileActor,
-        uploadedDate: uploadedDate ?? new Date().toISOString().split('T')[0],
-        sampleRate: sampleRate ?? '',
-        bitDepth: bitDepth ?? '',
-        channels: channels === 'Mono' || channels === '5.1' ? channels : 'Stereo',
-        peakLevel: '',
-        timeSignature: '',
-        key: '',
-        bpm: 0,
-        description: '',
-        tags: [],
-      },
+      metadata: looseFileUploadMetadata(
+        { format, originalFileName, uploadedDate, sampleRate, bitDepth, channels },
+        looseFileActor,
+      ),
       uploadedBy: looseFileActor,
     });
     if (!parsed.success) {
@@ -2219,6 +2537,67 @@ export async function registerRoutes(
 
     const looseFile = await storage.createLooseFile(parsed.data);
     res.status(201).json(looseFile);
+  });
+
+  /**
+   * POST /api/loose-files/unassigned/upload — Finder drops: upload a file and create
+   * its band-wide loose file in one request (multipart, `file` field). Same result as
+   * POST /api/upload then POST /api/loose-files/unassigned with UploadModal's
+   * band-loose body. No activity row, as above.
+   */
+  app.post("/api/loose-files/unassigned/upload", requireBand, upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+    const file = req.file;
+    const looseFileActor = (await sessionUsername(req)) ?? 'Unknown';
+    let looseFile: LooseFile;
+    try {
+      looseFile = await storeUploadThenCreate(file, 'loose', 'unplaced', 1, async (stored) => {
+        const parsed = insertLooseFileSchema.safeParse({
+          id: randomUUID(),
+          songId: null,
+          bandId: req.bandId,
+          ...looseFileUploadRow(stored, file, looseFileActor),
+        });
+        if (!parsed.success) throw new UploadRequestError(parsed.error.issues[0].message);
+        return storage.createLooseFile(parsed.data);
+      });
+    } catch (err) {
+      return sendUploadError(res, err, "[loose-files/unassigned/upload]");
+    }
+    res.status(201).json(looseFile);
+  });
+
+  /**
+   * POST /api/uploads/undo — undo just-finished uploads (the Finder-drop toast's Undo).
+   * Body: { items: [{ kind: 'clip', id, ideaId, taskAdvanced } | { kind: 'loose-file',
+   * id, songId, trackId }] } — where each file landed, as the client knew it. Each item
+   * is checked and undone on its own (storage.undoUpload): a refused item doesn't stop
+   * the others. 200 { results: [{ id, status: 'undone' | 'refused', reason? }] }; 400
+   * only for a malformed body.
+   */
+  const undoUploadsBody = z.object({
+    items: z.array(z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('clip'), id: z.string().min(1), ideaId: z.string().min(1), taskAdvanced: z.boolean() }),
+      z.object({ kind: z.literal('loose-file'), id: z.string().min(1), songId: z.string().min(1).nullable(), trackId: z.string().min(1).nullable() }),
+    ])).min(1).max(100),
+  });
+  app.post("/api/uploads/undo", requireBand, async (req, res) => {
+    const parsed = undoUploadsBody.safeParse(req.body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      return res.status(400).json({ message: `Invalid request: ${issue.path.join('.') || 'body'} — ${issue.message}` });
+    }
+    const ctx = { bandId: req.bandId!, username: await sessionUsername(req), now: Date.now() };
+    const results = [];
+    for (const item of parsed.data.items) {
+      try {
+        results.push(storage.undoUpload(item, ctx));
+      } catch (err) {
+        console.error("[uploads/undo] failed for", item.id, err);
+        results.push({ id: item.id, status: 'refused' as const, reason: "Something went wrong undoing this upload." });
+      }
+    }
+    res.json({ results });
   });
 
   /**
@@ -3048,67 +3427,24 @@ export async function registerRoutes(
           : 0;
         const versionNum = existingCount + 1;
 
-        // Build a unique physical filename (see buildFilename)
-        const filename = buildFilename(instrument, section, versionNum, req.file.originalname);
-        const destPath = path.join(UPLOADS_DIR, filename);
-        // Second line of defense behind buildFilename's slugging.
-        if (path.dirname(path.resolve(destPath)) !== path.resolve(UPLOADS_DIR)) {
-          return res.status(400).json({ message: "Invalid upload destination." });
-        }
-
-        // Write buffer to disk. "wx" fails if the file exists — an upload must never
-        // overwrite audio another row points at; a token collision fails the upload instead.
-        fs.writeFileSync(destPath, req.file.buffer, { flag: "wx" });
-
-        // Extract duration and technical metadata using music-metadata
-        let duration = 0;
-        let format = path.extname(req.file.originalname).replace(".", "").toUpperCase() || "WAV";
-        let sampleRateHz: number | undefined;
-        let bitDepth: number | undefined;
-        let numChannels: number | undefined;
+        // Write the file and read its metadata (storeUploadedFile).
+        let stored: StoredUpload;
         try {
-          // Try with mimetype string first
-          let meta = await parseBuffer(req.file.buffer, req.file.mimetype, { duration: true });
-          duration = meta.format.duration ?? 0;
-
-          // If that returns 0, try without mimetype hint (let music-metadata auto-detect)
-          if (duration === 0) {
-            meta = await parseBuffer(req.file.buffer, undefined, { duration: true });
-            duration = meta.format.duration ?? 0;
-          }
-
-          if (meta.format.container) format = meta.format.container;
-          sampleRateHz = meta.format.sampleRate;
-          bitDepth = meta.format.bitsPerSample;
-          numChannels = meta.format.numberOfChannels;
-        } catch {
-          console.warn("[upload] could not parse metadata for", req.file.originalname);
+          stored = await storeUploadedFile(req.file, instrument, section, versionNum);
+        } catch (err) {
+          if (err instanceof UploadPathError) return res.status(400).json({ message: err.message });
+          throw err;
         }
-
-        // If duration is still 0, fall back to a default so the clip is visible on the timeline
-        if (duration < 1) {
-          duration = 5;
-        }
-
-        // Format technical fields into display strings
-        const sampleRateStr = sampleRateHz
-          ? (sampleRateHz % 1000 === 0 ? `${sampleRateHz / 1000}kHz` : `${(sampleRateHz / 1000).toFixed(1)}kHz`)
-          : '';
-        const bitDepthStr = bitDepth ? `${bitDepth}-bit` : '';
-        const channelsStr = numChannels === 1 ? 'Mono' : numChannels === 2 ? 'Stereo' : numChannels === 6 ? '5.1' : '';
-
-        // The URL the browser's <audio> tag will use
-        const url = `/uploads/${filename}`;
 
         res.status(201).json({
-          url,
-          duration,
-          format,
-          originalFileName: req.file.originalname,
-          sampleRate: sampleRateStr,
-          bitDepth: bitDepthStr,
-          channels: channelsStr,
-          uploadedDate: new Date().toISOString().split('T')[0],
+          url: stored.url,
+          duration: stored.duration,
+          format: stored.format,
+          originalFileName: stored.originalFileName,
+          sampleRate: stored.sampleRate,
+          bitDepth: stored.bitDepth,
+          channels: stored.channels,
+          uploadedDate: stored.uploadedDate,
           uploadedBy: req.session.userId
             ? (await storage.getUser(req.session.userId))?.username ?? 'Unknown'
             : 'Unknown',
