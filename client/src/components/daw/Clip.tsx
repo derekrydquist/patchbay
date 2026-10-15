@@ -7,7 +7,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys, looseFileKeys, liveCommentRefetch, fetchClipCommentSummary, type ClipCommentSummary } from '@/lib/bucket-api';
-import { GripVertical, MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, FolderOutput } from 'lucide-react';
+import { MessageSquare, Info, Music, Clock, Hash, Activity, HardDrive, User, Calendar, CheckCircle2, Plus, RefreshCw, Download, XCircle, FolderSearch, Pencil, Trash2, Scissors, Wand2, X, Minus, ChevronDown, ChevronUp, FolderOutput } from 'lucide-react';
 import { WaveformPlayerCard } from './WaveformPlayerCard';
 import { CornerBadge } from './CornerBadge';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
@@ -1095,24 +1095,24 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     // it's set as the canvas element's CSS color and read back resolved here.
     ctx.fillStyle = getComputedStyle(canvas).color;
 
-    // Fixed 3px slots, one 2px bar each, mirrored around the center at 85% of the
-    // half-height for the slot's peak absolute sample.
-    const SLOT_PX = 3;
-    const BAR_PX = 2;
-    const slotCount = Math.ceil(w / SLOT_PX);
-    const samplesPerSlot = samples.length / slotCount;
+    // One column per CSS pixel, from the min to the max sample over the column's
+    // samples, drawn in the track color (the canvas has CSS opacity 0.5).
+    const samplesPerPixel = samples.length / w;
     const midY = h / 2;
 
-    for (let slot = 0; slot < slotCount; slot++) {
-      const startIdx = Math.floor(slot * samplesPerSlot);
-      const endIdx = Math.floor((slot + 1) * samplesPerSlot);
-      let peak = 0;
+    for (let x = 0; x < w; x++) {
+      const startIdx = Math.floor(x * samplesPerPixel);
+      const endIdx = Math.floor((x + 1) * samplesPerPixel);
+      let min = 0;
+      let max = 0;
       for (let i = startIdx; i < endIdx; i++) {
-        const s = Math.abs(samples[i]);
-        if (s > peak) peak = s;
+        const s = samples[i];
+        if (s < min) min = s;
+        if (s > max) max = s;
       }
-      const barHeight = Math.max(1, peak * 0.85 * midY * 2);
-      ctx.fillRect(slot * SLOT_PX, midY - barHeight / 2, BAR_PX, barHeight);
+      const yTop = midY - max * midY;
+      const yBottom = midY - min * midY;
+      ctx.fillRect(x, yTop, 1, Math.max(1, yBottom - yTop));
     }
   };
 
@@ -1530,16 +1530,15 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             />
 
 
-            <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between pointer-events-none">
-              <div className="flex items-center gap-1 truncate">
-                <GripVertical size={12} className="text-white/50 opacity-0 group-hover:opacity-100 transition-opacity" />
-                <span className={cn(
-                  "text-xs font-semibold text-white/90 truncate select-none",
-                  isFinal && "font-bold"
-                )}>
-                  {clip.name}
-                </span>
-              </div>
+            {/* Label row — top-left, out of the clip's middle where trimming happens.
+                pr-5 keeps the name clear of the top-right Final badge. */}
+            <div className="absolute top-0 left-0 right-0 z-10 pt-1 pl-1.5 pr-5 flex items-center gap-1 justify-between pointer-events-none">
+              <span className={cn(
+                "min-w-0 text-[10px] leading-none font-semibold text-white/90 truncate select-none [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]",
+                isFinal && "font-bold"
+              )}>
+                {clip.name}
+              </span>
 
               {clip.comments && clip.comments.length > 0 && (
                 <div className="flex items-center bg-black/40 rounded px-1 shrink-0">
