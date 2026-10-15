@@ -418,7 +418,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 `BucketClip` in `Clip.tsx` renders a **`WaveformPlayerCard`** (`client/src/components/daw/WaveformPlayerCard.tsx`) in the Files column of `MediaBucket`. The same component is used in the Dashboard file browser (Songs and Ideas modes).
 
-**`WaveformPlayerCard` props:** `src`, `name`, `duration`, `isFinal`, `color?` (left border), `waveformHeight?` (default 20px; MediaBucket uses 32px), `className?`, `cardRef?` (the card's root element — the landing flash animates it, not the drag wrapper).
+**`WaveformPlayerCard` props:** `src`, `name`, `duration`, `isFinal`, `color?` (left border), `waveformHeight?` (default 20px; MediaBucket's `BucketClip` passes `waveformHeight={20}`), `className?`, `cardRef?` (the card's root element — the landing flash animates it, not the drag wrapper).
 
 **What it renders:**
 - Thin colored left border accent (`absolute left-0 top-0 bottom-0 w-0.5`) — only when `color` is provided; MediaBucket passes `clip.color`, Dashboard omits it
