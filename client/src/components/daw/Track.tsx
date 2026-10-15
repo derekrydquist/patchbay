@@ -87,7 +87,9 @@ function SectionCell({
   const hasFlashingClip = !!flashClipId && clips.some((c) => c.id === flashClipId);
   return (
     <div
-      className={cn('relative h-full border-r border-border/20', hasFlashingClip ? 'overflow-visible' : 'overflow-hidden')}
+      // Divider is an inset shadow, not border-r: a border would take the cell's last
+      // pixel column, and overflow-hidden would clip the last clip's right edge there.
+      className={cn('relative h-full shadow-[inset_-1px_0_0_hsl(var(--border)/0.2)]', hasFlashingClip ? 'overflow-visible' : 'overflow-hidden')}
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
       {clips.map((clip) => {

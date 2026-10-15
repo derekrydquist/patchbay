@@ -17,6 +17,7 @@ import { useRemoveVersion } from '@/hooks/use-bucket-mutations';
 import { useToast } from '@/hooks/use-toast';
 import { BUCKET_CLIP_DRAG_TYPE, type BucketClipDragData, VersionMoveOutContext } from '@/hooks/use-loose-file-organize-dnd';
 import { buildDownloadFilename, downloadFile } from '@/lib/download-name';
+import { clipBodyColor, clipBorderColor } from '@/lib/track-color';
 import { useLandingFlash, clipLandingZone, flashGold, TIMELINE_LANDING_GLOW_ALPHA } from '@/hooks/use-landing-flash';
 import {
   ContextMenu,
@@ -1090,24 +1091,28 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     const samples = channelData.slice(startSample, Math.min(endSample, channelData.length));
 
     ctx.clearRect(0, 0, w, h);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    // The track color is a CSS string (hsl(var(--chart-N))) that canvas can't resolve;
+    // it's set as the canvas element's CSS color and read back resolved here.
+    ctx.fillStyle = getComputedStyle(canvas).color;
 
-    const samplesPerPixel = samples.length / w;
+    // Fixed 3px slots, one 2px bar each, mirrored around the center at 85% of the
+    // half-height for the slot's peak absolute sample.
+    const SLOT_PX = 3;
+    const BAR_PX = 2;
+    const slotCount = Math.ceil(w / SLOT_PX);
+    const samplesPerSlot = samples.length / slotCount;
     const midY = h / 2;
 
-    for (let x = 0; x < w; x++) {
-      const startIdx = Math.floor(x * samplesPerPixel);
-      const endIdx = Math.floor((x + 1) * samplesPerPixel);
-      let min = 0;
-      let max = 0;
+    for (let slot = 0; slot < slotCount; slot++) {
+      const startIdx = Math.floor(slot * samplesPerSlot);
+      const endIdx = Math.floor((slot + 1) * samplesPerSlot);
+      let peak = 0;
       for (let i = startIdx; i < endIdx; i++) {
-        const s = samples[i];
-        if (s < min) min = s;
-        if (s > max) max = s;
+        const s = Math.abs(samples[i]);
+        if (s > peak) peak = s;
       }
-      const yTop = midY - max * midY;
-      const yBottom = midY - min * midY;
-      ctx.fillRect(x, yTop, 1, Math.max(1, yBottom - yTop));
+      const barHeight = Math.max(1, peak * 0.85 * midY * 2);
+      ctx.fillRect(slot * SLOT_PX, midY - barHeight / 2, BAR_PX, barHeight);
     }
   };
 
@@ -1141,10 +1146,10 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     return () => { cancelled = true; };
   }, [clip.src, isOverlay]);
 
-  // Redraw when trim changes — buffer already decoded, no re-fetch needed
+  // Redraw when trim or the track color changes — buffer already decoded, no re-fetch needed
   useEffect(() => {
     drawRef.current?.();
-  }, [trimStart, trimEnd, clip.duration]);
+  }, [trimStart, trimEnd, clip.duration, trackColor]);
 
   // Redraw on zoom/resize — fires whenever the canvas CSS width changes
   useEffect(() => {
@@ -1456,7 +1461,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
         <ContextMenuTrigger asChild>
           <div
             ref={combinedRef}
-            style={positionStyle}
+            style={{ ...positionStyle, backgroundColor: clipBodyColor(trackColor) }}
             {...restListeners}
             {...attributes}
             onPointerDown={(e) => {
@@ -1491,13 +1496,16 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               else { setTrimEdge(null); }
             }}
             className={cn(
-              "h-full rounded-md border border-white/10 flex items-center overflow-hidden group cursor-grab active:cursor-grabbing shadow-sm touch-none select-none focus-visible:outline-none",
+              "h-full rounded-md flex items-center overflow-hidden group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
               isOverlay && "shadow-2xl scale-105 opacity-90"
             )}
           >
+            {/* Track-colored border — a layer inside the clip's box, the same box and radius
+                as the selection overlay, so the gold selection border fully covers it. */}
             <div
-              className="absolute inset-0 opacity-80"
-              style={{ backgroundColor: trackColor }}
+              aria-hidden
+              className="pointer-events-none absolute inset-0 rounded-md border z-[5]"
+              style={{ borderColor: clipBorderColor(trackColor) }}
             />
 
             {isFinal && (
@@ -1514,15 +1522,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
                 height: '100%',
                 zIndex: 2,
                 pointerEvents: 'none',
+                // drawRef reads this back resolved as the bar color; opacity puts the
+                // waveform at ~50% of the track color.
+                color: trackColor,
+                opacity: 0.5,
               }}
             />
 
 
             <div className="relative z-10 px-2 flex items-center gap-1 w-full justify-between pointer-events-none">
               <div className="flex items-center gap-1 truncate">
-                <GripVertical size={12} className="text-black/50 opacity-0 group-hover:opacity-100 transition-opacity" />
+                <GripVertical size={12} className="text-white/50 opacity-0 group-hover:opacity-100 transition-opacity" />
                 <span className={cn(
-                  "text-xs font-medium text-black truncate select-none mix-blend-multiply",
+                  "text-xs font-semibold text-white/90 truncate select-none",
                   isFinal && "font-bold"
                 )}>
                   {clip.name}
@@ -1530,9 +1542,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
               </div>
 
               {clip.comments && clip.comments.length > 0 && (
-                <div className="flex items-center bg-black/20 rounded px-1 shrink-0">
-                  <MessageSquare size={10} className="text-black" />
-                  <span className="text-[10px] font-bold text-black ml-0.5">{clip.comments.length}</span>
+                <div className="flex items-center bg-black/40 rounded px-1 shrink-0">
+                  <MessageSquare size={10} className="text-white/80" />
+                  <span className="text-[10px] font-bold text-white/80 ml-0.5">{clip.comments.length}</span>
                 </div>
               )}
             </div>

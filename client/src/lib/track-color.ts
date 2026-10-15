@@ -13,6 +13,19 @@ export function trackDisplayColor(track: { color: string | null } | null | undef
   return track?.color ?? TRACK_COLOR_FALLBACK;
 }
 
+/** Timeline clip body surface — matches the timeline sandbox; no theme token exists for it. */
+export const CLIP_BODY_SURFACE = '#181C26';
+
+/** A timeline clip's body fill: a muted tint of its track's display color. */
+export function clipBodyColor(trackColor: string): string {
+  return `color-mix(in srgb, ${trackColor} 24%, ${CLIP_BODY_SURFACE})`;
+}
+
+/** A timeline clip's 1px border: its track's display color at 70%. */
+export function clipBorderColor(trackColor: string): string {
+  return `color-mix(in srgb, ${trackColor} 70%, transparent)`;
+}
+
 /**
  * A loose file's display color: its track's color when it's Track-scoped and that
  * track is found. null (shown as an empty ring) for a song-level or band-wide file,
