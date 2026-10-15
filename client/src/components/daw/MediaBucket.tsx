@@ -26,6 +26,8 @@ import {
   type NativeFileHold,
 } from '@/hooks/use-native-file-drop';
 import { requestLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
+import { startDropUpload } from '@/lib/drop-upload';
+import { apiRequest } from '@/lib/queryClient';
 import { BucketClip, useLiveClipCommentSummary } from './Clip';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
 import { UploadModal } from './UploadModal';
@@ -259,14 +261,6 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
   const [autoOpenClipId, setAutoOpenClipId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
-  const [uploadMode, setUploadMode] = useState<'placed' | 'loose'>('placed');
-  const [uploadInitialIdeaId, setUploadInitialIdeaId] = useState('');
-  const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
-  // Finder drops only: the Track a 'loose' upload lands on, and whether the dialog
-  // names the destination. Cleared when the dialog closes, so the Upload buttons
-  // (which never set them) keep their song-level, unnamed behavior.
-  const [uploadLooseTrackId, setUploadLooseTrackId] = useState<string | undefined>(undefined);
-  const [uploadAnnounce, setUploadAnnounce] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
@@ -285,6 +279,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const { data: tracks = [], isLoading, isError } = useQuery<ApiTrack[]>({
     queryKey: bucketKeys.bucket(songId),
     queryFn: () => fetchBucket(songId),
+  });
+
+  // Song name for the Finder-drop toast of a song-level loose file. Same key (and
+  // cache entry) Workspace and SongHome already fill.
+  const { data: song } = useQuery<{ name: string }>({
+    queryKey: ['song', songId],
+    queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
 
   const { data: looseFiles = [] } = useQuery<ApiLooseFile[]>({
@@ -556,19 +557,22 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
   // ── File input helpers ───────────────────────────────────────────────────────
 
-  // Finder file drops (useNativeFileDrop). A drop carries its own destination:
-  // Section row / Files column → a real clip in that section; Track row / Sections-
-  // column background → a loose file on that Track; Tracks-column background → a
-  // song-level loose file. Native drag events and dnd-kit's pointer-sensor drags
-  // are independent mechanisms that never intercept each other.
+  // Finder file drops (useNativeFileDrop) upload immediately, no dialog
+  // (startDropUpload — progress and Undo live in a toast). A drop carries its own
+  // destination: Section row / Files column → a real clip in that section; Track
+  // row / Sections-column background → a loose file on that Track; Tracks-column
+  // background → a song-level loose file. The drop selects the destination now;
+  // nothing moves the selection when the upload finishes. Native drag events and
+  // dnd-kit's pointer-sensor drags are independent mechanisms that never intercept
+  // each other.
   const handleIdeaFileDrop = (files: File[], idea: ApiIdea, track: ApiTrack) => {
     const audioFiles = takeAudioFiles(files);
     if (!audioFiles.length) return;
-    setUploadMode('placed');
-    setUploadInitialFiles(audioFiles);
-    setUploadInitialIdeaId(idea.id);
-    setUploadAnnounce(true);
-    setIsUploadOpen(true);
+    startDropUpload({
+      files: audioFiles,
+      destination: { kind: 'placed', songId, ideaId: idea.id },
+      label: `${track.name} › ${idea.sectionName}`,
+    });
     setSelectedTrack(track);
     setSelectedIdea(idea);
   };
@@ -576,22 +580,22 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const handleTrackFileDrop = (files: File[], track: ApiTrack) => {
     const audioFiles = takeAudioFiles(files);
     if (!audioFiles.length) return;
-    setUploadMode('loose');
-    setUploadInitialFiles(audioFiles);
-    setUploadInitialIdeaId('');
-    setUploadLooseTrackId(track.id);
-    setUploadAnnounce(true);
-    setIsUploadOpen(true);
+    startDropUpload({
+      files: audioFiles,
+      destination: { kind: 'loose', songId, trackId: track.id },
+      label: track.name,
+    });
     if (selectedTrack?.id !== track.id) { setSelectedTrack(track); setSelectedIdea(null); }
   };
 
   const handleTracksFileDrop = (files: File[]) => {
     const audioFiles = takeAudioFiles(files);
     if (!audioFiles.length) return;
-    setUploadMode('loose');
-    setUploadInitialFiles(audioFiles);
-    setUploadInitialIdeaId('');
-    setIsUploadOpen(true);
+    startDropUpload({
+      files: audioFiles,
+      destination: { kind: 'loose', songId, trackId: null },
+      label: song?.name ?? 'this song',
+    });
   };
 
   const tracksColumnDrop = useNativeFileDrop({ onDrop: handleTracksFileDrop });
@@ -817,7 +821,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
           <Button
             size="sm"
             className="h-8 text-[10px] uppercase tracking-widest font-bold"
-            onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
+            onClick={() => setIsUploadOpen(true)}
           >
             <Upload size={14} className="mr-2" /> Upload
           </Button>
@@ -850,7 +854,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="text-xs cursor-pointer"
-                  onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setUploadInitialIdeaId(''); setIsUploadOpen(true); }}
+                  onClick={() => setIsUploadOpen(true)}
                 >
                   Add Files
                 </DropdownMenuItem>
@@ -1027,33 +1031,13 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
       </div>
 
+      {/* Upload button and Tracks "Add Files" only — song-level loose files. Finder
+          drops upload without a dialog (startDropUpload). */}
       <UploadModal
         open={isUploadOpen}
-        onOpenChange={(open) => {
-          setIsUploadOpen(open);
-          if (!open) { setUploadLooseTrackId(undefined); setUploadAnnounce(false); }
-        }}
+        onOpenChange={setIsUploadOpen}
         songId={songId}
-        mode={uploadMode}
-        looseTrackId={uploadMode === 'loose' ? uploadLooseTrackId : undefined}
-        announceDestination={uploadAnnounce}
-        defaultIdeaId={uploadInitialIdeaId || undefined}
-        defaultInstrumentName={uploadInitialIdeaId ? tracks.find(t => t.ideas.some(i => i.id === uploadInitialIdeaId))?.name : undefined}
-        defaultSectionName={uploadInitialIdeaId ? tracks.flatMap(t => t.ideas).find(i => i.id === uploadInitialIdeaId)?.sectionName : undefined}
-        initialFiles={uploadInitialFiles}
-        onUploadSuccess={({ mode, destTrackId, destIdeaId }) => {
-          // Loose uploads land where they were aimed (Tracks column, or the Track a
-          // Finder drop already selected); only a placed upload moves the view.
-          if (mode !== 'placed' || !destTrackId) return;
-          queryClient.fetchQuery<ApiTrack[]>({ queryKey: bucketKeys.bucket(songId), queryFn: () => fetchBucket(songId) }).then(fresh => {
-            const track = fresh.find(t => t.id === destTrackId);
-            if (track) {
-              setSelectedTrack(track);
-              const idea = track.ideas.find(i => i.id === destIdeaId);
-              setSelectedIdea(idea ?? null);
-            }
-          });
-        }}
+        mode="loose"
       />
 
       <AddInstrumentModal

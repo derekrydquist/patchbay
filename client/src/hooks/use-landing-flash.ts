@@ -51,6 +51,14 @@ interface LandingBatch {
   matched: HTMLElement[];
   frame: number | null;
   scrolled: boolean;
+  scrollPage: boolean;
+}
+
+export interface LandingFlashOptions {
+  /** Finder-drop uploads only: when the file's column doesn't scroll on its own
+   *  because it grows with the page (SongHome's Song Files), scroll the page
+   *  instead. Every other landing path leaves this off and never moves the page. */
+  scrollPage?: boolean;
 }
 
 const pending = new Map<string, LandingBatch>(); // `${zone}|${id}` → batch
@@ -64,9 +72,9 @@ function notify(): void {
   listeners.forEach(l => l());
 }
 
-export function requestLandingFlash(items: LandingFlashItem[]): void {
+export function requestLandingFlash(items: LandingFlashItem[], options: LandingFlashOptions = {}): void {
   if (!items.length) return;
-  const batch: LandingBatch = { matched: [], frame: null, scrolled: false };
+  const batch: LandingBatch = { matched: [], frame: null, scrolled: false, scrollPage: options.scrollPage ?? false };
   const keys = items.map(i => keyOf(i.id, i.zone));
   for (const key of keys) pending.set(key, batch);
   notify();
@@ -103,7 +111,7 @@ function takeLanding(key: string, el: HTMLElement): void {
     if (!els.length) return;
     if (!batch.scrolled) {
       batch.scrolled = true;
-      scrollBatchIntoView(els);
+      scrollBatchIntoView(els, batch.scrollPage);
     }
     for (const e of els) flashGold(e, { peakAlpha: LANDING_FLASH_PEAK_ALPHA, reducedMotion: 'ring' });
   });
@@ -150,15 +158,23 @@ function findOwnScroller(el: HTMLElement): HTMLElement | null {
 // elements, when they fit in the column's visible height; when they don't, bring
 // the topmost into view. Nothing moves when they're already all visible. Only the
 // elements in the topmost element's scroller count — one batch lands in one column.
-function scrollBatchIntoView(els: HTMLElement[]): void {
+// scrollPage (LandingFlashOptions): when the own scroller can't scroll — a Radix
+// viewport that grows with its content, as in SongHome — scroll the page instead,
+// by the same minimum amount.
+function scrollBatchIntoView(els: HTMLElement[], scrollPage: boolean): void {
   const rects = els.map(el => ({ el, r: el.getBoundingClientRect() }));
   const topmost = rects.reduce((a, b) => (b.r.top < a.r.top ? b : a));
   const scroller = findOwnScroller(topmost.el);
-  if (!scroller) return;
-  const inColumn = rects.filter(({ el }) => findOwnScroller(el) === scroller);
+  const usePage = scrollPage
+    && (!scroller || scroller.scrollHeight <= scroller.clientHeight + 1)
+    && document.documentElement.scrollHeight > window.innerHeight;
+  if (!scroller && !usePage) return;
+  const inColumn = usePage ? rects : rects.filter(({ el }) => findOwnScroller(el) === scroller);
   const top = topmost.r.top;
   const bottom = Math.max(...inColumn.map(({ r }) => r.bottom));
-  const view = scroller.getBoundingClientRect();
+  const view = usePage
+    ? { top: 0, bottom: window.innerHeight, height: window.innerHeight }
+    : scroller!.getBoundingClientRect();
   const fits = bottom - top + 2 * SCROLL_MARGIN_PX <= view.height;
   let delta = 0;
   if (top < view.top) {
@@ -171,7 +187,9 @@ function scrollBatchIntoView(els: HTMLElement[]): void {
     delta = fits ? showBottom : Math.min(showBottom, topToTop);
   }
   if (delta === 0) return;
-  scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+  const behavior = prefersReducedMotion() ? 'auto' : 'smooth';
+  if (usePage) window.scrollBy({ top: delta, behavior });
+  else scroller!.scrollTo({ top: scroller!.scrollTop + delta, behavior });
 }
 
 // ── Gold flash ───────────────────────────────────────────────────────────────

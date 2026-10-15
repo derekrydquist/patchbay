@@ -5,8 +5,11 @@ import type {
   ToastProps,
 } from "@/components/ui/toast"
 
-const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+// Toasts stack, newest first. Only OPEN toasts count toward the limit (see
+// ADD_TOAST) — a dismissed toast is only finishing its exit animation, and is
+// removed from state TOAST_REMOVE_DELAY after the dismiss.
+const TOAST_LIMIT = 3
+const TOAST_REMOVE_DELAY = 1000
 
 type ToasterToast = Omit<ToastProps, 'title'> & {
   id: string
@@ -73,11 +76,15 @@ const addToRemoveQueue = (toastId: string) => {
 
 export const reducer = (state: State, action: Action): State => {
   switch (action.type) {
-    case "ADD_TOAST":
+    case "ADD_TOAST": {
+      let open = 0
       return {
         ...state,
-        toasts: [action.toast, ...state.toasts].slice(0, TOAST_LIMIT),
+        toasts: [action.toast, ...state.toasts].filter(
+          (t) => t.open === false || ++open <= TOAST_LIMIT
+        ),
       }
+    }
 
     case "UPDATE_TOAST":
       return {
@@ -139,6 +146,25 @@ function dispatch(action: Action) {
 
 type Toast = Omit<ToasterToast, "id">
 
+// When a toast closes with focus inside it (a clicked Undo, action or X button),
+// Radix moves focus to the toast viewport. The viewport pauses EVERY toast's timer
+// while it holds focus and resumes only on focusout — which nothing triggers after
+// a mouse click — so the next toast (e.g. "Upload undone") stayed up until the user
+// clicked somewhere else. After a pointer close the viewport's focus isn't
+// :focus-visible: release it so timers run. A keyboard close keeps Radix's behavior
+// (focus stays in the region and timers stay paused while it's there).
+function releaseToastViewportFocus() {
+  const el = document.activeElement
+  if (
+    el instanceof HTMLElement &&
+    el.tagName === "OL" &&
+    el.closest('[role="region"]') &&
+    !el.matches(":focus-visible")
+  ) {
+    el.blur()
+  }
+}
+
 function toast({ ...props }: Toast) {
   const id = genId()
 
@@ -156,7 +182,12 @@ function toast({ ...props }: Toast) {
       id,
       open: true,
       onOpenChange: (open) => {
-        if (!open) dismiss()
+        if (!open) {
+          // Radix has already moved focus to the viewport (synchronously, just
+          // before this call) when focus was inside the closing toast.
+          releaseToastViewportFocus()
+          dismiss()
+        }
       },
     },
   })
