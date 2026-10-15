@@ -77,7 +77,8 @@ export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow:
   }, [queryClient]);
   // Swatch color: a Track-scoped file's track comes from the song's bucket, which
   // every surface that opens this window has already loaded. Read straight from the
-  // cache — never fetched here. A miss (no songId, track not in the bucket) is gold.
+  // cache — never fetched here. A miss (no songId, track not in the bucket) is null:
+  // the window shows an empty ring.
   const findTrack = (songId: string | null, trackId: string) => songId
     ? queryClient.getQueryData<ApiTrack[]>(bucketKeys.bucket(songId))?.find(t => t.id === trackId)
     : undefined;

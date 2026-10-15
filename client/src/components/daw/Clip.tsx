@@ -171,8 +171,8 @@ type ClipMetadataValue = NonNullable<Clip['metadata']>;
 export function ClipInfoWindow({ clip, trackColor, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default', target, metadataWriter }: {
   clip: Clip,
   // The header swatch color — the file's track's display color (lib/track-color.ts),
-  // never clip.color.
-  trackColor: string,
+  // never clip.color. null = a loose file with no track: an empty ring, same size.
+  trackColor: string | null,
   open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string,
   target?: CommentTarget,
   // Saves an edit: `metadata` is the full merged object, `updates` only the changed
@@ -578,9 +578,15 @@ export function ClipInfoWindow({ clip, trackColor, open, onOpenChange, onComment
         <div className="bg-gradient-to-r from-primary/20 to-transparent p-6 border-b border-primary/10">
           <DialogHeader>
             <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-lg shadow-lg flex items-center justify-center border border-white/10" style={{ backgroundColor: trackColor }}>
-                <Music size={20} className="text-black/70" />
-              </div>
+              {trackColor ? (
+                <div className="w-10 h-10 rounded-lg shadow-lg flex items-center justify-center border border-white/10" style={{ backgroundColor: trackColor }}>
+                  <Music size={20} className="text-black/70" />
+                </div>
+              ) : (
+                <div className="w-10 h-10 rounded-lg flex items-center justify-center border border-white/40">
+                  <Music size={20} className="text-white/40" />
+                </div>
+              )}
               <div className="flex flex-col">
                 <DialogTitle className="text-2xl font-heading font-bold text-white tracking-tight uppercase">
                   {clip.name} {clip.isFinal && <span className="text-primary ml-2">(FINAL)</span>}
