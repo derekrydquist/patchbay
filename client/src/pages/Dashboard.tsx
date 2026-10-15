@@ -90,9 +90,10 @@ import {
   IDEAS_SHELF_BACKGROUND_DROP_PREFIX,
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
-  useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
-  type NativeFileDropHandlers, type NativeFileHold,
+  useNativeFileDrop, takeDropFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
+  type NativeFileDropHandlers, type NativeFileHold, type DroppedFiles,
 } from '@/hooks/use-native-file-drop';
+import { startDropUpload, useExtractAudioRequest, extractAudioModalProps } from '@/lib/drop-upload';
 import { DndContext, useDroppable, useDraggable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { AppHeader } from '@/components/AppHeader';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -1228,21 +1229,12 @@ export default function Dashboard() {
   const [selectedInstrument, setSelectedInstrument] = useState<ApiTrack | null>(null);
   const [selectedSection, setSelectedSection] = useState<ApiIdea | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
-  // Set only by a Finder drop that carries its own destination (Track row, Sections
-  // background, Songs Section row, Idea row); drives the UploadModal props instead
-  // of the current selection. Cleared when the dialog closes, so the Upload buttons
-  // (which never set it) keep following the selection exactly as before.
-  const [dropUploadTarget, setDropUploadTarget] = useState<{
-    mode: 'placed' | 'loose';
-    songId: string;
-    songType: 'song' | 'idea';
-    ideaId?: string;
-    looseTrackId?: string;
-    instrumentName?: string;
-    sectionName?: string;
-  } | null>(null);
+  // A dropped video's "Extract audio" toast action: opens the UploadModal with the
+  // videos and the drop's destination preset instead of the current selection.
+  // Cleared when the dialog closes, so the Upload buttons (which never set it) keep
+  // following the selection exactly as before.
+  const extractAudio = useExtractAudioRequest();
   const [uploadMode, setUploadMode] = useState<'placed' | 'loose' | 'band-loose'>('placed');
-  const [uploadInitialFiles, setUploadInitialFiles] = useState<File[]>([]);
   const [infoClip, setInfoClip] = useState<ApiClip | null>(null);
   const [infoFocusNotes, setInfoFocusNotes] = useState(false);
   const [infoFocusComments, setInfoFocusComments] = useState(false);
@@ -1310,10 +1302,14 @@ export default function Dashboard() {
   const pendingNewIdeaIdRef = useRef<string | null>(null);
 
   // ── Finder file drops (useNativeFileDrop) ──────────────────────────────────
-  // A drop carries its own destination. Column backgrounds keep their existing
-  // routes (Songs Tracks column → song-level loose file; Ideas Column 1 → band-wide;
-  // Files columns → the selected section / Idea). Rows and the Sections background
-  // set dropUploadTarget so the dialog lands where the file was released.
+  // A Finder drop uploads immediately, no dialog (startDropUpload — progress and
+  // Undo live in a toast), into the destination it was released on: Songs Tracks
+  // column → song-level loose file; Track row / Sections background → loose file on
+  // that Track; Section row / Files column → a clip in that section; Ideas Column 1
+  // → band-wide; Idea row / Column 2 → that Idea. The drop selects the destination
+  // now; nothing moves the selection when the upload finishes. Video files get an
+  // "Extract audio" toast instead (extractAudio). The Library columns scroll on
+  // their own, so no scrollPage.
 
   // Songs quick-browser Tracks column (Column 2) — song-level loose file, same as
   // that column's "Add Files" dropdown item.
@@ -1326,32 +1322,41 @@ export default function Dashboard() {
       });
       return;
     }
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
-    setUploadMode('loose');
-    setUploadInitialFiles(audioFiles);
-    setIsUploadOpen(true);
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
+    startDropUpload({
+      files: dropped,
+      destination: { kind: 'loose', songId: selectedFile.id, trackId: null },
+      label: selectedFile.name,
+      onExtractAudio: extractAudio.requestExtract,
+    });
   };
 
   // Ideas shelf Column 1 (Ideas list) — band-wide unassigned loose file, same as
   // that column's "Upload Files" dropdown item.
   const handleIdeasColumnFileDrop = (files: File[]) => {
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
-    setUploadMode('band-loose');
-    setUploadInitialFiles(audioFiles);
-    setIsUploadOpen(true);
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
+    startDropUpload({
+      files: dropped,
+      destination: { kind: 'band-loose' },
+      label: 'Ideas',
+      onExtractAudio: extractAudio.requestExtract,
+    });
   };
 
   // Songs quick-browser Track row, or the Sections background for the selected
   // Track — a loose file on that Track, created in one server write.
   const handleSongsTrackFileDrop = (files: File[], track: ApiTrack) => {
     if (!selectedFile) return;
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
-    setDropUploadTarget({ mode: 'loose', songId: selectedFile.id, songType: 'song', looseTrackId: track.id });
-    setUploadInitialFiles(audioFiles);
-    setIsUploadOpen(true);
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
+    startDropUpload({
+      files: dropped,
+      destination: { kind: 'loose', songId: selectedFile.id, trackId: track.id },
+      label: track.name,
+      onExtractAudio: extractAudio.requestExtract,
+    });
     if (selectedInstrument?.id !== track.id) selectSongsTrack(track);
   };
 
@@ -1359,15 +1364,44 @@ export default function Dashboard() {
   // Workspace's Section row. Selects the section, as the Workspace drop does.
   const handleSongsSectionFileDrop = (files: File[], idea: ApiIdea) => {
     if (!selectedFile || !selectedInstrument) return;
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
-    setDropUploadTarget({
-      mode: 'placed', songId: selectedFile.id, songType: 'song', ideaId: idea.id,
-      instrumentName: selectedInstrument.name, sectionName: idea.sectionName,
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
+    startDropUpload({
+      files: dropped,
+      destination: { kind: 'placed', songId: selectedFile.id, ideaId: idea.id },
+      label: `${selectedInstrument.name} › ${idea.sectionName}`,
+      onExtractAudio: extractAudio.requestExtract,
     });
-    setUploadInitialFiles(audioFiles);
-    setIsUploadOpen(true);
     selectSongsSection(idea);
+  };
+
+  // Ideas shelf: upload a drop into an Idea's hidden default Folder (ideas-row id
+  // `ideaId`). The extract request carries the Idea's name so the dialog treats it
+  // as idea-type.
+  const uploadDropIntoIdea = (dropped: DroppedFiles, idea: Song, ideaId: string) => {
+    startDropUpload({
+      files: dropped,
+      destination: { kind: 'placed', songId: idea.id, ideaId },
+      label: idea.name,
+      onExtractAudio: (r) => extractAudio.requestExtract({ ...r, ideaName: idea.name }),
+    });
+  };
+
+  // Ideas shelf: resolve the Folder an upload into this Idea lands in, waiting for
+  // the Idea's bucket if it isn't loaded yet (fetchQuery joins an in-flight fetch
+  // and answers a cached one at once). Undefined if it can't be resolved.
+  const resolveIdeaFolderId = async (
+    idea: Song, pick: (bucket: ApiTrack[]) => ApiIdea | undefined,
+  ): Promise<string | undefined> => {
+    try {
+      const bucket = await queryClient.fetchQuery<ApiTrack[]>({
+        queryKey: bucketKeys.bucket(idea.id),
+        queryFn: () => fetchBucket(idea.id),
+      });
+      return pick(bucket)?.id;
+    } catch {
+      return undefined;
+    }
   };
 
   const [selectedAlbum, setSelectedAlbum] = useState<AlbumWithCount | null>(null);
@@ -1576,30 +1610,20 @@ export default function Dashboard() {
   };
 
   // Ideas shelf Idea row — upload into that Idea, selected or not. The row knows
-  // only its hidden default Folder's (trackId, sectionName); the dialog needs the
-  // ideas-row id, so resolve it from the Idea's bucket first. View follows the drop.
+  // only its hidden default Folder's (trackId, sectionName); the upload needs the
+  // ideas-row id, so resolve it from the Idea's bucket first, then select the Idea
+  // and start the upload. Nothing uploads if it can't be resolved.
   const handleIdeaRowFileDrop = async (files: File[], idea: Song) => {
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
-    let destIdeaId: string | undefined;
-    try {
-      const bucket = await queryClient.fetchQuery<ApiTrack[]>({
-        queryKey: bucketKeys.bucket(idea.id),
-        queryFn: () => fetchBucket(idea.id),
-      });
-      destIdeaId = bucket.find(t => t.id === idea.defaultTrackId)
-        ?.ideas.find(i => i.sectionName === idea.defaultSectionName)?.id;
-    } catch {
-      destIdeaId = undefined;
-    }
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
+    const destIdeaId = await resolveIdeaFolderId(idea, bucket =>
+      bucket.find(t => t.id === idea.defaultTrackId)?.ideas.find(i => i.sectionName === idea.defaultSectionName));
     if (!destIdeaId) {
       toast({ title: 'Upload failed', description: `Couldn't open ${idea.name}.`, variant: 'destructive' });
       return;
     }
     selectIdea(idea);
-    setDropUploadTarget({ mode: 'placed', songId: idea.id, songType: 'idea', ideaId: destIdeaId, instrumentName: idea.name });
-    setUploadInitialFiles(audioFiles);
-    setIsUploadOpen(true);
+    uploadDropIntoIdea(dropped, idea, destIdeaId);
   };
 
   const songsTracksColumnDrop = useNativeFileDrop({ onDrop: handleTracksColumnFileDrop });
@@ -1645,19 +1669,21 @@ export default function Dashboard() {
   const ideaFilesColumnDrop = useNativeFileDrop({
     enabled: !!selectedFile && !previewLooseFile,
     onDrop: (files) => {
-      const audioFiles = takeAudioFiles(files);
-      if (!audioFiles.length || !selectedFile) return;
-      // The selected Idea's hidden default Folder; null only while its bucket loads,
-      // in which case the selection-driven props below are used unchanged.
-      if (selectedSection) {
-        setDropUploadTarget({
-          mode: 'placed', songId: selectedFile.id, songType: 'idea',
-          ideaId: selectedSection.id, instrumentName: selectedFile.name,
-        });
-      } else {
-        setUploadMode('placed');
-      }
-      setUploadInitialFiles(audioFiles); setIsUploadOpen(true);
+      if (!selectedFile) return;
+      const idea = selectedFile;
+      const dropped = takeDropFiles(files);
+      if (!dropped) return;
+      // The selected Idea's hidden default Folder. selectedSection is null while the
+      // Idea's bucket loads (right after selecting it): wait for the bucket and pick
+      // the Folder the same way the ideas auto-select effect does.
+      if (selectedSection) { uploadDropIntoIdea(dropped, idea, selectedSection.id); return; }
+      void resolveIdeaFolderId(idea, bucket => bucket[0]?.ideas[0]).then(destIdeaId => {
+        if (!destIdeaId) {
+          toast({ title: 'Upload failed', description: `Couldn't open ${idea.name}.`, variant: 'destructive' });
+          return;
+        }
+        uploadDropIntoIdea(dropped, idea, destIdeaId);
+      });
     },
   });
 
@@ -3255,7 +3281,7 @@ export default function Dashboard() {
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           className="text-xs cursor-pointer"
-                          onClick={() => { setUploadMode('loose'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                          onClick={() => { setUploadMode('loose'); setIsUploadOpen(true); }}
                         >
                           Add Files
                         </DropdownMenuItem>
@@ -3377,7 +3403,7 @@ export default function Dashboard() {
                         </button>
                       )}
                       <button
-                        onClick={() => { setUploadMode('placed'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                        onClick={() => { setUploadMode('placed'); setIsUploadOpen(true); }}
                         className="flex items-center gap-1 text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                       >
                         <Upload size={10} />
@@ -3491,7 +3517,7 @@ export default function Dashboard() {
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         className="text-xs cursor-pointer"
-                        onClick={() => { setUploadMode('band-loose'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                        onClick={() => { setUploadMode('band-loose'); setIsUploadOpen(true); }}
                       >
                         Upload Files
                       </DropdownMenuItem>
@@ -3547,7 +3573,7 @@ export default function Dashboard() {
                       the selected Idea (named on the button), or band-wide into Column 1
                       when no Idea is selected (nothing selected, or a loose-file preview). */}
                   <button
-                    onClick={() => { setUploadMode(selectedFile ? 'placed' : 'band-loose'); setUploadInitialFiles([]); setIsUploadOpen(true); }}
+                    onClick={() => { setUploadMode(selectedFile ? 'placed' : 'band-loose'); setIsUploadOpen(true); }}
                     title={selectedFile ? `Upload to ${selectedFile.name}` : 'Upload'}
                     className="flex items-center gap-1 min-w-0 max-w-[60%] text-[10px] bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20 transition-colors rounded px-2 py-1 font-bold"
                   >
@@ -4031,30 +4057,24 @@ export default function Dashboard() {
           (Ideas shelf Column 1's "Upload Files") must work with no Idea selected at
           all, so it can't depend on a selection existing to have somewhere to attach
           to. songId is omitted entirely for 'band-loose' — selection state must never
-          affect this mode, even when an Idea happens to be selected. */}
+          affect this mode, even when an Idea happens to be selected.
+          Finder drops upload without it (startDropUpload); a drop opens it only
+          through a video's "Extract audio" action, whose request overrides the
+          selection-driven props with the drop's destination preset. */}
       <UploadModal
-        open={isUploadOpen}
-        onOpenChange={(open) => { setIsUploadOpen(open); if (!open) setDropUploadTarget(null); }}
-        {...(dropUploadTarget ? {
-          songId: dropUploadTarget.songId,
-          mode: dropUploadTarget.mode,
-          defaultIdeaId: dropUploadTarget.ideaId,
-          defaultInstrumentName: dropUploadTarget.instrumentName,
-          defaultSectionName: dropUploadTarget.sectionName,
-          songType: dropUploadTarget.songType,
-          looseTrackId: dropUploadTarget.looseTrackId,
-          announceDestination: true,
-        } : {
-          songId: uploadMode === 'band-loose' ? undefined : selectedFile?.id,
-          mode: uploadMode,
-          defaultIdeaId: selectedSection?.id,
-          defaultInstrumentName: filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? ''),
-          defaultSectionName: filesFilter === 'ideas' ? undefined : selectedSection?.sectionName,
-          songType: filesFilter === 'ideas' ? 'idea' as const : 'song' as const,
-        })}
-        initialFiles={uploadInitialFiles}
+        open={isUploadOpen || !!extractAudio.request}
+        onOpenChange={(open) => { setIsUploadOpen(open); if (!open) extractAudio.clear(); }}
+        songId={uploadMode === 'band-loose' ? undefined : selectedFile?.id}
+        mode={uploadMode}
+        defaultIdeaId={selectedSection?.id}
+        defaultInstrumentName={filesFilter === 'ideas' ? (selectedFile?.name ?? '') : (selectedInstrument?.name ?? '')}
+        defaultSectionName={filesFilter === 'ideas' ? undefined : selectedSection?.sectionName}
+        songType={filesFilter === 'ideas' ? 'idea' : 'song'}
+        {...(extractAudio.request ? extractAudioModalProps(extractAudio.request) : {})}
         onUploadSuccess={({ mode, destTrackId, destIdeaId }) => {
           if (filesFilter === 'ideas') queryClient.invalidateQueries({ queryKey: ['songs'] });
+          // A drop's "Extract audio" upload never moves the selection.
+          if (extractAudio.request) return;
           // Songs quick-browser: a placed upload's destination can differ from the
           // selection (the Upload button's Destination dropdown), so follow it — select
           // its Track and Section from fresh bucket data, as MediaBucket does — so the

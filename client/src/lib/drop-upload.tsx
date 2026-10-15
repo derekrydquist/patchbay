@@ -1,9 +1,12 @@
-import { AlertCircle, CheckCircle2, Loader2, Undo2 } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertCircle, CheckCircle2, Loader2, Undo2, Video } from 'lucide-react';
 import { queryClient } from '@/lib/queryClient';
 import { bucketKeys, looseFileKeys, type ApiClip, type ApiLooseFile } from '@/lib/bucket-api';
 import { toast } from '@/hooks/use-toast';
 import { ToastAction } from '@/components/ui/toast';
 import { requestLandingFlash, clipLandingZone, looseLandingZone } from '@/hooks/use-landing-flash';
+import type { DroppedFiles } from '@/hooks/use-native-file-drop';
+import type { UploadModalProps } from '@/components/daw/UploadModal';
 
 // ── Finder-drop uploads ───────────────────────────────────────────────────────
 // A Finder (OS) file drop uploads immediately, with no dialog. This module lives
@@ -15,6 +18,11 @@ import { requestLandingFlash, clipLandingZone, looseLandingZone } from '@/hooks/
 // Nothing here moves the selection. The drop handler selects the destination at drop
 // time; if the user has navigated away by the time files land, they stay put.
 //
+// Video files don't upload here: they need the audio extracted first (ffmpeg, in
+// UploadModal). A drop's video files get one "Video needs audio extraction" toast
+// whose "Extract audio" action asks the surface to open its UploadModal with those
+// files and the drop's destination preset (useExtractAudioRequest).
+//
 // Upload buttons keep using UploadModal.
 
 export type DropUploadDestination =
@@ -23,10 +31,17 @@ export type DropUploadDestination =
   | { kind: 'band-loose' };
 
 export interface DropUploadOptions {
-  files: File[];
+  /** From takeDropFiles: audio uploads now, video gets the "Extract audio" toast. */
+  files: DroppedFiles;
   destination: DropUploadDestination;
   /** Human-readable destination: "Drums › Intro", "Drums", the song or Idea name, "Ideas". */
   label: string;
+  /** The video toast's "Extract audio" action — the surface's requestExtract. */
+  onExtractAudio: (request: ExtractAudioRequest) => void;
+  /** Landing flash: scroll the page when the file's column grows with the page
+   *  instead of scrolling on its own (SongHome's Song Files, via MediaBucket). The
+   *  Library columns are fixed-height and scroll themselves, so they leave it off. */
+  scrollPage?: boolean;
 }
 
 // What Undo needs for each landed file (POST /api/uploads/undo).
@@ -218,12 +233,12 @@ async function undoBatch(landed: Landed[], dest: DropUploadDestination) {
 
 // ── Batch ─────────────────────────────────────────────────────────────────────
 
-export function startDropUpload({ files, destination, label }: DropUploadOptions): void {
-  if (!files.length) return;
-  void runBatch(files, destination, label);
+export function startDropUpload({ files, destination, label, onExtractAudio, scrollPage = false }: DropUploadOptions): void {
+  if (files.video.length) showExtractAudioToast(files.video, destination, onExtractAudio);
+  if (files.audio.length) void runBatch(files.audio, destination, label, scrollPage);
 }
 
-async function runBatch(files: File[], dest: DropUploadDestination, label: string) {
+async function runBatch(files: File[], dest: DropUploadDestination, label: string, scrollPage: boolean) {
   batchStarted();
   // Created only if the batch outlives PROGRESS_TOAST_DELAY_MS; then it stays up
   // until the batch finishes (duration Infinity), updated in place per file.
@@ -249,9 +264,7 @@ async function runBatch(files: File[], dest: DropUploadDestination, label: strin
         landed.push({ fileName: shortenFileName(file.name), undo });
         // Files appear as they land.
         invalidateFor(dest);
-        // scrollPage: SongHome's Song Files grows with the page, so its column never
-        // scrolls on its own — scroll the page to show the file instead.
-        requestLandingFlash([{ id: undo.id, zone }], { scrollPage: true });
+        requestLandingFlash([{ id: undo.id, zone }], { scrollPage });
       } catch (err) {
         failed.push({ fileName: shortenFileName(file.name), reason: err instanceof Error ? err.message : 'Upload failed.' });
       }
@@ -311,4 +324,78 @@ async function runBatch(files: File[], dest: DropUploadDestination, label: strin
       </ToastAction>
     ),
   });
+}
+
+// ── Video: "Extract audio" ────────────────────────────────────────────────────
+
+/** What the "Extract audio" action hands the surface: open UploadModal with these
+ *  video files and this destination preset. */
+export interface ExtractAudioRequest {
+  files: File[];
+  destination: DropUploadDestination;
+  /** Placed into an Idea (Ideas shelf): the Idea's name. UploadModal treats the
+   *  destination as idea-type — its "Uploading to" line and the clip keeps its file
+   *  name instead of the real-song V-number. */
+  ideaName?: string;
+}
+
+function showExtractAudioToast(
+  videos: File[], destination: DropUploadDestination, onExtractAudio: (request: ExtractAudioRequest) => void,
+) {
+  const names = videos.length === 1
+    ? shortenFileName(videos[0].name)
+    : `${videos.length} files (${videos.map(v => shortenFileName(v.name)).join(', ')})`;
+  let clicked = false;
+  toast({
+    title: <span className={TITLE_CLASS}><Video size={14} className="shrink-0" />Video needs audio extraction</span>,
+    description: `${names} ${videos.length === 1 ? 'is a video' : 'are videos'} — extract the audio to upload.`,
+    className: GOLD_TOAST_CLASS,
+    action: (
+      <ToastAction
+        altText="Extract audio"
+        className="shrink-0"
+        onClick={() => {
+          if (clicked) return;
+          clicked = true;
+          onExtractAudio({ files: videos, destination });
+        }}
+      >
+        Extract audio
+      </ToastAction>
+    ),
+  });
+}
+
+/** One surface's pending "Extract audio" request — set by the toast action, cleared
+ *  when the dialog closes. The toast outlives the surface; a click after it
+ *  unmounted does nothing. */
+export function useExtractAudioRequest() {
+  const [request, setRequest] = useState<ExtractAudioRequest | null>(null);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const requestExtract = useCallback((r: ExtractAudioRequest) => {
+    if (mountedRef.current) setRequest(r);
+  }, []);
+  const clear = useCallback(() => setRequest(null), []);
+  return { request, requestExtract, clear };
+}
+
+/** UploadModal props for an "Extract audio" request: the videos as initialFiles and
+ *  the drop's destination preset — placed → that idea; loose → loose mode on that
+ *  Track (or song-level); band-loose → band-loose. */
+export function extractAudioModalProps(r: ExtractAudioRequest): Partial<UploadModalProps> {
+  const d = r.destination;
+  const common = { initialFiles: r.files, announceDestination: true };
+  if (d.kind === 'band-loose') return { ...common, mode: 'band-loose', songId: undefined };
+  if (d.kind === 'loose') {
+    return { ...common, mode: 'loose', songId: d.songId, looseTrackId: d.trackId ?? undefined };
+  }
+  return r.ideaName !== undefined
+    ? { ...common, mode: 'placed', songId: d.songId, defaultIdeaId: d.ideaId, songType: 'idea',
+        defaultInstrumentName: r.ideaName, defaultSectionName: undefined }
+    : { ...common, mode: 'placed', songId: d.songId, defaultIdeaId: d.ideaId, songType: 'song',
+        defaultInstrumentName: undefined, defaultSectionName: undefined };
 }

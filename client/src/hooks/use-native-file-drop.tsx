@@ -262,7 +262,7 @@ export interface NativeFileHold {
 
 interface UseNativeFileDropOptions {
   enabled?: boolean;
-  /** Every file in the drop — use takeAudioFiles() to filter and toast. */
+  /** Every file in the drop — use takeDropFiles() to filter and toast. */
   onDrop: (files: File[]) => void;
   /** Hover-to-act timer: armed when the drag enters the target, cancelled when it
    *  leaves, drops, or the drag ends anywhere. Read at enter time — pass undefined
@@ -343,17 +343,27 @@ export function useNativeFileDrop({ enabled = true, onDrop, hold }: UseNativeFil
   return { isOver: isOver && enabled, handlers };
 }
 
-/** Audio files from a drop, or [] after showing the unsupported-file-type toast. */
-export function takeAudioFiles(files: File[]): File[] {
+/** A drop's usable files: audio uploads at once, video goes through "Extract audio". */
+export interface DroppedFiles {
+  audio: File[];
+  video: File[];
+}
+
+/** Splits a drop three ways: audio/*, video/*, and anything else — which gets the
+ *  unsupported-file-type toast here. Null when there's no audio or video at all.
+ *  Pass the result to startDropUpload (drop-upload.tsx), which uploads the audio and
+ *  shows the video toast. */
+export function takeDropFiles(files: File[]): DroppedFiles | null {
   const audio = files.filter(f => f.type.startsWith('audio/'));
-  if (!audio.length) {
+  const video = files.filter(f => f.type.startsWith('video/'));
+  if (audio.length + video.length < files.length) {
     toast({
       title: 'Unsupported file type',
       description: 'Only audio files can be uploaded here.',
       variant: 'destructive',
     });
   }
-  return audio;
+  return audio.length || video.length ? { audio, video } : null;
 }
 
 // Shared highlight styling. Feedback must never change layout: nothing is inserted

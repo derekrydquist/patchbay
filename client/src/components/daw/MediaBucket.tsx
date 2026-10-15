@@ -22,11 +22,11 @@ import {
   type SpringLoadedRowsOptions,
 } from '@/hooks/use-loose-file-organize-dnd';
 import {
-  useNativeFileDrop, takeAudioFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
+  useNativeFileDrop, takeDropFiles, NATIVE_DROP_ROW_CLASS, NATIVE_DROP_COLUMN_CLASS,
   type NativeFileHold,
 } from '@/hooks/use-native-file-drop';
 import { requestLandingFlash, clipLandingZone } from '@/hooks/use-landing-flash';
-import { startDropUpload } from '@/lib/drop-upload';
+import { startDropUpload, useExtractAudioRequest, extractAudioModalProps } from '@/lib/drop-upload';
 import { apiRequest } from '@/lib/queryClient';
 import { BucketClip, useLiveClipCommentSummary } from './Clip';
 import { LooseFileRow, LooseFileInfoProvider, useLooseFileInfoWindow } from './LooseFileRow';
@@ -261,6 +261,9 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   const [selectedIdea, setSelectedIdea] = useState<ApiIdea | null>(null);
   const [autoOpenClipId, setAutoOpenClipId] = useState<string | null>(null);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  // A dropped video's "Extract audio" toast action: opens the UploadModal below with
+  // the videos and the drop's destination preset.
+  const extractAudio = useExtractAudioRequest();
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddSectionOpen, setIsAddSectionOpen] = useState(false);
   const [newSectionName, setNewSectionName] = useState('');
@@ -564,37 +567,45 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
   // background → a song-level loose file. The drop selects the destination now;
   // nothing moves the selection when the upload finishes. Native drag events and
   // dnd-kit's pointer-sensor drags are independent mechanisms that never intercept
-  // each other.
+  // each other. Video files get an "Extract audio" toast instead (startDropUpload).
+  // scrollPage: SongHome's Song Files grows with the page, so its column never
+  // scrolls on its own — the landing flash scrolls the page instead.
   const handleIdeaFileDrop = (files: File[], idea: ApiIdea, track: ApiTrack) => {
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
     startDropUpload({
-      files: audioFiles,
+      files: dropped,
       destination: { kind: 'placed', songId, ideaId: idea.id },
       label: `${track.name} › ${idea.sectionName}`,
+      onExtractAudio: extractAudio.requestExtract,
+      scrollPage: true,
     });
     setSelectedTrack(track);
     setSelectedIdea(idea);
   };
 
   const handleTrackFileDrop = (files: File[], track: ApiTrack) => {
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
     startDropUpload({
-      files: audioFiles,
+      files: dropped,
       destination: { kind: 'loose', songId, trackId: track.id },
       label: track.name,
+      onExtractAudio: extractAudio.requestExtract,
+      scrollPage: true,
     });
     if (selectedTrack?.id !== track.id) { setSelectedTrack(track); setSelectedIdea(null); }
   };
 
   const handleTracksFileDrop = (files: File[]) => {
-    const audioFiles = takeAudioFiles(files);
-    if (!audioFiles.length) return;
+    const dropped = takeDropFiles(files);
+    if (!dropped) return;
     startDropUpload({
-      files: audioFiles,
+      files: dropped,
       destination: { kind: 'loose', songId, trackId: null },
       label: song?.name ?? 'this song',
+      onExtractAudio: extractAudio.requestExtract,
+      scrollPage: true,
     });
   };
 
@@ -1031,13 +1042,16 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
       </div>
 
-      {/* Upload button and Tracks "Add Files" only — song-level loose files. Finder
-          drops upload without a dialog (startDropUpload). */}
+      {/* Upload button and Tracks "Add Files" — song-level loose files. Finder drops
+          upload without a dialog (startDropUpload); the dialog opens for a drop only
+          through a video's "Extract audio" action, with the drop's destination preset
+          (extractAudioModalProps), cleared when it closes. */}
       <UploadModal
-        open={isUploadOpen}
-        onOpenChange={setIsUploadOpen}
+        open={isUploadOpen || !!extractAudio.request}
+        onOpenChange={(open) => { setIsUploadOpen(open); if (!open) extractAudio.clear(); }}
         songId={songId}
         mode="loose"
+        {...(extractAudio.request ? extractAudioModalProps(extractAudio.request) : {})}
       />
 
       <AddInstrumentModal
