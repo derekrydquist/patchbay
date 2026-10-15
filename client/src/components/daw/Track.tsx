@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip } from '@/lib/daw-data';
 import { TimelineClip } from './Clip';
+import { trackDisplayColor } from '@/lib/track-color';
 import { Mic, Headphones, Activity } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
 import {
@@ -29,6 +30,7 @@ interface SectionCellProps {
   isInvalid: boolean;
   insertionX?: number;
   trackId: string;
+  trackColor: string;
   songId: string;
   flashClipId?: string | null;
   selectedClipId?: string | null;
@@ -36,10 +38,11 @@ interface SectionCellProps {
 
 // Renders full-take clips at their absolute timeline positions. Used instead of the
 // section-cell grid when a track has at least one full-take clip on it.
-function FullTakeLane({ clips, zoom, trackId, songId, flashClipId, selectedClipId }: {
+function FullTakeLane({ clips, zoom, trackId, trackColor, songId, flashClipId, selectedClipId }: {
   clips: Clip[];
   zoom: number;
   trackId: string;
+  trackColor: string;
   songId: string;
   flashClipId?: string | null;
   selectedClipId?: string | null;
@@ -54,6 +57,7 @@ function FullTakeLane({ clips, zoom, trackId, songId, flashClipId, selectedClipI
           zoom={zoom}
           sectionStart={0}
           trackId={trackId}
+          trackColor={trackColor}
           songId={songId}
           instanceCount={1}
           isFlash={flashClipId === clip.id}
@@ -73,6 +77,7 @@ function SectionCell({
   isInvalid,
   insertionX,
   trackId,
+  trackColor,
   songId,
   flashClipId,
   selectedClipId,
@@ -88,7 +93,7 @@ function SectionCell({
       {clips.map((clip) => {
         const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
         return (
-          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} songId={songId} instanceCount={instanceCount} isFlash={flashClipId === clip.id} isSelected={selectedClipId === clip.id} />
+          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} trackColor={trackColor} songId={songId} instanceCount={instanceCount} isFlash={flashClipId === clip.id} isSelected={selectedClipId === clip.id} />
         );
       })}
       {insertionX !== undefined && (
@@ -342,6 +347,7 @@ export function TimelineTrack({
                 clips={track.clips}
                 zoom={zoom}
                 trackId={track.id}
+                trackColor={trackDisplayColor(track)}
                 songId={songId}
                 flashClipId={flashClipId}
                 selectedClipId={selectedClipId}
@@ -360,6 +366,7 @@ export function TimelineTrack({
                       zoom={zoom}
                       isInvalid={invalidSections.has(section.name)}
                       trackId={track.id}
+                      trackColor={trackDisplayColor(track)}
                       songId={songId}
                       insertionX={
                         insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined

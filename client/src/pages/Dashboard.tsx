@@ -7,6 +7,7 @@ import { Music2, Lightbulb, Plus, Clock, X, MoreHorizontal, Trash2, ChevronRight
 import { WaveformPlayerCard } from '@/components/daw/WaveformPlayerCard';
 import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import { cn } from '@/lib/utils';
+import { trackDisplayColor } from '@/lib/track-color';
 import {
   Dialog,
   DialogContent,
@@ -3869,6 +3870,7 @@ export default function Dashboard() {
                   isFinal: infoClip.isFinal,
                   metadata: infoClip.metadata ?? undefined,
                 }}
+                trackColor={trackDisplayColor(fileBucket.find(t => t.ideas.some(i => i.id === infoClip.ideaId)))}
                 open={true}
                 onOpenChange={open => { if (!open) { setInfoClip(null); setInfoFocusNotes(false); setInfoFocusComments(false); } }}
                 bucketClipId={infoClip.id}

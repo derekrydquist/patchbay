@@ -47,6 +47,7 @@ import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
+import { trackDisplayColor } from '@/lib/track-color';
 
 // ─── Section row — Sections column ─────────────────────────────────────────────
 // Extracted so useDroppable can be called once per row. Doubles as the organize
@@ -1022,6 +1023,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
                         clip={apiClipToClip({ ...clip, isFullTake: selectedIdea?.isFullTake ?? false })}
                         trackId={selectedTrack?.id}
                         trackName={selectedTrack?.name}
+                        trackColor={trackDisplayColor(selectedTrack)}
                         songId={songId}
                         onAddToTimeline={onAddToTimeline}
                         autoOpenInfo={clip.id === autoOpenClipId}

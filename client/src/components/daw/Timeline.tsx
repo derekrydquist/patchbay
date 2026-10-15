@@ -46,6 +46,7 @@ import {
   VersionMoveOutContext,
 } from '@/hooks/use-loose-file-organize-dnd';
 import { apiRequest } from '@/lib/queryClient';
+import { trackDisplayColor } from '@/lib/track-color';
 import { VersionMoveInUseDialog } from './ClipInUseDialog';
 import { LooseFileDragOverlay } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
@@ -3251,7 +3252,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 className="h-10 rounded-md border-2 border-primary shadow-[0_0_30px_rgba(212,175,55,0.4)] flex items-center px-4 gap-3 bg-[#0c0c0e] pointer-events-none"
                 style={{ width: Math.max(160, ((activeDragData.clip.trimEnd ?? activeDragData.clip.duration) - (activeDragData.clip.trimStart ?? 0)) * zoom) }}
               >
-                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: activeDragData.clip.color }} />
+                <div className="w-2 h-2 rounded-full" style={{ backgroundColor: trackDisplayColor(tracks.find((t) => t.id === activeDragData.trackId)) }} />
                 <span className="text-xs font-bold text-white truncate tracking-tight">
                   {activeDragData.clip.name}
                 </span>

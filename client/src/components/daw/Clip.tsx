@@ -144,6 +144,8 @@ interface ClipProps {
   zoom?: number;
   sectionStart?: number;
   trackId?: string;
+  // The track's display color (lib/track-color.ts) — used instead of clip.color.
+  trackColor: string;
   songId?: string;
   instanceCount?: number;
   isFlash?: boolean;
@@ -166,8 +168,12 @@ function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string
 
 type ClipMetadataValue = NonNullable<Clip['metadata']>;
 
-export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default', target, metadataWriter }: {
-  clip: Clip, open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string,
+export function ClipInfoWindow({ clip, trackColor, open, onOpenChange, onCommentsChange: _onCommentsChange, focusNotes, focusComments, bucketClipId, audioBuffer, songId = 'patchbay-default', target, metadataWriter }: {
+  clip: Clip,
+  // The header swatch color — the file's track's display color (lib/track-color.ts),
+  // never clip.color.
+  trackColor: string,
+  open: boolean, onOpenChange: (open: boolean) => void, onCommentsChange?: (comments: Comment[]) => void, focusNotes?: boolean, focusComments?: boolean, bucketClipId?: string, audioBuffer?: AudioBuffer, songId?: string,
   target?: CommentTarget,
   // Saves an edit: `metadata` is the full merged object, `updates` only the changed
   // field(s). When absent, a clip target falls back to PATCH /api/clips/:id (full
@@ -572,7 +578,7 @@ export function ClipInfoWindow({ clip, open, onOpenChange, onCommentsChange: _on
         <div className="bg-gradient-to-r from-primary/20 to-transparent p-6 border-b border-primary/10">
           <DialogHeader>
             <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-lg shadow-lg flex items-center justify-center border border-white/10" style={{ backgroundColor: clip.color }}>
+              <div className="w-10 h-10 rounded-lg shadow-lg flex items-center justify-center border border-white/10" style={{ backgroundColor: trackColor }}>
                 <Music size={20} className="text-black/70" />
               </div>
               <div className="flex flex-col">
@@ -989,7 +995,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1485,7 +1491,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
           >
             <div
               className="absolute inset-0 opacity-80"
-              style={{ backgroundColor: clip.color || 'hsl(var(--primary))' }}
+              style={{ backgroundColor: trackColor }}
             />
 
             {isFinal && (
@@ -1716,6 +1722,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
       {showInfo && (
         <ClipInfoWindow
           clip={{...clip, isFinal}}
+          trackColor={trackColor}
           open={showInfo}
           onOpenChange={(open) => { setShowInfo(open); if (!open) { setFocusNotes(false); setFocusComments(false); } }}
           focusNotes={focusNotes}
@@ -1865,6 +1872,8 @@ interface BucketClipProps {
   clip: Clip;
   trackId?: string;
   trackName?: string;
+  // The track's display color (lib/track-color.ts) — used instead of clip.color.
+  trackColor: string;
   songId?: string;
   onAddToTimeline?: (clip: Clip, trackId?: string) => void;
   autoOpenInfo?: boolean;
@@ -1872,7 +1881,7 @@ interface BucketClipProps {
   onAutoOpenHandled?: () => void;
 }
 
-export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo, onAutoOpenHandled }: BucketClipProps) {
+export function BucketClip({ clip, trackId, trackName, trackColor, songId = 'patchbay-default', onAddToTimeline, autoOpenInfo, onAutoOpenHandled }: BucketClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -2000,7 +2009,7 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
               name={clip.name}
               duration={clip.duration}
               isFinal={isFinal}
-              color={clip.color}
+              color={trackColor}
               waveformHeight={20}
               cardRef={cardRef}
             >
@@ -2076,6 +2085,7 @@ export function BucketClip({ clip, trackId, trackName, songId = 'patchbay-defaul
       {showInfo && (
         <ClipInfoWindow
           clip={{...clip, isFinal, comments}}
+          trackColor={trackColor}
           open={showInfo}
           onOpenChange={(open) => { setShowInfo(open); if (!open) { setFocusNotes(false); setFocusComments(false); } }}
           onCommentsChange={handleUpdateComments}

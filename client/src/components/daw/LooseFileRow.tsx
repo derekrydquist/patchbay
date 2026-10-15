@@ -9,8 +9,9 @@ import { ClipInfoWindow, hasUnreadComments, markCommentsViewed, useLastViewedCom
 import { useDeleteLooseFile } from '@/hooks/use-bucket-mutations';
 import { DRAG_SURFACE_ROW_HOVER } from '@/hooks/use-loose-file-organize-dnd';
 import { useLandingFlash, looseLandingZone } from '@/hooks/use-landing-flash';
-import { type ApiLooseFile, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
+import { type ApiLooseFile, type ApiTrack, bucketKeys, looseFileKeys } from '@/lib/bucket-api';
 import { type Clip } from '@/lib/daw-data';
+import { looseFileDisplayColor } from '@/lib/track-color';
 import { cn } from '@/lib/utils';
 
 // Converts a loose file into the same Clip shape BucketClip drag payloads use,
@@ -74,9 +75,16 @@ export function useLooseFileInfoWindow(): { open: OpenLooseFileInfo; infoWindow:
     queryClient.invalidateQueries({ queryKey: looseFileKeys.all() });
     queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(looseFile.songId ?? undefined) });
   }, [queryClient]);
+  // Swatch color: a Track-scoped file's track comes from the song's bucket, which
+  // every surface that opens this window has already loaded. Read straight from the
+  // cache — never fetched here. A miss (no songId, track not in the bucket) is gold.
+  const findTrack = (songId: string | null, trackId: string) => songId
+    ? queryClient.getQueryData<ApiTrack[]>(bucketKeys.bucket(songId))?.find(t => t.id === trackId)
+    : undefined;
   const infoWindow = state && (
     <ClipInfoWindow
       clip={looseFileToClip(state.looseFile)}
+      trackColor={looseFileDisplayColor(state.looseFile, trackId => findTrack(state.looseFile.songId, trackId))}
       open
       onOpenChange={o => { if (!o) setState(null); }}
       focusNotes={state.focusNotes}
