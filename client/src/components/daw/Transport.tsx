@@ -7,9 +7,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { ExportDialog } from './ExportDialog';
+import { DEFAULT_BPM, formatBarsBeats } from '@/lib/musical-time';
 
-// Tempo shown when a song's stored bpm is null. Must match Timeline's DEFAULT_BPM.
-const DEFAULT_BPM = 120;
 const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '2/4', '5/4'];
 const METRONOME_SUBDIVISIONS = ['1/4', '1/8', '1/16'] as const;
 type MetronomeSubdivision = typeof METRONOME_SUBDIVISIONS[number];
@@ -224,12 +223,17 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
   };
 
   return (
-    <div className="h-16 border-b border-border bg-card/50 backdrop-blur-md flex items-center justify-between px-6 select-none z-50 relative shadow-md">
+    <div className="h-16 border-b border-border bg-card/50 backdrop-blur-md grid grid-cols-[1fr_auto_1fr] items-center gap-6 px-6 select-none z-50 relative shadow-md">
       {/* Left: Time Display */}
-      <div className="flex items-center gap-6 w-1/3">
+      <div className="flex items-center gap-4 xl:gap-6">
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Timecode</span>
           <span className="text-2xl font-mono text-primary font-bold tracking-tight shadow-glow">{formatTimecode(currentTime)}</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Bar</span>
+          {/* min-w holds the width steady as the bar number gains digits */}
+          <span className="text-2xl font-mono text-primary font-bold tracking-tight shadow-glow min-w-[7ch]">{formatBarsBeats(currentTime, bpm, timeSignature)}</span>
         </div>
         <div className="flex flex-col">
           <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-heading">Tempo</span>
@@ -265,7 +269,7 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
       </div>
 
       {/* Center: Controls */}
-      <div className="flex items-center justify-center gap-2 w-1/3">
+      <div className="flex items-center justify-center gap-2">
         <Popover>
           <div className="group flex items-center gap-0">
             {/*
@@ -400,19 +404,19 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
       </div>
 
       {/* Right: Master Volume */}
-      <div className="flex items-center justify-end gap-4 w-1/3">
-        <div className="flex items-center gap-2 w-48">
-          <Volume2 size={16} className="text-muted-foreground" />
+      <div className="flex items-center justify-end gap-4">
+        <div className="hidden lg:flex flex-1 min-w-24 max-w-48 items-center gap-2">
+          <Volume2 size={16} className="text-muted-foreground shrink-0" />
           <Slider
             defaultValue={[80]}
             onValueChange={([val]) => {
               window.dispatchEvent(new CustomEvent('update-master-volume', { detail: { volume: val } }));
             }}
-            max={100} step={1} className="w-full"
+            max={100} step={1} className="w-full min-w-0"
           />
         </div>
         <ExportDialog songId={songId}>
-          <Button variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
+          <Button variant="outline" size="sm" className="flex-none border-primary/30 text-primary hover:bg-primary/10 uppercase text-xs font-bold tracking-wider">
             Export
           </Button>
         </ExportDialog>

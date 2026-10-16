@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip } from '@/lib/daw-data';
 import { TimelineClip } from './Clip';
+import { BeatGrid } from './BeatGrid';
 import { trackDisplayColor } from '@/lib/track-color';
 import { Mic, Headphones, Activity } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
@@ -122,6 +123,8 @@ interface TrackProps {
   selectedTrackId?: string | null;
   selectedClipId?: string | null;
   controlInteractionRef: React.RefObject<boolean>;
+  bpm: number;
+  timeSignature: string;
 }
 
 export function TimelineTrack({
@@ -138,6 +141,8 @@ export function TimelineTrack({
   selectedTrackId,
   selectedClipId,
   controlInteractionRef,
+  bpm,
+  timeSignature,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -341,9 +346,9 @@ export function TimelineTrack({
         return (
           <div
             ref={setNodeRef}
-            className="flex-1 relative h-full border-b border-border bg-[linear-gradient(90deg,transparent_19px,rgba(255,255,255,0.02)_20px)]"
-            style={{ backgroundSize: `${zoom / 4}px 100%` }}
+            className="flex-1 relative h-full border-b border-border"
           >
+            <BeatGrid zoom={zoom} bpm={bpm} timeSignature={timeSignature} />
             {hasFullTake ? (
               <FullTakeLane
                 clips={track.clips}

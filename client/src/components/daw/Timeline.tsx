@@ -52,6 +52,7 @@ import { LooseFileDragOverlay } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
+import { DEFAULT_BPM } from '@/lib/musical-time';
 import { DawScrollbar } from './DawScrollbar';
 import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
@@ -68,8 +69,6 @@ const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 const TRACK_PANEL_WIDTH = 256;
 const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
 // Ticks per quarter-note beat for each metronome subdivision setting.
-// Tempo used when a song's stored bpm is null. Must match Transport's DEFAULT_BPM.
-const DEFAULT_BPM = 120;
 const METRONOME_SUBDIVISION_FACTORS: Record<string, number> = { '1/4': 1, '1/8': 2, '1/16': 4 };
 
 type ApiTrack = {
@@ -3098,7 +3097,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                   Negative margin overlaps the flag-band without adding vertical space. */}
               <div className="-mt-1.5 sticky left-0 top-0 z-50 w-64 h-1.5 bg-card pointer-events-none" />
 
-              <Ruler onSeek={handleRulerSeek} zoom={zoom} />
+              <Ruler
+                onSeek={handleRulerSeek}
+                zoom={zoom}
+                bpm={bpm}
+                timeSignature={timeSignature}
+                // Same span as the content div's width/minWidth below, minus the track panel.
+                contentSeconds={Math.max(endOfTimeline + 15, 100)}
+              />
               {/* Ruler spacer — same pattern: content-root sibling, overlaps the 32px ruler. */}
               <div className="-mt-8 sticky left-0 top-[6px] z-50 w-64 h-8 bg-card pointer-events-none" />
 
@@ -3240,6 +3246,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     selectedTrackId={selectedTimelineTrackId}
                     selectedClipId={selectedTimelineClipId}
                     controlInteractionRef={controlInteractionRef}
+                    bpm={bpm}
+                    timeSignature={timeSignature}
                   />
                 );
               })}
