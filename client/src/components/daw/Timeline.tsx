@@ -68,6 +68,8 @@ const MIN_SECTION_WIDTH = 4; // seconds — minimum width for a section column
 const TRACK_PANEL_WIDTH = 256;
 const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
 // Ticks per quarter-note beat for each metronome subdivision setting.
+// Tempo used when a song's stored bpm is null. Must match Transport's DEFAULT_BPM.
+const DEFAULT_BPM = 120;
 const METRONOME_SUBDIVISION_FACTORS: Record<string, number> = { '1/4': 1, '1/8': 2, '1/16': 4 };
 
 type ApiTrack = {
@@ -363,8 +365,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     },
   });
   // "Remove from Section" is offered on version cards only for a real song (type
-  // 'song') — same cache entry Workspace reads for the song name.
-  const { data: songInfo } = useQuery<{ type?: string }>({
+  // 'song') — same cache entry Workspace reads for the song name. Also seeds the
+  // metronome's tempo and time signature (see the seeding effect below the bpm state).
+  const { data: songInfo } = useQuery<{ type?: string; bpm?: number | null; timeSignature?: string | null }>({
     queryKey: ['song', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
@@ -582,7 +585,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     setPlayheadTimeState(playheadRef.current);
   }, []);
 
-  const [bpm, setBpm] = useState(MOCK_SONG.bpm || 120);
+  // Placeholder until the song query resolves — the seeding effect below replaces it with the
+  // song's stored tempo. 120 is also the fallback for songs whose stored bpm is null.
+  const [bpm, setBpm] = useState(DEFAULT_BPM);
   const [timeSignature, setTimeSignature] = useState('4/4');
   const [zoom, setZoom] = useState(() => {
     const saved = localStorage.getItem(`patchbay-zoom-${songId}`);
@@ -641,7 +646,22 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   })());
   // Stale-closure-safe mirror of `bpm` state, needed inside zero-dep effect handlers
   // (the subdivision-change reseed) that can't depend on the main rAF effect's bpm closure.
-  const bpmRef = useRef(MOCK_SONG.bpm || 120);
+  const bpmRef = useRef(DEFAULT_BPM);
+  // Seed tempo + time signature from the song's stored values once per song. Guarded so a later
+  // refetch of ['song', songId] can't overwrite an edit made this session (edits arrive via the
+  // update-bpm / update-time-signature listeners). bpmRef is written directly, not just via the
+  // bpm mirror effect, so the subdivision reseed sees the loaded tempo immediately.
+  // Null bpm / missing time signature fall back to 120 and '4/4' — display only, nothing is
+  // written back. Transport applies the same fallbacks so both always agree.
+  const songTempoSeededForRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!songInfo || songTempoSeededForRef.current === songId) return;
+    songTempoSeededForRef.current = songId;
+    const seededBpm = songInfo.bpm ?? DEFAULT_BPM;
+    bpmRef.current = seededBpm;
+    setBpm(seededBpm);
+    setTimeSignature(songInfo.timeSignature || '4/4');
+  }, [songInfo, songId]);
   // Captured at first render; compared against when tracks first arrive to detect slow loads.
   const mountTimeRef = useRef(performance.now());
   // Stable refs for mutable values needed inside zero-dep useEffect handlers (stale closure safety).
@@ -873,6 +893,17 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     return () => window.removeEventListener('update-time-signature', handleTimeSignatureUpdated);
   }, []);
 
+  // Transport asks for the current time when it mounts, so its timecode shows the (lazily
+  // restored) playhead instead of 00:00:00:00 until the playhead next moves. This listener is
+  // registered before Transport's mount effect runs: Timeline renders first in Workspace.
+  useEffect(() => {
+    const handleRequestTimeUpdate = () => {
+      window.dispatchEvent(new CustomEvent('time-update', { detail: { time: playheadRef.current } }));
+    };
+    window.addEventListener('request-time-update', handleRequestTimeUpdate);
+    return () => window.removeEventListener('request-time-update', handleRequestTimeUpdate);
+  }, []);
+
   useEffect(() => {
     const handleMasterVolume = (e: any) => {
       masterVolumeRef.current = e.detail.volume / 100;
@@ -1043,7 +1074,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const savedPlayhead = localStorage.getItem(`patchbay-playhead-${songId}`);
     if (savedPlayhead) {
       const t = Number(savedPlayhead);
-      if (t >= 0 && isFinite(t)) setPlayheadTime(t);
+      if (t >= 0 && isFinite(t)) {
+        setPlayheadTime(t);
+        // Transport's timecode only learns the time from time-update. Its listener is already
+        // registered here (tracks arrive in a later commit than mount); request-time-update
+        // below covers Transport mounting without a restore ever running.
+        window.dispatchEvent(new CustomEvent('time-update', { detail: { time: t } }));
+      }
     }
 
     // Selection
@@ -1768,10 +1805,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     audio.pause();
                     pendingPlayRef.current.delete(clip.id);
                   }
-                  // Update volume/mute/rate every frame
+                  // Update volume/mute every frame. playbackRate is never written: clips always
+                  // play at their recorded speed (the <audio> default of 1). Tempo only drives
+                  // the metronome and grid — it must never time-stretch recordings.
                   audio.volume = (track.volume / 100) * masterVolumeRef.current;
                   audio.muted = track.muted;
-                  audio.playbackRate = bpm / 120;
                   ensurePanNode(clip.id, audio);
                   if (panNodesRef.current[clip.id]) {
                     panNodesRef.current[clip.id].pan.value = track.pan / 100;

@@ -8,6 +8,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { cn } from '@/lib/utils';
 import { ExportDialog } from './ExportDialog';
 
+// Tempo shown when a song's stored bpm is null. Must match Timeline's DEFAULT_BPM.
+const DEFAULT_BPM = 120;
 const TIME_SIGNATURES = ['4/4', '3/4', '6/8', '2/4', '5/4'];
 const METRONOME_SUBDIVISIONS = ['1/4', '1/8', '1/16'] as const;
 type MetronomeSubdivision = typeof METRONOME_SUBDIVISIONS[number];
@@ -39,20 +41,23 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
   const [bpm, setBpm] = React.useState<number | null>(null);
   const [bpmInput, setBpmInput] = React.useState('');
   const [timeSignature, setTimeSignature] = React.useState<string | null>(null);
-  const songDataInitialized = React.useRef(false);
+  // Song id the tempo/time signature were last seeded for — once per song, so a refetch can't
+  // overwrite a tempo edited this session. Timeline seeds itself the same way.
+  const songDataInitialized = React.useRef<string | null>(null);
 
   React.useEffect(() => {
-    if (!songDataInitialized.current && songData != null) {
-      songDataInitialized.current = true;
-      if (songData.bpm != null) {
-        setBpm(songData.bpm);
-        setBpmInput(String(songData.bpm));
-      }
-      const ts = songData.timeSignature ?? '4/4';
+    if (songDataInitialized.current !== songId && songData != null) {
+      songDataInitialized.current = songId;
+      // Null bpm shows 120 (display only, never PATCHed) — the same fallback Timeline's
+      // metronome uses, so both always show and use the same tempo.
+      const seededBpm = songData.bpm ?? DEFAULT_BPM;
+      setBpm(seededBpm);
+      setBpmInput(String(seededBpm));
+      const ts = songData.timeSignature || '4/4';
       setTimeSignature(ts);
       window.dispatchEvent(new CustomEvent('update-time-signature', { detail: { timeSignature: ts } }));
     }
-  }, [songData]);
+  }, [songData, songId]);
 
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isLooping, setIsLooping] = React.useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
@@ -190,6 +195,9 @@ export function Transport({ songId = 'patchbay-default' }: { songId?: string }) 
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('time-update', handleTimeUpdate);
+    // Ask Timeline for the current playhead time — it may have been restored from
+    // localStorage before this listener existed.
+    window.dispatchEvent(new CustomEvent('request-time-update'));
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
