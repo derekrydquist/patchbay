@@ -190,6 +190,8 @@ in route handlers.
 
 **`timeline_clips` vs `clips`:** These are intentionally separate tables. `clips` holds the uploaded source material (versions inside bucket ideas). `timeline_clips` holds the arranged instances placed on the timeline with a `start` time. Dragging from the bucket to the timeline creates a new `timeline_clips` row — it does not move the source clip.
 
+**File display color comes from the track, never the stored column.** `clips.color`, `timeline_clips.color` and `loose_files.color` are copied once at creation and never follow the file, so they go stale after organize, place-on-timeline or a cross-track move. They are still written (NOT NULL) but never read for display. Every place that shows a file's color uses `client/src/lib/track-color.ts`: a file on a track shows its track's color (`hsl(var(--chart-1))` if the track's color is null, same fallback as the timeline track header); a Track-scoped loose file shows its track's color; a loose file with no track (song-level or band-wide), or whose track isn't found, shows an empty outlined swatch, never gold — gold reads as Drums. Display sites: TimelineClip body and its More Info, the timeline-clip drag ghost dot, MediaBucket version card edge (`BucketClip` → `WaveformPlayerCard` `color`) and its More Info, the Library More Info, and the loose-file More Info (which reads the song's track list from already-loaded `bucketKeys.bucket(songId)` data, never fetching). Each passes a separate `trackColor` prop; `clip.color` is left alone so Replace and bucket → timeline placement still copy the stored value as before. TimelineClip's body, border and waveform all derive from the `trackColor` prop: body and border through `clipBodyColor` / `clipBorderColor` in `client/src/lib/track-color.ts`, waveform in the track color itself (see "Timeline clip look").
+
 ### Song and Idea deletion
 
 - `deleteSong` first deletes Track-scoped loose files and `bucket_folder_views` rows explicitly (no cascade on those FKs), in one transaction; another song's file pointing at its track only loses `trackId`.
@@ -457,6 +459,19 @@ After a file lands (version moves, Remove from Section, organize, assign/un-assi
 
 ---
 
+## Timeline clip look
+
+- **Origin** — restyled Oct 2026 from the "PatchBay Timeline Sandbox" prototype. `TimelineClip` lives in `Clip.tsx` (there is no `TimelineClip.tsx`).
+- **Body** — `clipBodyColor(trackColor)` = `color-mix(in srgb, <trackColor> 24%, #181C26)`. `#181C26` is `CLIP_BODY_SURFACE` in `track-color.ts`; no theme token exists for it. `color-mix` resolves `hsl(var(--chart-N))` fine (Safari 16.2+).
+- **Border** — 1px `clipBorderColor(trackColor)` (`color-mix` 70% into transparent), drawn as its own `aria-hidden` `pointer-events-none absolute inset-0 rounded-md` layer at `z-[5]` (above the canvas at z-2, below the label/final badge at z-10). Never on the root: the selection overlay (`inset-0 border-2`, `z-[19]`) sits inside any root border, so a selected clip showed a colored line outside the gold. Now the selection covers the border exactly — nothing of the clip shows outside the selection box.
+- **Root** — paints only its background: no border, no shadow. The `flashGold` placement glow is the only thing that paints outside a clip.
+- **Waveform** — canvas, one column per CSS pixel from the min to the max sample, in the track color, canvas CSS opacity 0.5. Canvas `fillStyle` cannot resolve `var()`, so the canvas element's CSS `color` is set to `trackColor` and `drawRef` reads `getComputedStyle(canvas).color`. The redraw effect depends on `trackColor`. A "blocky" style (2px bars in 3px slots) was tried and rejected in favor of this one.
+- **Name** — top-left (absolute row, `pt-1 pl-1.5`), `text-[10px] leading-none font-semibold text-white/90` with a subtle text shadow, `min-w-0` so it truncates; the row's `pr-5` keeps it clear of the Final badge. Moved out of the clip's middle so it doesn't sit where you watch while trimming. No grip icon (it was decorative; the whole clip is the drag handle).
+- **Section divider** — `SectionCell`'s divider is an inset box-shadow (`inset -1px 0 0 hsl(var(--border)/0.2)`), not `border-r`. A `border-r` took the cell's last pixel and the cell's `overflow-hidden` cut off the last clip's right border.
+- **Unchanged by the restyle** — `CornerBadge`, the gold selection overlay, the grey hover inset glow, the blue detected-trim overlay and its Apply/Dismiss buttons, `flashGold`, the timeline-clip `DragOverlay` ghost, `LooseFileDragOverlay`.
+
+---
+
 ## Auth Architecture
 
 Session-based auth using `express-session` (server-side sessions, cookie transport) and `bcrypt` (password hashing, cost 10).
@@ -593,6 +608,9 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Do not add a PostgreSQL dependency** — we are using SQLite. Do not add `pg`, `postgres`, or `neon` packages.
 - **Do not reintroduce free clip positioning** — clips on the timeline have no independent position. `clip.start` is always derived by `recalcAllStarts`, never set from a cursor pixel offset or stored as an arbitrary value. This is intentional.
 - **Do not add overlap capability to the timeline** — PatchBay is plug-and-play, not a freeform DAW. Clips on the same track cannot overlap under any circumstances. The only valid drop targets are append-to-end or insert-between within a section column.
+- **Never put the timeline clip's track border on the root element or as a root box-shadow** — `flashGold` animates the root's box-shadow and the selection overlay sits inside a root border. Use the inside border layer (see "Timeline clip look").
+- **Never pass a CSS-variable color string (e.g. `hsl(var(--chart-1))`) to a canvas `fillStyle`** — canvas silently ignores it and draws black. Resolve it first via `getComputedStyle` on an element styled with that color.
+- **Never give `SectionCell` a layout border (`border-r` etc.)** — it eats the cell's last pixel and clips the last clip. Use a box-shadow divider.
 - **Do not remove Replit-specific vite plugins without updating `vite.config.ts`** — they are conditionally loaded only when `REPL_ID` is set, so they do no harm locally.
 - **Do not set `isFinal` on clips or `timeline_clips` outside the established three-entry-point sync** — `PATCH /api/clips/:clipId`, `PATCH /api/timeline-clips/:id`, and `PATCH /api/production-tasks/:id` all cascade `isFinal` changes across bucket clips, timeline clips, and production task status using the same-name rule. A one-off `isFinal` write (direct DB update, ad-hoc route, or storage method call) will silently desync the three tables, leave stale checkmarks on same-name clip instances, and create inconsistent "Complete" task states. Always go through one of the three established entry points. See the "Same-name rule" section under isFinal ↔ task status bidirectional sync. **Approved fourth path:** Remove, move-to-section and move-to-loose clear Final on that one clip via `releaseClipDependencies`, then recompute the section's task. Never call `PATCH /api/clips` with `isFinal` for this — the same-name sync would un-final other clips.
 - **Do not set `trimStart`/`trimEnd` anywhere except `PATCH /api/timeline-clips/:id/trim`** — trim values on `timeline_clips` must only be written via this dedicated route. Setting them inline in `PATCH /api/timeline-clips/:id` or through ad-hoc DB writes bypasses the query-invalidation path that keeps `Timeline.tsx`'s local state in sync (the live-sync effect re-runs `recalcAllStarts` only when trimmed durations arrive via the normal API poll). Also: `clip.duration` must never be modified by trim — it always stores the full file length.
@@ -640,6 +658,10 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Toasts (`use-toast.ts`)** — `TOAST_LIMIT` is 3, closed toasts are removed after 1 s and don't count toward the limit. A toast closed by mouse (action or X) releases focus to the page; without that, Radix keeps focus in the toast area and every toast's timer stays paused. Keyboard closes keep Radix's default. Radix also pauses all toast timers while the window is blurred — expected during a Finder drop (Finder has focus); the timer starts when the user returns.
 - **Upload Undo never writes a feed row** — it deletes the upload's own row instead.
 - **Dev server: only one copy can run at a time (port 3001), and Derek may be running it in his own terminal.** Claude Code may restart it when needed, but always stop every running copy first with `pkill -f tsx`, then start it with `npm run dev`. After restarting, tell Derek, since the copy in his terminal will have stopped.
+- **Never read a file's stored `color` for display** — use the track-color helper (`client/src/lib/track-color.ts`) and pass a `trackColor` prop. Never override `clip.color` on the clip object to do it: Replace and bucket → timeline placement copy `clip.color` into new rows. See "File display color" under Database.
+- **Never set clip `playbackRate` from bpm** — tempo describes the grid and metronome and must never time-stretch recordings. Clips always play at their recorded speed.
+- **Never draw timeline gridlines with a CSS `background-size` tile** — fractional tile sizes get rounded and drift away from clips on long songs. Use the `BeatGrid` SVG pattern (see "Musical grid" in `client/src/components/daw/CLAUDE.md`).
+- **Don't put the Transport row back on fixed `w-1/3` thirds** — wider left content spills under the center group's transparent box and its controls stop receiving clicks (this happened to the time signature Select). See "Transport row layout" in `client/src/components/daw/CLAUDE.md`.
 
 ---
 
@@ -693,7 +715,7 @@ load-bearing depends on these loading at the right moment.
 
 | Topic | Location | Loads when |
 |---|---|---|
-| Timeline drag-and-drop internals (section columns, droppable zones, `recalcAllStarts`, stale-closure rules), audio playback system, track panning (Web Audio graph, `panNodesRef`/`ensurePanNode`), Safari playback-start failure (parked investigation), non-destructive trim + AI trim detection, apply/reset trim to instances, Media Bucket internals (add section, hidden-tracks invalidation, empty state, session persistence, new-content indicator), Timeline Selection, clip session notes / More Info panel, Musical Intelligence & Meta Tags, timeline clip waveform, Timeline background/clip right-click menus, placement feedback, keyboard shortcuts, pinch-to-zoom, AlertDialog focus management, Sticky Panel & Scroll Guards, Timeline playhead & occlusion, Production Tracker scroll container architecture, clip trim visual redesign, free-position (reverted) notes, shared CornerBadge component (final/comment badge styling, used by both TimelineClip and WaveformPlayerCard) | `client/src/components/daw/CLAUDE.md` | Editing a file under `client/src/components/daw/` |
+| Timeline drag-and-drop internals (section columns, droppable zones, `recalcAllStarts`, stale-closure rules), audio playback system and tempo source, musical grid (bars/beats helper, BeatGrid, ruler marks), Transport row layout, track panning (Web Audio graph, `panNodesRef`/`ensurePanNode`), Safari playback-start failure (parked investigation), non-destructive trim + AI trim detection, apply/reset trim to instances, Media Bucket internals (add section, hidden-tracks invalidation, empty state, session persistence, new-content indicator), Timeline Selection, clip session notes / More Info panel, Musical Intelligence & Meta Tags, timeline clip waveform, Timeline background/clip right-click menus, placement feedback, keyboard shortcuts, pinch-to-zoom, AlertDialog focus management, Sticky Panel & Scroll Guards, Timeline playhead & occlusion, Production Tracker scroll container architecture, clip trim visual redesign, free-position (reverted) notes, shared CornerBadge component (final/comment badge styling, used by both TimelineClip and WaveformPlayerCard) | `client/src/components/daw/CLAUDE.md` | Editing a file under `client/src/components/daw/` |
 | Bands (multi-tenancy) schema, startup backfill, session plumbing, storage additions, Phase 2 query scoping, route ownership rules, band admin & first-login | `server/CLAUDE.md` | Editing a file under `server/` |
 | isFinal ↔ task-status bidirectional sync, Complete status guard, clip addition → task in-progress, Replace flow isFinal handling | `.claude/skills/isfinal-sync/SKILL.md` | Working on final-clip / task-status logic |
 | Review tab architecture (waveform player, comments, @mentions, avatar markers) | `.claude/skills/review-tab/SKILL.md` | Working on the Review tab |
@@ -810,7 +832,6 @@ These are things that need a decision before being built:
 - **Home "Your Songs" Delete shows no error toast** — a failed delete is silent there.
 - **437 foreign-key violations from older deletes** — orphan tracks/tasks/task comments; they block nothing.
 - **Ideas clips and loose files have no Download menu item** — `buildDownloadFilename` already handles their naming; adding one is a one-line call per menu.
-- **Organized or placed loose files show gold instead of their track's color** — possibly also cross-track version moves. Investigation in progress.
 - **Multi-file upload partial failure** — UploadModal only: files that already landed stay in the pending list (Confirm again re-uploads them), and get no invalidation or landing flash. Finder drops don't have this.
 - **UploadModal two-step upload can orphan audio** — if the create request fails after `POST /api/upload`, the file stays in `uploads/` with no row. Finder drops use one-request routes and clean up.
 - **Old upload routes hang on a nonexistent `ideaId`** — `POST /api/upload` / `POST /api/ideas/:ideaId/clips` never respond. The new `/clips/upload` route answers 404.
@@ -824,6 +845,8 @@ These are things that need a decision before being built:
 - **`createTrack` sets section `sortOrder` by list position**, not the other tracks' values — a gap in the numbers misaligns the new track.
 - **The normal `?taskId=` deep link never clears the param** — a refetch can reopen the task modal.
 - **Tasks with no `ideas` row can't be flagged hidden** — six old demo songs plus two "Sort Test" songs; harmless.
+- **Zoom 10–19 is lost on reload** — the zoom controls allow 10–300, but saving/restoring (`patchbay-zoom-${songId}`) accepts only 20–400 and falls back to 80.
+- **Songs with null `bpm` show and use 120** — all Ideas plus a few test songs; display only, nothing writes a value to the DB.
 
 ---
 
@@ -986,6 +1009,8 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Audio + unsupported files in one drop skipped the unsupported ones silently (Oct 2026)** — the unsupported-file toast now shows.
 - **Toast timers stuck after clicking a toast's action or X (Oct 2026)** — focus stayed in the toast area and paused every toast; mouse closes now release focus.
 - **Long file names pushed the Undo action off screen (Oct 2026)** — names are shortened and the action can't shrink.
+- **Organized, placed and cross-track-moved files showed the wrong color (Oct 2026)** — every file stored a copy of a color at creation that never followed it; loose files were born gold, so organize and place-on-timeline carried gold onto non-gold tracks (Bass Outro V2 in comment2), and a version moved to another track kept its old track's color. The timeline only inherited the bucket clip's color. Fixed by computing display color from the file's current track (see "File display color" under Database). The Library's More Info swatch, hardcoded `#D4AF37`, now uses the clip's track too. Loose files with no track show an empty outlined swatch instead of gold. Stored colors were not repaired (locally ~30 clips and 5 timeline clips disagree with their track); they no longer affect anything on screen.
+- **Timeline clips restyled; last clip in each section lost its right border (Oct 2026)** — clips now use a dark track-tinted body, an inside track-colored border, a full waveform in the track color and a top-left name (see "Timeline clip look"). The missing right border was `SectionCell`'s `border-r` taking the cell's last pixel under `overflow-hidden`; it's now an inset box-shadow.
 
 ---
 
@@ -1012,3 +1037,13 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Retention and hard-delete policy** — removal only hides files for now. Before charging for storage, decide when hidden content is actually deleted (never, after N days, explicit "empty trash"), whether hidden files count toward quota, and how Remove vs Delete is explained. Ties together the paused undo model, real-song Delete and the R2 move; the shared-`src` unlink guard carries over.
 - **Full Take removal** — the concept is being removed; don't build or test around it.
 - **Spring hover style** — possible subtle "will open" hover for rows that spring but don't accept the drop.
+- **User-added tracks are always gold** — `POST /api/songs/:songId/tracks` defaults to `hsl(var(--chart-1))` and the client sends only `{ name }`, so every added track matches Drums. Likely should rotate through the palette like the seeded tracks.
+- **`--primary` and `--chart-1` are different strings for the same gold** — files stored `hsl(var(--primary))` and tracks stored `hsl(var(--chart-1))` look identical but never compare equal. Matters for any future color comparison or repair query.
+- **Stored file color columns** — unused for display and stale on some rows. Decide whether to repair them to their track's color once, stop writing them, or drop them; a production count is needed first.
+- **Library version cards have no color edge** — MediaBucket's version cards show the track color on their left edge; `SongsClipContextMenuCard` shows none. Parity optional.
+- **Files-column card restyle** — `WaveformPlayerCard` (MediaBucket, SongHome, Library Songs browser, Ideas shelf, loose-file preview) still has the old look. Considering the timeline clip look; needs a recon first (shared component, different waveform code with playback progress, trackless loose files need a neutral non-gold tint).
+- **Section-header drag ghost and track header stripe read raw `track.color`** — the ghost still draws solid bars, out of step with the clips and wrong for a null-color track; the stripe has the same raw read. Both should use `trackDisplayColor`.
+- **2px seam between adjacent timeline clips** — each draws its own 1px border. Possible follow-up.
+- **Invalid-drop veil and read comment badge tuned for bright fills** — the veil (`rgba(0,0,0,0.5)`) and the read comment badge (`bg-white/25`) need checking against the dark clip body.
+- **Timeline waveform rescans every sample on each redraw** — including every zoom tick; caching peaks would help on long clips.
+- **Timeline placement model** — decision pending between keeping sections as containers with free placement inside them (with lead-ins, and sections that grow while dragging) and sections as ruler markers with clips anywhere. The musical grid is the shared first step and is done. A clickable prototype of the markers model exists as the "PatchBay Timeline Sandbox" artifact. Next steps either way: stored per-clip positions, snap to grid with Shift / a magnet button for free placement, and a copy/move prompt when a file lands in a different section than its folder.

@@ -171,18 +171,18 @@ Real per-clip audio playback is handled entirely in `Timeline.tsx`. `Transport.t
 - `masterVolumeRef` — `number`, initialized to `0.8` (matching the Transport slider's default of 80). Updated by a `useEffect` listening for `update-master-volume` events (`e.detail.volume / 100`). The listener also immediately applies the new volume to all currently-playing elements in `customAudioRefs`. The rAF loop multiplies per-track volume by this ref: `audio.volume = (track.volume / 100) * masterVolumeRef.current`.
 
 **Playhead position model:**
-`playheadPositionState` (and `playheadRef`) store the playhead in **content-space pixels**: `256 + timeInSeconds * zoom`. The playhead has two DOM elements, both inside the scroller content root — no scroll-offset math anywhere:
+`playheadTimeSecs` (state, set via `setPlayheadTime`) and `playheadRef` store the playhead in **seconds**, not pixels. The content-space pixel position is derived at render time: `playheadPx = 256 + playheadTimeSecs * zoom`. The playhead has two DOM elements, both inside the scroller content root — no scroll-offset math anywhere:
 
-- **Line** — `position: absolute; left: playheadPositionState; top: 0; bottom: 0` at z-40. Scrolls natively with content; zero compositor lag.
-- **Flag** (draggable handle + triangle) — `position: absolute; left: playheadPositionState` inside the sticky flag band (z-35). Sticks vertically with the band; `handlePlayheadPointerDown` computes `clientX - rect.left + scrollLeft` to get content coordinates on pointermove.
+- **Line** — `position: absolute; left: playheadPx; top: 0; bottom: 0` at z-40. Scrolls natively with content; zero compositor lag.
+- **Flag** (draggable handle + triangle) — `position: absolute; left: playheadPx` inside the sticky flag band (z-35). Sticks vertically with the band; `handlePlayheadPointerDown` computes `clientX - rect.left + scrollLeft` to get content coordinates on pointermove.
 
 See **Timeline playhead & occlusion** section below for the full z-map and WebKit sticky rules.
 
 **Animation loop:**
 The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
-1. Advances the playhead by `delta * zoom` pixels (zoom is pixels/second).
-2. Computes `playheadTime` in seconds from the pixel position.
-3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + effectiveDuration)` (where `effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)`), calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume`, `muted`, and `playbackRate` every frame. When playback starts, `audio.currentTime` is set to `clip.trimStart ?? 0` so the audio begins at the trimmed in-point.
+1. Advances the playhead by `timeDelta` seconds (frame delta / 1000) — the playhead is time, so zoom plays no part in advancing it.
+2. Uses that time directly as `playheadTime` (no pixel conversion).
+3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + effectiveDuration)` (where `effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)`), calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume` and `muted` every frame. `playbackRate` is never written — see "Tempo source" below. When playback starts, `audio.currentTime` is set to `clip.trimStart ?? 0` so the audio begins at the trimmed in-point.
 4. If the clip is out of range and not paused, calls `audio.pause()`.
 
 **Safari AudioContext unlock:**
@@ -202,18 +202,41 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Remove the `toggle-play` listener in `Timeline.tsx` that calls `audioCtxRef.current.resume()` — it is the Safari unlock and must remain synchronous with the gesture.
 - Unconditionally `.close()` `audioCtxRef` on stop once any clip may have been routed through the Web Audio graph — see **Track panning** below for the suspend/close rule and why.
 - Modify the pre-create `useEffect` to detect src changes via URL comparison — `audio.src` is an absolute URL while `clip.src` is a relative path; use the `clip-replaced` event instead.
-- Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadPosition` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
+- Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadTime` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
 
 **Auto-stop at end of timeline:**
-Each frame, `animate` re-derives `timelineEndPx` fresh from `computeSectionLayout(tracks, sectionOrder)`: `256 + (lastSection.start + lastSection.duration) * zoom`. Zero sections → `timelineEndPx = 256` (time 0). This is intentionally re-derived every frame, not cached at play-start, so edits to tracks/sections mid-playback are respected.
+Each frame, `animate` re-derives `frameTimelineEnd` (seconds) fresh from `computeSectionLayout(tracks, sectionOrder)`: `lastSection.start + lastSection.duration`. Zero sections → `0`. This is intentionally re-derived every frame, not cached at play-start, so edits to tracks/sections mid-playback are respected.
 
-If the playhead's pixel position reaches or passes `timelineEndPx` on a given frame: the playhead is clamped to exactly `timelineEndPx` (frames advance in discrete jumps, so the raw computed position will usually overshoot slightly before the check catches it), the existing manual stop sequence is invoked (pause all audios, clear `pendingPlayRef`, close + null `audioCtxRef`, `isPlaying` → `false`), and the rest of that frame's per-clip play/pause logic is skipped.
+If `playheadRef.current + timeDelta` reaches or passes `frameTimelineEnd` on a given frame (and looping is off): the playhead is clamped to exactly `frameTimelineEnd` (frames advance in discrete jumps, so the raw computed position will usually overshoot slightly before the check catches it), the existing manual stop sequence is invoked (pause all audios, clear `pendingPlayRef`, close + null `audioCtxRef`, `isPlaying` → `false`), and the rest of that frame's per-clip play/pause logic is skipped.
 
-**Do not:** compute `timelineEndPx` once and reuse it across the play session — always re-derive per frame. Do not write a second/parallel stop implementation — this must call into the same stop path manual pause uses.
+**Do not:** compute `frameTimelineEnd` once and reuse it across the play session — always re-derive per frame. Do not write a second/parallel stop implementation — this must call into the same stop path manual pause uses.
 
 **Transport button sync (`playback-ended` event):** Transport.tsx and Timeline.tsx hold independent `isPlaying` state with no shared props or context. Transport dispatches `toggle-play` on button/spacebar (one-way, Transport → Timeline). Because auto-stop originates in Timeline.tsx (not via a `toggle-play` dispatch), a second one-way event was added: Timeline's auto-stop block dispatches `playback-ended` immediately after its own `setIsPlaying(false)`; Transport listens for it and calls its own local `setIsPlaying(false)` to un-stick the button.
 
 **Do not:** have Transport dispatch `playback-ended`, or have Timeline listen for it — this must stay strictly one-way (Timeline → Transport) to avoid a dispatch loop. The manual pause/stop path (originating from Transport's own `toggle-play`) does not dispatch `playback-ended` — only the auto-stop block does, since Transport already knows its own state in the manual case.
+
+**Tempo source:**
+- Timeline seeds `bpm` / `bpmRef` and the time signature from the `['song', songId]` query, once per song (`songTempoSeededForRef`) — not from `MOCK_SONG`, and not from an event Transport sends on mount. In-session edits still arrive via the `update-bpm` / `update-time-signature` events. Transport's own song-data seed guard (`songDataInitialized`) is also per song.
+- Null `bpm` → 120 (`DEFAULT_BPM` from `client/src/lib/musical-time.ts`) in both Timeline and Transport — display only, never written to the DB. Missing/empty time signature → `'4/4'` in both.
+- **Clip audio always plays at its recorded speed.** The old per-frame `playbackRate = bpm / 120` write was removed: tempo describes the grid and metronome and must never time-stretch recordings. (A future personal "practice speed" control would be a separate, client-only feature.)
+- After a reload the Transport shows the restored playhead: Timeline dispatches `time-update` right after the playhead restore, and Transport sends `request-time-update` on mount, answered with `playheadRef.current`.
+
+### Musical grid — ✅ Built
+
+- **Helper** — `client/src/lib/musical-time.ts`, pure functions, no React: `DEFAULT_BPM` (120), `parseTimeSignature` (numerator with `|| 4`; denominator returned but unused), `secondsPerBeat` (falls back to 120 for null/zero/non-numeric bpm), `secondsToBarsBeats`, `formatBarsBeats` (`"bar.beat.sixteenth"`, 1-based), `barStartSeconds`, `gridDensity`, `gridTile`.
+- **Same math as the metronome** — beats are counted from song time 0. Beat and sixteenth indexes use the metronome's form, `Math.floor(t / secondsPerBeat)` (sixteenths: `/ (secondsPerBeat / 4)`), never `t * bpm / 60` — the two round differently at boundaries, and the readout would change a frame away from the click.
+- **6/8** is six quarter-note beats per bar, matching the metronome. Handling the denominator is an open decision; change grid and metronome together or not at all.
+- **`gridDensity`** thresholds are named constants: bar lines thin to every 2/4/8… bars below 24px per bar; beat lines from 8px per beat and only when every bar line is drawn; 1/8 lines from 48px per beat; 1/16 from 96px per beat; bar-number labels at least 48px apart.
+- **`BeatGrid`** (`BeatGrid.tsx`) — an SVG with a `<pattern patternUnits="userSpaceOnUse">`, one tile per bar (or per N bars when thinned), starting at x = 0 = song time 0, rendered as the first child of each track lane's droppable div in `Track.tsx`: `pointer-events-none`, `absolute inset-0`, no z-index, so SectionCells and clips paint above it and dnd-kit measuring is unaffected. Pattern ids come from `useId`. Line colors are constants (bar 0.10, beat 0.045, subdivision 0.04 white alpha). It replaced the old quarter-second `linear-gradient` lane background. `React.memo` on primitive props so it doesn't redraw every playback frame.
+- **Ruler** (`Ruler.tsx`) — the outer shell is unchanged (`h-8`, sticky, z-30, opaque `bg-card`, `w-64` placeholder, `onSeek` contract); only its marks changed. 1-based bar numbers thinned by `gridDensity`; bar/beat/subdivision ticks as an SVG pattern in a 16px bottom band (bar 12px, beat 7px, subdivision 4px; tick opacities 0.5 / 0.35 / 0.32 of `text-muted-foreground`). It draws across `contentSeconds = max(endOfTimeline + 15, 100)` — the full content width; the old 100-label cap is gone. Positions are `t * zoom` with no +256 offset (the ruler's inner div already starts past the panel). Marks live in a memoized `RulerMarks` (Timeline re-renders every frame during playback).
+- **Transport** shows a BAR readout (`formatBarsBeats`) next to the timecode, fed by the same `time-update` events.
+- **Sections vs bars** — section lines usually don't land on bar lines, because sections are still sized from clip lengths. Expected until the timeline placement work.
+
+### Transport row layout
+
+- The row is `grid grid-cols-[1fr_auto_1fr]`; the three groups (time readouts / transport controls / volume + Export) no longer use `w-1/3`. A `1fr` column never shrinks below its content, so the left group can't spill under the center group; the controls stay centered whenever both side columns fit at equal width.
+- Master volume wrapper is `hidden lg:flex flex-1 min-w-24 max-w-48`: full size (192px) until space runs out, shrinks toward 96px, hidden below `lg`. Export is `flex-none` and always shown.
+- Why: on fixed thirds, the BAR readout made the left group's content wider than its third; the overflow sat under the center group's transparent box (a later flex item paints and hit-tests on top), and the time signature Select stopped receiving clicks.
 
 ### Track panning — ✅ Built
 
@@ -221,8 +244,8 @@ If the playhead's pixel position reaches or passes `timelineEndPx` on a given fr
 
 **Web Audio graph (`Timeline.tsx`):**
 - `panNodesRef` — `{ [clipId: string]: StereoPannerNode }`. One node per clip, created lazily.
-- `ensurePanNode(clipId, audio)` — called every frame a clip is in-range and playing, in the rAF `animate` loop, the same place `audio.volume`/`muted`/`playbackRate` are updated. Guarded by `panNodesRef.current[clipId]` — a `<audio>` element can only ever be passed to `createMediaElementSource` once; a second call throws. Wires `audio → createMediaElementSource → StereoPannerNode → audioCtxRef.current.destination`.
-- `panner.pan.value = track.pan / 100` — converts the `-100..100` integer column to the Web Audio API's `-1..1` range. Applied every frame alongside volume/mute/rate, not just at wiring time.
+- `ensurePanNode(clipId, audio)` — called every frame a clip is in-range and playing, in the rAF `animate` loop, the same place `audio.volume`/`muted` are updated. Guarded by `panNodesRef.current[clipId]` — a `<audio>` element can only ever be passed to `createMediaElementSource` once; a second call throws. Wires `audio → createMediaElementSource → StereoPannerNode → audioCtxRef.current.destination`.
+- `panner.pan.value = track.pan / 100` — converts the `-100..100` integer column to the Web Audio API's `-1..1` range. Applied every frame alongside volume/mute, not just at wiring time.
 - `audio.volume` is **unchanged** and still applies pre-graph, upstream of the pan node. Volume and pan are independent, non-interfering paths — panning does not replace or wrap the existing volume mechanism.
 
 **Gotcha — never unconditionally `.close()` `audioCtxRef` once any clip may have been panned:**
@@ -296,16 +319,15 @@ Previously, the only signal that looping was active was audible repetition. A go
 ```ts
 const loopedSectionName = React.useMemo(() => {
   if (!isLooping) return null;
-  const playheadTime = (playheadPositionState - 256) / zoom;
   return sectionLayout.find(
-    (sec) => playheadTime >= sec.start && playheadTime < sec.start + sec.duration
+    (sec) => playheadTimeSecs >= sec.start && playheadTimeSecs < sec.start + sec.duration
   )?.name ?? null;
-}, [isLooping, playheadPositionState, sectionLayout, zoom]);
+}, [isLooping, playheadTimeSecs, sectionLayout]);
 ```
 Recomputed on every render from render-time state — deliberately not gated on `isPlaying` — so the indicator stays correct while paused. There is no separate "pinned" loop section; the derivation is always live from the current playhead position.
 
 **Disable-on-reposition (generalized watcher):**
-A `useEffect` watching `[playheadPositionState, isLooping, sectionLayout, zoom]` compares the current derived section against the previous one via `prevLoopedSectionRef`. If `isLooping` is true, the previous section was non-null (guards against mount), and the section changes, `isLooping` is set to `false`. This works correctly because the loop's own boundary-reset always keeps the playhead inside the same section during normal looping — an observed section change during `isLooping` can only mean the user repositioned the playhead manually (flag drag, ruler click, or any other input method). No per-input-method special-casing is needed.
+A `useEffect` watching `[playheadTimeSecs, isLooping, sectionLayout]` compares the current derived section against the previous one via `prevLoopedSectionRef`. If `isLooping` is true, the previous section was non-null (guards against mount), and the section changes, `isLooping` is set to `false`. This works correctly because the loop's own boundary-reset always keeps the playhead inside the same section during normal looping — an observed section change during `isLooping` can only mean the user repositioned the playhead manually (flag drag, ruler click, or any other input method). No per-input-method special-casing is needed.
 
 **Cross-component sync:**
 `isLooping` is tracked independently in both `Transport.tsx` and `Timeline.tsx`. `toggle-loop` flows Transport → Timeline only. When Timeline's watcher auto-disables loop, it dispatches `loop-force-disabled` (no payload) and Transport listens for it to set its own `isLooping` to `false` directly — without re-dispatching `toggle-loop`, which would create an event ping-pong.
@@ -316,7 +338,7 @@ A `useEffect` watching `[playheadPositionState, isLooping, sectionLayout, zoom]`
 **Out of scope for this version:** no retargeting to a new section when the playhead moves — loop simply disables on reposition. No toast/notification on auto-disable. Multi-section loop ranges are a separate future feature.
 
 **Last-section loop fix — gotcha:**
-Looping the final section previously failed: `animate()`'s end-of-timeline guard (`playheadRef.current + pixelDelta >= timelineEndPx`) ran before `setPlayheadPosition` was called and returned early unconditionally, stopping playback instead of resetting. The last section's end position and `timelineEndPx` are numerically identical by construction, so the guard always fired first, preventing the loop boundary-reset (which lives inside the `setPlayheadPosition` updater) from ever being reached. Fixed by gating the guard on `!isLooping` — it now only stops playback when not looping, deferring to the existing loop boundary-reset when looping is active. **Any future changes to end-of-timeline handling must preserve this `!isLooping` check.**
+Looping the final section previously failed: `animate()`'s end-of-timeline guard (`playheadRef.current + timeDelta >= frameTimelineEnd`) ran before `setPlayheadTime` was called and returned early unconditionally, stopping playback instead of resetting. The last section's end and `frameTimelineEnd` are numerically identical by construction, so the guard always fired first, preventing the loop boundary-reset (which lives inside the `setPlayheadTime` updater) from ever being reached. Fixed by gating the guard on `!isLooping` — it now only stops playback when not looping, deferring to the existing loop boundary-reset when looping is active. **Any future changes to end-of-timeline handling must preserve this `!isLooping` check.**
 
 **`isLooping` persistence:**
 `isLooping` is persisted per-song to localStorage under `patchbay-loop-${songId}`, following the same personal-UI-state convention as mute/solo, zoom, scroll, and playhead position. Restored via lazy `useState` initialization on mount in both `Transport.tsx` and `Timeline.tsx` — not a post-mount `useEffect` — so the button and indicator are correct on first paint (same reasoning as the BPM-flash fix documented under Timeline session persistence). `loopedSectionName` itself remains a pure derived value and is not persisted.
@@ -541,13 +563,13 @@ When clips exist (or a search query is active), `ScrollArea` renders as normal f
 | `patchbay-zoom-${songId}` | number string | Pixels-per-second zoom level |
 | `patchbay-scroll-${songId}` | number string | `scrollLeft` of the timeline scroller (debounced 200ms via DOM listener) |
 | `patchbay-vscroll-${songId}` | number string | `scrollTop` of the timeline scroller (same debounced DOM listener as `scrollLeft` — one shared 200ms timer writes both keys together) |
-| `patchbay-playhead-${songId}` | number string | Playhead position as **time in seconds** (not pixels — pixel position is zoom-dependent; converted to pixels on restore using the already-restored zoom value) |
+| `patchbay-playhead-${songId}` | number string | Playhead position as **time in seconds** — the same unit the playhead state uses, restored directly with no conversion |
 | `patchbay-selected-timeline-track-${songId}` | string | ID of the last clicked track header |
 | `patchbay-selected-timeline-clip-${songId}` | string | ID of the last clicked timeline clip |
 
-**Restore ordering:** `zoom` and `playheadPositionState` are restored via **lazy `useState` initializers** (`useState(() => localStorage.getItem(...))`), not via the `useLayoutEffect` restore. This means the correct values are the initial values — they exist before the first render, so no wrong value is ever painted by construction. The `useLayoutEffect` restore still re-sets them when tracks arrive (idempotent; React bails out of the state update if the value hasn't changed). Mute/solo, scroll, and selection ARE still handled by the `useLayoutEffect` restore because they depend on tracks being loaded (mute/solo need track IDs; scroll uses `requestAnimationFrame` to wait for the content to render at the restored zoom width). The restore is declared before the muted/solo persist effect so it runs first in the same effect-flush cycle.
+**Restore ordering:** `zoom` and `playheadTimeSecs` are restored via **lazy `useState` initializers** (`useState(() => localStorage.getItem(...))`), not via the `useLayoutEffect` restore. This means the correct values are the initial values — they exist before the first render, so no wrong value is ever painted by construction. The `useLayoutEffect` restore still re-sets them when tracks arrive (idempotent; React bails out of the state update if the value hasn't changed). Mute/solo, scroll, and selection ARE still handled by the `useLayoutEffect` restore because they depend on tracks being loaded (mute/solo need track IDs; scroll uses `requestAnimationFrame` to wait for the content to render at the restored zoom width). The restore is declared before the muted/solo persist effect so it runs first in the same effect-flush cycle.
 
-**`patchbay-playhead` persist** — the persist effect fires on `playheadPositionState`, `isPlaying`, `songId`, and `zoom` changes, but is gated on `isPlaying === false`: when audio is playing the effect clears any pending write and returns immediately (no write attempted, not just debounced). A 200ms debounce on writes matches the scroll persist pattern. This means refreshing the page mid-playback intentionally falls back to the last paused or scrubbed position, not the live position — this is expected behavior, not a bug.
+**`patchbay-playhead` persist** — the persist effect fires on `playheadTimeSecs`, `isPlaying` and `songId` changes, but is gated on `isPlaying === false`: when audio is playing the effect clears any pending write and returns immediately (no write attempted, not just debounced). A 200ms debounce on writes matches the scroll persist pattern. This means refreshing the page mid-playback intentionally falls back to the last paused or scrubbed position, not the live position — this is expected behavior, not a bug.
 
 **Lazy-init as the preferred pattern for first-paint state** — a `useEffect` or even `useLayoutEffect` that corrects state after mount still means the component's first render used the wrong default. With React Query's cache, `apiTracks` can be immediately available but `tracks` (separate `useState`) always starts empty, so the first render always happens with the default values before the restore logic runs. Any state that must be visually correct on the very first paint should be lazy-initialized directly from its persisted source, not corrected by a post-mount effect. The BPM input flash was worked around with a `disabled` gate — lazy init is the cleaner, more general solution. Apply it whenever this bug class (flash-default-then-jump) appears for other persisted values.
 
@@ -693,13 +715,13 @@ Using `clip.metadata` as the merge base is a data-loss bug on timeline clips: si
 Each `TimelineClip` in `Clip.tsx` renders a `<canvas>` waveform over its clip background. The waveform is decoded once and cached; redrawing on trim change or zoom is cheap (no re-fetch).
 
 **Key refs in `TimelineClip`:**
-- `canvasRef` — `HTMLCanvasElement | null`. The canvas is `position: absolute; top: 0; left: 0; width: 100%; height: 100%` with `zIndex: 2` — above the clip color background, below the `z-10` label and `z-20` trim handles.
+- `canvasRef` — `HTMLCanvasElement | null`. The canvas is `position: absolute; top: 0; left: 0; width: 100%; height: 100%` with `zIndex: 2` — above the clip's track-tinted body background, below the `z-10` label and `z-20` trim handles.
 - `decodedBufferRef` — `AudioBuffer | null`. Populated once after the first fetch+decode. All subsequent redraws (trim, zoom) read from this ref — no re-fetch or re-decode.
 - `drawRef` — `(() => void) | null`. Reassigned in the component body on every render, so it always closes over the current `trimStart`, `trimEnd`, and `clip.duration`. The `ResizeObserver` and trim `useEffect` both call `drawRef.current?.()` with no stale-closure risk.
 
 **Three effects:**
 1. **Decode effect** `[clip.src, isOverlay]` — fetches the audio file, decodes via `AudioContext.decodeAudioData()` (channel 0 only), stores the buffer in `decodedBufferRef`, then calls `drawRef.current?.()`. Skipped for overlay clips. Fails silently. Cancellation flag prevents stale writes after unmount.
-2. **Trim redraw effect** `[trimStart, trimEnd, clip.duration]` — calls `drawRef.current?.()`. Buffer is already cached; redraw is a pure canvas operation.
+2. **Trim redraw effect** `[trimStart, trimEnd, clip.duration, trackColor]` — calls `drawRef.current?.()`. Buffer is already cached; redraw is a pure canvas operation. Also redraws when the track color changes.
 3. **Resize effect** `[]` — attaches a `ResizeObserver` to the canvas and calls `drawRef.current?.()` on every size change (fires on zoom-in/out since the clip container width tracks `displayWidth`).
 
 **Draw function (`drawRef.current`):**
@@ -707,7 +729,7 @@ Each `TimelineClip` in `Clip.tsx` renders a `<canvas>` waveform over its clip ba
 - Applies device pixel ratio: `canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr)` — renders at physical pixel resolution, displays at CSS size.
 - Slices `buffer.getChannelData(0)` to the trimmed region: `[trimStart * sampleRate, (trimEnd ?? duration) * sampleRate)`.
 - Iterates one column per CSS pixel, finds min/max sample in each slice, draws a vertical `fillRect` centered at `midY`. Minimum bar height: 1px (for silence).
-- Color: `rgba(0, 0, 0, 0.4)` — semi-transparent dark over the clip color.
+- Color: the track color, read back resolved via `getComputedStyle(canvas).color` (the canvas element's CSS `color` is `trackColor`; canvas `fillStyle` can't resolve `var()`), at canvas CSS opacity 0.5. See "Timeline clip look" in root `CLAUDE.md`.
 
 **`isOverlay` guard:** The decode effect returns early for overlay (drag ghost) clips. No waveform fetch is initiated during drag.
 
@@ -931,13 +953,13 @@ After writing `el.scrollLeft`, always:
 
 ## Timeline playhead & occlusion — hard-won rules (do not relearn these)
 
-- Playhead line lives INSIDE the scroller content at left = playheadPositionState (content
-  coordinates). Never position it with scrollLeft math or toggle it from scroll events: Safari
+- Playhead line lives INSIDE the scroller content at left = playheadPx (`256 + playheadTimeSecs
+  * zoom`, content coordinates). Never position it with scrollLeft math or toggle it from scroll events: Safari
   throttles scroll events during momentum/rubber-band (sparse deltas, negative scrollLeft) while
   the compositor moves content every frame — JS cannot keep up, by construction.
 - The draggable flag is a separate element inside the sticky flag band (band z-35 by default —
   see the dynamic-stacking entry below — so the flag, which overflows the 6px band, paints over
-  the z-30 ruler). Line and flag both read playheadPositionState.
+  the z-30 ruler). Line and flag both read playheadPx.
 - **Playhead flag/panel stacking is dynamic, not a static z-map entry (updated 2026-08-12).** The
   playhead is two independently-positioned elements sharing one source value, `playheadPx = 256 +
   playheadTimeSecs * zoom` (256 = `TRACK_PANEL_WIDTH`): the full-height line (z-40, `left:
@@ -1042,7 +1064,7 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 
 ## Clip trim visual redesign (Clip.tsx)
 - Trim handles are no longer rendered as visible elements. Trim is triggered by cursor proximity: `onPointerDown` within 8px of a clip's left or right edge (checked via `getBoundingClientRect()` at press time) starts the existing `handleLeftTrimDrag`/`handleRightTrimDrag` flow unchanged; `onMouseMove` sets `trimEdge` state (`'left' | 'right' | null`) which drives `cursor: ew-resize` via `positionStyle` inline style (overrides Tailwind `cursor-grab`).
-- Hover shows a gold glow via a separate `pointer-events-none absolute inset-0 z-20` child div rendered after the fill and waveform canvas — `boxShadow: 'inset 0 0 0 2px rgba(212,175,55,0.9), inset 0 0 14px rgba(212,175,55,0.35)'`. Never a `boxShadow` on the container itself (the `absolute inset-0 opacity-80` fill div paints on top of the container's own style and buries it). Absent on DragOverlay ghost (`isOverlay` condition).
+- Hover shows a grey inset glow via a separate `pointer-events-none absolute inset-0 z-20` child div rendered after the waveform canvas — `boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)'` (grey, not gold — see the hover glow passage above). Never a `boxShadow` on the container itself: `flashGold` animates the root's box-shadow, and the root paints only its body background (see "Timeline clip look" in root `CLAUDE.md`). Absent on DragOverlay ghost (`isOverlay` condition).
 - **Gotcha:** dnd-kit's `listeners.onPointerDown` must be extracted into a variable (`dndOnPointerDown`) and called explicitly in the non-trim branch — placing a custom `onPointerDown` after `{...listeners}` in JSX silently overrides dnd-kit's handler and breaks drag. `restListeners` (listeners minus `onPointerDown`) is spread instead.
 
 ## Free-position (manualOffset) feature — attempted and reverted
