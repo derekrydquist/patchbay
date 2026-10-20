@@ -50,6 +50,8 @@ remaining work is:
 
 `Dashboard.tsx` derives `activeTab` reactively from `useSearch()` (wouter) on every render. When no `?tab=` param is present, it reads `localStorage.getItem('patchbay-last-home-tab')` as a fallback. An explicit `?tab=` param always wins — deep links are never overridden. The Home nav link always navigates to `/?tab=dashboard` (explicit param) so it reliably overrides the memory.
 
+Every successful normal login and the `/login` already-authenticated redirect in `App.tsx` navigate to `/?tab=dashboard`, never bare `/`. The remembered tab is stored per browser, not per user, so a bare `/` would land a newly signed-in user on whatever tab the previous user left open. The demo login is the one exception: it lands in Workspace (see "Demo login").
+
 **Do not reintroduce a mount-only redirect `useEffect`** for tab memory — the reactive `useSearch()` derivation already handles every SPA navigation case, including navigating back to `/` from a song page.
 
 ### Song-level breadcrumb
@@ -222,9 +224,15 @@ DATABASE_URL=./patchbay.db
 # Required for sessions — generate a random string
 SESSION_SECRET=replace-this-with-a-long-random-string
 
+# Demo bandmate password (mara, theo, kai). Optional — if unset, only the
+# demo guest is created and the boot log says so. Set separately in Railway.
+DEMO_PASSWORD=replace-this-with-a-password
+
 # Set automatically by npm scripts — do not set manually
 # NODE_ENV=development
 ```
+
+The dev script runs `tsx --env-file-if-exists=.env server/index.ts`, so `.env` values reach the local server. (Before Oct 2026 the dev script was plain `tsx server/index.ts` and `.env` was never read; the server silently used fallback values.) Railway does not read `.env` — production variables (`SESSION_SECRET`, `UPLOADS_DIR`, `DEMO_PASSWORD`, etc.) are set in the Railway service's Variables tab.
 
 ---
 
@@ -478,17 +486,9 @@ Session-based auth using `express-session` (server-side sessions, cookie transpo
 
 ### Server setup (`server/index.ts`)
 
-```ts
-declare module "express-session" { interface SessionData { userId: string; } }
-app.use(session({
-  secret: "patchbay-secret",
-  resave: false,
-  saveUninitialized: false,
-  cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
-}));
-```
+The session secret is `process.env.SESSION_SECRET`, falling back to `"patchbay-dev-secret"` in development; production refuses to start if it is unset. Sessions are stored by a custom `BetterSqlite3Store` (`server/session-store.ts`) in a `sessions` table in the same SQLite file, pruned on boot and every 15 minutes where `expired_at < now`. Cookie `maxAge` is 7 days; every request touches the session and pushes its expiry out.
 
-`storage.seedUsers()` is called at startup. It inserts the six core users (jordan, alex, jamie, sam, taylor, riley — all lowercase, all with password "password") using `INSERT OR IGNORE` semantics — safe to call on every boot. `storage.backfillBands()`, which runs immediately after, also seeds "Band B" and its demo user "zed" (password "password") using the same existence-check pattern — no manual `band-admin.ts` step required.
+`storage.seedUsers()` is called at startup. It inserts the six core users (jordan, alex, jamie, sam, taylor, riley — all lowercase, all with password "password") using `INSERT OR IGNORE` semantics — safe to call on every boot. `storage.backfillBands()`, which runs immediately after, also seeds "Band B" and its demo user "zed" (password "password") using the same existence-check pattern. `storage.ensureDemoBand()` runs right after that (see "Demo login" below). No manual `band-admin.ts` step is required.
 
 ### Auth routes (`server/routes.ts`)
 
@@ -521,7 +521,19 @@ interface AuthUser { id: string; username: string; }
 
 ### Route guard (`client/src/App.tsx`)
 
-`RequireAuth` component: returns `null` while `isLoading`, renders `<Redirect to="/login" />` if `!user`, otherwise renders children. All non-login routes are wrapped in it. The `/login` route itself redirects to `/` if the user is already authenticated (`!isLoading && user`).
+`RequireAuth` component: returns `null` while `isLoading`, renders `<Redirect to="/login" />` if `!user`, otherwise renders children. All non-login routes are wrapped in it. The `/login` route itself redirects to `/?tab=dashboard` if the user is already authenticated (`!isLoading && user`).
+
+### Demo login
+
+A public demo for reviewers: the login page's "Check out a demo project" button logs the visitor in as a guest in the demo band **Glass Harbor**.
+
+- **Band and users** — `storage.ensureDemoBand()` runs at boot right after `backfillBands()`. It ensures the band `demo-band` ("Glass Harbor") and users `demo-guest` (username `guest`), `demo-mara`, `demo-theo` and `demo-kai` exist, each inserted with its `bandId` in the same write (never via `createUser`, which sets `bandId` null and would let `backfillBands` move the user into The Zenith Passage). Existing users are never updated, so passwords set at first boot stay. A taken username is logged and skipped, never a crash.
+- **Passwords** — mara, theo and kai get the bcrypt hash of `DEMO_PASSWORD`; if it is unset they are skipped with one log line. The guest's password is the hash of 96 random hex characters, so nobody can log in as guest with a password.
+- **Login route** — `POST /api/auth/demo` needs no existing session. It sets `req.session.userId`/`bandId` exactly as `POST /api/auth/login` does and returns the same response shape plus `demoSongId`: the demo band's most recently updated real song (`type = 'song'`, ordered by `updatedAt` then `createdAt`), or null. Returns 503 `{ message: "The demo isn't available right now." }` if the guest is missing.
+- **Client** — `loginAsDemo(onSuccess)` in `AuthContext` shares its response handling with `login`. It navigates to `/songs/:songId/workspace?tab=arrangement`, or to `/?tab=dashboard` when `demoSongId` is null. The navigation happens in the same step as setting the user, so the `/login` already-authenticated redirect can't win the race.
+- **Welcome dialog** — a successful demo login sets the sessionStorage flag `patchbay-demo-welcome = pending`. `DemoWelcomeDialog` (`client/src/components/DemoWelcomeDialog.tsx`), mounted once in `App.tsx` for signed-in users, opens only when the flag is pending and the user is `demo-guest`. Every way of closing it clears the flag, so it shows once per demo login, not on refresh. The guest id and flag helpers live in `client/src/lib/demo.ts`.
+- **Uploads off for the guest only** — `rejectDemoGuestUpload` runs before multer on every route that accepts a file (`POST /api/upload`, `POST /api/ideas/:ideaId/clips/upload`, `POST /api/songs/:songId/loose-files/upload`, `POST /api/loose-files/unassigned/upload`, `POST /api/songs/:songId/reviews`) and returns 403 `{ message: "Uploads are turned off in the demo." }`. Add to Song and Promote to Song re-upload through `POST /api/upload`, so they fail for the guest too. The demo bandmates can upload normally.
+- **Content** — built by hand on the live site, logged in as mara, theo and kai. There is no seeding, reset or cleanup: a visitor's changes persist until fixed by hand. The landing song is whichever real song was edited most recently, so the showcase song should be the last one edited.
 
 ### AppHeader dropdowns (`client/src/components/AppHeader.tsx`)
 
@@ -555,7 +567,16 @@ This split keeps workspace-level actions (shared settings, collaborator access) 
 |---|---|
 | zed | password |
 
-Both bands and all seven users are seeded automatically on every server boot — no manual `band-admin.ts` step required. All usernames are lowercase. Passwords are bcrypt-hashed at cost 10 and are never returned by any API route.
+**Glass Harbor** (public demo — seeded by `ensureDemoBand()`):
+
+| Username | Password |
+|---|---|
+| guest | none usable — reached only through the demo button |
+| mara | `DEMO_PASSWORD` |
+| theo | `DEMO_PASSWORD` |
+| kai | `DEMO_PASSWORD` |
+
+All three bands and their users are seeded automatically on every server boot — no manual `band-admin.ts` step required. All usernames are lowercase. Passwords are bcrypt-hashed at cost 10 and are never returned by any API route.
 
 ### Author fields throughout the app
 
@@ -662,6 +683,9 @@ return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 - **Never set clip `playbackRate` from bpm** — tempo describes the grid and metronome and must never time-stretch recordings. Clips always play at their recorded speed.
 - **Never draw timeline gridlines with a CSS `background-size` tile** — fractional tile sizes get rounded and drift away from clips on long songs. Use the `BeatGrid` SVG pattern (see "Musical grid" in `client/src/components/daw/CLAUDE.md`).
 - **Don't put the Transport row back on fixed `w-1/3` thirds** — wider left content spills under the center group's transparent box and its controls stop receiving clicks (this happened to the time signature Select). See "Transport row layout" in `client/src/components/daw/CLAUDE.md`.
+- **Every route that accepts a file must call `rejectDemoGuestUpload` before multer runs** — it returns 403 for the demo guest. A new upload route without it lets public demo visitors write to the production disk.
+- **Look up the demo band and users by id (`demo-band`, `demo-guest`, …), never by name** — `bands.name` isn't unique, and existing boot code already looks bands up by name.
+- **Never navigate to bare `/` after a login** — use `/?tab=dashboard` (or the demo's Workspace landing). See "Tab persistence and bare-URL resolution".
 
 ---
 
@@ -807,7 +831,7 @@ These are things that need a decision before being built:
    the internet? Options: local disk (simple, free, not scalable), AWS S3, Cloudflare R2.
    Start with local disk; plan to abstract behind a storage interface.
 
-2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Seven seeded users exist across two bands: six on The Zenith Passage (jordan/alex/jamie/sam/taylor/riley) and zed on Band B. Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
+2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Eleven seeded users exist across three bands: six on The Zenith Passage (jordan/alex/jamie/sam/taylor/riley), zed on Band B, and guest/mara/theo/kai on the Glass Harbor public demo. Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
 
 3. **Real-time vs async:** The spec calls for async collaboration to start. WebSockets (`ws`)
    is installed. Leave real-time for a future milestone.
@@ -847,6 +871,8 @@ These are things that need a decision before being built:
 - **Tasks with no `ideas` row can't be flagged hidden** — six old demo songs plus two "Sort Test" songs; harmless.
 - **Zoom 10–19 is lost on reload** — the zoom controls allow 10–300, but saving/restoring (`patchbay-zoom-${songId}`) accepts only 20–400 and falls back to 80.
 - **Songs with null `bpm` show and use 120** — all Ideas plus a few test songs; display only, nothing writes a value to the DB.
+- **Demo visitors' changes persist** — the Glass Harbor demo has no reset or cleanup; anything a visitor rearranges or deletes stays until fixed by hand. Check the demo before sending the link to someone important.
+- **Demo guest can't use Add to Song or Promote to Song** — both re-upload through the blocked `POST /api/upload`. Could be fixed later by copying the src server-side.
 
 ---
 
@@ -1011,6 +1037,8 @@ Violating this rule lets a user scope queries to a band they don't belong to, ex
 - **Long file names pushed the Undo action off screen (Oct 2026)** — names are shortened and the action can't shrink.
 - **Organized, placed and cross-track-moved files showed the wrong color (Oct 2026)** — every file stored a copy of a color at creation that never followed it; loose files were born gold, so organize and place-on-timeline carried gold onto non-gold tracks (Bass Outro V2 in comment2), and a version moved to another track kept its old track's color. The timeline only inherited the bucket clip's color. Fixed by computing display color from the file's current track (see "File display color" under Database). The Library's More Info swatch, hardcoded `#D4AF37`, now uses the clip's track too. Loose files with no track show an empty outlined swatch instead of gold. Stored colors were not repaired (locally ~30 clips and 5 timeline clips disagree with their track); they no longer affect anything on screen.
 - **Timeline clips restyled; last clip in each section lost its right border (Oct 2026)** — clips now use a dark track-tinted body, an inside track-colored border, a full waveform in the track color and a top-left name (see "Timeline clip look"). The missing right border was `SectionCell`'s `border-r` taking the cell's last pixel under `overflow-hidden`; it's now an inset box-shadow.
+- **Logging in landed on the previous user's tab (Oct 2026)** — Dashboard's remembered tab is stored per browser, so a new login opened Library if the last user left it there. Every login now navigates to `/?tab=dashboard`.
+- **`.env` was never read in development (Oct 2026)** — the dev script didn't load it, so the server silently used fallback values (including the dev session secret). Fixed with `--env-file-if-exists=.env`; local sessions were signed out once.
 
 ---
 
