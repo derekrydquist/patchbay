@@ -35,7 +35,7 @@ export function DemoWelcomeDialog() {
         <DialogHeader className="text-left">
           <DialogTitle className="text-sm uppercase tracking-widest font-heading">Welcome to PatchBay</DialogTitle>
           <DialogDescription className="text-sm text-white/70 leading-relaxed pt-1">
-            You're looking at Glass Harbor, a demo band partway through writing a song. PatchBay is where a band collects its recorded ideas, organizes them by track and section, and assembles them into a demo together.
+            PatchBay is where a band collects its recorded ideas, organizes them by track and section, and assembles them into a demo together.
           </DialogDescription>
         </DialogHeader>
 
