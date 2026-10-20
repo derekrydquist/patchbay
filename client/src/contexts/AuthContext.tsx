@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { queryClient } from "@/lib/queryClient";
+import { markDemoWelcomePending } from "@/lib/demo";
 
 interface AuthUser {
   id: string;
@@ -11,9 +12,12 @@ interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
-  loginAsDemo: () => Promise<void>;
+  loginAsDemo: (onSuccess: (demoSongId: string | null) => void) => Promise<void>;
   logout: () => Promise<void>;
 }
+
+// POST /api/auth/demo adds demoSongId; the stored user never carries it.
+type LoginResponse = AuthUser & { demoSongId?: string | null };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
@@ -111,12 +115,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [recheckSession]);
 
   // Shared by login and loginAsDemo: both routes answer with the same user shape.
-  const completeLogin = async (res: Response) => {
+  // beforeApply runs in the same synchronous step as setting the user, so a caller
+  // that navigates there lands before /login's already-signed-in redirect can run.
+  const completeLogin = async (res: Response, beforeApply?: (data: LoginResponse) => void) => {
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error((body as { message?: string }).message ?? "Login failed.");
     }
-    const data: AuthUser = await res.json();
+    const { demoSongId, ...data }: LoginResponse = await res.json();
+    beforeApply?.({ ...data, demoSongId });
     authEpochRef.current++;
     queryClient.clear();
     applyUser(data);
@@ -132,8 +139,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }));
   };
 
-  const loginAsDemo = async () => {
-    await completeLogin(await fetch("/api/auth/demo", { method: "POST", credentials: "include" }));
+  const loginAsDemo = async (onSuccess: (demoSongId: string | null) => void) => {
+    const res = await fetch("/api/auth/demo", { method: "POST", credentials: "include" });
+    await completeLogin(res, ({ demoSongId }) => {
+      markDemoWelcomePending();
+      onSuccess(demoSongId ?? null);
+    });
   };
 
   const logout = async () => {

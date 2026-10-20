@@ -7,6 +7,7 @@ import NotFound from "./pages/not-found";
 import { Toaster } from "@/components/ui/toaster";
 import { useAuth } from "./contexts/AuthContext";
 import { useWindowFileDropGuard } from "@/hooks/use-native-file-drop";
+import { DemoWelcomeDialog } from "@/components/DemoWelcomeDialog";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { user, isLoading } = useAuth();
@@ -41,11 +42,13 @@ function Router() {
 }
 
 export default function App() {
+  const { user } = useAuth();
   // A Finder file released outside every drop target must never open in the browser.
   useWindowFileDropGuard();
   return (
     <>
       <Router />
+      {user && <DemoWelcomeDialog />}
       <Toaster />
     </>
   );

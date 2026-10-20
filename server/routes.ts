@@ -16,9 +16,9 @@ import bcrypt from "bcrypt";
 import multer from "multer";
 import { z } from "zod";
 import { parseBuffer } from "music-metadata";
-import { eq, and, ne, count, asc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
+import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -770,6 +770,8 @@ export async function registerRoutes(
   });
 
   // Public demo: signs the visitor in as the demo guest, exactly as login does.
+  // demoSongId is the demo band's most recently updated real song, which the client
+  // opens in Workspace; null when the band has none.
   app.post("/api/auth/demo", async (req, res) => {
     const user = await storage.getUser(DEMO_GUEST_ID);
     if (!user) {
@@ -781,7 +783,11 @@ export async function registerRoutes(
     const band = user.bandId
       ? db.select({ name: bands.name }).from(bands).where(eq(bands.id, user.bandId)).get()
       : null;
-    return res.json({ ...safeUser, bandName: band?.name ?? null });
+    const demoSong = db.select({ id: songs.id }).from(songs)
+      .where(and(eq(songs.bandId, DEMO_BAND_ID), eq(songs.type, "song")))
+      .orderBy(desc(songs.updatedAt), desc(songs.createdAt))
+      .get();
+    return res.json({ ...safeUser, bandName: band?.name ?? null, demoSongId: demoSong?.id ?? null });
   });
 
   app.post("/api/auth/logout", (req, res) => {

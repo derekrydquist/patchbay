@@ -33,8 +33,11 @@ export default function Login() {
     setError(null);
     setIsDemoPending(true);
     try {
-      await loginAsDemo();
-      setLocation("/?tab=dashboard");
+      await loginAsDemo((demoSongId) => {
+        setLocation(demoSongId
+          ? `/songs/${encodeURIComponent(demoSongId)}/workspace?tab=arrangement`
+          : "/?tab=dashboard");
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {
