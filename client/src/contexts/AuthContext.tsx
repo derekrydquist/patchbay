@@ -11,6 +11,7 @@ interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
+  loginAsDemo: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -109,13 +110,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [recheckSession]);
 
-  const login = async (username: string, password: string) => {
-    const res = await fetch("/api/auth/login", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
+  // Shared by login and loginAsDemo: both routes answer with the same user shape.
+  const completeLogin = async (res: Response) => {
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error((body as { message?: string }).message ?? "Login failed.");
@@ -127,6 +123,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     channelRef.current?.postMessage({ type: "login" });
   };
 
+  const login = async (username: string, password: string) => {
+    await completeLogin(await fetch("/api/auth/login", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    }));
+  };
+
+  const loginAsDemo = async () => {
+    await completeLogin(await fetch("/api/auth/demo", { method: "POST", credentials: "include" }));
+  };
+
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
     authEpochRef.current++;
@@ -136,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, logout }}>
+    <AuthContext.Provider value={{ user, isLoading, login, loginAsDemo, logout }}>
       {children}
     </AuthContext.Provider>
   );

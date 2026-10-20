@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_GUEST_ID } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -344,6 +344,15 @@ export function requireBand(req: Request, res: Response, next: NextFunction) {
   const bandId = req.session.bandId;
   if (!bandId) return res.status(403).json({ message: "Band not resolved for session." });
   req.bandId = bandId;
+  next();
+}
+
+// The demo guest can't add files. Runs before multer on every route that accepts
+// one, so the file is never read. Demo bandmates (real logins) still can.
+function rejectDemoGuestUpload(req: Request, res: Response, next: NextFunction) {
+  if (req.session.userId === DEMO_GUEST_ID) {
+    return res.status(403).json({ message: "Uploads are turned off in the demo." });
+  }
   next();
 }
 
@@ -750,6 +759,21 @@ export async function registerRoutes(
     const match = await bcrypt.compare(password, user.password);
     if (!match) {
       return res.status(401).json({ message: "Invalid username or password." });
+    }
+    req.session.userId = user.id;
+    if (user.bandId) req.session.bandId = user.bandId;
+    const { password: _pw, ...safeUser } = user;
+    const band = user.bandId
+      ? db.select({ name: bands.name }).from(bands).where(eq(bands.id, user.bandId)).get()
+      : null;
+    return res.json({ ...safeUser, bandName: band?.name ?? null });
+  });
+
+  // Public demo: signs the visitor in as the demo guest, exactly as login does.
+  app.post("/api/auth/demo", async (req, res) => {
+    const user = await storage.getUser(DEMO_GUEST_ID);
+    if (!user) {
+      return res.status(503).json({ message: "The demo isn't available right now." });
     }
     req.session.userId = user.id;
     if (user.bandId) req.session.bandId = user.bandId;
@@ -2213,7 +2237,7 @@ export async function registerRoutes(
    * the clip id client-side too). Answers the clip plus taskAdvanced (this upload
    * moved the section's task from To Do to In Progress).
    */
-  app.post("/api/ideas/:ideaId/clips/upload", requireBand, upload.single("file"), async (req, res) => {
+  app.post("/api/ideas/:ideaId/clips/upload", requireBand, rejectDemoGuestUpload, upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ message: "No file provided" });
     const file = req.file;
     const ideaId = req.params.ideaId as string;
@@ -2366,7 +2390,7 @@ export async function registerRoutes(
    * POST /api/upload then POST /api/songs/:songId/loose-files with UploadModal's
    * loose-mode body.
    */
-  app.post("/api/songs/:songId/loose-files/upload", requireBand, upload.single("file"), async (req, res) => {
+  app.post("/api/songs/:songId/loose-files/upload", requireBand, rejectDemoGuestUpload, upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ message: "No file provided" });
     const file = req.file;
     const songId = req.params.songId as string;
@@ -2545,7 +2569,7 @@ export async function registerRoutes(
    * POST /api/upload then POST /api/loose-files/unassigned with UploadModal's
    * band-loose body. No activity row, as above.
    */
-  app.post("/api/loose-files/unassigned/upload", requireBand, upload.single("file"), async (req, res) => {
+  app.post("/api/loose-files/unassigned/upload", requireBand, rejectDemoGuestUpload, upload.single("file"), async (req, res) => {
     if (!req.file) return res.status(400).json({ message: "No file provided" });
     const file = req.file;
     const looseFileActor = (await sessionUsername(req)) ?? 'Unknown';
@@ -3402,6 +3426,7 @@ export async function registerRoutes(
   app.post(
     "/api/upload",
     requireBand,
+    rejectDemoGuestUpload,
     upload.single("file"),
     async (req: Request, res) => {
       try {
@@ -3813,7 +3838,7 @@ export async function registerRoutes(
     res.json(reviews);
   });
 
-  app.post("/api/songs/:songId/reviews", requireBand, upload.single("file"), async (req: Request, res) => {
+  app.post("/api/songs/:songId/reviews", requireBand, rejectDemoGuestUpload, upload.single("file"), async (req: Request, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
     try {

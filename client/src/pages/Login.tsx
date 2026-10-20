@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, loginAsDemo } = useAuth();
   const [, setLocation] = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
+  const [isDemoPending, setIsDemoPending] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -20,11 +21,24 @@ export default function Login() {
     setIsPending(true);
     try {
       await login(username, password);
-      setLocation("/");
+      setLocation("/?tab=dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {
       setIsPending(false);
+    }
+  };
+
+  const handleDemo = async () => {
+    setError(null);
+    setIsDemoPending(true);
+    try {
+      await loginAsDemo();
+      setLocation("/?tab=dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed.");
+    } finally {
+      setIsDemoPending(false);
     }
   };
 
@@ -86,12 +100,28 @@ export default function Login() {
 
           <Button
             type="submit"
-            disabled={isPending}
+            disabled={isPending || isDemoPending}
             className="w-full h-10 bg-primary text-black font-bold text-sm hover:bg-primary/90 transition-colors"
           >
             {isPending ? "Signing in…" : "Sign In"}
           </Button>
         </form>
+
+        <div className="flex items-center gap-3 my-5">
+          <div className="h-px flex-1 bg-white/10" />
+          <span className="text-xs text-white/30">or</span>
+          <div className="h-px flex-1 bg-white/10" />
+        </div>
+
+        <Button
+          type="button"
+          variant="outline"
+          onClick={handleDemo}
+          disabled={isPending || isDemoPending}
+          className="w-full h-10 bg-transparent [border-color:rgba(255,255,255,0.15)] text-white/80 font-bold text-sm hover:bg-white/5 hover:text-white transition-colors"
+        >
+          {isDemoPending ? "Opening demo…" : "Check out a demo project"}
+        </Button>
 
         {/* Placeholder links */}
         <div className="mt-6 flex items-center justify-center gap-6">

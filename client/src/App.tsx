@@ -24,7 +24,7 @@ function Router() {
     <Switch>
       <Route path="/login">
         {/* Redirect already-authenticated users away from the login page */}
-        {!isLoading && user ? <Redirect to="/" /> : <Login />}
+        {!isLoading && user ? <Redirect to="/?tab=dashboard" /> : <Login />}
       </Route>
       <Route path="/">
         <RequireAuth><Dashboard /></RequireAuth>

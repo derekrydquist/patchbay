@@ -142,6 +142,7 @@ app.use((req, res, next) => {
 (async () => {
   await storage.seedUsers();
   await storage.backfillBands();
+  await storage.ensureDemoBand();
   try {
     await storage.relinkNullTaskTracks();
   } catch (err) {

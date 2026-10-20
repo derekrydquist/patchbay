@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { randomBytes, randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
@@ -123,6 +123,9 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR
   : path.resolve("uploads");
 
 export const DEFAULT_SONG_ID = "patchbay-default";
+
+export const DEMO_BAND_ID = "demo-band";
+export const DEMO_GUEST_ID = "demo-guest";
 
 export const DEFAULT_SECTIONS = [
   "Intro",
@@ -2799,6 +2802,42 @@ export class SQLiteStorage implements IStorage {
       const hashed = await bcrypt.hash("password", 10);
       db.insert(users).values({ id: randomUUID(), username: "zed", password: hashed, bandId: bandB.id }).run();
       console.log(`[bands] Created user "zed" in band "${BAND_B_NAME}"`);
+    }
+  }
+
+  // Public demo: band "Glass Harbor" with a password-less guest (the demo login
+  // route signs visitors in as it) and three bandmates whose content is made by hand.
+  // Looked up by fixed id, never by name. Users are inserted with bandId in the same
+  // write — createUser sets bandId null, and backfillBands would move such a user into
+  // The Zenith Passage. Existing users are never updated, so passwords stay as set.
+  async ensureDemoBand(): Promise<void> {
+    if (!db.select().from(bands).where(eq(bands.id, DEMO_BAND_ID)).get()) {
+      db.insert(bands).values({ id: DEMO_BAND_ID, name: "Glass Harbor", createdAt: new Date().toISOString() }).run();
+      console.log(`[demo] Created band "Glass Harbor" (${DEMO_BAND_ID})`);
+    }
+
+    const ensureUser = async (id: string, username: string, password: string) => {
+      if (db.select().from(users).where(eq(users.id, id)).get()) return;
+      const clash = db.select().from(users).where(eq(users.username, username)).get();
+      if (clash) {
+        console.error(`[demo] Username "${username}" already belongs to user ${clash.id}; demo user ${id} not created`);
+        return;
+      }
+      const hashed = await bcrypt.hash(password, 10);
+      db.insert(users).values({ id, username, password: hashed, bandId: DEMO_BAND_ID }).run();
+      console.log(`[demo] Created user "${username}" (${id})`);
+    };
+
+    // Nobody knows this password, so the guest can only be reached through the demo route.
+    await ensureUser(DEMO_GUEST_ID, "guest", randomBytes(48).toString("hex"));
+
+    const demoPassword = process.env.DEMO_PASSWORD;
+    if (!demoPassword) {
+      console.log("[demo] DEMO_PASSWORD is not set; skipping demo bandmates (mara, theo, kai)");
+      return;
+    }
+    for (const [id, username] of [["demo-mara", "mara"], ["demo-theo", "theo"], ["demo-kai", "kai"]]) {
+      await ensureUser(id, username, demoPassword);
     }
   }
 
