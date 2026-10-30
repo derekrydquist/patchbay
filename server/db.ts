@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "@shared/schema";
@@ -309,4 +310,138 @@ const hasActivityLogClipId = (sqlite.prepare(
 if (!hasActivityLogClipId) {
   sqlite.exec("ALTER TABLE activity_log ADD COLUMN clip_id TEXT");
   console.log("[PatchBay] Added clip_id column to activity_log table.");
+}
+
+// ─── Timeline placement rebuild, step 2: section_offset + song_sections ──────────
+// Data only — nothing reads base_length or sort_order yet, and the timeline still
+// computes every position itself. Hand-authored and idempotent (see the deploy skill:
+// drizzle-kit push is banned from production).
+
+// timeline_clips.section_offset — seconds from the clip's home-section start.
+const hasTimelineClipsSectionOffset = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('timeline_clips') WHERE name='section_offset'"
+).get() as { c: number }).c;
+if (!hasTimelineClipsSectionOffset) {
+  sqlite.exec("ALTER TABLE timeline_clips ADD COLUMN section_offset REAL");
+  console.log("[PatchBay] Added section_offset column to timeline_clips table.");
+}
+
+// song_sections — one row per (song, section name), song-wide.
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS song_sections (
+    id TEXT PRIMARY KEY,
+    song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+    section_name TEXT NOT NULL,
+    base_length REAL,
+    sort_order INTEGER,
+    created_at TEXT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uniq_song_section ON song_sections(song_id, section_name);
+`);
+
+// Seed / complete song_sections on every boot. sort_order records the order the
+// timeline shows after a reload (Timeline.tsx apiTracksToTracks → getActiveSections
+// with MOCK_SONG.sections): the fixed default list first, then other sections in the
+// order the timeline finds them (active tracks by sort_order, each track's clips by
+// start), then sections with no timeline clips by their lowest ideas.sort_order.
+// Existing rows keep their sort_order; new rows and NULL sort_orders are appended
+// after the song's current maximum. Must match client DEFAULT_SECTIONS (daw-data.ts),
+// which seeds MOCK_SONG.sections — db.ts can't import storage.ts (circular).
+{
+  const TIMELINE_DEFAULT_SECTION_ORDER = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"];
+  const sectionsBySong = sqlite.prepare(`
+    SELECT t.song_id AS songId, i.section_name AS sectionName,
+           MIN(i.sort_order) AS minOrder
+    FROM ideas i JOIN instrument_tracks t ON t.id = i.track_id
+    JOIN songs s ON s.id = t.song_id
+    WHERE i.is_full_take = 0
+    GROUP BY t.song_id, i.section_name
+  `).all() as { songId: string; sectionName: string; minOrder: number }[];
+  const timelineDiscovery = sqlite.prepare(`
+    SELECT tc.section_name AS sectionName
+    FROM timeline_clips tc JOIN instrument_tracks t ON t.id = tc.track_id
+    WHERE t.song_id = ? AND t.active = 1 AND tc.is_full_take = 0 AND tc.section_name IS NOT NULL
+    ORDER BY t.sort_order, t.rowid, tc.start, tc.rowid
+  `);
+  const existingRows = sqlite.prepare(
+    "SELECT section_name AS sectionName, sort_order AS sortOrder FROM song_sections WHERE song_id = ?"
+  );
+  const insertRow = sqlite.prepare(`
+    INSERT OR IGNORE INTO song_sections (id, song_id, section_name, base_length, sort_order, created_at)
+    VALUES (?, ?, ?, NULL, ?, ?)
+  `);
+  const fillSortOrder = sqlite.prepare(
+    "UPDATE song_sections SET sort_order = ? WHERE song_id = ? AND section_name = ? AND sort_order IS NULL"
+  );
+
+  const bySong = new Map<string, { sectionName: string; minOrder: number }[]>();
+  for (const row of sectionsBySong) {
+    const list = bySong.get(row.songId) ?? [];
+    list.push(row);
+    bySong.set(row.songId, list);
+  }
+
+  let inserted = 0;
+  sqlite.transaction(() => {
+    const now = new Date().toISOString();
+    bySong.forEach((sections, songId) => {
+      const names = new Set(sections.map((s) => s.sectionName));
+      const ordered: string[] = TIMELINE_DEFAULT_SECTION_ORDER.filter((n) => names.has(n));
+      for (const { sectionName } of timelineDiscovery.all(songId) as { sectionName: string }[]) {
+        if (names.has(sectionName) && !ordered.includes(sectionName)) ordered.push(sectionName);
+      }
+      [...sections]
+        .sort((a, b) => a.minOrder - b.minOrder || a.sectionName.localeCompare(b.sectionName))
+        .forEach(({ sectionName }) => { if (!ordered.includes(sectionName)) ordered.push(sectionName); });
+
+      const existing = new Map(
+        (existingRows.all(songId) as { sectionName: string; sortOrder: number | null }[])
+          .map((r) => [r.sectionName, r.sortOrder]),
+      );
+      let next = Math.max(-1, ...Array.from(existing.values()).filter((v): v is number => v !== null)) + 1;
+      for (const sectionName of ordered) {
+        if (!existing.has(sectionName)) {
+          insertRow.run(randomUUID(), songId, sectionName, next++, now);
+          inserted++;
+        } else if (existing.get(sectionName) === null) {
+          fillSortOrder.run(next++, songId, sectionName);
+        }
+      }
+    });
+  })();
+  if (inserted > 0) console.log(`[PatchBay] song_sections: added ${inserted} row(s).`);
+}
+
+// Backfill timeline_clips.section_offset on every boot (fills only NULLs, so it's a
+// no-op once complete). Per (track, section): clips ordered by start, then rowid —
+// the order the timeline shows — and offset = running sum of trimmed lengths. Rows
+// that already have an offset count toward the sum but are never rewritten. Full
+// takes and clips with no section stay NULL. start is left untouched.
+{
+  const groups = sqlite.prepare(`
+    SELECT DISTINCT track_id AS trackId, section_name AS sectionName FROM timeline_clips
+    WHERE section_offset IS NULL AND is_full_take = 0 AND section_name IS NOT NULL
+  `).all() as { trackId: string; sectionName: string }[];
+  if (groups.length > 0) {
+    const groupClips = sqlite.prepare(`
+      SELECT id, duration, trim_start AS trimStart, trim_end AS trimEnd, section_offset AS sectionOffset
+      FROM timeline_clips
+      WHERE track_id = ? AND section_name = ? AND is_full_take = 0
+      ORDER BY start, rowid
+    `);
+    const setOffset = sqlite.prepare("UPDATE timeline_clips SET section_offset = ? WHERE id = ?");
+    let filled = 0;
+    sqlite.transaction(() => {
+      for (const { trackId, sectionName } of groups) {
+        let offset = 0;
+        for (const c of groupClips.all(trackId, sectionName) as {
+          id: string; duration: number; trimStart: number; trimEnd: number | null; sectionOffset: number | null;
+        }[]) {
+          if (c.sectionOffset === null) { setOffset.run(offset, c.id); filled++; }
+          offset += (c.trimEnd ?? c.duration) - c.trimStart;
+        }
+      }
+    })();
+    console.log(`[PatchBay] Backfilled section_offset on ${filled} timeline clip(s).`);
+  }
 }

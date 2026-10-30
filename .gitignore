@@ -15,3 +15,4 @@ server/db.sqlite
 patchbay.db
 .claude/settings.local.json
 server-crash.log
+*.backup-*.db*

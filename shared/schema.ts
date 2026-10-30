@@ -263,6 +263,11 @@ export const timelineClips = sqliteTable("timeline_clips", {
   trimEnd: real("trim_end"),
   bucketClipId: text("bucket_clip_id").references(() => clips.id, { onDelete: "set null" }),
   isFullTake: integer("is_full_take", { mode: "boolean" }).notNull().default(false),
+  // Seconds from the start of the clip's home section (sectionName). Nullable: full
+  // takes keep NULL, and rows written before the column existed are backfilled at
+  // boot (server/db.ts). Kept equal to start − section start while clips are still
+  // contiguous; becomes the authoritative position in the timeline placement rebuild.
+  sectionOffset: real("section_offset"),
 });
 
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);
@@ -275,6 +280,25 @@ export const deletedSections = sqliteTable("deleted_sections", {
   songId: text("song_id").notNull(),
   sectionName: text("section_name").notNull(),
 });
+
+// ─── Song Sections ────────────────────────────────────────────────────────────
+
+// One row per (song, section name), song-wide — a per-track hide leaves it alone;
+// the song-wide section delete removes it. Created by guarded CREATE TABLE in
+// server/db.ts, never drizzle-kit push. Not read yet: baseLength and sortOrder are
+// recorded now and switched on in a later step of the timeline placement rebuild.
+export const songSections = sqliteTable("song_sections", {
+  id: text("id").primaryKey(),
+  songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
+  sectionName: text("section_name").notNull(),
+  baseLength: real("base_length"), // seconds; NULL = fit to content
+  sortOrder: integer("sort_order"),
+  createdAt: text("created_at").notNull(),
+}, (table) => ({
+  uniqSongSection: uniqueIndex("uniq_song_section").on(table.songId, table.sectionName),
+}));
+
+export type SongSection = typeof songSections.$inferSelect;
 
 // ─── Task Comments ────────────────────────────────────────────────────────────
 

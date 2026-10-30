@@ -94,6 +94,7 @@ type ApiTrack = {
     trimStart: number;
     trimEnd: number | null;
     bucketClipId: string | null;
+    sectionOffset: number | null;
   }[];
 };
 
@@ -139,9 +140,12 @@ function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
     const fullTakeClips = track.clips.filter((c) => c.isFullTake);
     const sectioned = sections.flatMap((name) => {
       const sc = track.clips.filter((c) => c.sectionName === name && !c.isFullTake);
-      let pos = sectionStarts[name];
+      const sectionStart = sectionStarts[name];
+      let pos = sectionStart;
       return sc.map((clip) => {
-        const updated = { ...clip, start: pos };
+        // sectionOffset mirrors start while clips are contiguous; it's written with
+        // every start PATCH so the server copy stays in step.
+        const updated = { ...clip, start: pos, sectionOffset: pos - sectionStart };
         pos += (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
         return updated;
       });
@@ -149,6 +153,55 @@ function recalcAllStarts(tracks: Track[], sectionOrder: string[]): Track[] {
     const unsectioned = track.clips.filter((c) => !c.sectionName && !c.isFullTake);
     return { ...track, clips: [...sectioned, ...unsectioned, ...fullTakeClips] };
   });
+}
+
+// Orders one track's clips from the server: by start (as before — the order in which
+// sections first appear here feeds getActiveSections, so it must not change), then
+// within each section by sectionOffset (falling back to start) inside the slots that
+// section already occupies.
+function orderServerClips<T extends { start: number; sectionName: string | null; isFullTake?: boolean; sectionOffset: number | null }>(clips: T[]): T[] {
+  const sorted = [...clips].sort((a, b) => a.start - b.start);
+  const slots = new Map<string, number[]>();
+  sorted.forEach((c, i) => {
+    if (!c.sectionName || c.isFullTake) return;
+    const list = slots.get(c.sectionName) ?? [];
+    list.push(i);
+    slots.set(c.sectionName, list);
+  });
+  const result = [...sorted];
+  slots.forEach((indices) => {
+    const inSection = indices
+      .map((i) => sorted[i])
+      .sort((a, b) => (a.sectionOffset ?? a.start) - (b.sectionOffset ?? b.start));
+    indices.forEach((slot, k) => { result[slot] = inSection[k]; });
+  });
+  return result;
+}
+
+// Dev only: warns when a stored section_offset disagrees with what recalcAllStarts
+// computes, so drift between the two shows up while testing. Each distinct mismatch
+// is reported once. (A poll that lands before a fire-and-forget PATCH can show a
+// transient mismatch that clears on the next poll.)
+const reportedOffsetDrift = new Set<string>();
+function warnOffsetDrift(apiTracks: ApiTrack[], computed: Track[]) {
+  if (!import.meta.env.DEV) return;
+  for (const apiTrack of apiTracks) {
+    const track = computed.find((t) => t.id === apiTrack.id);
+    if (!track) continue;
+    for (const stored of apiTrack.timelineClips) {
+      if (stored.isFullTake || !stored.sectionName) continue;
+      const clip = track.clips.find((c) => c.id === stored.id);
+      if (!clip || clip.sectionOffset == null) continue;
+      if (stored.sectionOffset != null && Math.abs(stored.sectionOffset - clip.sectionOffset) < 1e-6) continue;
+      const key = `${stored.id}|${stored.sectionOffset}|${clip.sectionOffset}`;
+      if (reportedOffsetDrift.has(key)) continue;
+      reportedOffsetDrift.add(key);
+      console.warn('[section_offset drift]', {
+        clip: stored.name, track: apiTrack.name, section: stored.sectionName,
+        stored: stored.sectionOffset, computed: clip.sectionOffset,
+      });
+    }
+  }
 }
 
 // Inserts or moves sectionName to gapIndex within activeNames (the section order shown during drag).
@@ -187,7 +240,7 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
     muted: false,
     solo: false,
     color: t.color ?? 'hsl(var(--chart-1))',
-    clips: [...t.timelineClips].sort((a, b) => a.start - b.start).map((c) => {
+    clips: orderServerClips(t.timelineClips).map((c) => {
       const ts = c.trimStart ?? 0;
       const te = c.trimEnd ?? null;
       return {
@@ -204,11 +257,14 @@ function apiTracksToTracks(apiTracks: ApiTrack[]): { tracks: Track[]; initialSec
         trimStart: ts,
         trimEnd: te,
         bucketClipId: c.bucketClipId ?? undefined,
+        sectionOffset: c.sectionOffset ?? null,
       };
     }),
   }));
   const initialSectionOrder = getActiveSections(rawTracks, MOCK_SONG.sections);
-  return { tracks: recalcAllStarts(rawTracks, initialSectionOrder), initialSectionOrder };
+  const tracks = recalcAllStarts(rawTracks, initialSectionOrder);
+  warnOffsetDrift(apiTracks, tracks);
+  return { tracks, initialSectionOrder };
 }
 
 // Whether the pointer is inside MediaBucket's on-screen bounds (its root carries
@@ -448,6 +504,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const { tracks: converted, initialSectionOrder } = apiTracksToTracks(apiTracks);
       setTracks(converted);
       setSectionOrder(initialSectionOrder);
+      // Set the ref now, not via its sync effect: the live-sync effect below runs in
+      // this same pass and recalcs with sectionOrderRef.current — still [] otherwise,
+      // which lays clips out in a different order than the section headers.
+      sectionOrderRef.current = initialSectionOrder;
       tracksInitialized.current = true;
       const durationMs = Math.round(performance.now() - mountTimeRef.current);
       if (durationMs > 2000) {
@@ -469,7 +529,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const withUpdatedClips = withRemovals.map(track => {
         const apiTrack = apiTracks.find(t => t.id === track.id);
         if (!apiTrack) return track;
-        const freshClips = [...apiTrack.timelineClips].sort((a, b) => a.start - b.start).map(c => {
+        const freshClips = orderServerClips(apiTrack.timelineClips).map(c => {
           const ts = c.trimStart ?? 0;
           const te = c.trimEnd ?? null;
           return {
@@ -486,6 +546,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             trimStart: ts,
             trimEnd: te,
             bucketClipId: c.bucketClipId ?? undefined,
+            sectionOffset: c.sectionOffset ?? null,
           };
         });
         return { ...track, clips: freshClips, volume: apiTrack.volume ?? 100, pan: apiTrack.pan ?? 0 };
@@ -506,7 +567,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         }));
 
       const merged = [...withUpdatedClips, ...newTracks];
-      return recalcAllStarts(merged, sectionOrderRef.current);
+      const recalced = recalcAllStarts(merged, sectionOrderRef.current);
+      warnOffsetDrift(apiTracks, recalced);
+      return recalced;
     });
   }, [apiTracks]);
 
@@ -1965,7 +2028,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             fetch(`/api/timeline-clips/${old.id}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ start: updated.start }),
+              body: JSON.stringify({ start: updated.start, sectionOffset: updated.sectionOffset }),
             })
               .then(() => queryClient.invalidateQueries({ queryKey: ['activity'] }))
               .catch((err) => console.error('Failed to update clip start after remove:', err));
@@ -2069,7 +2132,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             fetch(`/api/timeline-clips/${old.id}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ start: updated.start }),
+              body: JSON.stringify({ start: updated.start, sectionOffset: updated.sectionOffset }),
             })
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
@@ -2219,6 +2282,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         body: JSON.stringify({
           id: newId, trackId, name: clip.name, type: clip.type, color: clip.color,
           start: finalClip?.start ?? 0, duration: clip.duration,
+          sectionOffset: finalClip?.sectionOffset ?? null,
           src: clip.src ?? null, sectionName,
           trimStart: 0, trimEnd: null,
           bucketClipId: clip.id,
@@ -2237,7 +2301,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           fetch(`/api/timeline-clips/${old.id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ start: updated.start }),
+            body: JSON.stringify({ start: updated.start, sectionOffset: updated.sectionOffset }),
           })
             .then(() => Promise.all([
               queryClient.invalidateQueries({ queryKey: ['songs'] }),
@@ -2357,7 +2421,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             fetch(`/api/timeline-clips/${old.id}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ start: updated.start }),
+              body: JSON.stringify({ start: updated.start, sectionOffset: updated.sectionOffset }),
             })
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
@@ -2493,7 +2557,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             fetch(`/api/timeline-clips/${old.id}`, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ start: updated.start }),
+              body: JSON.stringify({ start: updated.start, sectionOffset: updated.sectionOffset }),
             })
               .then(() => Promise.all([
                 queryClient.invalidateQueries({ queryKey: ['songs'] }),
@@ -3034,7 +3098,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         </LooseFilePlacementProvider>
 
         <div
-          className="flex flex-col min-w-0 bg-[#09090b] relative overflow-hidden select-none shrink-0"
+          className="flex flex-col min-w-0 bg-[#09090b] relative isolate overflow-hidden select-none shrink-0"
           style={{ height: `${timelineHeight}px` }}
         >
           <div

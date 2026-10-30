@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -1304,6 +1304,7 @@ export async function registerRoutes(
         }).run();
         created.push(db.select().from(ideas).where(eq(ideas.id, id)).get()!);
       }
+      ensureSongSection(songId, name);
       return created;
     });
 
@@ -1502,6 +1503,7 @@ export async function registerRoutes(
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
     let clip = await storage.addTimelineClip(trackId, parsed.data);
+    if (clip.sectionName && !clip.isFullTake) ensureSongSection(trackSongIdVal, clip.sectionName);
 
     // If there's already a final bucket clip for this track+section, mark the new timeline clip final too
     if (clip.sectionName) {
@@ -1584,6 +1586,12 @@ export async function registerRoutes(
       ? await storage.updateTimelineClip(clipId, clipUpdates)
       : existingClip;
     if (!clip) return res.status(404).json({ message: "Clip not found" });
+    // Replace changes duration and resets trim, which moves every later clip in the
+    // section — keep their section_offset in step (clips are contiguous for now).
+    if (('duration' in clipUpdates || 'trimStart' in clipUpdates || 'trimEnd' in clipUpdates)
+        && clip.sectionName && !clip.isFullTake) {
+      recomputeSectionOffsets(clip.trackId, clip.sectionName);
+    }
 
     const isFinal = clipUpdates.isFinal;
     if (isFinal === true || isFinal === false) {
@@ -1757,7 +1765,14 @@ export async function registerRoutes(
     if (typeof trimStart !== 'number' || (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number')) {
       return res.status(400).json({ message: "trimStart must be a number; trimEnd must be a number or null" });
     }
-    const clip = await storage.updateTimelineClip(clipId, { trimStart, trimEnd: trimEnd ?? null });
+    // Trim and the section's sibling offsets change together (a trim moves every
+    // later clip in the section; clips are contiguous for now).
+    const clip = sqlite.transaction(() => {
+      const updated = db.update(timelineClips).set({ trimStart, trimEnd: trimEnd ?? null })
+        .where(eq(timelineClips.id, clipId)).returning().get();
+      if (updated?.sectionName && !updated.isFullTake) recomputeSectionOffsets(updated.trackId, updated.sectionName);
+      return updated;
+    })();
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
     const trimActor = req.session.userId
@@ -1792,10 +1807,17 @@ export async function registerRoutes(
     }
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
-    db.update(timelineClips)
-      .set({ trimStart, trimEnd: trimEnd ?? null })
-      .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
-      .run();
+    sqlite.transaction(() => {
+      const updated = db.update(timelineClips)
+        .set({ trimStart, trimEnd: trimEnd ?? null })
+        .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
+        .returning().all();
+      // Each touched section's later clips move — recompute their offsets too.
+      const sectionNames = new Set(
+        updated.filter((c) => c.sectionName && !c.isFullTake).map((c) => c.sectionName as string),
+      );
+      sectionNames.forEach((sectionName) => recomputeSectionOffsets(trackId, sectionName));
+    })();
 
     const applyTrimActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'

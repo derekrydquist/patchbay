@@ -41,6 +41,9 @@ export interface Clip {
   sectionName?: string;
   trimStart?: number;
   trimEnd?: number | null;
+  // Timeline clips only: seconds from the home section's start (timeline_clips.section_offset).
+  // Kept equal to start − section start by recalcAllStarts; null for full takes.
+  sectionOffset?: number | null;
   bucketClipId?: string;
   // Bucket versions only: the ideas row (section) the version lives in. Carried so a
   // version drag knows its own section; timeline clips never set it.

@@ -17,6 +17,7 @@ type TimelineClip = {
   src: string | null;
   trimStart: number;
   trimEnd: number | null;
+  sectionOffset: number | null;
 };
 
 type ApiTrack = {
@@ -141,7 +142,7 @@ function computeExportSectionLayout(
 }
 
 // Returns a Map of clipId → corrected absolute start in seconds.
-// Clips within each section are ordered by their existing start value (preserves relative order).
+// Clips within each section keep the timeline's order: sectionOffset, falling back to start.
 function recalcStartsForExport(tracks: ApiTrack[], sectionOrder: string[]): Map<string, number> {
   const layout = computeExportSectionLayout(tracks, sectionOrder);
   const sectionStarts = new Map(layout.map((s) => [s.name, s.start]));
@@ -153,7 +154,7 @@ function recalcStartsForExport(tracks: ApiTrack[], sectionOrder: string[]): Map<
       const sectionClips = track.timelineClips
         .filter((c) => (c as any).sectionName === name)
         .slice()
-        .sort((a, b) => a.start - b.start);
+        .sort((a, b) => (a.sectionOffset ?? a.start) - (b.sectionOffset ?? b.start));
       let pos = sectionStarts.get(name) ?? 0;
       for (const clip of sectionClips) {
         result.set(clip.id, pos);

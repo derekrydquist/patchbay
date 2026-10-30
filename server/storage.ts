@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
 import { eq, ne, asc, desc, inArray, notInArray, count, and, or, gte, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
-import { db } from "./db";
+import { db, sqlite } from "./db";
 import {
   type User, type InsertUser,
   type Song, type InsertSong,
@@ -25,6 +25,7 @@ import {
   users, songs, instrumentTracks, ideas, clips, looseFiles, timelineClips, deletedSections,
   productionTasks, taskComments, clipComments, looseFileComments, songReviews, songReviewComments,
   lyricsComments, activityLog, globalSettings, albums, albumSongs, bands, bucketFolderViews,
+  songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 
@@ -752,6 +753,46 @@ export function insertProductionTaskForSection({
   }).onConflictDoNothing().run();
 }
 
+// Makes sure song_sections has a row for (songId, sectionName), appending its
+// sort_order after the song's current maximum. A no-op when the row exists. One
+// statement, so it's atomic on its own and safe inside a transaction (same
+// connection). Call from every path that creates a section's ideas row or places a
+// clip into a section; never for Full Takes. See song_sections in server/db.ts.
+const ensureSongSectionStmt = sqlite.prepare(`
+  INSERT OR IGNORE INTO song_sections (id, song_id, section_name, base_length, sort_order, created_at)
+  SELECT ?, ?, ?, NULL, COALESCE(MAX(sort_order), -1) + 1, ?
+  FROM song_sections WHERE song_id = ?
+`);
+export function ensureSongSection(songId: string, sectionName: string): void {
+  ensureSongSectionStmt.run(randomUUID(), songId, sectionName, new Date().toISOString(), songId);
+}
+
+// Song id for a track, for ensureSongSection callers that only hold a trackId.
+function songIdForTrack(trackId: string): string | undefined {
+  return db.select({ songId: instrumentTracks.songId }).from(instrumentTracks)
+    .where(eq(instrumentTracks.id, trackId)).get()?.songId;
+}
+
+// Rewrites section_offset for every non-full-take clip in one track + section as the
+// running sum of trimmed lengths, in the order the timeline shows (offset, falling
+// back to start, then rowid). Clips are still contiguous in this step, so this is the
+// whole truth about their offsets. Used after a trim, which changes the siblings
+// after the trimmed clip. Call inside the transaction that wrote the trim.
+export function recomputeSectionOffsets(trackId: string, sectionName: string): void {
+  const rows = sqlite.prepare(`
+    SELECT id, duration, trim_start AS trimStart, trim_end AS trimEnd
+    FROM timeline_clips
+    WHERE track_id = ? AND section_name = ? AND is_full_take = 0
+    ORDER BY COALESCE(section_offset, start), rowid
+  `).all(trackId, sectionName) as { id: string; duration: number; trimStart: number; trimEnd: number | null }[];
+  const setOffset = sqlite.prepare("UPDATE timeline_clips SET section_offset = ? WHERE id = ?");
+  let offset = 0;
+  for (const c of rows) {
+    setOffset.run(offset, c.id);
+    offset += (c.trimEnd ?? c.duration) - c.trimStart;
+  }
+}
+
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 export class SQLiteStorage implements IStorage {
@@ -950,6 +991,7 @@ export class SQLiteStorage implements IStorage {
           sortOrder: si,
           active: true,
         }).run();
+        ensureSongSection(songId, sections[si]);
         insertProductionTaskForSection({ songId, trackId, instrument: trackName, sectionName: sections[si] });
       }
     }
@@ -985,6 +1027,7 @@ export class SQLiteStorage implements IStorage {
             sectionName: section,
             sortOrder: i,
           }).onConflictDoNothing().run();
+          ensureSongSection(DEFAULT_SONG_ID, section);
           insertProductionTaskForSection({ songId: DEFAULT_SONG_ID, trackId: track.id, instrument: track.name, sectionName: section, sectionIndex: i });
         }
       });
@@ -1159,6 +1202,7 @@ export class SQLiteStorage implements IStorage {
         sortOrder: 0,
         active: true,
       }).run();
+      ensureSongSection(songId, 'Files');
       idea = db.select().from(ideas).where(eq(ideas.id, ideaId)).get()!;
     }
 
@@ -1233,6 +1277,10 @@ export class SQLiteStorage implements IStorage {
 
   async deleteSection(songId: string, sectionName: string): Promise<void> {
     console.log('[storage deleteSection] songId:', songId, 'sectionName:', sectionName);
+    // Song-wide delete removes the song_sections row (a per-track hide never does).
+    db.delete(songSections)
+      .where(and(eq(songSections.songId, songId), eq(songSections.sectionName, sectionName)))
+      .run();
     const songTracks = db.select().from(instrumentTracks)
       .where(eq(instrumentTracks.songId, songId)).all();
     console.log('[storage deleteSection] songTracks.length:', songTracks.length);
@@ -1277,6 +1325,10 @@ export class SQLiteStorage implements IStorage {
   async createIdea(data: InsertIdea): Promise<Idea> {
     const idea: Idea = { sortOrder: 0, active: true, isFullTake: false, ...data, id: data.id ?? randomUUID() };
     db.insert(ideas).values(idea).run();
+    if (!idea.isFullTake) {
+      const songId = songIdForTrack(idea.trackId);
+      if (songId) ensureSongSection(songId, idea.sectionName);
+    }
     return db.select().from(ideas).where(eq(ideas.id, idea.id)).get()!;
   }
 
@@ -1408,18 +1460,26 @@ export class SQLiteStorage implements IStorage {
       cursor += sectionWidths[section];
     }
 
-    // Recompute each final clip's start and write to DB.
+    // Recompute each final clip's start and write to DB. Within a track + section,
+    // clips keep the timeline's order (sectionOffset, falling back to start). start
+    // keeps its old raw-duration arithmetic (the client recomputes positions anyway);
+    // section_offset is the running sum of trimmed lengths, the same value the
+    // timeline's recalcAllStarts produces.
     for (const trackId of trackIds) {
       for (const section of sections) {
         const trackSectionClips = finals
           .filter(c => c.trackId === trackId && c.sectionName === section)
-          .sort((a, b) => a.start - b.start);
+          .sort((a, b) => (a.sectionOffset ?? a.start) - (b.sectionOffset ?? b.start));
         let pos = sectionStarts[section];
+        let offset = 0;
         for (const clip of trackSectionClips) {
-          if (clip.start !== pos) {
-            db.update(timelineClips).set({ start: pos }).where(eq(timelineClips.id, clip.id)).run();
+          // Full takes keep a NULL offset (they're laid out by absolute start).
+          const sectionOffset = clip.isFullTake ? null : offset;
+          if (clip.start !== pos || clip.sectionOffset !== sectionOffset) {
+            db.update(timelineClips).set({ start: pos, sectionOffset }).where(eq(timelineClips.id, clip.id)).run();
           }
           pos += clip.duration;
+          offset += (clip.trimEnd ?? clip.duration) - clip.trimStart;
         }
       }
     }
@@ -1779,6 +1839,12 @@ export class SQLiteStorage implements IStorage {
       const start = sectionClips.length
         ? Math.max(...sectionClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart))
         : 0;
+      // Appended at the end, so the offset is the section's existing trimmed length.
+      const sectionOffset = sectionClips
+        .filter((c) => !c.isFullTake)
+        .reduce((sum, c) => sum + (c.trimEnd ?? c.duration) - c.trimStart, 0);
+      const placedSongId = songIdForTrack(trackId);
+      if (placedSongId) ensureSongSection(placedSongId, sectionName);
 
       const timelineClip: TimelineClip = {
         id: randomUUID(),
@@ -1795,6 +1861,7 @@ export class SQLiteStorage implements IStorage {
         trimEnd: null,
         bucketClipId: clip.id,
         isFullTake: false,
+        sectionOffset,
       };
       tx.insert(timelineClips).values(timelineClip).run();
 
