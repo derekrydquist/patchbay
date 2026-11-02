@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, reorderSongSections, SectionOrderError,LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -1252,6 +1252,49 @@ export async function registerRoutes(
     if (!assertSongOwned(req, res, songId)) return;
     const hidden = await storage.getHiddenTracks(songId);
     res.json(hidden);
+  });
+
+  // The song's song_sections rows in timeline order — the timeline's only source of
+  // section order (see shared/timelineLayout.ts). sortOrder is never null here.
+  app.get("/api/songs/:songId/sections", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    res.json(getSongSections(songId));
+  });
+
+  // Section header drag on the timeline. `order` lists the sections the timeline
+  // shows (those with clips) in their new order; they swap sort_order values among
+  // themselves and every other row keeps its place (reorderSongSections). Clip
+  // offsets don't change, so no clip is written.
+  app.put("/api/songs/:songId/sections/order", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const { order } = req.body as { order?: unknown };
+    if (!Array.isArray(order) || !order.every((n): n is string => typeof n === "string")) {
+      return res.status(400).json({ message: "order must be an array of section names" });
+    }
+    try {
+      reorderSongSections(songId, order);
+    } catch (err) {
+      if (err instanceof SectionOrderError) return res.status(400).json({ message: err.message });
+      throw err;
+    }
+
+    // Same sort-only type the per-clip start PATCHes logged when a section drag
+    // rewrote every clip; one row per drag now.
+    const sectionReorderActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'timeline-reordered',
+      description: `${sectionReorderActor} reordered sections on the timeline`,
+      timestamp: Date.now(),
+      author: sectionReorderActor,
+    }).catch(console.error);
+
+    res.json(getSongSections(songId));
   });
 
   // Atomic song-wide section creation: inserts one ideas row per active track in a

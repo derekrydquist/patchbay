@@ -767,6 +767,46 @@ export function ensureSongSection(songId: string, sectionName: string): void {
   ensureSongSectionStmt.run(randomUUID(), songId, sectionName, new Date().toISOString(), songId);
 }
 
+export interface SongSectionRow { name: string; sortOrder: number; baseLength: number | null }
+
+// A song's song_sections rows in timeline order. Rows with a NULL sort_order go last,
+// by name, and are numbered on from the song's highest sort_order — so callers never
+// see NULL. Read-only: the numbers given to NULL rows are not written back.
+export function getSongSections(songId: string): SongSectionRow[] {
+  const rows = sqlite.prepare(`
+    SELECT section_name AS name, sort_order AS sortOrder, base_length AS baseLength
+    FROM song_sections WHERE song_id = ?
+  `).all(songId) as { name: string; sortOrder: number | null; baseLength: number | null }[];
+  const byName = (a: { name: string }, b: { name: string }) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const numbered = rows
+    .filter((r): r is SongSectionRow => r.sortOrder !== null)
+    .sort((a, b) => a.sortOrder - b.sortOrder || byName(a, b));
+  let next = numbered.length ? numbered[numbered.length - 1].sortOrder + 1 : 0;
+  const unnumbered = rows.filter((r) => r.sortOrder === null).sort(byName)
+    .map((r) => ({ ...r, sortOrder: next++ }));
+  return [...numbered, ...unnumbered];
+}
+
+export class SectionOrderError extends Error {}
+
+// Reorders the listed sections among themselves: the sort_order values they hold now
+// are sorted and handed back in `order`'s sequence, in one transaction. Rows not
+// listed keep their sort_order, so sections with no timeline clips keep their places.
+// A listed row whose sort_order is NULL takes the number getSongSections shows for it.
+// Throws SectionOrderError for an empty list, duplicates or an unknown name.
+export function reorderSongSections(songId: string, order: string[]): void {
+  if (order.length === 0) throw new SectionOrderError("order must list at least one section");
+  if (new Set(order).size !== order.length) throw new SectionOrderError("order has duplicate section names");
+  const update = sqlite.prepare("UPDATE song_sections SET sort_order = ? WHERE song_id = ? AND section_name = ?");
+  sqlite.transaction(() => {
+    const current = new Map(getSongSections(songId).map((s) => [s.name, s.sortOrder]));
+    const missing = order.find((name) => !current.has(name));
+    if (missing !== undefined) throw new SectionOrderError(`No section named "${missing}" in this song`);
+    const slots = order.map((name) => current.get(name)!).sort((a, b) => a - b);
+    order.forEach((name, i) => update.run(slots[i], songId, name));
+  })();
+}
+
 // Song id for a track, for ensureSongSection callers that only hold a trackId.
 function songIdForTrack(trackId: string): string | undefined {
   return db.select({ songId: instrumentTracks.songId }).from(instrumentTracks)
