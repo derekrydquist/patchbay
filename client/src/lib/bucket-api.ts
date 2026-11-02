@@ -1,5 +1,6 @@
 import type { Clip as DawClip } from '@/lib/daw-data';
 import type { ProductionTask } from '@shared/schema';
+import { apiRequest } from '@/lib/queryClient';
 
 // ─── Wire types for GET /api/songs/:id/bucket ────────────────────────────────
 // Single source of truth. Union of all fields the API returns; both Dashboard
@@ -183,6 +184,14 @@ export async function fetchUnassignedLooseFiles(): Promise<ApiLooseFile[]> {
   return res.json();
 }
 
+// One song_sections row as GET /api/songs/:songId/sections returns it (sortOrder is
+// never null there). The only source of section order for the timeline and Export.
+export interface SongSectionRow { name: string; sortOrder: number; baseLength: number | null }
+
+export async function fetchSongSections(songId: string): Promise<SongSectionRow[]> {
+  return apiRequest('GET', `/api/songs/${songId}/sections`).then((r) => r.json());
+}
+
 // Track-scoped loose files — the "I know the track, not yet the section" resting
 // tier. Rendered in that Track's own Sections column in MediaBucket.
 export async function fetchTrackLooseFiles(trackId: string): Promise<ApiLooseFile[]> {
@@ -207,6 +216,9 @@ export const bucketKeys = {
   allHiddenIdeas: () => ['hidden-ideas'] as const,
   hiddenTracks: (songId: string | undefined) => ['hidden-tracks', songId] as const,
 };
+
+// Section order and base lengths (song_sections) — read by the timeline and Export.
+export const songSectionsKey = (songId: string) => ['song-sections', songId] as const;
 
 export const looseFileKeys = {
   // Prefix of every key below — invalidates all loose-file lists at once.

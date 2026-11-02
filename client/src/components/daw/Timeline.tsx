@@ -31,7 +31,7 @@ import {
 import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
-import { bucketKeys, fetchBucket, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
+import { bucketKeys, fetchBucket, fetchSongSections, songSectionsKey, type SongSectionRow, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
 import { LooseFilePlacementProvider } from './LooseFileRow';
 import { useLiveClipCommentSummary } from './Clip';
 import { usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
@@ -100,10 +100,6 @@ type ApiTrack = {
 
 type InsertionPoint = { trackId: string; sectionName: string; index: number; x: number };
 
-// One song_sections row as GET /api/songs/:songId/sections returns it (sortOrder is
-// never null there). The only source of section order on the timeline.
-type SongSectionRow = { name: string; sortOrder: number; baseLength: number | null };
-const songSectionsKey = (songId: string) => ['song-sections', songId] as const;
 const EMPTY_SECTIONS: SongSectionRow[] = [];
 
 type ApiTimelineClip = ApiTrack['timelineClips'][number];
@@ -505,7 +501,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const sectionOrderSaving = useIsMutating({ mutationKey: ['song-sections-order', songId] }) > 0;
   const { data: songSections } = useQuery<SongSectionRow[]>({
     queryKey: songSectionsKey(songId),
-    queryFn: () => apiRequest('GET', `/api/songs/${songId}/sections`).then((r) => r.json()),
+    queryFn: () => fetchSongSections(songId),
     refetchInterval: sectionOrderSaving ? false : 3000,
   });
   const sections = songSections ?? EMPTY_SECTIONS;

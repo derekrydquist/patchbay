@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, reorderSongSections, SectionOrderError,LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, reorderSongSections, SectionOrderError,LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -1545,8 +1545,19 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
+    // A sectioned clip sent with no sectionOffset is appended to the end of this
+    // track's section (trimmed lengths), the same rule as Place on Timeline, and its
+    // start cache comes from the layout. A sent offset (and start) is kept as is.
+    const fillOffset = !!parsed.data.sectionName && !parsed.data.isFullTake && parsed.data.sectionOffset == null;
+    if (fillOffset) parsed.data.sectionOffset = sectionAppendOffset(trackId, parsed.data.sectionName!);
     let clip = await storage.addTimelineClip(trackId, parsed.data);
     if (clip.sectionName && !clip.isFullTake) ensureSongSection(trackSongIdVal, clip.sectionName);
+    if (fillOffset) {
+      const start = computeSongLayout(trackSongIdVal).clipStarts.get(clip.id);
+      if (start !== undefined && start !== clip.start) {
+        clip = (await storage.updateTimelineClip(clip.id, { start })) ?? clip;
+      }
+    }
 
     // If there's already a final bucket clip for this track+section, mark the new timeline clip final too
     if (clip.sectionName) {

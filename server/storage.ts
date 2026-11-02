@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
 import bcrypt from "bcrypt";
-import { eq, ne, asc, desc, inArray, notInArray, count, and, or, gte, isNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
+import { eq, ne, asc, desc, inArray, notInArray, count, and, or, gte, isNull, isNotNull, max, min, getTableColumns, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import { db, sqlite } from "./db";
 import {
   type User, type InsertUser,
@@ -28,6 +28,7 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
+import { layoutTimeline, effectiveLength, type TimelineLayout } from "@shared/timelineLayout";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -833,6 +834,52 @@ export function recomputeSectionOffsets(trackId: string, sectionName: string): v
   }
 }
 
+// The song's timeline layout (shared/timelineLayout.ts), built from the same inputs
+// the Workspace timeline uses: song_sections rows (getSongSections), the timeline
+// clips on active tracks, and the song's bpm / time signature (null → 120 and 4/4
+// inside layoutTimeline). The one place the server derives clip positions — every
+// stored start it writes comes from here. Reads on the shared connection, so it sees
+// uncommitted writes when called inside a transaction.
+export function computeSongLayout(songId: string): TimelineLayout {
+  const song = db.select({ bpm: songs.bpm, timeSignature: songs.timeSignature })
+    .from(songs).where(eq(songs.id, songId)).get();
+  const trackIds = db.select({ id: instrumentTracks.id }).from(instrumentTracks)
+    .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
+    .all().map((t) => t.id);
+  const clipRows = trackIds.length
+    ? db.select().from(timelineClips).where(inArray(timelineClips.trackId, trackIds)).all()
+    : [];
+  return layoutTimeline({
+    sections: getSongSections(songId),
+    clips: clipRows.map((c) => ({
+      id: c.id,
+      trackId: c.trackId,
+      sectionName: c.sectionName,
+      sectionOffset: c.sectionOffset,
+      duration: c.duration,
+      trimStart: c.trimStart,
+      trimEnd: c.trimEnd,
+      isFullTake: c.isFullTake,
+      start: c.start,
+    })),
+    bpm: song?.bpm ?? null,
+    timeSignature: song?.timeSignature ?? null,
+  });
+}
+
+// section_offset for a clip appended to the end of one track's section: the trimmed
+// lengths of the non-full-take clips already there, summed. Call before inserting.
+export function sectionAppendOffset(trackId: string, sectionName: string): number {
+  return db.select().from(timelineClips)
+    .where(and(
+      eq(timelineClips.trackId, trackId),
+      eq(timelineClips.sectionName, sectionName),
+      eq(timelineClips.isFullTake, false),
+    ))
+    .all()
+    .reduce((sum, c) => sum + effectiveLength(c), 0);
+}
+
 // ─── Implementation ───────────────────────────────────────────────────────────
 
 export class SQLiteStorage implements IStorage {
@@ -1451,78 +1498,42 @@ export class SQLiteStorage implements IStorage {
     return !!finalClip;
   }
 
+  // Smart Clear ("Leave Final Clips"). Deletes every non-final timeline clip on the
+  // song's active tracks (full takes included; a final full take stays, untouched).
+  // Then, per track + section, re-packs the remaining clips end to end in their
+  // existing offset order with trimmed lengths (recomputeSectionOffsets), and writes
+  // each remaining sectioned clip's start as a cache value from computeSongLayout.
+  // song_sections rows are never touched: a section left with no clips just drops off
+  // the timeline.
   async deleteNonFinalTimelineClips(songId: string): Promise<void> {
     const songTracks = db.select().from(instrumentTracks)
       .where(and(eq(instrumentTracks.songId, songId), eq(instrumentTracks.active, true)))
       .all();
     if (!songTracks.length) return;
     const trackIds = songTracks.map(t => t.id);
+    const sectionedRemaining = and(
+      inArray(timelineClips.trackId, trackIds),
+      eq(timelineClips.isFullTake, false),
+      isNotNull(timelineClips.sectionName),
+    );
 
-    const allClips = db.select().from(timelineClips)
-      .where(inArray(timelineClips.trackId, trackIds))
-      .all();
+    db.transaction((tx) => {
+      tx.delete(timelineClips)
+        .where(and(inArray(timelineClips.trackId, trackIds), eq(timelineClips.isFinal, false)))
+        .run();
 
-    db.delete(timelineClips)
-      .where(and(inArray(timelineClips.trackId, trackIds), eq(timelineClips.isFinal, false)))
-      .run();
+      const groups = tx.selectDistinct({ trackId: timelineClips.trackId, sectionName: timelineClips.sectionName })
+        .from(timelineClips).where(sectionedRemaining).all();
+      for (const g of groups) recomputeSectionOffsets(g.trackId, g.sectionName!);
 
-    const finals = allClips.filter(c => c.isFinal);
-    if (!finals.length) return;
-
-    // Infer section order from existing start values (smallest clip start per section).
-    const sectionMinStart: Record<string, number> = {};
-    for (const clip of finals) {
-      if (!clip.sectionName) continue;
-      if (!(clip.sectionName in sectionMinStart) || clip.start < sectionMinStart[clip.sectionName]) {
-        sectionMinStart[clip.sectionName] = clip.start;
-      }
-    }
-    const sections = Object.keys(sectionMinStart).sort((a, b) => sectionMinStart[a] - sectionMinStart[b]);
-
-    // Section width = max total final-clip duration across all tracks for that section.
-    const MIN_SECTION_WIDTH = 4;
-    const sectionWidths: Record<string, number> = {};
-    for (const section of sections) {
-      sectionWidths[section] = MIN_SECTION_WIDTH;
-      for (const trackId of trackIds) {
-        const total = finals
-          .filter(c => c.trackId === trackId && c.sectionName === section)
-          .reduce((sum, c) => sum + c.duration, 0);
-        if (total > sectionWidths[section]) sectionWidths[section] = total;
-      }
-    }
-
-    // Compute absolute section starts.
-    const sectionStarts: Record<string, number> = {};
-    let cursor = 0;
-    for (const section of sections) {
-      sectionStarts[section] = cursor;
-      cursor += sectionWidths[section];
-    }
-
-    // Recompute each final clip's start and write to DB. Within a track + section,
-    // clips keep the timeline's order (sectionOffset, falling back to start). start
-    // keeps its old raw-duration arithmetic (the client recomputes positions anyway);
-    // section_offset is the running sum of trimmed lengths, the same value the
-    // timeline's recalcAllStarts produces.
-    for (const trackId of trackIds) {
-      for (const section of sections) {
-        const trackSectionClips = finals
-          .filter(c => c.trackId === trackId && c.sectionName === section)
-          .sort((a, b) => (a.sectionOffset ?? a.start) - (b.sectionOffset ?? b.start));
-        let pos = sectionStarts[section];
-        let offset = 0;
-        for (const clip of trackSectionClips) {
-          // Full takes keep a NULL offset (they're laid out by absolute start).
-          const sectionOffset = clip.isFullTake ? null : offset;
-          if (clip.start !== pos || clip.sectionOffset !== sectionOffset) {
-            db.update(timelineClips).set({ start: pos, sectionOffset }).where(eq(timelineClips.id, clip.id)).run();
-          }
-          pos += clip.duration;
-          offset += (clip.trimEnd ?? clip.duration) - clip.trimStart;
+      const layout = computeSongLayout(songId);
+      for (const clip of tx.select().from(timelineClips).where(sectionedRemaining).all()) {
+        const start = layout.clipStarts.get(clip.id);
+        if (start !== undefined && start !== clip.start) {
+          tx.update(timelineClips).set({ start }).where(eq(timelineClips.id, clip.id)).run();
         }
       }
-    }
+    });
   }
 
   // ── Loose Files (song-scoped, unplaced uploads) ──────────────────────────────
@@ -1870,19 +1881,8 @@ export class SQLiteStorage implements IStorage {
     return db.transaction((tx) => {
       const clip = materializeLooseFileCore(tx, looseFileId, trackId, sectionName);
 
-      // Append after the last existing clip in this track's section — mirrors the
-      // client's insertClipInSection append behavior, scoped to this one track/section
-      // (not a full cross-track recalcAllStarts, which is a client-side concern).
-      const sectionClips = tx.select().from(timelineClips)
-        .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.sectionName, sectionName)))
-        .all();
-      const start = sectionClips.length
-        ? Math.max(...sectionClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart))
-        : 0;
-      // Appended at the end, so the offset is the section's existing trimmed length.
-      const sectionOffset = sectionClips
-        .filter((c) => !c.isFullTake)
-        .reduce((sum, c) => sum + (c.trimEnd ?? c.duration) - c.trimStart, 0);
+      // Appended at the end of this track's section (trimmed lengths).
+      const sectionOffset = sectionAppendOffset(trackId, sectionName);
       const placedSongId = songIdForTrack(trackId);
       if (placedSongId) ensureSongSection(placedSongId, sectionName);
 
@@ -1892,7 +1892,7 @@ export class SQLiteStorage implements IStorage {
         name: clip.name,
         type: clip.type,
         color: clip.color,
-        start,
+        start: 0, // replaced below by the layout's value
         duration: clip.duration,
         src: clip.src,
         sectionName,
@@ -1904,6 +1904,12 @@ export class SQLiteStorage implements IStorage {
         sectionOffset,
       };
       tx.insert(timelineClips).values(timelineClip).run();
+
+      // The start cache, from the layout with the new clip in it.
+      if (placedSongId) {
+        timelineClip.start = computeSongLayout(placedSongId).clipStarts.get(timelineClip.id) ?? 0;
+        tx.update(timelineClips).set({ start: timelineClip.start }).where(eq(timelineClips.id, timelineClip.id)).run();
+      }
 
       return { clip, timelineClip };
     });

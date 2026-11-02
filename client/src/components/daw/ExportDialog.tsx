@@ -9,6 +9,8 @@ import { useToast } from '@/hooks/use-toast';
 import { useQueryClient } from '@tanstack/react-query';
 import { Mp3Encoder } from '@breezystack/lamejs';
 import JSZip from 'jszip';
+import { layoutTimeline } from '@shared/timelineLayout';
+import { fetchSongSections, songSectionsKey, type SongSectionRow } from '@/lib/bucket-api';
 
 type TimelineClip = {
   id: string;
@@ -17,7 +19,9 @@ type TimelineClip = {
   src: string | null;
   trimStart: number;
   trimEnd: number | null;
+  sectionName: string | null;
   sectionOffset: number | null;
+  isFullTake: boolean;
 };
 
 type ApiTrack = {
@@ -113,56 +117,31 @@ function normalizeInPlace(buf: AudioBuffer): void {
   }
 }
 
-const MIN_SECTION_WIDTH = 4; // seconds — mirrors Timeline.tsx
-
-function computeExportSectionLayout(
+// Every clip's start, from the same section layout the timeline uses
+// (shared/timelineLayout.ts): section start + sectionOffset, sections in
+// song_sections order. Full takes keep their stored start.
+function exportLayout(
   tracks: ApiTrack[],
-  sectionOrder: string[],
-): { name: string; start: number; duration: number }[] {
-  const present = new Set(
-    tracks.flatMap((t) => t.timelineClips.map((c) => (c as any).sectionName as string | undefined).filter(Boolean) as string[]),
-  );
-  const ordered = sectionOrder.filter((s) => present.has(s));
-  present.forEach((s) => { if (!ordered.includes(s)) ordered.push(s); });
-
-  const sections: { name: string; start: number; duration: number }[] = [];
-  let cursor = 0;
-  for (const name of ordered) {
-    let maxWidth = MIN_SECTION_WIDTH;
-    for (const t of tracks) {
-      const total = t.timelineClips
-        .filter((c) => (c as any).sectionName === name)
-        .reduce((s, c) => s + (c.trimEnd ?? c.duration) - (c.trimStart ?? 0), 0);
-      if (total > maxWidth) maxWidth = total;
-    }
-    sections.push({ name, start: cursor, duration: maxWidth });
-    cursor += maxWidth;
-  }
-  return sections;
-}
-
-// Returns a Map of clipId → corrected absolute start in seconds.
-// Clips within each section keep the timeline's order: sectionOffset, falling back to start.
-function recalcStartsForExport(tracks: ApiTrack[], sectionOrder: string[]): Map<string, number> {
-  const layout = computeExportSectionLayout(tracks, sectionOrder);
-  const sectionStarts = new Map(layout.map((s) => [s.name, s.start]));
-  const sectionNames = layout.map((s) => s.name);
-
-  const result = new Map<string, number>();
-  for (const track of tracks) {
-    for (const name of sectionNames) {
-      const sectionClips = track.timelineClips
-        .filter((c) => (c as any).sectionName === name)
-        .slice()
-        .sort((a, b) => (a.sectionOffset ?? a.start) - (b.sectionOffset ?? b.start));
-      let pos = sectionStarts.get(name) ?? 0;
-      for (const clip of sectionClips) {
-        result.set(clip.id, pos);
-        pos += (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
-      }
-    }
-  }
-  return result;
+  sections: SongSectionRow[],
+  bpm: number | null,
+  timeSignature: string | null,
+) {
+  return layoutTimeline({
+    sections,
+    clips: tracks.flatMap((t) => t.timelineClips.map((c) => ({
+      id: c.id,
+      trackId: t.id,
+      sectionName: c.sectionName,
+      sectionOffset: c.sectionOffset ?? null,
+      duration: c.duration,
+      trimStart: c.trimStart ?? 0,
+      trimEnd: c.trimEnd ?? null,
+      isFullTake: !!c.isFullTake,
+      start: c.start,
+    }))),
+    bpm,
+    timeSignature,
+  });
 }
 
 async function renderClips(
@@ -314,9 +293,11 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
     setProgress({ phase: 'Fetching timeline…', done: 0, total: 0 });
 
     try {
-      const [res, songRes] = await Promise.all([
+      // Section rows: the timeline's own cached query when it's loaded.
+      const [res, songRes, sections] = await Promise.all([
         fetch(`/api/songs/${songId}/timeline`),
         fetch(`/api/songs/${songId}`),
+        queryClient.fetchQuery({ queryKey: songSectionsKey(songId), queryFn: () => fetchSongSections(songId) }),
       ]);
       console.log('[Export] timeline fetch status:', res.status);
       if (!res.ok) throw new Error(`Timeline fetch failed: HTTP ${res.status}`);
@@ -324,8 +305,8 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
       const songData = songRes.ok ? await songRes.json() : null;
       const songName: string = body.songName ?? 'Untitled';
       const tracks: ApiTrack[] = body.tracks;
-      const sectionOrder: string[] = songData?.sections ?? [];
-      const correctedStarts = recalcStartsForExport(tracks, sectionOrder);
+      // Null bpm → 120 and missing time signature → 4/4 inside layoutTimeline, as on the timeline.
+      const layout = exportLayout(tracks, sections, songData?.bpm ?? null, songData?.timeSignature ?? null);
       console.log('[Export] songName:', songName, '| tracks:', tracks.map((t) => ({ id: t.id, name: t.name, clips: t.timelineClips.length })));
 
       const VOLUME = 0.8;
@@ -342,14 +323,19 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
       const allClips: ExportClip[] = tracksWithClips.flatMap((t) =>
         t.timelineClips.filter((c) => c.src).map((c) => ({
           src: c.src!,
-          start: correctedStarts.get(c.id) ?? c.start,
+          start: layout.clipStarts.get(c.id) ?? c.start,
           duration: c.duration,
           volume: VOLUME,
           trimStart: c.trimStart ?? 0,
           trimEnd: c.trimEnd ?? null,
         })),
       );
-      const totalDuration = Math.max(...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart));
+      // The end of the last section, or later if a clip (a full take) ends past it — no
+      // audio is ever cut off.
+      const totalDuration = Math.max(
+        layout.timelineEnd,
+        ...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart),
+      );
       console.log('[Export] allClips:', allClips, '| totalDuration:', totalDuration);
       const ext = format === 'mp3' ? 'mp3' : 'wav';
 
@@ -362,7 +348,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
             .filter((c) => c.src)
             .map((c) => ({
               src: c.src!,
-              start: correctedStarts.get(c.id) ?? c.start,
+              start: layout.clipStarts.get(c.id) ?? c.start,
               duration: c.duration,
               volume: VOLUME,
               trimStart: c.trimStart ?? 0,
