@@ -29,6 +29,7 @@ import {
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 import { layoutTimeline, effectiveLength, type TimelineLayout } from "@shared/timelineLayout";
+import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -279,7 +280,6 @@ export interface IStorage {
 
   // Timeline
   getTimelineTracks(songId: string): Promise<TrackWithTimelineClips[]>;
-  addTimelineClip(trackId: string, data: InsertTimelineClip): Promise<TimelineClip>;
   updateTimelineClip(id: string, updates: Partial<InsertTimelineClip>): Promise<TimelineClip | undefined>;
   deleteTimelineClip(id: string): Promise<void>;
 
@@ -340,7 +340,8 @@ export interface IStorage {
   materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
-    sectionName: string
+    sectionName: string,
+    hint?: SectionPlacementHint | null,
   ): Promise<{ clip: Clip; timelineClip: TimelineClip }>;
 
   // Activity
@@ -788,23 +789,80 @@ export function getSongSections(songId: string): SongSectionRow[] {
   return [...numbered, ...unnumbered];
 }
 
-export class SectionOrderError extends Error {}
-
-// Reorders the listed sections among themselves: the sort_order values they hold now
-// are sorted and handed back in `order`'s sequence, in one transaction. Rows not
-// listed keep their sort_order, so sections with no timeline clips keep their places.
-// A listed row whose sort_order is NULL takes the number getSongSections shows for it.
-// Throws SectionOrderError for an empty list, duplicates or an unknown name.
-export function reorderSongSections(songId: string, order: string[]): void {
-  if (order.length === 0) throw new SectionOrderError("order must list at least one section");
-  if (new Set(order).size !== order.length) throw new SectionOrderError("order has duplicate section names");
+// A timeline section header drag: moves `section` directly in front of `before` (or,
+// when before is null, directly behind `after`) within ALL the song's song_sections
+// rows — including rows with no clips and sections hidden on every track — then
+// renumbers every row 0…n−1, in one transaction (shared/sectionOrder.ts moveSection).
+// This is the ARRANGEMENT order only (timeline, Export, computeSongLayout); the
+// filing order every other surface uses (ideas.sortOrder) is never touched.
+// Throws SectionMoveError for an unknown name, a self-reference or no neighbour.
+export function moveSongSection(songId: string, section: string, before: string | null, after: string | null): void {
   const update = sqlite.prepare("UPDATE song_sections SET sort_order = ? WHERE song_id = ? AND section_name = ?");
   sqlite.transaction(() => {
-    const current = new Map(getSongSections(songId).map((s) => [s.name, s.sortOrder]));
-    const missing = order.find((name) => !current.has(name));
-    if (missing !== undefined) throw new SectionOrderError(`No section named "${missing}" in this song`);
-    const slots = order.map((name) => current.get(name)!).sort((a, b) => a - b);
-    order.forEach((name, i) => update.run(slots[i], songId, name));
+    const names = moveSection(getSongSections(songId).map((s) => s.name), section, before, after);
+    names.forEach((name, i) => update.run(i, songId, name));
+  })();
+}
+
+// Sections that are on the timeline: a song_sections row and at least one
+// non-full-take timeline clip on an active track.
+function sectionsOnTimeline(songId: string): Set<string> {
+  const rows = sqlite.prepare(`
+    SELECT DISTINCT tc.section_name AS name
+    FROM timeline_clips tc
+    JOIN instrument_tracks t ON t.id = tc.track_id AND t.active = 1
+    JOIN song_sections ss ON ss.song_id = t.song_id AND ss.section_name = tc.section_name
+    WHERE t.song_id = ? AND tc.is_full_take = 0
+  `).all(songId) as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+// Whether the song's section has any non-full-take timeline clip on an active track.
+// False means the next clip placed there is the section's first, which places the
+// section in the arrangement (placeSectionInArrangement).
+export function sectionHasTimelineClips(songId: string, sectionName: string): boolean {
+  return !!sqlite.prepare(`
+    SELECT 1 FROM timeline_clips tc
+    JOIN instrument_tracks t ON t.id = tc.track_id AND t.active = 1
+    WHERE t.song_id = ? AND tc.section_name = ? AND tc.is_full_take = 0
+    LIMIT 1
+  `).get(songId, sectionName);
+}
+
+// A section's first timeline clip sets its arrangement position: directly between the
+// timeline sections the hint names, or — no hint, or a hint naming a section that
+// isn't on the timeline or has no row — directly after the last section on the
+// timeline (first when nothing is on it). Creates the row there if it's missing, then
+// renumbers every row 0…n−1, in one transaction (shared/sectionOrder.ts
+// placeFirstClipSection). Call only for a section with no non-full-take timeline clips,
+// before its first clip is inserted. Never for Full Takes.
+export function placeSectionInArrangement(songId: string, sectionName: string, hint?: SectionPlacementHint | null): void {
+  const update = sqlite.prepare("UPDATE song_sections SET sort_order = ? WHERE song_id = ? AND section_name = ?");
+  sqlite.transaction(() => {
+    const names = getSongSections(songId).map((s) => s.name);
+    const onTimeline = sectionsOnTimeline(songId);
+    onTimeline.delete(sectionName);
+    if (!names.includes(sectionName)) ensureSongSection(songId, sectionName);
+    placeFirstClipSection(names, onTimeline, sectionName, hint)
+      .forEach((name, i) => update.run(i, songId, name));
+  })();
+}
+
+// Inserts a timeline clip. A sectioned, non-full-take clip that is the first in its
+// section across all tracks places the section in the arrangement first (the hint is
+// ignored otherwise); a later clip only makes sure the row exists. One transaction.
+export function insertTimelineClipPlaced(
+  songId: string, data: InsertTimelineClip, hint?: SectionPlacementHint | null,
+): TimelineClip {
+  return sqlite.transaction(() => {
+    const sectioned = !!data.sectionName && !data.isFullTake;
+    if (sectioned && !sectionHasTimelineClips(songId, data.sectionName!)) {
+      placeSectionInArrangement(songId, data.sectionName!, hint);
+    } else if (sectioned) {
+      ensureSongSection(songId, data.sectionName!);
+    }
+    db.insert(timelineClips).values(data).run();
+    return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
   })();
 }
 
@@ -815,16 +873,16 @@ function songIdForTrack(trackId: string): string | undefined {
 }
 
 // Rewrites section_offset for every non-full-take clip in one track + section as the
-// running sum of trimmed lengths, in the order the timeline shows (offset, falling
-// back to start, then rowid). Clips are still contiguous in this step, so this is the
-// whole truth about their offsets. Used after a trim, which changes the siblings
+// running sum of trimmed lengths, in the order the timeline shows (offset, then rowid;
+// a NULL offset — not expected, every insert path sets one — goes last). Clips are
+// still contiguous in this step, so this is the whole truth about their offsets. Used after a trim, which changes the siblings
 // after the trimmed clip. Call inside the transaction that wrote the trim.
 export function recomputeSectionOffsets(trackId: string, sectionName: string): void {
   const rows = sqlite.prepare(`
     SELECT id, duration, trim_start AS trimStart, trim_end AS trimEnd
     FROM timeline_clips
     WHERE track_id = ? AND section_name = ? AND is_full_take = 0
-    ORDER BY COALESCE(section_offset, start), rowid
+    ORDER BY section_offset IS NULL, section_offset, rowid
   `).all(trackId, sectionName) as { id: string; duration: number; trimStart: number; trimEnd: number | null }[];
   const setOffset = sqlite.prepare("UPDATE timeline_clips SET section_offset = ? WHERE id = ?");
   let offset = 0;
@@ -1143,11 +1201,6 @@ export class SQLiteStorage implements IStorage {
       ...track,
       timelineClips: allClips.filter((c) => c.trackId === track.id),
     }));
-  }
-
-  async addTimelineClip(trackId: string, data: InsertTimelineClip): Promise<TimelineClip> {
-    db.insert(timelineClips).values({ ...data, trackId }).run();
-    return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
   }
 
   async updateTimelineClip(id: string, updates: Partial<InsertTimelineClip>): Promise<TimelineClip | undefined> {
@@ -1802,13 +1855,17 @@ export class SQLiteStorage implements IStorage {
       .from(clips).innerJoin(ideas, eq(clips.ideaId, ideas.id))
       .where(eq(clips.id, clipId)).get();
     if (!row) return undefined;
-    const timelineCopies = db.select({
-      id: timelineClips.id, trackName: instrumentTracks.name,
-      sectionName: timelineClips.sectionName, start: timelineClips.start,
-    })
-      .from(timelineClips).innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
-      .where(eq(timelineClips.bucketClipId, clipId))
-      .orderBy(asc(timelineClips.start)).all();
+    // Timeline playing order: arrangement order (song_sections.sort_order; no row =
+    // last), then offset within the section, then rowid; Full Takes last. Only decides
+    // the dialog's bullet order.
+    const timelineCopies = sqlite.prepare(`
+      SELECT tc.id AS id, t.name AS trackName, tc.section_name AS sectionName
+      FROM timeline_clips tc
+      JOIN instrument_tracks t ON t.id = tc.track_id
+      LEFT JOIN song_sections ss ON ss.song_id = t.song_id AND ss.section_name = tc.section_name
+      WHERE tc.bucket_clip_id = ?
+      ORDER BY tc.is_full_take, ss.sort_order IS NULL, ss.sort_order, tc.section_offset IS NULL, tc.section_offset, tc.rowid
+    `).all(clipId) as ClipDependents['timelineCopies'];
     const tasks: ClipDependents['tasks'] = [];
     const task = await this.getTaskByTrackSection(row.idea.trackId, row.idea.sectionName);
     if (task) {
@@ -1876,7 +1933,8 @@ export class SQLiteStorage implements IStorage {
   async materializeLooseFileToTimeline(
     looseFileId: string,
     trackId: string,
-    sectionName: string
+    sectionName: string,
+    hint?: SectionPlacementHint | null,
   ): Promise<{ clip: Clip; timelineClip: TimelineClip }> {
     return db.transaction((tx) => {
       const clip = materializeLooseFileCore(tx, looseFileId, trackId, sectionName);
@@ -1884,7 +1942,13 @@ export class SQLiteStorage implements IStorage {
       // Appended at the end of this track's section (trimmed lengths).
       const sectionOffset = sectionAppendOffset(trackId, sectionName);
       const placedSongId = songIdForTrack(trackId);
-      if (placedSongId) ensureSongSection(placedSongId, sectionName);
+      // The section's first timeline clip places the section in the arrangement
+      // (counted before the insert below); a later one only makes sure the row exists.
+      if (placedSongId && !sectionHasTimelineClips(placedSongId, sectionName)) {
+        placeSectionInArrangement(placedSongId, sectionName, hint);
+      } else if (placedSongId) {
+        ensureSongSection(placedSongId, sectionName);
+      }
 
       const timelineClip: TimelineClip = {
         id: randomUUID(),

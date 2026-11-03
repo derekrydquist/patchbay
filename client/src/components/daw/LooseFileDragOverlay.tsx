@@ -31,7 +31,7 @@ import { type Clip } from '@/lib/daw-data';
 // to the left of the cursor until the cursor crossed the Files column border. Our
 // `style` is applied after dnd-kit's own (PositionedOverlay spreads it last), so
 // these sizes win.
-const CURSOR_GAP_PX = 4;
+export const CURSOR_GAP_PX = 4;
 
 // Moves the overlay's top-left corner to the cursor plus CURSOR_GAP_PX on both
 // axes. Same shape as @dnd-kit/modifiers' snapCenterToCursor, which would center

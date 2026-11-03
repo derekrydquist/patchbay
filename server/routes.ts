@@ -18,13 +18,15 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, reorderSongSections, SectionOrderError,LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, moveSongSection, insertTimelineClipPlaced, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
   insertSongSchema,
   insertInstrumentTrackSchema,
   insertTimelineClipSchema,
+  type InsertTimelineClip,
   insertIdeaSchema,
   insertClipSchema,
   insertLooseFileSchema,
@@ -1262,21 +1264,28 @@ export async function registerRoutes(
     res.json(getSongSections(songId));
   });
 
-  // Section header drag on the timeline. `order` lists the sections the timeline
-  // shows (those with clips) in their new order; they swap sort_order values among
-  // themselves and every other row keeps its place (reorderSongSections). Clip
-  // offsets don't change, so no clip is written.
+  // Section header drag on the timeline. `section` is the dragged section; `before`
+  // is the timeline section it now sits directly in front of, `after` the one it now
+  // sits directly behind (at least one is set). It moves within ALL the song's rows —
+  // clip-less and hidden ones included, so a clip-less section lands in the right
+  // place once it gets its first clip — and every row is renumbered 0…n−1
+  // (moveSongSection, shared/sectionOrder.ts). Arrangement order only: the filing
+  // order (ideas.sortOrder) of the Media Bucket, Production and pickers never changes.
+  // Clip offsets don't change, so no clip is written.
   app.put("/api/songs/:songId/sections/order", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
     if (!assertSongOwned(req, res, songId)) return;
-    const { order } = req.body as { order?: unknown };
-    if (!Array.isArray(order) || !order.every((n): n is string => typeof n === "string")) {
-      return res.status(400).json({ message: "order must be an array of section names" });
+    const { section, before = null, after = null } = (req.body ?? {}) as {
+      section?: unknown; before?: unknown; after?: unknown;
+    };
+    const isNameOrNull = (v: unknown): v is string | null => v === null || typeof v === "string";
+    if (typeof section !== "string" || !isNameOrNull(before) || !isNameOrNull(after)) {
+      return res.status(400).json({ message: "section must be a section name; before and after must be section names or null" });
     }
     try {
-      reorderSongSections(songId, order);
+      moveSongSection(songId, section, before, after);
     } catch (err) {
-      if (err instanceof SectionOrderError) return res.status(400).json({ message: err.message });
+      if (err instanceof SectionMoveError) return res.status(400).json({ message: err.message });
       throw err;
     }
 
@@ -1534,6 +1543,16 @@ export async function registerRoutes(
     res.json({ songName: song?.name ?? 'Untitled', tracks });
   });
 
+  // The optional `placement` body field of the two routes that create a timeline clip:
+  // { before?: string | null, after?: string | null }. Anything malformed is treated as
+  // no hint (the end rule) rather than rejected.
+  function parsePlacementHint(raw: unknown): SectionPlacementHint | null {
+    if (!raw || typeof raw !== "object") return null;
+    const { before, after } = raw as { before?: unknown; after?: unknown };
+    const nameOrNull = (v: unknown) => (typeof v === "string" ? v : null);
+    return { before: nameOrNull(before), after: nameOrNull(after) };
+  }
+
   app.post("/api/tracks/:trackId/clips", requireBand, async (req, res) => {
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
@@ -1550,8 +1569,10 @@ export async function registerRoutes(
     // start cache comes from the layout. A sent offset (and start) is kept as is.
     const fillOffset = !!parsed.data.sectionName && !parsed.data.isFullTake && parsed.data.sectionOffset == null;
     if (fillOffset) parsed.data.sectionOffset = sectionAppendOffset(trackId, parsed.data.sectionName!);
-    let clip = await storage.addTimelineClip(trackId, parsed.data);
-    if (clip.sectionName && !clip.isFullTake) ensureSongSection(trackSongIdVal, clip.sectionName);
+    // `placement` ({ before, after }: the timeline sections the drop landed between) is
+    // used only when this is the section's first non-full-take clip — see
+    // placeSectionInArrangement. Missing or unusable → the end rule.
+    let clip = insertTimelineClipPlaced(trackSongIdVal, parsed.data, parsePlacementHint(req.body?.placement));
     if (fillOffset) {
       const start = computeSongLayout(trackSongIdVal).clipStarts.get(clip.id);
       if (start !== undefined && start !== clip.start) {
@@ -1615,13 +1636,27 @@ export async function registerRoutes(
     res.status(201).json(clip);
   });
 
+  // Every field a client caller of PATCH /api/timeline-clips/:id sends:
+  //   patchChangedOffsets (Timeline.tsx)   sectionOffset
+  //   replace event handler (Timeline.tsx) name, type, color, src
+  //   mark final (Clip.tsx)                 isFinal
+  //   performReplace (Clip.tsx)            name, src, duration, type, color, trimStart,
+  //                                         trimEnd, bucketClipId
+  const TIMELINE_CLIP_PATCH_FIELDS = [
+    'name', 'type', 'color', 'src', 'duration', 'trimStart', 'trimEnd', 'bucketClipId', 'isFinal', 'sectionOffset',
+  ] as const;
+
   app.patch("/api/timeline-clips/:id", requireBand, async (req, res) => {
     const clipId = req.params.id as string;
     const tclipSongId = timelineClipSongId(clipId);
     if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
-    // `author` is stripped so it never reaches the update; it's no longer used (system
-    // task comments are authored 'System').
-    const { author: _ignoredAuthor, ...clipUpdates } = req.body;
+    // Only the fields the client actually sends are written (TIMELINE_CLIP_PATCH_FIELDS);
+    // anything else in the body — `author`, `start`, `trackId`, … — is ignored. start is
+    // never written from the client: a sectioned clip's position comes from the layout.
+    const clipUpdates: Partial<InsertTimelineClip> = {};
+    for (const key of TIMELINE_CLIP_PATCH_FIELDS) {
+      if (req.body && key in req.body) (clipUpdates as Record<string, unknown>)[key] = req.body[key];
+    }
     const timelineClipActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
@@ -1729,10 +1764,11 @@ export async function registerRoutes(
       }
     }
 
-    // Log timeline-reordered for plain start-position updates (drag reorder / section reorder).
-    // isFinal and replace branches already have their own logActivity calls above.
+    // Log timeline-reordered for plain position updates (a clip reorder or insert
+    // inside a section rewrites sectionOffset). isFinal and replace branches already
+    // have their own logActivity calls above.
     const isFinalUpdate = clipUpdates.isFinal === true || clipUpdates.isFinal === false;
-    if ('start' in clipUpdates && !isFinalUpdate && !isReplace) {
+    if ('sectionOffset' in clipUpdates && !isFinalUpdate && !isReplace) {
       try {
         const reorderTrack = db.select().from(instrumentTracks)
           .where(eq(instrumentTracks.id, clip.trackId))
@@ -3206,7 +3242,7 @@ export async function registerRoutes(
 
     let result;
     try {
-      result = await storage.materializeLooseFileToTimeline(looseFileId, trackId, sectionName);
+      result = await storage.materializeLooseFileToTimeline(looseFileId, trackId, sectionName, parsePlacementHint(req.body?.placement));
     } catch (err) {
       if (err instanceof LooseFileNotFoundError) {
         return res.status(404).json({ message: "Loose file not found." });

@@ -312,10 +312,12 @@ if (!hasActivityLogClipId) {
   console.log("[PatchBay] Added clip_id column to activity_log table.");
 }
 
-// ─── Timeline placement rebuild, step 2: section_offset + song_sections ──────────
-// Data only — nothing reads base_length or sort_order yet, and the timeline still
-// computes every position itself. Hand-authored and idempotent (see the deploy skill:
-// drizzle-kit push is banned from production).
+// ─── Timeline placement rebuild: section_offset + song_sections ──────────────────
+// song_sections.sort_order is the ARRANGEMENT order, read only by the timeline, Export
+// and the server layout (computeSongLayout); ideas.sort_order is the separate FILING
+// order every other surface uses. base_length feeds the timeline layout
+// (shared/timelineLayout.ts). Hand-authored and idempotent (see the
+// deploy skill: drizzle-kit push is banned from production).
 
 // timeline_clips.section_offset — seconds from the clip's home-section start.
 const hasTimelineClipsSectionOffset = (sqlite.prepare(
@@ -339,16 +341,12 @@ sqlite.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS uniq_song_section ON song_sections(song_id, section_name);
 `);
 
-// Seed / complete song_sections on every boot. sort_order records the order the
-// timeline shows after a reload (Timeline.tsx apiTracksToTracks → getActiveSections
-// with MOCK_SONG.sections): the fixed default list first, then other sections in the
-// order the timeline finds them (active tracks by sort_order, each track's clips by
-// start), then sections with no timeline clips by their lowest ideas.sort_order.
-// Existing rows keep their sort_order; new rows and NULL sort_orders are appended
-// after the song's current maximum. Must match client DEFAULT_SECTIONS (daw-data.ts),
-// which seeds MOCK_SONG.sections — db.ts can't import storage.ts (circular).
+// Complete song_sections on every boot: any (song, section) that has a non-full-take
+// ideas row but no song_sections row is appended after the song's current maximum, by
+// lowest ideas.sort_order, then by name; a row with a NULL sort_order is numbered the
+// same way. Existing sort_orders are never changed. Every write path already calls
+// ensureSongSection, so this is a safety net and normally adds nothing.
 {
-  const TIMELINE_DEFAULT_SECTION_ORDER = ["Intro", "Verse 1", "Chorus 1", "Verse 2", "Chorus 2", "Bridge", "Outro"];
   const sectionsBySong = sqlite.prepare(`
     SELECT t.song_id AS songId, i.section_name AS sectionName,
            MIN(i.sort_order) AS minOrder
@@ -357,12 +355,6 @@ sqlite.exec(`
     WHERE i.is_full_take = 0
     GROUP BY t.song_id, i.section_name
   `).all() as { songId: string; sectionName: string; minOrder: number }[];
-  const timelineDiscovery = sqlite.prepare(`
-    SELECT tc.section_name AS sectionName
-    FROM timeline_clips tc JOIN instrument_tracks t ON t.id = tc.track_id
-    WHERE t.song_id = ? AND t.active = 1 AND tc.is_full_take = 0 AND tc.section_name IS NOT NULL
-    ORDER BY t.sort_order, t.rowid, tc.start, tc.rowid
-  `);
   const existingRows = sqlite.prepare(
     "SELECT section_name AS sectionName, sort_order AS sortOrder FROM song_sections WHERE song_id = ?"
   );
@@ -385,14 +377,9 @@ sqlite.exec(`
   sqlite.transaction(() => {
     const now = new Date().toISOString();
     bySong.forEach((sections, songId) => {
-      const names = new Set(sections.map((s) => s.sectionName));
-      const ordered: string[] = TIMELINE_DEFAULT_SECTION_ORDER.filter((n) => names.has(n));
-      for (const { sectionName } of timelineDiscovery.all(songId) as { sectionName: string }[]) {
-        if (names.has(sectionName) && !ordered.includes(sectionName)) ordered.push(sectionName);
-      }
-      [...sections]
-        .sort((a, b) => a.minOrder - b.minOrder || a.sectionName.localeCompare(b.sectionName))
-        .forEach(({ sectionName }) => { if (!ordered.includes(sectionName)) ordered.push(sectionName); });
+      const ordered = [...sections]
+        .sort((a, b) => a.minOrder - b.minOrder || (a.sectionName < b.sectionName ? -1 : a.sectionName > b.sectionName ? 1 : 0))
+        .map((s) => s.sectionName);
 
       const existing = new Map(
         (existingRows.all(songId) as { sectionName: string; sortOrder: number | null }[])

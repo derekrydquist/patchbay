@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useLocation } from 'wouter';
 import { useQuery, useQueryClient, useMutation, useIsMutating } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
@@ -28,7 +29,8 @@ import {
   TouchSensor,
   MouseSensor,
 } from '@dnd-kit/core';
-import { restrictToWindowEdges, restrictToHorizontalAxis } from '@dnd-kit/modifiers';
+import { restrictToWindowEdges } from '@dnd-kit/modifiers';
+import { getEventCoordinates } from '@dnd-kit/utilities';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
 import { bucketKeys, fetchBucket, fetchSongSections, songSectionsKey, type SongSectionRow, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
@@ -48,12 +50,14 @@ import {
 import { apiRequest } from '@/lib/queryClient';
 import { trackDisplayColor } from '@/lib/track-color';
 import { VersionMoveInUseDialog } from './ClipInUseDialog';
-import { LooseFileDragOverlay } from './LooseFileDragOverlay';
+import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, type TimelineLayout } from '@shared/timelineLayout';
+import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
+import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
 import { DawScrollbar } from './DawScrollbar';
 import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
@@ -67,6 +71,133 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 
 const TRACK_PANEL_WIDTH = 256;
+
+// Edge-scroll constants — the playhead drag's (handlePlayheadPointerDown), shared by the
+// section header drag's createEdgeScroller below. EDGE_ZONE_PX / EDGE_ZONE_RELEASE_PX are
+// hysteresis thresholds ONLY — they decide when the auto-scroll zone turns on/off in the
+// playhead's handlePointerMove. They are
+// deliberately NOT used by clampToVisibleWindow's bound formula. Those two jobs (zone
+// activation vs. position-clamp bound) have different correctness requirements: the clamp
+// bound must reach exactly 0 / endOfTimeline at the true scroll limits with a constant
+// (undistorted) rate throughout, which a shared hysteresis-distance constant cannot express
+// without either leaving a residual floor/ceiling (a fixed margin) or a variable-rate taper
+// (margin that shrinks with scrollLeft — tried and reverted; a linear taper doubles the
+// effective rate throughout the tapered region, and a smoothstep taper only matches the rate
+// AT the two endpoints while leaving a ~2.5x mid-taper speed bump). See clampToVisibleWindow
+// below for the constant-rate, no-margin formula that replaced both.
+const SCROLL_SPEED_PX = 300;       // pixels/second of viewport scroll when the zone is active
+const EDGE_ZONE_PX = 150;          // pointer within this px of the edge → zone ON
+const EDGE_ZONE_RELEASE_PX = 210;  // pointer must clear this px from the edge → zone OFF
+// Minimum total pointer displacement from the pointerdown origin before a zone can engage AT
+// ALL. Filters the case where the flag happens to already render within EDGE_ZONE_PX at the
+// moment of pointerdown (e.g. after a prior manual scroll) — without this, any sub-pixel
+// jitter from a real hand trying to hold still would immediately trigger full-speed
+// auto-scroll on a click the user never intended as a drag toward the edge. History: 6 -> 24
+// -> 48 -> 96 -> 72. At 96 against a 100px EDGE_ZONE_PX (96% of the zone width), a natural
+// drag toward the edge from a starting position already inside the zone required the cursor
+// to cross onto the instrument panel (leftDist going negative) before the displacement gate
+// was satisfied — confirmed via live testing, not just reasoned about. EDGE_ZONE_PX was raised
+// to 150 and this lowered to 72 together to restore a real gap (78px) between the two, so a
+// drag toward the edge from anywhere inside the zone can satisfy both conditions without
+// needing to overshoot past the panel. Each step up from 6 still read as too sensitive for
+// real trackpad input, whose OS-level pointer-acceleration curve can turn a small physical
+// touch into a much larger on-screen CSS-pixel delta than the same gesture produces via direct
+// pixel-targeted input. Gating logic itself confirmed correct and unbypassable; this value is
+// a pure feel/tuning knob, not a correctness fix — but it and EDGE_ZONE_PX are not
+// independently tunable without checking this relationship.
+const MIN_DRAG_DISTANCE_PX = 72;
+
+// Panel-aware edge scroll for a drag over the timeline, with the playhead drag's rules
+// and constants: the zone turns on within EDGE_ZONE_PX of the visible track area's left
+// edge (the sticky track panel's edge, not the container's) or of the right edge, once
+// the pointer has moved MIN_DRAG_DISTANCE_PX from the drag origin; it turns off past
+// EDGE_ZONE_RELEASE_PX; any movement away from the edge pauses scrolling until the
+// pointer moves toward it again; rightward scrolling stops at rightScrollCap. It only
+// moves scrollLeft — the caller recomputes from the timeline's scroll event. Used by
+// the section header drag; the playhead drag keeps its own copy of this logic, inside
+// handlePlayheadPointerDown, because it also derives playhead time each frame.
+interface EdgeScroller {
+  start: (originX: number, originY: number) => void;
+  onPointerMove: (e: PointerEvent) => void;
+  stop: () => void;
+}
+function createEdgeScroller(opts: {
+  getEl: () => HTMLDivElement | null;
+  rightScrollCap: (el: HTMLDivElement) => number;
+  onScrolled: (scrollLeft: number) => void;
+}): EdgeScroller {
+  let zone: 'off' | 'on-left' | 'on-right' = 'off';
+  let raf: number | null = null;
+  let lastTs: number | null = null;
+  let lastDist: number | null = null;
+  let paused = false;
+  let origin = { x: 0, y: 0 };
+
+  const stopLoop = () => {
+    if (raf !== null) cancelAnimationFrame(raf);
+    raf = null;
+    lastTs = null;
+  };
+  const turnOff = () => {
+    zone = 'off';
+    lastDist = null;
+    paused = false;
+  };
+  const frame = (timestamp: number) => {
+    const el = opts.getEl();
+    if (!el || zone === 'off') { stopLoop(); return; }
+    if (lastTs === null) { lastTs = timestamp; raf = requestAnimationFrame(frame); return; }
+    const dt = (timestamp - lastTs) / 1000;
+    lastTs = timestamp;
+    const dir = zone === 'on-left' ? -1 : 1;
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+    const ceiling = dir === 1 ? opts.rightScrollCap(el) : maxScroll;
+    const speed = paused ? 0 : SCROLL_SPEED_PX;
+    const next = Math.max(0, Math.min(el.scrollLeft + dir * speed * dt, ceiling));
+    el.scrollLeft = next;
+    opts.onScrolled(next);
+    if (next <= 0 || next >= ceiling) { stopLoop(); turnOff(); return; }
+    raf = requestAnimationFrame(frame);
+  };
+
+  return {
+    start(originX, originY) {
+      origin = { x: originX, y: originY };
+      stopLoop();
+      turnOff();
+    },
+    onPointerMove(e) {
+      const el = opts.getEl();
+      if (!el) return;
+      const viewportX = e.clientX - el.getBoundingClientRect().left;
+      const leftDist = viewportX - TRACK_PANEL_WIDTH;
+      const rightDist = el.clientWidth - viewportX;
+      const movedEnough = Math.hypot(e.clientX - origin.x, e.clientY - origin.y) >= MIN_DRAG_DISTANCE_PX;
+      const prev = zone;
+      if (prev === 'off') {
+        if (movedEnough && leftDist < EDGE_ZONE_PX) { zone = 'on-left'; lastDist = leftDist; paused = false; }
+        else if (movedEnough && rightDist < EDGE_ZONE_PX) { zone = 'on-right'; lastDist = rightDist; paused = false; }
+      } else {
+        const dist = prev === 'on-left' ? leftDist : rightDist;
+        if (dist >= EDGE_ZONE_RELEASE_PX) {
+          turnOff();
+        } else {
+          if (lastDist !== null) {
+            if (dist > lastDist) paused = true;
+            else if (dist < lastDist) paused = false;
+          }
+          lastDist = dist;
+        }
+      }
+      if (prev === 'off' && zone !== 'off' && raf === null) { lastTs = null; raf = requestAnimationFrame(frame); }
+      if (zone === 'off' && raf !== null) stopLoop();
+    },
+    stop() {
+      stopLoop();
+      turnOff();
+    },
+  };
+}
 const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
 // Ticks per quarter-note beat for each metronome subdivision setting.
 const METRONOME_SUBDIVISION_FACTORS: Record<string, number> = { '1/4': 1, '1/8': 2, '1/16': 4 };
@@ -172,53 +303,30 @@ function packSectionOffsets(tracks: Track[], trackId: string, sectionName: strin
   });
 }
 
-// Inserts or moves sectionName to gapIndex within activeNames (the section order shown during drag).
-// gapIndex = 0 means before activeNames[0]; gapIndex = activeNames.length means after the last.
-// Returns the new ordered list of all active section names.
-function reorderSectionOrder(
-  sectionName: string,
-  gapIndex: number,
-  activeNames: string[]
-): string[] {
-  // Remove the section from its current position (if it's already in the layout).
-  const withoutMoved = activeNames.filter((s) => s !== sectionName);
-  const oldPos = activeNames.indexOf(sectionName);
+// A section header drag as PUT /api/songs/:songId/sections/order sends it: the
+// dragged section and the visible timeline sections it now sits in front of (before)
+// and behind (after).
+interface SectionMove { section: string; before: string | null; after: string | null }
 
-  // gapIndex references a position in activeNames (which still includes the section if it existed).
-  // Removing the section at oldPos shifts every subsequent index down by 1.
-  let insertAt = gapIndex;
-  if (oldPos !== -1 && oldPos < gapIndex) insertAt = gapIndex - 1;
-  insertAt = Math.min(insertAt, withoutMoved.length);
-
-  return [
-    ...withoutMoved.slice(0, insertAt),
-    sectionName,
-    ...withoutMoved.slice(insertAt),
-  ];
-}
-
-// The section rows with the listed names given back their own sort_order values in
-// the new sequence — the same rule PUT /api/songs/:songId/sections/order applies, so
-// the cache matches the server before it answers. Unlisted rows don't change.
-function applySectionOrder(sections: SongSectionRow[], order: string[]): SongSectionRow[] {
-  const listed = new Set(order);
-  const slots = sections.filter((s) => listed.has(s.name)).map((s) => s.sortOrder).sort((a, b) => a - b);
-  const newOrder = new Map(order.filter((n) => sections.some((s) => s.name === n)).map((n, i) => [n, slots[i]]));
-  return sections
-    .map((s) => (newOrder.has(s.name) ? { ...s, sortOrder: newOrder.get(s.name)! } : s))
-    .sort((a, b) => a.sortOrder - b.sortOrder);
+// The song_sections rows after a section move — the same rule the server applies
+// (moveSection, then every row renumbered 0…n−1), so the cache matches the server
+// before it answers.
+function applySectionMove(sections: SongSectionRow[], move: SectionMove): SongSectionRow[] {
+  const byName = new Map(sections.map((s) => [s.name, s]));
+  const ordered = [...sections].sort((a, b) => a.sortOrder - b.sortOrder).map((s) => s.name);
+  return moveSection(ordered, move.section, move.before, move.after)
+    .map((name, i) => ({ ...byName.get(name)!, sortOrder: i }));
 }
 
 // PATCHes every clip already on the server whose sectionOffset differs between
 // `before` and `after` — and only those: a clip that moved because an earlier section
-// grew or the sections were reordered keeps its offset and is not written. start is
-// sent too, from `afterLayout`, as a cache value only (nothing reads it back for a
-// sectioned clip); the server logs timeline-reordered on a start PATCH. Clips not in
-// `before` are new and POSTed by the caller.
+// grew or the sections were reordered keeps its offset and is not written. Only
+// sectionOffset is sent (the server never takes start from the client); the server
+// logs timeline-reordered on a sectionOffset PATCH. Clips not in `before` are new and
+// POSTed by the caller.
 function patchChangedOffsets(
   before: Track[],
   after: Track[],
-  afterLayout: TimelineLayout,
   onSaved: () => unknown,
   errorLabel: string,
 ) {
@@ -229,10 +337,7 @@ function patchChangedOffsets(
       fetch(`/api/timeline-clips/${clip.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sectionOffset: clip.sectionOffset ?? null,
-          start: afterLayout.clipStarts.get(clip.id) ?? clip.start,
-        }),
+        body: JSON.stringify({ sectionOffset: clip.sectionOffset ?? null }),
       })
         .then(onSaved)
         .catch((err) => console.error(errorLabel, err));
@@ -366,7 +471,7 @@ function DraggableSectionHeader({ name, width, isLooped }: { name: string; width
 // left: pixel offset from the left edge of the content div (includes the 256px track header).
 // pointer-events is always 'auto' so the live getBoundingClientRect() check in collision
 // detection can reliably find these elements.
-function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trackAreaHeight: number }) {
+function GapZone({ id, left, trackAreaHeight, lineLayers }: { id: string; left: number; trackAreaHeight: number; lineLayers: InsertionLineLayers }) {
   const nodeRef = React.useRef<HTMLDivElement | null>(null);
   const { setNodeRef, isOver } = useDroppable({ id });
 
@@ -381,10 +486,66 @@ function GapZone({ id, left, trackAreaHeight }: { id: string; left: number; trac
       className="absolute z-30 -translate-x-1/2"
       style={{ left, top: 0, width: 20, height: trackAreaHeight, pointerEvents: 'auto' }}
     >
-      {isOver && (
-        <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_12px_rgba(212,175,55,0.9)] pointer-events-none" />
-      )}
+      {isOver && <SplitInsertionLine left={left} layers={lineLayers} />}
     </div>
+  );
+}
+
+// The gold insertion line, centred in its (relatively positioned) parent. Only
+// SplitInsertionLine draws it.
+function InsertionLine() {
+  return (
+    <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_12px_rgba(212,175,55,0.9)] pointer-events-none" />
+  );
+}
+
+// Every gold insertion line on the timeline — a gap zone's (in-section drop), the
+// new-section line (first-clip drop) and the section header drag's destination — is a
+// SplitInsertionLine, so they all look the same: one unbroken line from the top of the
+// section header row to the bottom of the track rows, never in the ruler. It's drawn
+// in two identical parts at the same content X, each portalled into its own layer
+// (Timeline's insertion-line layers): one inside the sticky header row, running 1px
+// past it to cover its border-b, and one over the track rows. Two parts because the
+// header row is sticky and the rows scroll vertically. `left` is in content px
+// (including the 256px track panel). pointer-events: none throughout.
+interface InsertionLineLayers { header: HTMLDivElement | null; rows: HTMLDivElement | null }
+function SplitInsertionLine({ left, layers }: { left: number; layers: InsertionLineLayers }) {
+  const part = (
+    <div className="absolute top-0 bottom-0 -translate-x-1/2 pointer-events-none" style={{ left, width: 20 }}>
+      <InsertionLine />
+    </div>
+  );
+  return (
+    <>
+      {layers.header && createPortal(part, layers.header)}
+      {layers.rows && createPortal(part, layers.rows)}
+    </>
+  );
+}
+
+// Content-root offsets: the 6px flag band and 32px ruler sit above the 24px section
+// header row; the 64px track rows start below it.
+const RULER_TOP_PX = 6;
+const RULER_HEIGHT_PX = 32;
+const TRACK_ROWS_TOP_PX = 62;
+const TRACK_ROW_HEIGHT_PX = 64;
+
+// Compact name tag that follows the pointer during a section header drag. Portalled to
+// <body> with position: fixed, and placed imperatively by the drag pointer source
+// (Timeline's positionSectionDragTag), so following the pointer never re-renders the
+// timeline. Hidden until it has been placed once.
+function SectionDragTag({ name, tagRef }: { name: string; tagRef: (node: HTMLDivElement | null) => void }) {
+  return createPortal(
+    <div
+      ref={tagRef}
+      className="fixed left-0 top-0 z-[70] pointer-events-none select-none rounded border border-primary bg-[#09090b] px-1.5 py-0.5 shadow-[0_0_12px_rgba(212,175,55,0.45)]"
+      style={{ visibility: 'hidden' }}
+    >
+      <span className="block text-[9px] leading-none font-bold text-primary uppercase tracking-widest whitespace-nowrap">
+        {name}
+      </span>
+    </div>,
+    document.body,
   );
 }
 
@@ -498,11 +659,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // Section order and base lengths (song_sections), polled with the timeline so a
   // bandmate's section reorder shows up. Paused while this browser's own reorder is
   // in flight, so a poll can't put the old order back before the server answers.
+  // Also paused while a section's first-clip POST is in flight (insertClipInSection),
+  // which sets the section's arrangement place in the cache before the server has it.
   const sectionOrderSaving = useIsMutating({ mutationKey: ['song-sections-order', songId] }) > 0;
+  const [firstClipPostsInFlight, setFirstClipPostsInFlight] = useState(0);
   const { data: songSections } = useQuery<SongSectionRow[]>({
     queryKey: songSectionsKey(songId),
     queryFn: () => fetchSongSections(songId),
-    refetchInterval: sectionOrderSaving ? false : 3000,
+    refetchInterval: sectionOrderSaving || firstClipPostsInFlight > 0 ? false : 3000,
   });
   const sections = songSections ?? EMPTY_SECTIONS;
 
@@ -513,8 +677,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const [insertionPoint, setInsertionPoint] = useState<InsertionPoint | null>(null);
   // Section-reorder drag state — separate from clip drag state.
   const [activeSectionName, setActiveSectionName] = useState<string | null>(null);
-  // Which gap index the cursor is nearest to during a section header drag (0 = before first column).
-  const [sectionInsertGap, setSectionInsertGap] = useState<number | null>(null);
 
   // Placeholder until the song query resolves — the seeding effect below replaces it with the
   // song's stored tempo. 120 is also the fallback for songs whose stored bpm is null.
@@ -537,9 +699,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     [layout]
   );
   const endOfTimeline = layout.timelineEnd;
-  // For zero-dep handlers that save offsets and need a start to send with them.
-  const layoutInputsRef = useRef({ sections, bpm, timeSignature });
-  layoutInputsRef.current = { sections, bpm, timeSignature };
 
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
 
@@ -1306,38 +1465,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const pointerId = e.pointerId;
     flagEl.setPointerCapture(pointerId);
 
-    // Edge-scroll constants. EDGE_ZONE_PX / EDGE_ZONE_RELEASE_PX are hysteresis thresholds ONLY —
-    // they decide when the auto-scroll zone turns on/off in handlePointerMove below. They are
-    // deliberately NOT used by clampToVisibleWindow's bound formula. Those two jobs (zone
-    // activation vs. position-clamp bound) have different correctness requirements: the clamp
-    // bound must reach exactly 0 / endOfTimeline at the true scroll limits with a constant
-    // (undistorted) rate throughout, which a shared hysteresis-distance constant cannot express
-    // without either leaving a residual floor/ceiling (a fixed margin) or a variable-rate taper
-    // (margin that shrinks with scrollLeft — tried and reverted; a linear taper doubles the
-    // effective rate throughout the tapered region, and a smoothstep taper only matches the rate
-    // AT the two endpoints while leaving a ~2.5x mid-taper speed bump). See clampToVisibleWindow
-    // below for the constant-rate, no-margin formula that replaced both.
-    const SCROLL_SPEED_PX = 300;       // pixels/second of viewport scroll when the zone is active
-    const EDGE_ZONE_PX = 150;          // pointer within this px of the edge → zone ON
-    const EDGE_ZONE_RELEASE_PX = 210;  // pointer must clear this px from the edge → zone OFF
-    // Minimum total pointer displacement from the pointerdown origin before a zone can engage AT
-    // ALL. Filters the case where the flag happens to already render within EDGE_ZONE_PX at the
-    // moment of pointerdown (e.g. after a prior manual scroll) — without this, any sub-pixel
-    // jitter from a real hand trying to hold still would immediately trigger full-speed
-    // auto-scroll on a click the user never intended as a drag toward the edge. History: 6 -> 24
-    // -> 48 -> 96 -> 72. At 96 against a 100px EDGE_ZONE_PX (96% of the zone width), a natural
-    // drag toward the edge from a starting position already inside the zone required the cursor
-    // to cross onto the instrument panel (leftDist going negative) before the displacement gate
-    // was satisfied — confirmed via live testing, not just reasoned about. EDGE_ZONE_PX was raised
-    // to 150 and this lowered to 72 together to restore a real gap (78px) between the two, so a
-    // drag toward the edge from anywhere inside the zone can satisfy both conditions without
-    // needing to overshoot past the panel. Each step up from 6 still read as too sensitive for
-    // real trackpad input, whose OS-level pointer-acceleration curve can turn a small physical
-    // touch into a much larger on-screen CSS-pixel delta than the same gesture produces via direct
-    // pixel-targeted input. Gating logic itself confirmed correct and unbypassable; this value is
-    // a pure feel/tuning knob, not a correctness fix — but it and EDGE_ZONE_PX are not
-    // independently tunable without checking this relationship.
-    const MIN_DRAG_DISTANCE_PX = 72;
 
     type EdgeZone = 'off' | 'on-left' | 'on-right';
     const edgeZoneRef = { current: 'off' as EdgeZone };
@@ -1995,7 +2122,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         const packed = removed.sectionName && !removed.isFullTake
           ? packSectionOffsets(draft, track.id, removed.sectionName)
           : draft;
-        const { sections, bpm: layoutBpm, timeSignature: layoutTs } = layoutInputsRef.current;
 
         fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' })
           .then(() => Promise.all([
@@ -2006,7 +2132,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           ]))
           .catch((err) => console.error('Failed to delete timeline clip:', err));
         patchChangedOffsets(
-          draft, packed, deriveLayout(packed, sections, layoutBpm, layoutTs),
+          draft, packed,
           () => queryClient.invalidateQueries({ queryKey: ['activity'] }),
           'Failed to update clip offset after remove:',
         );
@@ -2063,49 +2189,73 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   );
 
   // ── Section-reorder handlers (separate DndContext) ─────────────────────────
+  // A header drag scrolls the timeline with the playhead drag's panel-aware edge scroll
+  // (createEdgeScroller) — dnd-kit's own auto-scroll is off in this DndContext — and
+  // the gold line follows the pointer source (startDragPointer).
+  const headerEdgeScrollerRef = useRef<EdgeScroller | null>(null);
+  const grabbingCursorStyleRef = useRef<HTMLStyleElement | null>(null);
+  useEffect(() => () => { grabbingCursorStyleRef.current?.remove(); }, []);
   const handleSectionDragStart = (event: DragStartEvent) => {
     const id = String(event.active.id);
-    if (id.startsWith('sec||')) setActiveSectionName(id.slice(5));
+    if (!id.startsWith('sec||')) return;
+    const name = id.slice(5);
+    draggedSectionRef.current = name;
+    setActiveSectionName(name);
+    const origin = getEventCoordinates(event.activatorEvent) ?? { x: 0, y: 0 };
+    // Where the header was grabbed, from the section's start (content px) — the clip
+    // ghost keeps this offset from the pointer.
+    const grabbedEl = timelineRef.current;
+    const grabbedSection = sectionLayout.find((s) => s.name === name);
+    sectionDragGrabOffsetRef.current = grabbedEl && grabbedSection
+      ? origin.x - grabbedEl.getBoundingClientRect().left + grabbedEl.scrollLeft - (TRACK_PANEL_WIDTH + grabbedSection.start * zoom)
+      : 0;
+    const scroller = createEdgeScroller({
+      getEl: () => timelineRef.current,
+      rightScrollCap: (el) => Math.max(0, Math.min(
+        endOfTimeline * zoom - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
+        el.scrollWidth - el.clientWidth,
+      )),
+      onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
+    });
+    scroller.start(origin.x, origin.y);
+    headerEdgeScrollerRef.current = scroller;
+    startDragPointer(origin, { onMove: (e) => scroller.onPointerMove(e) });
+    recomputeDragIndicatorsRef.current();
+    // Grabbing cursor everywhere for the length of the drag (elements' own cursors —
+    // cursor-grab on the headers, pointer on buttons — would otherwise win).
+    const cursorStyle = document.createElement('style');
+    cursorStyle.textContent = '* { cursor: grabbing !important; }';
+    document.head.appendChild(cursorStyle);
+    grabbingCursorStyleRef.current = cursorStyle;
   };
 
-  const handleSectionDragMove = (event: DragMoveEvent) => {
-    if (!timelineRef.current) return;
-    const { activatorEvent, delta } = event;
-    const startClientX =
-      'clientX' in activatorEvent
-        ? (activatorEvent as MouseEvent).clientX
-        : (activatorEvent as TouchEvent).touches?.[0]?.clientX ?? 0;
-    const cursorClientX = startClientX + delta.x;
-    const containerRect = timelineRef.current.getBoundingClientRect();
-    const scrollLeft = timelineRef.current.scrollLeft;
-    // Cursor position in section-area coordinates (x=0 = left edge of first section).
-    const cursorX = cursorClientX - containerRect.left + scrollLeft - 256;
-
-    // Gap 0 is at x=0; gap i+1 is at the right edge of section[i].
-    const gapXPositions = [0, ...sectionLayout.map((s) => (s.start + s.duration) * zoom)];
-    let nearest = 0;
-    let minDist = Infinity;
-    for (let i = 0; i < gapXPositions.length; i++) {
-      const dist = Math.abs(cursorX - gapXPositions[i]);
-      if (dist < minDist) { minDist = dist; nearest = i; }
-    }
-    setSectionInsertGap(nearest);
+  const endSectionDrag = () => {
+    grabbingCursorStyleRef.current?.remove();
+    grabbingCursorStyleRef.current = null;
+    headerEdgeScrollerRef.current?.stop();
+    headerEdgeScrollerRef.current = null;
+    stopDragPointer();
+    draggedSectionRef.current = null;
+    headerDropRef.current = null;
+    setHeaderDrop(null);
+    setActiveSectionName(null);
   };
 
-  // A section reorder only changes song_sections.sort_order: no clip offset changes,
-  // so no clip is written. The cache takes the new order at once and rolls back if
-  // the PUT fails.
+  // A section reorder only changes song_sections.sort_order (the arrangement order):
+  // no clip offset changes, so no clip is written. The cache takes the new order at
+  // once and rolls back if the PUT fails. The filing order (ideas.sortOrder) of the
+  // Media Bucket, Production and the pickers doesn't change, so nothing else refreshes.
   const sectionOrderMutation = useMutation({
     mutationKey: ['song-sections-order', songId],
-    mutationFn: (order: string[]) =>
-      apiRequest('PUT', `/api/songs/${songId}/sections/order`, { order }).then((r) => r.json() as Promise<SongSectionRow[]>),
-    onMutate: async (order) => {
+    mutationFn: (move: SectionMove) =>
+      apiRequest('PUT', `/api/songs/${songId}/sections/order`, move).then((r) => r.json() as Promise<SongSectionRow[]>),
+    onMutate: async (move) => {
       await queryClient.cancelQueries({ queryKey: songSectionsKey(songId) });
       const previous = queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
-      if (previous) queryClient.setQueryData(songSectionsKey(songId), applySectionOrder(previous, order));
+      if (previous) queryClient.setQueryData(songSectionsKey(songId), applySectionMove(previous, move));
       return { previous };
     },
-    onError: (err, _order, context) => {
+    onError: (err, _move, context) => {
       console.error('Failed to save section order:', err);
       if (context?.previous) queryClient.setQueryData(songSectionsKey(songId), context.previous);
       toast({ title: 'Failed to reorder sections', description: (err as Error).message, variant: 'destructive' });
@@ -2117,34 +2267,36 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     onSettled: () => queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) }),
   });
 
+  // Sends exactly what the line showed (headerDropTarget); no line = nothing to send.
+  // Orphans (clips but no song_sections row) are never in the target: they always lay
+  // out after every row, so they can't be placed by sort_order.
   const handleSectionDragEnd = () => {
-    if (activeSectionName !== null && sectionInsertGap !== null) {
-      const activeNames = sectionLayout.map((s) => s.name);
-      const newOrder = reorderSectionOrder(activeSectionName, sectionInsertGap, activeNames);
-      // A section with clips but no song_sections row (an orphan) always lays out after
-      // every row, so it can't be placed by sort_order; it's left out of the request.
-      const rowNames = new Set(sections.map((s) => s.name));
-      if (newOrder.some((name, i) => name !== activeNames[i])) {
-        sectionOrderMutation.mutate(newOrder.filter((name) => rowNames.has(name)));
-      }
+    const target = headerDropRef.current;
+    if (target) {
+      sectionOrderMutation.mutate({ section: target.section, before: target.before, after: target.after });
     }
-    setActiveSectionName(null);
-    setSectionInsertGap(null);
+    endSectionDrag();
   };
 
-  // Pixel offset (within the sections area) where the insertion line should appear during section drag.
-  const sectionInsertX = React.useMemo(() => {
-    if (activeSectionName === null || sectionInsertGap === null) return null;
-    if (sectionInsertGap === 0) return 0;
-    const prev = sectionLayout[sectionInsertGap - 1];
-    return prev ? (prev.start + prev.duration) * zoom : null;
-  }, [activeSectionName, sectionInsertGap, sectionLayout, zoom]);
+  // Escape or a sensor cancel: clear the line, send nothing.
+  const handleSectionDragCancel = () => endSectionDrag();
   // ─────────────────────────────────────────────────────────────────────────
 
   const handleDragStart = (event: DragStartEvent) => {
     // The shared organize hook takes its drag-start snapshot (loose files and
     // versions) here, the same as SongHome and the Songs quick-browser.
     looseFileOrganizeDnd.handleDragStart(event);
+    // Horizontal drop positions (and the new-section line) read this pointer source. A
+    // file from the Media Bucket (a version or a loose file) also edge-scrolls the
+    // timeline; timeline clip drags don't (step 4).
+    const startCoords = getEventCoordinates(event.activatorEvent) ?? { x: 0, y: 0 };
+    const dragType = event.active.data.current?.type as string | undefined;
+    if (dragType === BUCKET_CLIP_DRAG_TYPE || dragType === 'loose-file') {
+      startFileEdgeScroll();
+      startDragPointer(startCoords, { onMove: fileEdgeScrollMove, onScroll: nudgeDndCollision });
+    } else {
+      startDragPointer(startCoords);
+    }
     const clip = event.active.data.current?.clip as Clip;
     const type = event.active.data.current?.type as string;
     const dragTrackId = event.active.data.current?.trackId as string | undefined;
@@ -2221,28 +2373,290 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     return newId;
   };
 
+  // The arrangement position a section's first clip gets from a drop at `dropTime`
+  // (seconds): between the two timeline sections whose midpoints it falls between —
+  // before the first one, or null (the end rule) past the last one's midpoint. Only
+  // sections with a song_sections row count; orphans always lay out last anyway.
+  const firstClipHintAt = (dropTime: number): SectionPlacementHint | null => {
+    const visible = rowSectionsOnTimeline();
+    const i = visible.findIndex((s) => dropTime < s.start + s.length / 2);
+    if (i === -1) return null;
+    return { before: visible[i].name, after: visible[i - 1]?.name ?? null };
+  };
+  const rowSectionsOnTimeline = () => {
+    const rowNames = new Set(sections.map((s) => s.name));
+    return layout.sections.filter((s) => rowNames.has(s.name));
+  };
+  // Song time of the boundary a first-clip drop at `dropTime` lands on — read from
+  // firstClipHintAt's own answer, so the insertion line and the drop can't disagree:
+  // the start of `before`, or with no hint (the end rule) the end of the last section
+  // on the timeline, or 0 when nothing is on it.
+  const firstClipBoundaryAt = (dropTime: number): number => {
+    const visible = rowSectionsOnTimeline();
+    const hint = firstClipHintAt(dropTime);
+    const before = hint?.before ? visible.find((s) => s.name === hint.before) : undefined;
+    if (before) return before.start;
+    return visible.length ? visible[visible.length - 1].end : 0;
+  };
+  // Song time under a viewport clientX: clientX − the timeline's left edge + scrollLeft
+  // − the sticky track panel, ÷ zoom. Scroll is counted once.
+  const dragPointerTime = (clientX: number): number => {
+    const el = timelineRef.current;
+    return (clientX - (el?.getBoundingClientRect().left ?? 0) + (el?.scrollLeft ?? 0) - TRACK_PANEL_WIDTH) / zoom;
+  };
+
+  // ── Drag pointer source ────────────────────────────────────────────────────
+  // While a drag is active (a section header, or a file from the Media Bucket), the
+  // pointer's horizontal position comes from a window pointermove listener (capture
+  // phase), never from dnd-kit's activatorEvent.clientX + delta.x: that delta also
+  // carries the scroll of the dragged node's scroll containers — for a section header,
+  // the timeline itself — so adding scrollLeft on top counted the scroll twice. The
+  // drag indicators are recomputed on every pointer move and every timeline scroll.
+  // Started in the drag-start handlers; stopped on drag end, cancel and unmount.
+  const dragClientXRef = useRef<number | null>(null);
+  const dragClientYRef = useRef<number | null>(null);
+  const dragPointerCleanupRef = useRef<(() => void) | null>(null);
+  const recomputeDragIndicatorsRef = useRef<() => void>(() => {});
+  const stopDragPointer = () => {
+    dragPointerCleanupRef.current?.();
+    dragPointerCleanupRef.current = null;
+    dragClientXRef.current = null;
+    dragClientYRef.current = null;
+  };
+  const startDragPointer = (
+    initial: { x: number; y: number },
+    hooks?: { onMove?: (e: PointerEvent) => void; onScroll?: () => void },
+  ) => {
+    stopDragPointer();
+    dragClientXRef.current = initial.x;
+    dragClientYRef.current = initial.y;
+    const onPointerMove = (e: PointerEvent) => {
+      dragClientXRef.current = e.clientX;
+      dragClientYRef.current = e.clientY;
+      hooks?.onMove?.(e);
+      recomputeDragIndicatorsRef.current();
+    };
+    const onScroll = () => {
+      recomputeDragIndicatorsRef.current();
+      hooks?.onScroll?.();
+    };
+    const el = timelineRef.current;
+    window.addEventListener('pointermove', onPointerMove, { capture: true });
+    el?.addEventListener('scroll', onScroll, { passive: true });
+    dragPointerCleanupRef.current = () => {
+      window.removeEventListener('pointermove', onPointerMove, { capture: true });
+      el?.removeEventListener('scroll', onScroll);
+    };
+  };
+  useEffect(() => () => stopDragPointer(), []);
+
+  // ── Edge scroll for file drags ─────────────────────────────────────────────
+  // A file dragged from the Media Bucket (a version or a loose file) scrolls the
+  // timeline horizontally with createEdgeScroller — the header drag's panel-aware edge
+  // scroll, with the playhead's constants — but only while the pointer is over the
+  // timeline's track area (below the ruler and header row). The minimum-drag distance
+  // counts from where the pointer ENTERED the track area (the scroller restarts on
+  // each entry), not from the drag's origin in the Media Bucket. Leaving the track
+  // area stops it; drop, cancel and unmount stop it too.
+  const fileEdgeScrollerRef = useRef<EdgeScroller | null>(null);
+  const fileDragInTrackAreaRef = useRef(false);
+  const startFileEdgeScroll = () => {
+    fileEdgeScrollerRef.current?.stop();
+    fileDragInTrackAreaRef.current = false;
+    fileEdgeScrollerRef.current = createEdgeScroller({
+      getEl: () => timelineRef.current,
+      rightScrollCap: (el) => Math.max(0, Math.min(
+        endOfTimeline * zoom - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
+        el.scrollWidth - el.clientWidth,
+      )),
+      onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
+    });
+  };
+  const stopFileEdgeScroll = () => {
+    fileEdgeScrollerRef.current?.stop();
+    fileEdgeScrollerRef.current = null;
+    fileDragInTrackAreaRef.current = false;
+  };
+  const fileEdgeScrollMove = (e: PointerEvent) => {
+    const scroller = fileEdgeScrollerRef.current;
+    const el = timelineRef.current;
+    if (!scroller || !el) return;
+    const rect = el.getBoundingClientRect();
+    const inTrackArea = e.clientX >= rect.left && e.clientX <= rect.left + el.clientWidth
+      && e.clientY >= rect.top + TRACK_ROWS_TOP_PX && e.clientY <= rect.top + el.clientHeight;
+    if (!inTrackArea) {
+      if (fileDragInTrackAreaRef.current) {
+        scroller.stop();
+        fileDragInTrackAreaRef.current = false;
+      }
+      return;
+    }
+    if (!fileDragInTrackAreaRef.current) {
+      fileDragInTrackAreaRef.current = true;
+      scroller.start(e.clientX, e.clientY);
+    }
+    scroller.onPointerMove(e);
+  };
+  // A timeline scroll under a still pointer moves the gap zones (they're in the
+  // scrolled content) but dnd-kit only re-runs collision detection when its drag state
+  // changes, and the timeline isn't one of the dragged file's scroll containers, so
+  // `over` — and a GapZone's gold line, and where the drop lands — would go stale. A
+  // synthetic pointermove at the last pointer position makes the PointerSensor
+  // dispatch a move (same coordinates), so collisions re-run against the re-measured
+  // rects. Our own capture listener sees it too, which is harmless: same position.
+  const nudgeDndCollision = () => {
+    const x = dragClientXRef.current;
+    const y = dragClientYRef.current;
+    if (x === null || y === null) return;
+    document.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, bubbles: true, isPrimary: true }));
+  };
+  useEffect(() => () => stopFileEdgeScroll(), []);
+
+  // ── New-section insertion line ─────────────────────────────────────────────
+  // While a Media Bucket version whose section has no non-full-take clips on the
+  // timeline is dragged over a track row, a gold line marks the boundary its section
+  // will join at (firstClipBoundaryAt — the drop's own rule), measured from the drag
+  // chip's left edge (pointer + CURSOR_GAP_PX, as anchorBelowRightOfCursor draws it).
+  // newSectionEligibleRef is set by handleDragMove; false = no line.
+  const newSectionEligibleRef = useRef(false);
+  const [newSectionLineX, setNewSectionLineX] = useState<number | null>(null);
+  const isFirstClipDrag = (data: typeof activeDragData): boolean => {
+    if (data?.type !== 'bucket-clip' || data.clip?.isFullTake) return false;
+    const sectionName = data.clip?.sectionName ?? data.sectionName;
+    if (!sectionName) return false;
+    return !trackState.some((t) => t.clips.some((c) => c.sectionName === sectionName && !c.isFullTake));
+  };
+  // The first-clip drop's time: the chip's left edge. Shared by the line and the drop.
+  const firstClipDropTime = (pointerClientX: number) => dragPointerTime(pointerClientX + CURSOR_GAP_PX);
+  const updateNewSectionLine = () => {
+    const clientX = dragClientXRef.current;
+    const x = newSectionEligibleRef.current && clientX !== null
+      ? TRACK_PANEL_WIDTH + firstClipBoundaryAt(firstClipDropTime(clientX)) * zoom
+      : null;
+    setNewSectionLineX((prev) => (prev === x ? prev : x));
+  };
+  const clearNewSectionLine = () => {
+    newSectionEligibleRef.current = false;
+    setNewSectionLineX(null);
+  };
+
+  // ── Section header drop target ─────────────────────────────────────────────
+  // headerDropTarget (lib/section-drag.ts) is the one computation for both the gold
+  // header line and what the drop sends. draggedSectionRef is set synchronously at drag
+  // start, so the first pointer move already sees it.
+  // The two layers every gold insertion line is drawn into (SplitInsertionLine).
+  const [headerLineLayer, setHeaderLineLayer] = useState<HTMLDivElement | null>(null);
+  const [rowsLineLayer, setRowsLineLayer] = useState<HTMLDivElement | null>(null);
+  const insertionLineLayers = React.useMemo<InsertionLineLayers>(
+    () => ({ header: headerLineLayer, rows: rowsLineLayer }),
+    [headerLineLayer, rowsLineLayer],
+  );
+  const draggedSectionRef = useRef<string | null>(null);
+  const headerDropRef = useRef<HeaderDropTarget | null>(null);
+  const [headerDrop, setHeaderDrop] = useState<HeaderDropTarget | null>(null);
+  const updateHeaderDrop = () => {
+    const dragged = draggedSectionRef.current;
+    const clientX = dragClientXRef.current;
+    let target: HeaderDropTarget | null = null;
+    if (dragged !== null && clientX !== null) {
+      const rowNames = new Set(sections.map((s) => s.name));
+      const drawn = layout.sections.filter((s) => rowNames.has(s.name)).map((s) => ({ name: s.name, start: s.start, end: s.end }));
+      target = headerDropTarget(drawn, dragged, dragPointerTime(clientX));
+    }
+    headerDropRef.current = target;
+    setHeaderDrop((prev) =>
+      prev?.before === target?.before && prev?.after === target?.after && prev?.lineAt === target?.lineAt ? prev : target);
+  };
+  // The header drag's name tag: centred on the pointer, in the ruler strip above the
+  // header row, clamped to the visible track area (never over the track panel).
+  // Positioned directly on the element — no React state, so no re-render per move.
+  const sectionDragTagElRef = useRef<HTMLDivElement | null>(null);
+  const positionSectionDragTag = () => {
+    const tag = sectionDragTagElRef.current;
+    const el = timelineRef.current;
+    const clientX = dragClientXRef.current;
+    if (!tag || !el || clientX === null) return;
+    const rect = el.getBoundingClientRect();
+    const w = tag.offsetWidth;
+    const minX = rect.left + TRACK_PANEL_WIDTH;
+    const maxX = Math.max(minX, rect.left + el.clientWidth - w);
+    const x = Math.min(Math.max(clientX - w / 2, minX), maxX);
+    const y = rect.top + RULER_TOP_PX + (RULER_HEIGHT_PX - tag.offsetHeight) / 2;
+    tag.style.transform = `translate(${x}px, ${y}px)`;
+    tag.style.visibility = 'visible';
+  };
+  const sectionDragTagRef = useCallback((node: HTMLDivElement | null) => {
+    sectionDragTagElRef.current = node;
+    if (node) positionSectionDragTagRef.current();
+  }, []);
+  const positionSectionDragTagRef = useRef(positionSectionDragTag);
+  positionSectionDragTagRef.current = positionSectionDragTag;
+
+  // The header drag's clip ghost: its left edge = the pointer − where the header was
+  // grabbed (measured from the section's start, set at drag start), in content
+  // coordinates, so it stays put under the pointer while the timeline edge-scrolls.
+  // Set directly on the element, like the tag.
+  const sectionDragGrabOffsetRef = useRef(0);
+  const sectionDragGhostElRef = useRef<HTMLDivElement | null>(null);
+  const positionSectionDragGhost = () => {
+    const ghost = sectionDragGhostElRef.current;
+    const el = timelineRef.current;
+    const clientX = dragClientXRef.current;
+    if (!ghost || !el || clientX === null) return;
+    const left = clientX - el.getBoundingClientRect().left + el.scrollLeft - sectionDragGrabOffsetRef.current;
+    ghost.style.transform = `translateX(${left}px)`;
+    ghost.style.visibility = 'visible';
+  };
+  const positionSectionDragGhostRef = useRef(positionSectionDragGhost);
+  positionSectionDragGhostRef.current = positionSectionDragGhost;
+  const sectionDragGhostRef = useCallback((node: HTMLDivElement | null) => {
+    sectionDragGhostElRef.current = node;
+    if (node) positionSectionDragGhostRef.current();
+  }, []);
+
+  recomputeDragIndicatorsRef.current = () => {
+    updateHeaderDrop();
+    updateNewSectionLine();
+    if (draggedSectionRef.current !== null) {
+      positionSectionDragTag();
+      positionSectionDragGhost();
+    }
+  };
+
   // Inserts a clip into a specific section of a track. index is the position within that
-  // section's clip array; omit to append at end.
+  // section's clip array; omit to append at end. dropHint: where on the timeline a drop
+  // landed, for a section's first clip (firstClipHintAt); omit when there's no drop
+  // position (the end rule).
   const insertClipInSection = (
     trackId: string,
     sectionName: string,
     clip: Clip,
     index?: number,
+    dropHint?: SectionPlacementHint | null,
   ) => {
     const newId = nanoid();
-    // A section with no song_sections row yet goes to the end straight away, the same
-    // way the server's ensureSongSection appends it when the clip is POSTed. The query
-    // is refreshed once the POST has created the row.
+    // A section with no non-full-take clips on the timeline has no position: its first
+    // clip places it (shared placeFirstClipSection — the server applies the same rule
+    // when the clip is POSTed, creating the row if needed). The cache takes the new
+    // order at once and is refreshed once the POST lands. A later clip moves nothing.
+    // The section-order poll is paused until the POST settles; a failed POST puts the
+    // order back as it was before the drop.
     let layoutSections = sections;
-    const isNewSection = !sections.some((s) => s.name === sectionName);
-    if (isNewSection) {
-      const nextSortOrder = sections.reduce((m, s) => Math.max(m, s.sortOrder), -1) + 1;
-      layoutSections = [...sections, { name: sectionName, sortOrder: nextSortOrder, baseLength: null }];
-      queryClient.setQueryData<SongSectionRow[]>(songSectionsKey(songId), (old) =>
-        old && !old.some((s) => s.name === sectionName)
-          ? [...old, { name: sectionName, sortOrder: nextSortOrder, baseLength: null }]
-          : old
-      );
+    let sectionsBeforeDrop: SongSectionRow[] | undefined;
+    const isFirstClip = !trackState.some((t) => t.clips.some((c) => c.sectionName === sectionName && !c.isFullTake));
+    if (isFirstClip) {
+      const byName = new Map(sections.map((s) => [s.name, s]));
+      const onTimeline = new Set(layout.sections.map((s) => s.name).filter((n) => byName.has(n) && n !== sectionName));
+      const placed = placeFirstClipSection(sections.map((s) => s.name), onTimeline, sectionName, dropHint)
+        .map((name, i) => ({ ...(byName.get(name) ?? { name, baseLength: null }), sortOrder: i }));
+      layoutSections = placed;
+      sectionsBeforeDrop = queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
+      setFirstClipPostsInFlight((n) => n + 1);
+      queryClient.setQueryData<SongSectionRow[]>(songSectionsKey(songId), placed);
+      // A poll already in flight is cancelled, which reverts the cache to its pre-fetch
+      // data — so the new order is set again once the cancel has finished.
+      queryClient.cancelQueries({ queryKey: songSectionsKey(songId) })
+        .then(() => queryClient.setQueryData<SongSectionRow[]>(songSectionsKey(songId), placed));
     }
 
     setTracks((prev) => {
@@ -2276,18 +2690,29 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           src: clip.src ?? null, sectionName,
           trimStart: 0, trimEnd: null,
           bucketClipId: clip.id,
+          placement: isFirstClip && dropHint ? dropHint : undefined,
         }),
       })
-        .then(() => Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['activity'] }),
-          queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] }),
-          queryClient.invalidateQueries({ queryKey: ['songs'] }),
-          isNewSection && queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) }),
-        ]))
-        .catch((err) => console.error('Failed to persist timeline clip:', err));
+        .then((res) => {
+          if (!res.ok) throw new Error(`POST /api/tracks/${trackId}/clips answered ${res.status}`);
+          return Promise.all([
+            queryClient.invalidateQueries({ queryKey: ['activity'] }),
+            queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] }),
+            queryClient.invalidateQueries({ queryKey: ['songs'] }),
+            isFirstClip && queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) }),
+          ]);
+        })
+        .catch((err) => {
+          console.error('Failed to persist timeline clip:', err);
+          if (isFirstClip) {
+            if (sectionsBeforeDrop) queryClient.setQueryData(songSectionsKey(songId), sectionsBeforeDrop);
+            queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) });
+          }
+        })
+        .finally(() => { if (isFirstClip) setFirstClipPostsInFlight((n) => n - 1); });
 
       patchChangedOffsets(
-        prev, packed, packedLayout,
+        prev, packed,
         () => Promise.all([
           queryClient.invalidateQueries({ queryKey: ['songs'] }),
           queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
@@ -2305,6 +2730,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const handleDragMove = (event: DragMoveEvent) => {
     const { over } = event;
     setInsertionPoint(null);
+    // New-section insertion line: only for a version whose section has no clips on the
+    // timeline yet, and only while it's over one of the timeline's track rows (a
+    // wrong-track row is disabled, so `over` is null there and the line hides).
+    // Only eligibility is decided here; the position comes from the pointer source.
+    const overTrack = over ? tracks.some((t) => t.id === over.id) : false;
+    newSectionEligibleRef.current = overTrack && isFirstClipDrag(activeDragData);
+    updateNewSectionLine();
     if (!over) return;
   };
 
@@ -2314,6 +2746,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const dragData = activeDragData;
 
     setActiveDragData(null);
+    clearNewSectionLine();
+    // The pointer's clientX at release, for every horizontal drop position below
+    // (read before stopping the pointer source).
+    const pointerClientX = dragClientXRef.current ?? getEventCoordinates(event.activatorEvent)?.x ?? 0;
+    stopFileEdgeScroll();
+    stopDragPointer();
 
     // The organize drag (loose file or version), live or from the hook's drag-start
     // snapshot — read before handleDragEnd below clears that snapshot.
@@ -2397,7 +2835,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         const packed = packSectionOffsets(draft, sourceTrackId, clipSectionName);
         setTracks(packed);
         patchChangedOffsets(
-          trackState, packed, deriveLayout(packed, sections, bpm, timeSignature),
+          trackState, packed,
           () => Promise.all([
             queryClient.invalidateQueries({ queryKey: ['songs'] }),
             queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
@@ -2432,12 +2870,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
       // ── Full-take path: freeform placement at drop position ──────────────────
       if (clip.isFullTake) {
-        const el = timelineRef.current;
-        const activatorEvent = event.activatorEvent as MouseEvent;
-        const scrollLeft = el?.scrollLeft ?? 0;
-        const containerLeft = el?.getBoundingClientRect().left ?? 0;
-        const releaseClientX = activatorEvent.clientX + event.delta.x;
-        const dropTime = Math.max(0, (releaseClientX - containerLeft + scrollLeft - 256) / zoom);
+        const dropTime = Math.max(0, dragPointerTime(pointerClientX));
         const newClipId = insertFreeformClip(targetTrack.id, clip, dropTime);
         setInsertionPoint(null);
         if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
@@ -2458,7 +2891,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         insertionPoint?.trackId === trackId && insertionPoint?.sectionName === clipSectionName
           ? insertionPoint.index
           : undefined;
-      insertClipInSection(trackId, clipSectionName, clipToInsert, idx);
+      // Where it was released, in case this is the section's first clip: the section
+      // then joins the timeline at that point (insertClipInSection ignores it otherwise).
+      insertClipInSection(trackId, clipSectionName, clipToInsert, idx, firstClipHintAt(firstClipDropTime(pointerClientX)));
       setInsertionPoint(null);
 
     } else if (activeType === 'clip') {
@@ -2470,6 +2905,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
       // Bug 1: for leftward drops, confirm the cursor released within the timeline track area
       // (right of the 256px instrument panel). Releases inside the panel are ignored.
+      // Known issue, left for step 4 (drag rebuild): a timeline clip lives inside the
+      // timeline scroller, so dnd-kit's delta.x here (and in the direction check below)
+      // also includes any timeline scroll since the drag started — it double-counts
+      // scroll. Section header and file drags use the pointer source instead.
       if (event.delta.x < 0) {
         const activatorEvent = event.activatorEvent;
         const startX = 'clientX' in activatorEvent
@@ -2525,7 +2964,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         );
         const packed = packSectionOffsets(draft, trackId, clipSection);
         patchChangedOffsets(
-          prev, packed, deriveLayout(packed, sections, bpm, timeSignature),
+          prev, packed,
           () => Promise.all([
             queryClient.invalidateQueries({ queryKey: ['songs'] }),
             queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
@@ -2557,12 +2996,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         return;
       }
 
-      const el = timelineRef.current;
-      const activatorEvent = event.activatorEvent as MouseEvent;
-      const scrollLeft = el?.scrollLeft ?? 0;
-      const containerLeft = el?.getBoundingClientRect().left ?? 0;
-      const releaseClientX = activatorEvent.clientX + event.delta.x;
-      const dropTimeSec = (releaseClientX - containerLeft + scrollLeft - 256) / zoom;
+      const dropTimeSec = dragPointerTime(pointerClientX);
       const targetSection = sectionAt(dropTimeSec, layout.sections);
 
       // The file doesn't move until the dialog confirms — a spring-opened Track
@@ -2581,6 +3015,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // drag. The spring-loaded restore runs from its own useDndMonitor (MediaBucket).
   const handleDragCancel = () => {
     setActiveDragData(null);
+    clearNewSectionLine();
+    stopFileEdgeScroll();
+    stopDragPointer();
     setInsertionPoint(null);
     looseFileOrganizeDnd.handleDragCancel();
   };
@@ -3138,18 +3575,94 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
               {/* Gap zones — rendered at clip boundaries within the active drag's section.
                   One zone before the first clip and one after each clip (N clips → N+1 zones). */}
               {gapZones.map(({ id, left }) => (
-                <GapZone key={id} id={id} left={left} trackAreaHeight={64 * tracks.length + 64} />
+                <GapZone key={id} id={id} left={left} trackAreaHeight={64 * tracks.length + 64} lineLayers={insertionLineLayers} />
               ))}
+
+              {/* Track-row layer for every gold insertion line (SplitInsertionLine): the
+                  rows only, z-29 — above clips, the veil (22) and the clip ghost (24),
+                  below the sticky ruler and header row (30), so a line never shows in the
+                  ruler, even when the rows are scrolled up under it. */}
+              <div
+                ref={setRowsLineLayer}
+                className="absolute left-0 right-0 z-[29] pointer-events-none"
+                style={{ top: TRACK_ROWS_TOP_PX, height: TRACK_ROW_HEIGHT_PX * tracks.length }}
+              />
+
+              {/* New-section insertion line — where a dragged version's section will join
+                  the timeline when it has no clips there yet (handleDragMove). */}
+              {newSectionLineX !== null && (
+                <SplitInsertionLine left={newSectionLineX} layers={insertionLineLayers} />
+              )}
+
+              {/* Section header drag: the destination line, and a veil dimming the dragged
+                  section's column. The veil is its own element so SectionCell and
+                  TimelineClip keep no drag-aware styling. */}
+              {headerDrop !== null && (
+                <SplitInsertionLine left={TRACK_PANEL_WIDTH + headerDrop.lineAt * zoom} layers={insertionLineLayers} />
+              )}
+              {activeSectionName !== null && (() => {
+                const sec = sectionLayout.find((s) => s.name === activeSectionName);
+                if (!sec) return null;
+                return (
+                  <div
+                    className="absolute z-[22] bg-[#09090b]/60 pointer-events-none"
+                    style={{
+                      left: TRACK_PANEL_WIDTH + sec.start * zoom,
+                      width: sec.duration * zoom,
+                      top: TRACK_ROWS_TOP_PX,
+                      height: TRACK_ROW_HEIGHT_PX * tracks.length,
+                    }}
+                  />
+                );
+              })()}
+              {activeSectionName !== null && <SectionDragTag name={activeSectionName} tagRef={sectionDragTagRef} />}
+              {/* Section header drag: a ghost of the dragged section's clips that travels
+                  with the pointer (positionSectionDragGhost), across the track rows only.
+                  Its own layer in the content root, so it scrolls vertically with the rows;
+                  the strip clips it to the content (a ghost pushed past the edge can't grow
+                  the scroll area), the sticky track panel (z-50) covers it over the panel,
+                  and the insertion line (z-30) draws above it. */}
+              {activeSectionName !== null && (() => {
+                const sec = sectionLayout.find((s) => s.name === activeSectionName);
+                if (!sec) return null;
+                return (
+                  <div
+                    className="absolute left-0 right-0 z-[24] overflow-hidden pointer-events-none"
+                    style={{ top: TRACK_ROWS_TOP_PX, height: TRACK_ROW_HEIGHT_PX * tracks.length }}
+                  >
+                    <div
+                      ref={sectionDragGhostRef}
+                      className="absolute left-0 top-0 rounded-sm border border-primary/40"
+                      style={{ width: sec.duration * zoom, opacity: 0.55, visibility: 'hidden' }}
+                    >
+                      {/* One bar per track row that has clips in this section — the old
+                          DragOverlay's shapes, without its header label. */}
+                      {tracks.map((track) => (
+                        <div key={track.id} className="h-16 flex items-center px-1.5">
+                          {track.clips.some((c) => c.sectionName === activeSectionName) && (
+                            <div className="h-8 rounded flex-1" style={{ backgroundColor: trackDisplayColor(track) }} />
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Section column headers — own DndContext for section reordering */}
               <DndContext
                 sensors={sensors}
+                autoScroll={false}
                 onDragStart={handleSectionDragStart}
-                onDragMove={handleSectionDragMove}
                 onDragEnd={handleSectionDragEnd}
-                onDragCancel={handleSectionDragEnd}
+                onDragCancel={handleSectionDragCancel}
               >
                 <div className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-[38px] z-30">
+                  {/* Header-row layer for every gold insertion line (SplitInsertionLine).
+                      Content px like the rows layer; runs 1px past the row (-bottom-px) to
+                      cover its border-b, which otherwise left a 1px gap at y 62. Over the
+                      track panel it sits under the z-50 section-band spacer. */}
+                  <div ref={setHeaderLineLayer} className="absolute inset-x-0 top-0 -bottom-px z-10 pointer-events-none" />
                   {/* Layout placeholder — z-50 cover provided by content-root sibling spacer below */}
                   <div className="w-64 shrink-0 bg-card border-r border-border h-full" />
                   <div className="flex relative">
@@ -3161,54 +3674,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                         isLooped={sec.name === loopedSectionName}
                       />
                     ))}
-                    {/* Insertion line — appears at the nearest gap while dragging a section header */}
-                    {sectionInsertX !== null && (
-                      <div
-                        className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_8px_rgba(212,175,55,0.9)] pointer-events-none z-10"
-                        style={{ left: sectionInsertX }}
-                      />
-                    )}
                   </div>
                 </div>
 
-                {/* Lightweight column ghost shown while dragging a section header */}
-                <DragOverlay modifiers={[restrictToHorizontalAxis]} dropAnimation={null}>
-                  {activeSectionName && (() => {
-                    const sec = sectionLayout.find((s) => s.name === activeSectionName);
-                    if (!sec) return null;
-                    const colWidth = sec.duration * zoom;
-                    return (
-                      <div
-                        className="pointer-events-none opacity-90 rounded-sm overflow-hidden border border-primary/40 shadow-[0_0_20px_rgba(212,175,55,0.25)]"
-                        style={{ width: colWidth }}
-                      >
-                        {/* Header label */}
-                        <div className="h-6 bg-[#09090b]/95 flex items-center px-2 border-b border-primary/30">
-                          <span className="text-[9px] font-bold text-primary uppercase tracking-widest">
-                            {activeSectionName}
-                          </span>
-                        </div>
-                        {/* One solid bar per track — shows which tracks have clips in this section */}
-                        {tracks.map((track) => {
-                          const hasClips = track.clips.some((c) => c.sectionName === activeSectionName);
-                          return (
-                            <div
-                              key={track.id}
-                              className="h-16 border-b border-border/20 bg-[#09090b]/80 flex items-center px-1.5"
-                            >
-                              {hasClips && (
-                                <div
-                                  className="h-8 rounded flex-1 opacity-60"
-                                  style={{ backgroundColor: track.color }}
-                                />
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
-                </DragOverlay>
               </DndContext>
               {/* Section-band spacer — content-root sibling, overlaps the 24px section band. */}
               <div className="-mt-6 sticky left-0 top-[38px] z-50 w-64 h-6 bg-card pointer-events-none" />

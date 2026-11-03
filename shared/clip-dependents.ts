@@ -8,7 +8,7 @@ export type TaskStatus = "todo" | "in-progress" | "complete" | "will-not-play";
 
 export interface ClipDependents {
   // Placed timeline copies of this version (timeline_clips.bucketClipId = the clip).
-  timelineCopies: Array<{ id: string; trackName: string; sectionName: string | null; start: number }>;
+  timelineCopies: Array<{ id: string; trackName: string; sectionName: string | null }>;
   isFinal: boolean;
   // The production task of the section the version leaves, with the status it will
   // move to. willChangeTo equals status when the task is unaffected.

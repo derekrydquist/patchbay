@@ -285,8 +285,12 @@ export const deletedSections = sqliteTable("deleted_sections", {
 
 // One row per (song, section name), song-wide — a per-track hide leaves it alone;
 // the song-wide section delete removes it. Created by guarded CREATE TABLE in
-// server/db.ts, never drizzle-kit push. Not read yet: baseLength and sortOrder are
-// recorded now and switched on in a later step of the timeline placement rebuild.
+// server/db.ts, never drizzle-kit push. sortOrder is the ARRANGEMENT order, read only
+// by the timeline, Export and the server layout (computeSongLayout); the timeline
+// header drag writes it. ideas.sortOrder is the separate FILING order, used by the
+// Media Bucket, Library browser, Production Tracker and every section picker — a
+// timeline reorder never changes it. baseLength feeds the timeline layout
+// (shared/timelineLayout.ts).
 export const songSections = sqliteTable("song_sections", {
   id: text("id").primaryKey(),
   songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),

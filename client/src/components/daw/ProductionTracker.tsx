@@ -763,7 +763,7 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
 
   type TimelineApiTrack = {
     id: string; name: string;
-    timelineClips: { name: string; start: number; isFinal: boolean; sectionName: string | null }[];
+    timelineClips: { name: string; sectionOffset: number | null; isFinal: boolean; sectionName: string | null }[];
   };
 
   const { data: finalClipsTracks = [] } = useQuery<TimelineApiTrack[]>({
@@ -779,26 +779,6 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     queryKey: ['task-comment-counts', songId],
     queryFn: () => fetch(`/api/songs/${songId}/task-comment-counts`).then(r => r.json()),
   });
-
-  // Map of `${instrument}__${sectionName}` → ordered, deduplicated final clip names
-  const finalClipsMap = useMemo(() => {
-    const map: Record<string, string[]> = {};
-    for (const track of finalClipsTracks) {
-      const finalClips = track.timelineClips
-        .filter(c => c.isFinal && c.sectionName)
-        .sort((a, b) => a.start - b.start);
-      const seenNames = new Set<string>();
-      for (const c of finalClips) {
-        const key = `${track.name}__${c.sectionName}`;
-        if (!map[key]) map[key] = [];
-        if (!seenNames.has(c.name)) {
-          seenNames.add(c.name);
-          map[key].push(c.name);
-        }
-      }
-    }
-    return map;
-  }, [finalClipsTracks]);
 
   // Deduplicated sections, ordered by the smallest sortOrder any active track gives
   // the section, first appearance as the tiebreak. First appearance alone put a
@@ -821,6 +801,33 @@ export function ProductionTracker({ songId, modeTabs }: { songId: string; modeTa
     // Array.prototype.sort is stable, so equal sortOrders keep first-appearance order.
     return firstSeen.sort((a, b) => minOrder.get(a)! - minOrder.get(b)!);
   }, [bucket]);
+
+  // Map of `${instrument}__${sectionName}` → ordered, deduplicated final clip names.
+  // Sections in the tracker's own row order (the filing order above), clips within a
+  // section by sectionOffset. A name already listed under an earlier section of the
+  // same track isn't listed again, so the row order decides which section shows it.
+  const finalClipsMap = useMemo(() => {
+    const rowIndex = new Map(sections.map((name, i) => [name, i]));
+    const rank = (name: string) => rowIndex.get(name) ?? Number.POSITIVE_INFINITY;
+    const map: Record<string, string[]> = {};
+    for (const track of finalClipsTracks) {
+      const finalClips = track.timelineClips
+        .filter(c => c.isFinal && c.sectionName)
+        .sort((a, b) =>
+          (rank(a.sectionName!) - rank(b.sectionName!) || 0)
+          || (a.sectionOffset ?? 0) - (b.sectionOffset ?? 0));
+      const seenNames = new Set<string>();
+      for (const c of finalClips) {
+        const key = `${track.name}__${c.sectionName}`;
+        if (!map[key]) map[key] = [];
+        if (!seenNames.has(c.name)) {
+          seenNames.add(c.name);
+          map[key].push(c.name);
+        }
+      }
+    }
+    return map;
+  }, [finalClipsTracks, sections]);
 
   // A hidden-section task never shows its modal — also closes one that was open when a
   // refetch (or a 409) brings the task back hidden.
