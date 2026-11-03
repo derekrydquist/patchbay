@@ -81,8 +81,18 @@ POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body:
                                            exists for this track+section; advances the linked
                                            production task from todo to in-progress if its current
                                            status is todo (no-op otherwise); wrapped in try/catch
-                                           so a missing task never blocks clip creation
-PATCH  /api/timeline-clips/:id           — update a placed clip (start position, etc.); also accepts
+                                           so a missing task never blocks clip creation; optional
+                                           placement: { before, after }, used only for a section's
+                                           first clip (placeSectionInArrangement); fills in the
+                                           append offset when a sectioned clip arrives without
+                                           sectionOffset
+POST   /api/loose-files/:id/place-on-timeline — materialize a loose file as a clip + timeline clip;
+                                           optional placement: { before, after }, used only for a
+                                           section's first clip
+PATCH  /api/timeline-clips/:id           — update a placed clip; field whitelist: name, type, color,
+                                           src, duration, trimStart, trimEnd, bucketClipId, isFinal,
+                                           sectionOffset (never start); logs sort-only
+                                           timeline-reordered when sectionOffset is sent; also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
                                            marks ALL same-name timeline clips on the track final (or
@@ -107,8 +117,15 @@ GET    /api/timeline-clips/:id/replacements — returns bucket clips that can re
 GET    /api/songs/:songId/timeline-has-finals     — returns { hasFinals: boolean }; true if any
                                                     timeline clip with isFinal=true exists for this song
 DELETE /api/songs/:songId/timeline-clips/non-final — deletes all non-final timeline clips for the song,
-                                                      then recomputes and persists correct start values
-                                                      for the remaining final clips → 204
+                                                      re-packs the remaining ones with trimmed lengths and
+                                                      writes their start cache from the layout → 204
+GET    /api/songs/:songId/sections        — the song's song_sections rows as [{ name, sortOrder,
+                                           baseLength }] in arrangement order; NULL sort orders go
+                                           last by name. requireBand + song ownership
+PUT    /api/songs/:songId/sections/order  — body { section, before, after }; moves only that section
+                                           in the arrangement order; 400 for unknown names, a
+                                           self-reference, or both neighbours null. Logs
+                                           timeline-reordered
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
 POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server

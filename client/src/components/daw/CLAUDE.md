@@ -14,7 +14,7 @@ These are intentional product decisions, not implementation details:
 
 - **Clips are always contiguous** — no gaps, no overlaps within a track
 - **Section-locking is enforced** — a clip can only live in its matching section column
-- **Position is always derived, never stored independently** — `clip.start` is always the output of `recalcAllStarts`, never set from a cursor pixel offset or arbitrary value
+- **Position is always derived from the layout** — a clip's start is its section's start + `sectionOffset`, from the shared `layoutTimeline` (see "Timeline layout and arrangement order" in root `CLAUDE.md`); never set from a cursor pixel offset, and the stored `start` is never read for a sectioned clip
 - **The timeline is plug-and-play by design** — complexity that belongs in a freeform DAW does not belong in PatchBay
 - **Mute, solo, zoom, scroll, and selection are client-only, per-browser** — they are never sent to the server. Volume is the only per-track mix value that is shared (stored in `instrument_tracks.volume`). The client-only values follow the same localStorage pattern as MediaBucket (one-shot restore on mount guarded by a `uiRestored` ref, keys scoped `patchbay-*-${songId}`). Do not add mute/solo/zoom/scroll to the DB schema — band members intentionally have independent views of the same arrangement.
 
@@ -24,21 +24,10 @@ The timeline is a **grid**: rows are instrument tracks, columns are song section
 
 ### Section columns
 
-Sections are derived entirely from the clips currently on the tracks — there is no independent section list. A section only exists if at least one clip with that `sectionName` is on the timeline. When the last clip for a section is removed, the column disappears immediately.
-
-Section column **order** is stored as an explicit `sectionOrder: string[]` state in `Timeline`. This is the authoritative order — not inferred from `MOCK_SONG.sections`. It is initialized from `MOCK_SONG.sections` on first load, updated when clips are dropped, and pruned by a `useEffect` that removes sections with no clips. A `sectionOrderRef` keeps it accessible inside stale-closure handlers.
-
-Three pure functions (module-level in `Timeline.tsx`) maintain section geometry. All three take `sectionOrder` as their second argument:
-- **`getActiveSections(tracks, sectionOrder)`** — returns ordered section names present in clips, using `sectionOrder` as the authoritative sequence. Sections not yet in `sectionOrder` are appended at the end.
-- **`computeSectionLayout(tracks, sectionOrder)`** — calls `getActiveSections`, then computes each section's absolute `start` (seconds) and `duration` (sum of effective trimmed durations per track, max across tracks, floored at `MIN_SECTION_WIDTH = 4s`). Effective duration = `(c.trimEnd ?? c.duration) - (c.trimStart ?? 0)`. Returns `SectionInfo[]`.
-- **`recalcAllStarts(tracks, sectionOrder)`** — calls `computeSectionLayout` internally and recalculates `clip.start` for every clip using effective trimmed durations to advance position. This is the single source of truth for positions.
-
-The `sectionLayout` `useMemo` inside `Timeline` calls `computeSectionLayout(tracks, sectionOrder)` and is the authoritative list for rendering (section headers, `SectionCell` widths, invalid-section grayout):
-```ts
-{ name: string; start: number; duration: number }[]
-```
-
-**Always pass `sectionOrder` to `recalcAllStarts`.** Never call it with only `tracks`. Handlers inside `useEffect(fn, [])` must use `sectionOrderRef.current` instead of the `sectionOrder` closure variable (stale closure).
+- **Which sections show** — only sections with at least one non-full-take clip get a column; the column disappears with its last clip. Rules (lengths, beats, orphans, full takes): see "Timeline layout and arrangement order" in root `CLAUDE.md`.
+- **Order** — `song_sections.sort_order` via the `['song-sections', songId]` query (`sections` in `Timeline`), never clip data or `ideas.sortOrder`. There is no `sectionOrder` state or ref.
+- **Geometry** — `deriveLayout(trackState, sections, bpm, timeSignature)` (a thin wrapper over `layoutTimeline`) is memoized as `layout`. `tracks` = `trackState` with every clip's in-memory `start` taken from the layout (`positionTracks`), so playback, keyboard nav, skip and `Track.tsx` read layout positions. `sectionLayout` = `layout.sections` as `{ name, start, duration }[]` (the shape `Track.tsx` takes: section headers, `SectionCell` widths, invalid-section grayout); `endOfTimeline` = `layout.timelineEnd`.
+- **Write paths** that need a new clip's start call `deriveLayout` on the tracks they're about to save.
 
 ### Droppable zones
 
@@ -48,13 +37,11 @@ There are two kinds of droppable zones in the clip-drag `DndContext`:
 
 **2. Gap zones** — `gap||${gapIndex}` — **clip-boundary** zones within the active drag's section. `gapIndex = 0` is before the first clip; `gapIndex = N` is after clip N−1 (i.e. between clips N−1 and N). Dropping here **reorders clips within the section** — it is not a section column operation. These are rendered as `GapZone` components (defined in `Timeline.tsx`) via a `gapZones` `useMemo` that runs whenever `activeDragData` changes. They are always rendered (not gated on `isDragging`) so their DOM nodes exist for the live rect check. Each zone is 20px wide, centered on the boundary, spanning the full track-area height.
 
-**`GapZone` implementation:** Uses a `refCallback` that writes to both `setNodeRef` (dnd-kit) and a local `nodeRef.current` (for live rect), so the collision function can call `container.node.current?.getBoundingClientRect()` to bypass the stale `droppableRects` cache. `isOver` alone drives the gold insertion line — no state threaded from the parent.
+**`GapZone` implementation:** Uses a `refCallback` that writes to both `setNodeRef` (dnd-kit) and a local `nodeRef.current` (for live rect), so the collision function can call `container.node.current?.getBoundingClientRect()` to bypass the stale `droppableRects` cache. `isOver` alone drives the gold insertion line (drawn through `SplitInsertionLine`, the `lineLayers` prop) — no state threaded from the parent.
 
-**`gapZones` useMemo:** Reads `activeDragData.trackId` and `activeDragData.clip.sectionName` to find the track and section, then walks the section's clips in order using effective durations to compute each boundary's absolute pixel position (`256 + posSec * zoom`). Returns `[]` when no drag is active.
+**`gapZones` useMemo:** Reads `activeDragData.trackId` and `activeDragData.clip.sectionName` to find the track and section, then takes the boundaries from the layout: the section's start, then each clip's end (layout `start` + trimmed length), as `256 + posSec * zoom`. Returns `[]` when no drag is active.
 
-**Section column reordering** is handled entirely by a **separate inner `DndContext`** that wraps only the section header row. It does not use gap zone IDs — it uses `handleSectionDragMove` (nearest-gap heuristic) and `handleSectionDragEnd` → `reorderSectionOrder`. Clip drag and section-column drag are completely independent drag contexts with no shared drop targets.
-
-**`reorderSectionOrder(sectionOrder, sectionName, gapIndex, activeNames)`** — pure function used only by the section-header DndContext. `activeNames` is `sectionLayout.map(s => s.name)`. It removes the section from its current position, adjusts `gapIndex` for the resulting index shift, and splices the section back in. Returns the new ordered array.
+**Section column reordering** is a **separate inner `DndContext`** around the section header row (`autoScroll={false}`), independent of the clip drag (no shared drop targets). `handleSectionDragStart` starts the drag pointer source and a `createEdgeScroller`; the target is `headerDropTarget(…)` from the pointer (`headerDrop` state, `headerDropRef`); `handleSectionDragEnd` sends it as `PUT /api/songs/:songId/sections/order` only when non-null; `handleSectionDragCancel` sends nothing. There is no header `DragOverlay` — the preview is `SectionDragTag` + a clip ghost, positioned imperatively through refs. Target rule, preview and edge scroll: see "Timeline layout and arrangement order" in root `CLAUDE.md`.
 
 **There are no per-section-cell droppables.** The old `${trackId}||${sectionName}` format was replaced. `SectionCell` is a pure visual component with no dnd-kit involvement.
 
@@ -66,29 +53,22 @@ While the pointer is inside MediaBucket's on-screen bounds (`[data-media-bucket]
 
 **`handleDragEnd` gap drop — clip reorder:**
 - **Bucket clip**: calls `insertClipInSection(targetTrack.id, clipSectionName, clip, gapIndex)`. No index adjustment needed — inserting a new clip, not removing an existing one.
-- **Timeline clip**: removes the clip from `sectionClips`, computes `adjustedGapIndex = oldIndex < gapIndex ? gapIndex - 1 : gapIndex` (removal shifts subsequent indices down by 1), splices the clip back at `Math.min(adjustedGapIndex, withoutClip.length)`, calls `recalcAllStarts`, and PATCHes all clips whose `start` changed to the server. Uses `clipFromState` (the clip from current `tracks` state, not the stale drag-data closure) to get current `trimStart`/`trimEnd`.
+- **Timeline clip**: removes the clip from `sectionClips`, computes `adjustedGapIndex = oldIndex < gapIndex ? gapIndex - 1 : gapIndex` (removal shifts subsequent indices down by 1), splices the clip back at `Math.min(adjustedGapIndex, withoutClip.length)`, re-packs the section with `packSectionOffsets`, and saves with `patchChangedOffsets`. Uses `clipFromState` (the clip from current `tracks` state, not the stale drag-data closure) to get current `trimStart`/`trimEnd`.
 
 On a track-row drop, `overId` is the trackId directly — see clip reorder section below.
 
-### Position calculation — `recalcAllStarts`
+### Positions — packing and offsets
 
-`recalcAllStarts(tracks, sectionOrder)` is the single source of truth for all clip start times. It:
-1. Calls `computeSectionLayout(tracks, sectionOrder)` to get each section's absolute start offset (widest track in that section determines section width)
-2. For each track, walks each section's clip array in order and sets `clip.start = sectionOffset + sum of preceding effective trimmed durations`
-
-**Effective duration** — everywhere clip length is used for layout (section width, snap position, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. (The drag overlay width applies to timeline-clip drags only; loose-file and version drags use the small `LooseFileDragOverlay` chip.) `clip.duration` is the full file length and is never modified.
-
-Call it after every insert, remove, or section reorder. It takes the full tracks array and the current `sectionOrder` and returns a new array with all starts updated. Because it is pure, it can be called inside `setTracks(prev => ...)` safely.
-
-`insertClipInSection` accepts an optional `newOrder` parameter. When a gap drop pre-computes the new `sectionOrder`, pass it here so the recalc uses the already-updated order instead of the stale closure value.
-
-**Do not reintroduce `recalcStarts` (the old global version).** The section-scoped model replaced it. Never derive `clip.start` from a pixel value or cursor position.
+- **Packing** — `packSectionOffsets(tracks, trackId, sectionName)` sets each clip's `sectionOffset` in one track's section to the sum of the trimmed lengths before it, in array order. Run it after an insert, remove, reorder or trim inside that section; never on a sync or a section reorder. It touches only `sectionOffset`; positions follow from the layout. Pure, so safe inside `setTracks(prev => ...)`.
+- **Effective duration** — everywhere clip length is used for layout (section width, gap zones, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. (The drag overlay width applies to timeline-clip drags only; loose-file and version drags use the small `LooseFileDragOverlay` chip.) `clip.duration` is the full file length and is never modified.
+- **`insertClipInSection(trackId, sectionName, clip, index?, dropHint?)`** — `index` is the position within the section (omit to append). For a section's first clip it applies `placeFirstClipSection` to the `['song-sections']` cache and POSTs `placement` (`dropHint`, from `firstClipHintAt`); see "Timeline layout and arrangement order" in root `CLAUDE.md`.
+- **`recalcAllStarts`, `computeSectionLayout`, `getActiveSections`, `MIN_SECTION_WIDTH` and the `sectionOrder` state are gone.** Never derive `clip.start` from a pixel value or cursor position, and never add a layout outside `layoutTimeline`.
 
 ### Insertion indicators
 
-There is one active insertion indicator during drag:
+There is one active insertion indicator per clip drag:
 
-**Column-level** — each `GapZone` component renders its own gold vertical line via dnd-kit's `isOver` state when the drag pointer is over it. No separate state is needed; the indicator is owned entirely by the `GapZone`.
+**Column-level** — each `GapZone` component renders its own gold vertical line via dnd-kit's `isOver` state when the drag pointer is over it. No separate state is needed; the indicator is owned entirely by the `GapZone`. Two more gold lines use the same `SplitInsertionLine`: the new-section line (`newSectionLineX`, a section's first clip) and the header-drag line (`headerDrop.lineAt`).
 
 **`insertionPoint` is always `null` during drag.** `handleDragMove` unconditionally calls `setInsertionPoint(null)`. As a result, all track-row drops append to the end of the section (`idx = undefined` in `insertClipInSection`). The `SectionCell` gold vertical line never renders during live drag. Do not reintroduce cursor-position–based insertion indicator logic — it caused a "stuck at position zero" visual bug and is incompatible with the full-track droppable model.
 
@@ -116,13 +96,13 @@ Dropping a timeline clip onto its own track row (not a gap zone) reorders it wit
 - `delta.x < 0` (dragged leftward) → move clip to **index 0** (beginning of section)
 - `delta.x >= 0` (dragged rightward or no horizontal movement) → move clip to **end of section** (`withoutClip.length`)
 
-**Left-boundary guard:** Before processing a leftward drop, the handler checks whether the pointer released inside the 256px instrument panel. It reads `activatorEvent.clientX + delta.x` and compares to `timelineRef.current.getBoundingClientRect().left`. If the cursor is left of the track area, the drop is cancelled. This prevents accidental reorders when the user drags a clip toward the panel and releases.
+**Left-boundary guard:** Before processing a leftward drop, the handler checks whether the pointer released inside the 256px instrument panel. It reads `activatorEvent.clientX + delta.x` and compares to `timelineRef.current.getBoundingClientRect().left`. If the cursor is left of the track area, the drop is cancelled. This prevents accidental reorders when the user drags a clip toward the panel and releases. Known issue: `delta.x` already includes timeline scroll, so this counts scroll twice; left with a comment for the drag rebuild (header and file drags use the drag pointer source instead).
 
-**Trim-safe splicing (`clipFromPrev`):** Inside `setTracks(prev => ...)`, the clip must be read from `prev` state rather than from the stale drag-data closure. The closure captures `clip` at drag-start, which may have stale `trimStart`/`trimEnd` if the clip was trimmed after the drag began. `clipFromPrev = sectionClips.find(c => c.id === clip.id) ?? clip` ensures `recalcAllStarts` sees current trim values and computes correct effective durations.
+**Trim-safe splicing (`clipFromPrev`):** Inside `setTracks(prev => ...)`, the clip must be read from `prev` state rather than from the stale drag-data closure. The closure captures `clip` at drag-start, which may have stale `trimStart`/`trimEnd` if the clip was trimmed after the drag began. `clipFromPrev = sectionClips.find(c => c.id === clip.id) ?? clip` ensures `packSectionOffsets` sees current trim values and computes correct effective durations.
 
 **Index adjustment for capturedPoint (unused path):** If `insertionPoint` ever resumes (currently always null during drag), `oldIndex < newIndex → newIndex -= 1` corrects for the removal shift — same logic as the gap zone `adjustedGapIndex`.
 
-After splicing, `recalcAllStarts(draft, sectionOrder)` is called inside `setTracks`, and all clips whose `start` changed are PATCHed to the server.
+After splicing, `packSectionOffsets` runs inside `setTracks`, and `patchChangedOffsets` PATCHes the clips whose `sectionOffset` changed.
 
 ### Drag data — `trackId` requirements
 
@@ -138,13 +118,11 @@ After splicing, `recalcAllStarts(draft, sectionOrder)` is called inside `setTrac
 
 All event handlers registered inside `useEffect(fn, [])` (e.g. `handleRemoveClip`, `handleToggleMute`) must use `setTracks(prev => ...)` and read current state from `prev`, not from the `tracks` variable in the outer closure (which is permanently `[]` in those handlers).
 
-The same problem applies to `sectionOrder`. Handlers inside `useEffect(fn, [])` that call `recalcAllStarts` must use `sectionOrderRef.current` (a ref kept in sync via a separate `useEffect`), not the `sectionOrder` closure variable.
-
-`insertClipInSection` is called from non-stale contexts (recreated on every render), so it can read `sectionOrder` directly from the closure.
+Packing (`packSectionOffsets`) needs no section order, so zero-dep handlers such as `trim-preview` need no section ref. `insertClipInSection` is recreated on every render, so it reads `sections` and `layout` directly from the closure.
 
 ### API calls after mutations
 
-Every insert fires a `POST /api/tracks/:trackId/clips` for the new clip, then `PATCH /api/timeline-clips/:id` for every existing clip whose `start` changed. Every remove fires `DELETE` then patches shifted clips. All are fire-and-forget (`.catch(console.error)`).
+Every insert fires a `POST /api/tracks/:trackId/clips` for the new clip (with `placement` for a section's first clip; checks `res.ok`), then `patchChangedOffsets` for existing clips whose `sectionOffset` changed. Every remove fires `DELETE`, then the same. Offset PATCHes send only `sectionOffset` — never `start` — and are fire-and-forget (`.catch(console.error)`).
 
 ### Timeline polling and live track sync
 
@@ -152,9 +130,9 @@ The timeline `useQuery` has `refetchInterval: 3000` and an explicit `queryFn` th
 
 There are two `useEffect`s that sync `apiTracks` into the local `tracks` state:
 
-1. **Initial load** (guarded by `tracksInitialized.current`): runs once on first non-null `apiTracks`, converts and sets the full tracks array, sets `sectionOrder`. After this, `tracksInitialized.current = true` and this branch never runs again.
+1. **Initial load** (guarded by `tracksInitialized.current`): runs once when `apiTracks`, the song's `song_sections` and the song (tempo) have all loaded, so the first paint has the right order and widths; converts and sets the full tracks array. After this, `tracksInitialized.current = true` and this branch never runs again.
 
-2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, syncs clips for existing tracks from the API response, and appends any new tracks. Preserves local `muted`/`solo`/`volume` state. New tracks start with empty clips. Clip sync is needed so that when a section is hidden (which deletes its timeline clips on the server), the timeline removes those clips within 3 seconds without a manual refresh.
+2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, syncs clips for existing tracks from the API response, and appends any new tracks. Preserves local `muted`/`solo`/`volume` state. New tracks start with empty clips. Clips and `sectionOffset` are taken from the server as they are (`serverClipsToClips` orders each section by offset); it never re-packs or writes. Clip sync is needed so that when a section is hidden (which deletes its timeline clips on the server), the timeline removes those clips within 3 seconds without a manual refresh.
 
 **Do not merge the two effects.** The initial-load guard exists to prevent the API response from clobbering clip state that the user has added to the timeline mid-session (before the refetch fires).
 
@@ -205,11 +183,11 @@ When a timeline clip is replaced via `PATCH /api/timeline-clips/:id` (from the R
 - Put side effects (ref writes, scroll/DOM mutations) inside a `setPlayheadTime` state-updater function — React may invoke updaters more than once per render (StrictMode double-invocation, retried concurrent renders), causing any side effect to fire multiple times against a stale snapshot of related state. This caused an early ~2-second scroll overshoot bug during development. All auto-scroll logic lives in the rAF `animate` function body, which runs exactly once per real frame.
 
 **Auto-stop at end of timeline:**
-Each frame, `animate` re-derives `frameTimelineEnd` (seconds) fresh from `computeSectionLayout(tracks, sectionOrder)`: `lastSection.start + lastSection.duration`. Zero sections → `0`. This is intentionally re-derived every frame, not cached at play-start, so edits to tracks/sections mid-playback are respected.
+Each frame, `animate` reads `frameTimelineEnd` (seconds) from `endOfTimeline` (`layout.timelineEnd`). The playback effect depends on `layout` and `endOfTimeline`, so it re-runs whenever the layout changes and edits to tracks/sections mid-playback are respected.
 
 If `playheadRef.current + timeDelta` reaches or passes `frameTimelineEnd` on a given frame (and looping is off): the playhead is clamped to exactly `frameTimelineEnd` (frames advance in discrete jumps, so the raw computed position will usually overshoot slightly before the check catches it), the existing manual stop sequence is invoked (pause all audios, clear `pendingPlayRef`, close + null `audioCtxRef`, `isPlaying` → `false`), and the rest of that frame's per-clip play/pause logic is skipped.
 
-**Do not:** compute `frameTimelineEnd` once and reuse it across the play session — always re-derive per frame. Do not write a second/parallel stop implementation — this must call into the same stop path manual pause uses.
+**Do not:** cache `frameTimelineEnd` at play-start outside that effect — it must follow the current layout. Do not write a second/parallel stop implementation — this must call into the same stop path manual pause uses.
 
 **Transport button sync (`playback-ended` event):** Transport.tsx and Timeline.tsx hold independent `isPlaying` state with no shared props or context. Transport dispatches `toggle-play` on button/spacebar (one-way, Transport → Timeline). Because auto-stop originates in Timeline.tsx (not via a `toggle-play` dispatch), a second one-way event was added: Timeline's auto-stop block dispatches `playback-ended` immediately after its own `setIsPlaying(false)`; Transport listens for it and calls its own local `setIsPlaying(false)` to un-stick the button.
 
@@ -380,7 +358,7 @@ Timeline clips have left and right trim handles that physically resize the clip 
 - Drag is captured with `window.addEventListener('pointermove'/'pointerup')` (no `setPointerCapture`) to avoid conflicts with dnd-kit sensors. `e.nativeEvent.stopImmediatePropagation()` on `pointerdown` prevents dnd-kit from starting a drag
 - `isTrimDragging` ref gates the `positionStyle` so dnd-kit's `style` prop (transform) is suppressed during trim drag
 - Local `trimStart`/`trimEnd` state is updated on every `pointermove` frame; `patchTrim` fires on `pointerup`
-- On every `pointermove` frame, `Clip.tsx` also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd }`. `Timeline.tsx` listens in a zero-dep `useEffect` and calls `setTracks(prev => recalcAllStarts(...))` with `sectionOrderRef.current` — so neighboring clips reflow in real time during drag without waiting for the server PATCH
+- On every `pointermove` frame, `Clip.tsx` also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd }`. `Timeline.tsx` listens in a zero-dep `useEffect` and updates the clip's trim and re-packs its section with `packSectionOffsets` inside `setTracks(prev => ...)` — so neighboring clips reflow in real time during drag. Nothing is PATCHed from here; the trim route re-packs the same offsets on the server
 - A `useEffect` syncs `trimStart`/`trimEnd` from the prop whenever the API refetches (so a live-sync poll doesn't clobber active drag state — the effect only runs when the clip is not being dragged)
 - All trim actions live inside a **▶ Trim submenu** (`ContextMenuSub`) in the `TimelineClip` right-click menu. Menu order: Detect Trim Points → Apply Trim to All Instances (conditional) → Reset Trim on All Instances (conditional) → Reset Trim (conditional). The submenu is always visible; individual items appear conditionally.
 
@@ -388,10 +366,10 @@ Timeline clips have left and right trim handles that physically resize the clip 
 Accepts `{ trimStart: number, trimEnd: number | null }`. Validates both fields. Calls `storage.updateTimelineClip`. Does not touch `isFinal` or `start`. On success, `patchTrim` in `TimelineClip` calls `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` to push the new trim values into the tracks state so the rAF loop and live-sync effect see them immediately.
 
 **Layout — effective duration everywhere:**
-`computeSectionLayout`, `recalcAllStarts`, the mute-state range check, and the `DragOverlay` width all use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` instead of raw `clip.duration`. This ensures section columns expand/contract to match the audible content, not the raw file length.
+`layoutTimeline`, `packSectionOffsets`, the mute-state range check, and the `DragOverlay` width all use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` instead of raw `clip.duration`. This ensures section columns expand/contract to match the audible content, not the raw file length.
 
-**Live-sync fix:**
-After a trim PATCH, the server's `start` values for sibling clips may be stale (they were computed before the trim change). The live-sync `useEffect` in `Timeline.tsx` calls `recalcAllStarts(merged, sectionOrderRef.current)` at the end of its `setTracks` callback to recompute all positions from the fresh trim values.
+**After a trim:**
+Positions are never read from stored `start`: the layout recomputes from the trim values and offsets the poll brings back, so siblings land correctly after a trim PATCH without any client-side re-pack in live sync.
 
 **New and replaced clips always start untrimmed:**
 `insertClipInSection` explicitly sets `trimStart: 0, trimEnd: null` on every new clip it creates and in the `POST /api/tracks/:trackId/clips` body. Spreading from the bucket clip drag data is not sufficient because bucket clips don't carry these fields. `performReplace` in `TimelineClip` also explicitly sends `trimStart: 0, trimEnd: null` in its `PATCH /api/timeline-clips/:id` body — the general PATCH route is a partial update and would otherwise preserve the original clip's trim values on the replacement.
@@ -753,8 +731,8 @@ Clicking "Clear Timeline" in the background context menu triggers a `GET /api/so
   - **Clear All** — same as the simple path; deletes everything.
   - **Leave Final Clips** — fires `DELETE /api/songs/:songId/timeline-clips/non-final` (fire-and-forget), closes the dialog immediately, then calls `queryClient.invalidateQueries` for the timeline key. No manual local state update — the live sync picks up the server result when the query refetches.
 
-**`deleteNonFinalTimelineClips` server-side recalc:**
-After deleting non-final clips, the server recomputes correct `start` values for the remaining final clips using the same algorithm as the client's `recalcAllStarts`: infers section order from the clips' pre-deletion `start` values (smallest per section), computes section widths (max total final-clip duration per section across all tracks, floored at 4s), then walks each track+section and writes updated `start` values to the DB. This ensures the client's live sync picks up geometrically correct positions without needing a client-side recalc.
+**`deleteNonFinalTimelineClips` (server):**
+One transaction: deletes the non-final clips on the song's active tracks, re-packs each remaining track + section with trimmed lengths (`recomputeSectionOffsets`), and writes each remaining sectioned clip's `start` cache from `computeSongLayout`. A final full take is never moved; `song_sections` is never touched. see "Timeline layout and arrangement order" in root `CLAUDE.md`.
 
 `clearDialogState` in `Timeline.tsx` is a string union `'none' | 'checking' | 'simple' | 'enhanced'` (replaced the old `showClearConfirm: boolean`). The `'checking'` state covers the async server round-trip before the dialog appears.
 
@@ -1069,7 +1047,7 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 
 ## Free-position (manualOffset) feature — attempted and reverted
 - A Shift+drag free-positioning feature was built and fully reverted via `git reset` (never committed; no trace in codebase or schema).
-- **Key architectural conflict:** `recalcAllStarts` recomputes every un-offset clip's `start` from scratch on every call. Trimming a clip triggers a recalc that immediately re-closes any gap the trim created — there is never a moment where trimmed space persists long enough to drag another clip into it. Any future free-position attempt must resolve this first: decide whether trim should stop triggering a section-wide recalc (leaving sibling `start` values untouched).
+- **Key architectural conflict (then `recalcAllStarts`; now `packSectionOffsets`, same behavior):** packing recomputes every clip's position in the section from scratch on every call. Trimming a clip triggers a re-pack that immediately re-closes any gap the trim created — there is never a moment where trimmed space persists long enough to drag another clip into it. Any future free-position attempt must resolve this first: decide whether trim should stop triggering a section-wide re-pack (leaving sibling `sectionOffset` values untouched). The drag rebuild (step 4) adds free positioning.
 - **Clamping gap:** the first wall-clamp implementation only checked section outer edges, not actual sibling clip positions, allowing real clip-to-clip overlap. Clamping must bound against per-drag sibling positions looked up from current track state.
 - **Investigation discipline:** this session required multiple compactions during a single "read and understand" prompt. Split future attempts into: (1) a no-changes trace prompt to confirm recalc behavior at specific file/line granularity, (2) a scoped implementation prompt referencing those findings. Avoid broad "read and understand the whole system" asks in one shot.
 
