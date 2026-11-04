@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDraggable } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
 import { cn, capitalize, trapDialogTab } from '@/lib/utils';
 import { Clip, Comment } from '@/lib/daw-data';
 import { bucketKeys, looseFileKeys, liveCommentRefetch, fetchClipCommentSummary, type ClipCommentSummary } from '@/lib/bucket-api';
@@ -143,7 +142,6 @@ interface ClipProps {
   clip: Clip;
   isOverlay?: boolean;
   zoom?: number;
-  sectionStart?: number;
   trackId?: string;
   // The track's display color (lib/track-color.ts) — used instead of clip.color.
   trackColor: string;
@@ -1002,7 +1000,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
+export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1049,8 +1047,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
   // Scroll this clip into view and play the shared gold landing flash when it was
   // just placed (context-menu Add to Timeline, Place on Timeline). A ring + glow
   // outside the clip's edge, never a tint — Drums clips are gold. While isFlash is
-  // set the clip sits one layer above its neighbours (positionStyle) and its
-  // SectionCell stops clipping (Track.tsx), so the glow isn't cut off.
+  // set the clip sits one layer above its neighbours (positionStyle), so the glow
+  // isn't covered.
   useEffect(() => {
     if (!isFlash || !clipContainerRef.current) return;
     clipContainerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
@@ -1361,7 +1359,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     }
   };
 
-  const { attributes, listeners, setNodeRef, transform } = useDraggable({
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
@@ -1373,19 +1371,19 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
     setNodeRef(node);
   }, [setNodeRef]);
 
-  const style = {
-    transform: CSS.Translate.toString(transform),
-  };
-
   const displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom;
 
+  // Positioned on the whole track row (Track.tsx) at its layout start, so it can be
+  // drawn anywhere on the row. The drag transform is never applied: the source stays
+  // in place and dims while the DragOverlay ghost follows the pointer — translating it
+  // would slide it across the row and grow the timeline's scroll width.
   const positionStyle: React.CSSProperties = isOverlay ? { width: displayWidth } : {
     width: displayWidth,
-    left: (clip.start - sectionStart) * zoom,
+    left: clip.start * zoom,
+    top: 0,
     position: 'absolute',
     // One above neighbouring clips while the landing glow plays, so it isn't covered.
     zIndex: isFlash ? 2 : 1,
-    ...(isTrimDragging ? {} : style),
     ...(trimEdge !== null || isTrimDragging ? { cursor: 'ew-resize' } : {}),
   };
 
@@ -1497,7 +1495,8 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, sectionStart = 0, tra
             }}
             className={cn(
               "h-full rounded-md flex items-center overflow-hidden group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
-              isOverlay && "shadow-2xl scale-105 opacity-90"
+              isOverlay && "shadow-2xl scale-105 opacity-90",
+              !isOverlay && isDragging && "opacity-40"
             )}
           >
             {/* Track-colored border — a layer inside the clip's box, the same box and radius

@@ -23,82 +23,21 @@ export interface SectionInfo {
 }
 
 interface SectionCellProps {
-  sectionStart: number;
   sectionDuration: number;
-  clips: Clip[];
-  allTrackClips: Clip[];
   zoom: number;
-  isInvalid: boolean;
   insertionX?: number;
-  trackId: string;
-  trackColor: string;
-  songId: string;
-  flashClipId?: string | null;
-  selectedClipId?: string | null;
 }
 
-// Renders full-take clips at their absolute timeline positions. Used instead of the
-// section-cell grid when a track has at least one full-take clip on it.
-function FullTakeLane({ clips, zoom, trackId, trackColor, songId, flashClipId, selectedClipId }: {
-  clips: Clip[];
-  zoom: number;
-  trackId: string;
-  trackColor: string;
-  songId: string;
-  flashClipId?: string | null;
-  selectedClipId?: string | null;
-}) {
-  const fullTakeClips = clips.filter((c) => c.isFullTake);
-  return (
-    <div className="relative h-full w-full">
-      {fullTakeClips.map((clip) => (
-        <TimelineClip
-          key={clip.id}
-          clip={clip}
-          zoom={zoom}
-          sectionStart={0}
-          trackId={trackId}
-          trackColor={trackColor}
-          songId={songId}
-          instanceCount={1}
-          isFlash={flashClipId === clip.id}
-          isSelected={selectedClipId === clip.id}
-        />
-      ))}
-    </div>
-  );
-}
-
-function SectionCell({
-  sectionStart,
-  sectionDuration,
-  clips,
-  allTrackClips,
-  zoom,
-  isInvalid,
-  insertionX,
-  trackId,
-  trackColor,
-  songId,
-  flashClipId,
-  selectedClipId,
-}: SectionCellProps) {
-  // While one of this cell's clips plays its landing glow (flashClipId), the cell stops
-  // clipping so the glow outside the clip's edge shows. Not drag-related.
-  const hasFlashingClip = !!flashClipId && clips.some((c) => c.id === flashClipId);
+// One section's width on a track row: the background behind the clips, with its
+// divider. The clips themselves are drawn at row level (TimelineTrack), not in here.
+function SectionCell({ sectionDuration, zoom, insertionX }: SectionCellProps) {
   return (
     <div
       // Divider is an inset shadow, not border-r: a border would take the cell's last
-      // pixel column, and overflow-hidden would clip the last clip's right edge there.
-      className={cn('relative h-full shadow-[inset_-1px_0_0_hsl(var(--border)/0.2)]', hasFlashingClip ? 'overflow-visible' : 'overflow-hidden')}
+      // pixel column.
+      className="relative h-full shadow-[inset_-1px_0_0_hsl(var(--border)/0.2)]"
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
     >
-      {clips.map((clip) => {
-        const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
-        return (
-          <TimelineClip key={clip.id} clip={clip} zoom={zoom} sectionStart={sectionStart} trackId={trackId} trackColor={trackColor} songId={songId} instanceCount={instanceCount} isFlash={flashClipId === clip.id} isSelected={selectedClipId === clip.id} />
-        );
-      })}
       {insertionX !== undefined && (
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_8px_rgba(212,175,55,0.8)] z-20 pointer-events-none"
@@ -175,6 +114,7 @@ export function TimelineTrack({
     disabled: isInvalidDrop,
   });
 
+  const trackColor = trackDisplayColor(track);
   const isValidTarget = isDragging && !isInvalidDrop;
   const isInvalidTarget = isDragging && isInvalidDrop;
 
@@ -339,55 +279,56 @@ export function TimelineTrack({
       </ContextMenuContent>
       </ContextMenu>
 
-      {/* Section cells — full row is the droppable target.
-          For tracks that have full-take clips, FullTakeLane replaces the section grid. */}
-      {(() => {
-        const hasFullTake = track.clips.some((c) => c.isFullTake);
-        return (
-          <div
-            ref={setNodeRef}
-            className="flex-1 relative h-full border-b border-border"
-          >
-            <BeatGrid zoom={zoom} bpm={bpm} timeSignature={timeSignature} />
-            {hasFullTake ? (
-              <FullTakeLane
-                clips={track.clips}
-                zoom={zoom}
-                trackId={track.id}
-                trackColor={trackDisplayColor(track)}
-                songId={songId}
-                flashClipId={flashClipId}
-                selectedClipId={selectedClipId}
-              />
-            ) : (
-              <div className="flex h-full">
-                {sections.map((section) => {
-                  const sectionClips = track.clips.filter((c) => c.sectionName === section.name);
-                  return (
-                    <SectionCell
-                      key={section.name}
-                      sectionStart={section.start}
-                      sectionDuration={section.duration}
-                      clips={sectionClips}
-                      allTrackClips={track.clips}
-                      zoom={zoom}
-                      isInvalid={invalidSections.has(section.name)}
-                      trackId={track.id}
-                      trackColor={trackDisplayColor(track)}
-                      songId={songId}
-                      insertionX={
-                        insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
-                      }
-                      flashClipId={flashClipId}
-                      selectedClipId={selectedClipId}
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })()}
+      {/* Lane — the full row is the droppable target. Section cells are the background;
+          clips are drawn on top at row level, each at its layout start (clip.start, from
+          layoutTimeline via Timeline's positionTracks), so a clip isn't confined to its
+          section's cell. Legacy full takes sit on the same row at their stored start. */}
+      <div
+        ref={setNodeRef}
+        className="flex-1 relative h-full border-b border-border"
+      >
+        <BeatGrid zoom={zoom} bpm={bpm} timeSignature={timeSignature} />
+        <div className="flex h-full">
+          {sections.map((section) => (
+            <SectionCell
+              key={section.name}
+              sectionDuration={section.duration}
+              zoom={zoom}
+              insertionX={
+                insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
+              }
+            />
+          ))}
+        </div>
+        {sections.flatMap((section) =>
+          track.clips.filter((c) => !c.isFullTake && c.sectionName === section.name)
+        ).map((clip) => (
+          <TimelineClip
+            key={clip.id}
+            clip={clip}
+            zoom={zoom}
+            trackId={track.id}
+            trackColor={trackColor}
+            songId={songId}
+            instanceCount={track.clips.filter((c) => c.name === clip.name).length}
+            isFlash={flashClipId === clip.id}
+            isSelected={selectedClipId === clip.id}
+          />
+        ))}
+        {track.clips.filter((c) => c.isFullTake).map((clip) => (
+          <TimelineClip
+            key={clip.id}
+            clip={clip}
+            zoom={zoom}
+            trackId={track.id}
+            trackColor={trackColor}
+            songId={songId}
+            instanceCount={1}
+            isFlash={flashClipId === clip.id}
+            isSelected={selectedClipId === clip.id}
+          />
+        ))}
+      </div>
 
       <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
         <AlertDialogContent
