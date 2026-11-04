@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
@@ -1720,7 +1720,8 @@ export async function registerRoutes(
   //   replace event handler (Timeline.tsx) name, type, color, src
   //   mark final (Clip.tsx)                 isFinal
   //   performReplace (Clip.tsx)            name, src, duration, type, color, trimStart,
-  //                                         trimEnd, bucketClipId
+  //                                         trimEnd, bucketClipId (trimStart 0 / trimEnd
+  //                                         null; the route may then cut trimEnd short)
   const TIMELINE_CLIP_PATCH_FIELDS = [
     'name', 'type', 'color', 'src', 'duration', 'trimStart', 'trimEnd', 'bucketClipId', 'isFinal', 'sectionOffset',
   ] as const;
@@ -1773,16 +1774,24 @@ export async function registerRoutes(
       const bucketClip = db.select().from(clips).where(eq(clips.id, clipUpdates.bucketClipId as string)).get();
       clipUpdates.isFinal = bucketClip?.isFinal ?? false;
     }
-    const clip = Object.keys(clipUpdates).length > 0
-      ? await storage.updateTimelineClip(clipId, clipUpdates)
-      : existingClip;
-    if (!clip) return res.status(404).json({ message: "Clip not found" });
-    // Replace changes duration and resets trim, which moves every later clip in the
-    // section — keep their section_offset in step (clips are contiguous for now).
-    if (('duration' in clipUpdates || 'trimStart' in clipUpdates || 'trimEnd' in clipUpdates)
-        && clip.sectionName && !clip.isFullTake) {
-      recomputeSectionOffsets(clip.trackId, clip.sectionName);
+    // Replace changes duration and resets trim. The clip keeps its section and
+    // section_offset and the clips after it never move; if the new length would run
+    // into the next clip it is cut short there (updateTimelineClipKeepingSpot).
+    const changesLength = 'duration' in clipUpdates || 'trimStart' in clipUpdates || 'trimEnd' in clipUpdates;
+    let clip: typeof existingClip | undefined;
+    try {
+      clip = Object.keys(clipUpdates).length === 0
+        ? existingClip
+        : changesLength
+          ? updateTimelineClipKeepingSpot(clipId, clipUpdates)
+          : await storage.updateTimelineClip(clipId, clipUpdates);
+    } catch (err) {
+      if (err instanceof TimelineOverlapError) {
+        return res.status(409).json({ message: "That would overlap another clip in this section." });
+      }
+      throw err;
     }
+    if (!clip) return res.status(404).json({ message: "Clip not found" });
 
     const isFinal = clipUpdates.isFinal;
     if (isFinal === true || isFinal === false) {
@@ -1960,8 +1969,7 @@ export async function registerRoutes(
     // Trim and the section's sibling offsets change together (a trim moves every
     // later clip in the section; clips are contiguous for now).
     const clip = sqlite.transaction(() => {
-      const updated = db.update(timelineClips).set({ trimStart, trimEnd: trimEnd ?? null })
-        .where(eq(timelineClips.id, clipId)).returning().get();
+      const updated = writeTimelineClipTrim(clipId, trimStart, trimEnd ?? null);
       if (updated?.sectionName && !updated.isFullTake) recomputeSectionOffsets(updated.trackId, updated.sectionName);
       return updated;
     })();

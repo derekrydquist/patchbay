@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, type PlacementClip } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, type PlacementClip } from './timelinePlacement';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -270,5 +270,48 @@ describe('toPlacementClip', () => {
       .toEqual({ id: 'a', offset: 0, length: 5 });
     expect(toPlacementClip({ id: 'b', sectionOffset: 3, duration: 4, trimStart: 1, trimEnd: null }))
       .toEqual({ id: 'b', offset: 3, length: 3 });
+  });
+});
+
+describe('appendOffset', () => {
+  it('is 0 with no clips', () => {
+    expect(appendOffset([])).toBe(0);
+  });
+  it('is the furthest clip end, not the sum of lengths, so gaps stay', () => {
+    // 0–2 and 6–8: the sum of lengths would be 4 (inside b); the end is 8.
+    expect(appendOffset([clip('a', 0, 2), clip('b', 6, 2)])).toBe(8);
+  });
+  it('ignores array order', () => {
+    expect(appendOffset([clip('b', 6, 2), clip('a', 0, 2)])).toBe(8);
+  });
+});
+
+describe('trimEndBeforeNext (Replace cut-short)', () => {
+  const at = (offset: number, duration: number, trimStart = 0, trimEnd: number | null = null) =>
+    ({ offset, duration, trimStart, trimEnd });
+
+  it('the last clip in the section is never cut', () => {
+    expect(trimEndBeforeNext(at(4, 10), [clip('a', 0, 2)])).toBeNull();
+  });
+  it('a clip that fits before the next one is not cut', () => {
+    expect(trimEndBeforeNext(at(2, 3), [clip('a', 0, 2), clip('b', 6, 2)])).toBeNull();
+    // Touching the next clip exactly is a fit.
+    expect(trimEndBeforeNext(at(2, 4), [clip('a', 0, 2), clip('b', 6, 2)])).toBeNull();
+  });
+  it('a longer clip is cut to end exactly at the next clip', () => {
+    // At 2, next clip at 6: room 4, so trimEnd = 0 + 4.
+    const trimEnd = trimEndBeforeNext(at(2, 10), [clip('a', 0, 2), clip('b', 6, 2)]);
+    expect(trimEnd).toBe(4);
+    // The result passes the overlap check.
+    expect(findOverlap([clip('a', 0, 2), clip('b', 6, 2), clip('A', 2, trimEnd! - 0)])).toBeNull();
+  });
+  it('keeps trimStart: the cut is measured from it', () => {
+    expect(trimEndBeforeNext(at(2, 10, 1), [clip('b', 6, 2)])).toBe(5);
+  });
+  it('an existing trimEnd that runs too far is cut further', () => {
+    expect(trimEndBeforeNext(at(0, 10, 0, 8), [clip('b', 3, 2)])).toBe(3);
+  });
+  it('clips before it never count as the next clip', () => {
+    expect(trimEndBeforeNext(at(5, 10), [clip('a', 0, 2)])).toBeNull();
   });
 });

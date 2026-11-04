@@ -54,7 +54,7 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapTime } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
-import { placeInGap, toPlacementClip, PLACEMENT_EPSILON } from '@shared/timelinePlacement';
+import { placeInGap, toPlacementClip, appendOffset, PLACEMENT_EPSILON } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -291,8 +291,9 @@ function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
 
 // Packs one track's clips in one section end to end: sectionOffset = the sum of the
 // trimmed lengths before it, in array order. Touches sectionOffset only — a clip's
-// position follows from the layout. Run after an insert, remove, reorder or trim
-// inside that section; never on a sync or a section reorder. Other tracks and
+// position follows from the layout. Run only for a trim preview and a Media Bucket
+// gap-zone drop inside that section; removes, appends, Replace and clip drags leave
+// gaps as they are. Never on a sync or a section reorder. Other tracks and
 // sections are left exactly as they are.
 function packSectionOffsets(tracks: Track[], trackId: string, sectionName: string): Track[] {
   return tracks.map((track) => {
@@ -2156,30 +2157,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         const track = prev.find((t) => t.clips.some((c) => c.id === clipId));
         if (!track) return prev;
 
-        const removed = track.clips.find((c) => c.id === clipId)!;
+        // The removed clip leaves a gap: the clips after it keep their offsets, so
+        // nothing else is saved.
         const draft = prev.map((t) =>
           t.id === track.id ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t
         );
-        const packed = removed.sectionName && !removed.isFullTake
-          ? packSectionOffsets(draft, track.id, removed.sectionName)
-          : draft;
 
-        // The re-pack is saved once the delete has landed: until then the removed clip
-        // is still in the section on the server, and its overlap check would refuse it.
         fetch(`/api/timeline-clips/${clipId}`, { method: 'DELETE' })
           .then(() => Promise.all([
             queryClient.invalidateQueries({ queryKey: ['activity'] }),
             queryClient.invalidateQueries({ queryKey: ['songs'] }),
             queryClient.invalidateQueries({ queryKey: ['production-tasks', songId] }),
             queryClient.invalidateQueries({ queryKey: ['final-clips', songId] }),
-            patchChangedOffsets(
-              songId, draft, packed,
-              () => queryClient.invalidateQueries({ queryKey: ['activity'] }),
-              'Failed to update clip offset after remove:',
-            ),
           ]))
           .catch((err) => console.error('Failed to delete timeline clip:', err));
-        return packed;
+        return draft;
       });
       // Clear selection if the deleted clip was selected.
       setSelectedTimelineClipId((prev) => {
@@ -2938,7 +2930,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   };
 
   // Inserts a clip into a specific section of a track. index is the position within that
-  // section's clip array; omit to append at end. dropHint: where on the timeline a drop
+  // section's clip array (a Media Bucket gap-zone drop — the section is re-packed); omit
+  // to append: the clip goes after the furthest clip end on that track in that section
+  // (appendOffset), gaps stay and nothing else moves. dropHint: where on the timeline a drop
   // landed, for a section's first clip (firstClipHintAt); omit when there's no drop
   // position (the end rule).
   const insertClipInSection = (
@@ -2980,16 +2974,20 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const sectionClips = targetTrack.clips.filter((c) => c.sectionName === sectionName && !c.isFullTake);
       const otherClips = targetTrack.clips.filter((c) => !(c.sectionName === sectionName && !c.isFullTake));
       const insertAt = index ?? sectionClips.length;
+      const added: Clip = { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null, bucketClipId: clip.id, isFullTake: false };
+      if (index === undefined) added.sectionOffset = appendOffset(sectionClips.map((c) => toPlacementClip(placementInput(c))));
       const newSectionClips = [
         ...sectionClips.slice(0, insertAt),
-        { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null, bucketClipId: clip.id, isFullTake: false },
+        added,
         ...sectionClips.slice(insertAt),
       ];
 
       const draft = prev.map((t) =>
         t.id === trackId ? { ...t, clips: [...otherClips, ...newSectionClips] } : t
       );
-      const packed = packSectionOffsets(draft, trackId, sectionName);
+      // Only a gap-zone drop (an index) re-packs; an append changes no other clip, so
+      // patchChangedOffsets below finds nothing to save.
+      const packed = index === undefined ? draft : packSectionOffsets(draft, trackId, sectionName);
       const packedLayout = deriveLayout(packed, layoutSections, bpm, timeSignature);
       const newClip = packed.find((t) => t.id === trackId)!.clips.find((c) => c.id === newId);
 

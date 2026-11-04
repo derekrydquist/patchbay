@@ -30,7 +30,7 @@ import {
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 import { layoutTimeline, type TimelineLayout } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -42,8 +42,9 @@ export class LooseFileNotFoundError extends Error {
   }
 }
 
-// Thrown by setTimelineClipOffsets when the new offsets would make two clips overlap
-// on one track in one section — the transaction rolls back and the route answers 409.
+// Thrown by setTimelineClipOffsets (and updateTimelineClipKeepingSpot) when the writes
+// would make two clips overlap on one track in one section — the transaction rolls
+// back and the route answers 409.
 export class TimelineOverlapError extends Error {
   constructor(public trackId: string, public sectionName: string) {
     super(`Clips would overlap: ${trackId} / ${sectionName}`);
@@ -884,9 +885,10 @@ function songIdForTrack(trackId: string): string | undefined {
 
 // Rewrites section_offset for every non-full-take clip in one track + section as the
 // running sum of trimmed lengths, in the order the timeline shows (offset, then rowid;
-// a NULL offset — not expected, every insert path sets one — goes last). Clips are
-// still contiguous in this step, so this is the whole truth about their offsets. Used after a trim, which changes the siblings
-// after the trimmed clip. Call inside the transaction that wrote the trim.
+// a NULL offset — not expected, every insert path sets one — goes last), closing any
+// gaps. Used only after a trim (the trim route and apply-trim-to-instances), which
+// changes the siblings after the trimmed clip; nothing else re-packs a section. Call
+// inside the transaction that wrote the trim.
 export function recomputeSectionOffsets(trackId: string, sectionName: string): void {
   const rows = sqlite.prepare(`
     SELECT id, duration, trim_start AS trimStart, trim_end AS trimEnd
@@ -971,12 +973,43 @@ export function computeSongLayout(songId: string): TimelineLayout {
 }
 
 // section_offset for a clip appended to the end of one track's section: the end of
-// the furthest non-full-take clip already there (offset + trimmed length). For packed
-// clips that's the sum of their lengths; once clips can be placed freely, a gap must
-// not pull the new clip back over a later clip. Call before inserting.
+// the furthest non-full-take clip already there (offset + trimmed length), or 0
+// (shared appendOffset). Gaps stay; nothing is re-packed. Call before inserting.
 export function sectionAppendOffset(trackId: string, sectionName: string): number {
-  return sectionPlacementClips(trackId, sectionName)
-    .reduce((end, c) => Math.max(end, c.offset + c.length), 0);
+  return appendOffset(sectionPlacementClips(trackId, sectionName));
+}
+
+// Writes a timeline clip's trim points. The one storage write for trimStart/trimEnd
+// shared by the trim route (PATCH /api/timeline-clips/:id/trim) and Replace's
+// cut-short below. Returns the updated row, or undefined if there's no such clip.
+export function writeTimelineClipTrim(clipId: string, trimStart: number, trimEnd: number | null): TimelineClip | undefined {
+  return db.update(timelineClips).set({ trimStart, trimEnd })
+    .where(eq(timelineClips.id, clipId)).returning().get();
+}
+
+// Replace (and any PATCH that changes a sectioned clip's length): writes the updates,
+// keeping the clip's section and section_offset. The clips after it never move. If its
+// new trimmed length would run into the next clip on its track in its section, it is
+// cut short to end exactly there (trimEnd, through writeTimelineClipTrim); the last
+// clip in a section is never cut — the section grows. One transaction; if the clip
+// still overlaps a sibling afterwards (only possible when an earlier clip already ran
+// past its start), TimelineOverlapError is thrown and nothing is written.
+export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<InsertTimelineClip>): TimelineClip | undefined {
+  return sqlite.transaction(() => {
+    db.update(timelineClips).set(updates).where(eq(timelineClips.id, clipId)).run();
+    let clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
+    const sectionName = clip?.sectionName;
+    if (!clip || !sectionName || clip.isFullTake) return clip;
+    const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
+    const offset = clip.sectionOffset ?? 0;
+    const cutTo = trimEndBeforeNext(
+      { offset, duration: clip.duration, trimStart: clip.trimStart, trimEnd: clip.trimEnd }, others,
+    );
+    if (cutTo !== null) clip = writeTimelineClipTrim(clip.id, clip.trimStart, cutTo) ?? clip;
+    const placed = toPlacementClip(clip);
+    if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, sectionName);
+    return clip;
+  })();
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -1594,9 +1627,9 @@ export class SQLiteStorage implements IStorage {
 
   // Smart Clear ("Leave Final Clips"). Deletes every non-final timeline clip on the
   // song's active tracks (full takes included; a final full take stays, untouched).
-  // Then, per track + section, re-packs the remaining clips end to end in their
-  // existing offset order with trimmed lengths (recomputeSectionOffsets), and writes
-  // each remaining sectioned clip's start as a cache value from computeSongLayout.
+  // The remaining clips keep their section offsets — the deleted clips leave gaps,
+  // nothing is re-packed — and each remaining sectioned clip's start is rewritten as
+  // a cache value from computeSongLayout (section lengths can change).
   // song_sections rows are never touched: a section left with no clips just drops off
   // the timeline.
   async deleteNonFinalTimelineClips(songId: string): Promise<void> {
@@ -1615,10 +1648,6 @@ export class SQLiteStorage implements IStorage {
       tx.delete(timelineClips)
         .where(and(inArray(timelineClips.trackId, trackIds), eq(timelineClips.isFinal, false)))
         .run();
-
-      const groups = tx.selectDistinct({ trackId: timelineClips.trackId, sectionName: timelineClips.sectionName })
-        .from(timelineClips).where(sectionedRemaining).all();
-      for (const g of groups) recomputeSectionOffsets(g.trackId, g.sectionName!);
 
       const layout = computeSongLayout(songId);
       for (const clip of tx.select().from(timelineClips).where(sectionedRemaining).all()) {

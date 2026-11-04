@@ -102,3 +102,27 @@ export function findOverlap(clips: PlacementClip[]): [PlacementClip, PlacementCl
   }
   return null;
 }
+
+// Offset for a clip appended to the end of one track's section: the end of the clip
+// that ends furthest right (offset + trimmed length), or 0 when there are none. Gaps
+// stay: never the sum of the lengths, and nothing is re-packed.
+export function appendOffset(clips: PlacementClip[]): number {
+  return clips.reduce((end, c) => Math.max(end, c.offset + c.length), 0);
+}
+
+// After Replace: the trimEnd that cuts a clip short so it ends exactly where the next
+// clip on its track in its section starts (non-destructive — duration is untouched),
+// or null when it already fits or is the last clip there (the section grows instead).
+// `others` are the other clips in that track's section, never the clip itself.
+export function trimEndBeforeNext(
+  clip: { offset: number; duration: number; trimStart: number; trimEnd: number | null },
+  others: PlacementClip[],
+): number | null {
+  const next = others
+    .filter((c) => c.offset >= clip.offset - PLACEMENT_EPSILON)
+    .reduce<number>((min, c) => Math.min(min, c.offset), Infinity);
+  if (!Number.isFinite(next)) return null;
+  const room = Math.max(0, next - clip.offset);
+  const length = (clip.trimEnd ?? clip.duration) - clip.trimStart;
+  return length > room + PLACEMENT_EPSILON ? clip.trimStart + room : null;
+}
