@@ -126,3 +126,86 @@ export function trimEndBeforeNext(
   const length = (clip.trimEnd ?? clip.duration) - clip.trimStart;
   return length > room + PLACEMENT_EPSILON ? clip.trimStart + room : null;
 }
+
+// ── Trims ────────────────────────────────────────────────────────────────────
+// A trim changes one clip and nothing else: its neighbours never move and nothing is
+// re-packed. Both edges stop at the neighbouring clip on the same track in the same
+// section. The left edge moves the clip's start with the audio: when trimStart changes
+// by d, the clip's offset changes by the same d, so the audio stays where it is in time.
+
+// The shortest a trim can make a clip, in seconds.
+export const MIN_TRIM_LENGTH = 0.5;
+
+// What limits a clip's edges: the end of the clip before it (0 when there is none) and
+// the start of the clip after it (Infinity when it's the last clip there — its right
+// edge can grow the section).
+export interface TrimNeighbours {
+  prevEnd: number;
+  nextStart: number;
+}
+
+// A clip's neighbours among `others` — the other clips on its track in its section,
+// never the clip itself. A clip that starts before it is before it; one that starts at
+// or after it is after it.
+export function trimNeighbours(clip: { offset: number }, others: PlacementClip[]): TrimNeighbours {
+  let prevEnd = 0;
+  let nextStart = Infinity;
+  for (const c of others) {
+    if (c.offset < clip.offset - PLACEMENT_EPSILON) prevEnd = Math.max(prevEnd, c.offset + c.length);
+    else nextStart = Math.min(nextStart, c.offset);
+  }
+  return { prevEnd, nextStart };
+}
+
+export interface TrimClip {
+  offset: number;          // seconds from the section start
+  duration: number;        // full file length
+  trimStart: number;
+  trimEnd: number | null;  // null = plays to the end of the file
+}
+
+export interface TrimResult {
+  trimStart: number;
+  trimEnd: number | null;  // null when it reaches the end of the file
+  offset: number;          // offset + (new trimStart − old trimStart)
+  clamped: boolean;        // true when it isn't exactly the trim asked for
+}
+
+// The closest allowed trim to `wanted` for `clip`, from its current state. `nb` null
+// means no neighbours and no offset limits (a legacy full take, or an unsectioned
+// clip): only 0 ≤ trimStart and trimEnd ≤ duration apply, and the offset stays.
+//   Left edge:  trimStart ≥ 0; the new offset ≥ 0 (no pickups yet) and ≥ the previous
+//               clip's end; the clip stays at least MIN_TRIM_LENGTH long.
+//   Right edge: trimEnd ≤ duration; the clip's end ≤ the next clip's start (no limit
+//               for the last clip); at least MIN_TRIM_LENGTH long.
+// The left edge is settled first, so a left-only change (trimEnd as it was) never moves
+// the right edge, and a right-only change never moves the left edge. Returns null only
+// when there is no room at all (stored clips already overlapping).
+export function clampTrim(
+  clip: TrimClip,
+  wanted: { trimStart: number; trimEnd: number | null },
+  nb: TrimNeighbours | null,
+): TrimResult | null {
+  const wantedEnd = wanted.trimEnd ?? clip.duration;
+  const wantedStart = Number.isFinite(wanted.trimStart) ? wanted.trimStart : clip.trimStart;
+  // ── Left edge ──
+  const lowStart = nb
+    ? Math.max(0, clip.trimStart + (Math.max(0, nb.prevEnd) - clip.offset))
+    : 0;
+  // Moving the left edge keeps the minimum length against the wanted right edge; a
+  // right-only change leaves the left edge alone (the right edge yields instead).
+  const leftMoves = Math.abs(wantedStart - clip.trimStart) > PLACEMENT_EPSILON;
+  const highStart = leftMoves ? Math.min(wantedEnd, clip.duration) - MIN_TRIM_LENGTH : Infinity;
+  const trimStart = Math.max(lowStart, Math.min(wantedStart, highStart));
+  const offset = nb ? clip.offset + (trimStart - clip.trimStart) : clip.offset;
+  // ── Right edge ──
+  const highEnd = nb ? Math.min(clip.duration, trimStart + (nb.nextStart - offset)) : clip.duration;
+  const lowEnd = trimStart + MIN_TRIM_LENGTH;
+  let trimEnd = Math.min(highEnd, Math.max(lowEnd, Number.isFinite(wantedEnd) ? wantedEnd : clip.duration));
+  if (trimEnd <= trimStart + PLACEMENT_EPSILON) return null;
+  const storedEnd = trimEnd >= clip.duration - PLACEMENT_EPSILON ? null : trimEnd;
+  if (storedEnd === null) trimEnd = clip.duration;
+  const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON
+    || Math.abs(trimEnd - wantedEnd) > PLACEMENT_EPSILON;
+  return { trimStart, trimEnd: storedEnd, offset, clamped };
+}

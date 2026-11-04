@@ -48,6 +48,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
+import { clampTrim, type TrimNeighbours } from '@shared/timelinePlacement';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
 // loose_file_comments rows, which differ only in their parent-id column.
@@ -152,6 +153,91 @@ interface ClipProps {
   // The clip being dragged: drawn above everything else on its row (and above its
   // "picked up" layer and the landing outline in Track.tsx), slightly see-through.
   isRaised?: boolean;
+  // Sectioned timeline clips: where its trim edges stop — the end of the clip before it
+  // on its track in its section (0 if none) and the start of the clip after it
+  // (Infinity if it's the last). Undefined for full takes: no neighbours, no offset.
+  trimPrevEnd?: number;
+  trimNextStart?: number;
+}
+
+// Tells Timeline a trim drag or trim save started (+1) or ended (−1); the timeline
+// poll pauses while any is running, so a poll can't snap a trimmed clip back.
+function signalTrimBusy(delta: 1 | -1) {
+  window.dispatchEvent(new CustomEvent('trim-busy', { detail: { delta } }));
+}
+
+// Torn edges: an edge with hidden audio behind it (left: trimStart > 0; right: trimEnd
+// before the end of the file) is drawn as a small zigzag, like torn paper. The teeth
+// are in screen pixels, so they look the same at every zoom: TORN_TEETH teeth over the
+// clip's height (the 64px track row → about 7px apart), TORN_DEPTH_PX deep, shallower
+// on very short clips so the two edges never meet.
+const TORN_TEETH = 9;
+const HOVER_RING_COLOR = 'rgba(180,180,180,0.7)';
+const TORN_DEPTH_PX = 1.75;
+const CLIP_HEIGHT_PX = 64; // h-16 track row (Track.tsx); only sizes the border line's SVG
+
+interface TornEdges {
+  // clip-path for every layer drawn in the clip's shape (body, waveform, border, selection,
+  // hover glow); undefined when both edges are straight.
+  clipPath: string | undefined;
+  // A line `strokeWidth` px wide along each torn edge, lying just inside it (as a straight
+  // border of that width would), as SVG polyline points (viewBox: width × CLIP_HEIGHT_PX).
+  lines: (strokeWidth: number) => string[];
+}
+
+// The torn-edge shape for a clip `width` px wide. Teeth tips sit on the clip's edge
+// (so the top and bottom keep their full length) and the notches go `depth` px in.
+function tornEdges(width: number, left: boolean, right: boolean): TornEdges {
+  if (!left && !right) return { clipPath: undefined, lines: () => [] };
+  const depth = Math.max(0, Math.min(TORN_DEPTH_PX, width / ((left && right ? 2 : 1) * 4)));
+  const steps = TORN_TEETH * 2;
+  const inset = (i: number) => (i % 2 === 1 ? depth : 0);
+  const yPct = (i: number) => `${((i / steps) * 100).toFixed(3)}%`;
+  const yPx = (i: number) => ((i / steps) * CLIP_HEIGHT_PX).toFixed(2);
+  const pts: string[] = [];
+  // Clockwise: down the right edge, then up the left edge.
+  for (let i = 0; i <= steps; i++) pts.push(`calc(100% - ${right ? inset(i) : 0}px) ${yPct(i)}`);
+  for (let i = steps; i >= 0; i--) pts.push(`${left ? inset(i) : 0}px ${yPct(i)}`);
+  const line = (x: (i: number) => number) =>
+    Array.from({ length: steps + 1 }, (_, i) => `${x(i).toFixed(2)},${yPx(i)}`).join(' ');
+  return {
+    clipPath: `polygon(${pts.join(', ')})`,
+    lines: (strokeWidth) => [
+      ...(left ? [line((i) => inset(i) + strokeWidth / 2)] : []),
+      ...(right ? [line((i) => width - inset(i) - strokeWidth / 2)] : []),
+    ],
+  };
+}
+
+// The lines along a clip's torn edges — the zigzag part of a border, ring or outline
+// whose straight sides are drawn with CSS. Clipped to the clip's shape like the layer
+// it belongs to, and stacked with it (`className` carries its z-index).
+function TornEdgeLines({ torn, width, strokeWidth, color, className, style }: {
+  torn: TornEdges; width: number; strokeWidth: number; color: string; className: string; style?: React.CSSProperties;
+}) {
+  const lines = torn.lines(strokeWidth);
+  if (lines.length === 0) return null;
+  return (
+    <svg
+      aria-hidden
+      className={cn('pointer-events-none absolute inset-0 h-full w-full', className)}
+      style={style}
+      viewBox={`0 0 ${Math.max(1, width)} ${CLIP_HEIGHT_PX}`}
+      preserveAspectRatio="none"
+    >
+      {lines.map((points) => (
+        <polyline
+          key={points}
+          points={points}
+          fill="none"
+          stroke={color}
+          strokeWidth={strokeWidth}
+          strokeLinejoin="miter"
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
+    </svg>
+  );
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -1003,7 +1089,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false }: ClipProps) {
+function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimNextStart }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1027,6 +1113,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   const [applyTrimInstanceCount, setApplyTrimInstanceCount] = useState(0);
   const [showResetTrimAllConfirm, setShowResetTrimAllConfirm] = useState(false);
   const queryClient = useQueryClient();
+  const { toast } = useToast();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const decodedBufferRef = useRef<AudioBuffer | null>(null);
   const drawRef = useRef<(() => void) | null>(null);
@@ -1191,7 +1278,40 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     trimEndRef.current = clip.trimEnd ?? null;
   }, [clip.trimStart, clip.trimEnd]);
 
+  // The clip's neighbours for trimming (null: a full take — no neighbours, no offset).
+  const trimNb: TrimNeighbours | null = trimPrevEnd === undefined || trimNextStart === undefined
+    ? null
+    : { prevEnd: trimPrevEnd, nextStart: trimNextStart };
+
+  // The clip as it stands now, for clampTrim.
+  const currentTrimClip = () => ({
+    offset: clip.sectionOffset ?? 0,
+    duration: clip.duration,
+    trimStart: trimStartRef.current,
+    trimEnd: trimEndRef.current,
+  });
+
+  // Shows a trim on screen at once: this clip's own state, and Timeline's copy (trim and,
+  // for a sectioned clip, the offset that moves with trimStart). Nothing is saved here.
+  const showTrim = (next: { trimStart: number; trimEnd: number | null; offset: number }) => {
+    trimStartRef.current = next.trimStart;
+    trimEndRef.current = next.trimEnd;
+    setTrimStart(next.trimStart);
+    setTrimEnd(next.trimEnd);
+    window.dispatchEvent(new CustomEvent('trim-preview', {
+      detail: {
+        clipId: clip.id,
+        trimStart: next.trimStart,
+        trimEnd: next.trimEnd,
+        ...(trimNb ? { sectionOffset: next.offset } : {}),
+      },
+    }));
+  };
+
+  // Saves a trim. The server moves the offset with trimStart itself. The timeline poll
+  // stays paused until the save and the refetch after it are done.
   const patchTrim = async (newTrimStart: number, newTrimEnd: number | null) => {
+    signalTrimBusy(1);
     try {
       const res = await fetch(`/api/timeline-clips/${clip.id}/trim`, {
         method: 'PATCH',
@@ -1199,91 +1319,87 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
         body: JSON.stringify({ trimStart: newTrimStart, trimEnd: newTrimEnd }),
       });
       if (res.ok) {
-        queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
         queryClient.invalidateQueries({ queryKey: ['songs'] });
         queryClient.invalidateQueries({ queryKey: ['activity'] });
+      } else {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Trim failed (${res.status})`);
       }
     } catch (err) {
       console.error('Failed to patch trim:', err);
+      toast({ title: "Couldn't trim the clip", description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      signalTrimBusy(-1);
+      // Brings back the server's trim and offsets (the saved ones, or the old ones after
+      // a failure).
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
     }
   };
 
-  const handleLeftTrimDrag = (e: React.PointerEvent) => {
+  // One trim drag on either edge. Free movement (no snap). Both edges stop at the
+  // neighbouring clips (clampTrim); the left edge moves the clip's start with the audio.
+  // Neighbours never move. Escape cancels: the clip goes back and nothing is saved.
+  const startTrimDrag = (e: React.PointerEvent, edge: 'left' | 'right') => {
     if (isOverlay) return;
     e.preventDefault();
     e.stopPropagation();
     e.nativeEvent.stopImmediatePropagation();
     setIsTrimDragging(true);
+    signalTrimBusy(1);
     const startX = e.clientX;
-    const startTrimStart = trimStartRef.current;
+    const start = currentTrimClip();
+    const startOffset = start.offset;
 
     const onMove = (moveE: PointerEvent) => {
-      const delta = moveE.clientX - startX;
-      const deltaSecs = delta / zoom;
-      const maxTrimStart = (trimEndRef.current ?? clip.duration) - 0.5;
-      const newTrimStart = Math.max(0, Math.min(maxTrimStart, startTrimStart + deltaSecs));
-      trimStartRef.current = newTrimStart;
-      setTrimStart(newTrimStart);
-      window.dispatchEvent(new CustomEvent('trim-preview', {
-        detail: { clipId: clip.id, trimStart: newTrimStart, trimEnd: trimEndRef.current },
-      }));
+      const deltaSecs = (moveE.clientX - startX) / zoom;
+      const wanted = edge === 'left'
+        ? { trimStart: start.trimStart + deltaSecs, trimEnd: start.trimEnd }
+        : { trimStart: start.trimStart, trimEnd: (start.trimEnd ?? clip.duration) + deltaSecs };
+      const next = clampTrim(start, wanted, trimNb);
+      if (next) showTrim(next);
     };
-
-    const onUp = () => {
+    const finish = () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('keydown', onKey, true);
       setIsTrimDragging(false);
-      patchTrim(trimStartRef.current, trimEndRef.current);
+    };
+    const onUp = () => {
+      finish();
+      // At the very end of the file counts as no right trim.
+      const end = trimEndRef.current;
+      const storedEnd = end !== null && end >= clip.duration - 0.01 ? null : end;
+      const changed = Math.abs(trimStartRef.current - start.trimStart) > 1e-6 || storedEnd !== start.trimEnd;
+      if (storedEnd !== end) {
+        showTrim({ trimStart: trimStartRef.current, trimEnd: storedEnd, offset: startOffset + (trimStartRef.current - start.trimStart) });
+      }
+      if (changed) patchTrim(trimStartRef.current, storedEnd);
+      signalTrimBusy(-1);
+    };
+    const onKey = (keyE: KeyboardEvent) => {
+      if (keyE.key !== 'Escape') return;
+      keyE.preventDefault();
+      keyE.stopPropagation();
+      finish();
+      showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
+      signalTrimBusy(-1);
     };
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('keydown', onKey, true);
   };
 
-  const handleRightTrimDrag = (e: React.PointerEvent) => {
-    if (isOverlay) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.nativeEvent.stopImmediatePropagation();
-    setIsTrimDragging(true);
-    const startX = e.clientX;
-    const startTrimEnd = trimEndRef.current ?? clip.duration;
-
-    const onMove = (moveE: PointerEvent) => {
-      const delta = moveE.clientX - startX;
-      const deltaSecs = delta / zoom;
-      const minTrimEnd = trimStartRef.current + 0.5;
-      const newTrimEnd = Math.max(minTrimEnd, Math.min(clip.duration, startTrimEnd + deltaSecs));
-      trimEndRef.current = newTrimEnd;
-      setTrimEnd(newTrimEnd);
-      window.dispatchEvent(new CustomEvent('trim-preview', {
-        detail: { clipId: clip.id, trimStart: trimStartRef.current, trimEnd: newTrimEnd },
-      }));
-    };
-
-    const onUp = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      setIsTrimDragging(false);
-      // Store null when trim is at the very end of the file (no right trim)
-      const finalTrimEnd = trimEndRef.current;
-      const storedTrimEnd = finalTrimEnd !== null && finalTrimEnd >= clip.duration - 0.01 ? null : finalTrimEnd;
-      trimEndRef.current = storedTrimEnd;
-      setTrimEnd(storedTrimEnd);
-      patchTrim(trimStartRef.current, storedTrimEnd);
-    };
-
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
+  // A whole-trim change from a menu or the detected-trim Apply: the closest allowed trim
+  // to `wanted` at this clip's neighbours, shown at once and saved.
+  const applyTrim = (wanted: { trimStart: number; trimEnd: number | null }) => {
+    const next = clampTrim(currentTrimClip(), wanted, trimNb);
+    if (!next) return;
+    showTrim(next);
+    patchTrim(next.trimStart, next.trimEnd);
   };
 
-  const handleResetTrim = async () => {
-    setTrimStart(0);
-    setTrimEnd(null);
-    trimStartRef.current = 0;
-    trimEndRef.current = null;
-    await patchTrim(0, null);
-  };
+  const handleResetTrim = () => applyTrim({ trimStart: 0, trimEnd: null });
 
   const detectTrimPoints = () => {
     const buffer = decodedBufferRef.current;
@@ -1346,20 +1462,35 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     setShowApplyTrimConfirm(true);
   };
 
-  const performApplyTrimToInstances = async () => {
-    setShowApplyTrimConfirm(false);
+  // Apply / reset trim on every instance of this clip on its track. The server clamps
+  // each instance at its own neighbours and says which it clamped (not shown). The
+  // timeline poll stays paused until the save is done.
+  const saveTrimOnInstances = async (newTrimStart: number, newTrimEnd: number | null) => {
+    signalTrimBusy(1);
     try {
-      await fetch('/api/timeline-clips/apply-trim-to-instances', {
+      const res = await fetch('/api/timeline-clips/apply-trim-to-instances', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trackId, name: clip.name, trimStart, trimEnd }),
+        body: JSON.stringify({ trackId, name: clip.name, trimStart: newTrimStart, trimEnd: newTrimEnd }),
       });
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.message ?? `Trim failed (${res.status})`);
+      }
       queryClient.invalidateQueries({ queryKey: ['songs'] });
       queryClient.invalidateQueries({ queryKey: ['activity'] });
     } catch (err) {
-      console.error('Failed to apply trim to instances:', err);
+      console.error('Failed to save trim on instances:', err);
+      toast({ title: "Couldn't trim the clips", description: (err as Error).message, variant: 'destructive' });
+    } finally {
+      signalTrimBusy(-1);
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
     }
+  };
+
+  const performApplyTrimToInstances = async () => {
+    setShowApplyTrimConfirm(false);
+    await saveTrimOnInstances(trimStart, trimEnd);
   };
 
   const { attributes, listeners, setNodeRef } = useDraggable({
@@ -1375,6 +1506,21 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   }, [setNodeRef]);
 
   const displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom;
+
+  // Torn edges where audio is hidden behind the edge; straight once fully untrimmed.
+  const tornLeft = trimStart > 0.001;
+  const tornRight = trimEnd !== null && trimEnd < clip.duration - 0.001;
+  const torn = tornEdges(displayWidth, tornLeft, tornRight);
+  // For the body, waveform and border layers: the torn shape, square corners on a torn side.
+  const tornCornerStyle: React.CSSProperties = {
+    ...(tornLeft ? { borderTopLeftRadius: 0, borderBottomLeftRadius: 0 } : {}),
+    ...(tornRight ? { borderTopRightRadius: 0, borderBottomRightRadius: 0 } : {}),
+  };
+  const tornLayerStyle: React.CSSProperties = torn.clipPath ? {
+    clipPath: torn.clipPath,
+    WebkitClipPath: torn.clipPath,
+    ...tornCornerStyle,
+  } : {};
 
   // Positioned on the whole track row (Track.tsx) at its layout start, so it can be
   // drawn anywhere on the row. The drag transform is never applied: while it's dragged,
@@ -1467,7 +1613,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
             // Timeline's floating-clip loop finds the dragged clip by this and moves it
             // with a transform (React never sets transform here).
             data-timeline-clip={isOverlay ? undefined : clip.id}
-            style={{ ...positionStyle, backgroundColor: clipBodyColor(trackColor) }}
+            style={positionStyle}
             {...restListeners}
             {...attributes}
             onPointerDown={(e) => {
@@ -1475,8 +1621,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
                 const rect = clipContainerRef.current?.getBoundingClientRect();
                 if (rect) {
                   const x = e.clientX - rect.left;
-                  if (x <= 8) { handleLeftTrimDrag(e); return; }
-                  if (x >= rect.width - 8) { handleRightTrimDrag(e); return; }
+                  if (x <= 8) { startTrimDrag(e, 'left'); return; }
+                  if (x >= rect.width - 8) { startTrimDrag(e, 'right'); return; }
                 }
               }
               dndOnPointerDown?.(e);
@@ -1502,131 +1648,181 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
               else { setTrimEdge(null); }
             }}
             className={cn(
-              "h-full rounded-md flex items-center overflow-hidden group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
+              "h-full rounded-md flex items-center group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
               isOverlay && "shadow-2xl scale-105 opacity-90"
             )}
           >
-            {/* Track-colored border — a layer inside the clip's box, the same box and radius
-                as the selection overlay, so the gold selection border fully covers it. */}
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-0 rounded-md border z-[5]"
-              style={{ borderColor: clipBorderColor(trackColor) }}
-            />
+            {/* Everything the clip draws, clipped to its rounded box — here rather than on the
+                root (which keeps rounded-md for flashGold's glow), so a torn side's corners
+                can be square while the untrimmed sides stay rounded. */}
+            <div className="absolute inset-0 rounded-md overflow-hidden" style={tornCornerStyle}>
+              {/* Clip body — its own layer, not the root's background, so a torn edge can
+                  clip it (the root is never clipped: flashGold's glow is its box-shadow). */}
+              <div
+                aria-hidden
+                data-clip-body
+                className="pointer-events-none absolute inset-0 rounded-md z-0"
+                style={{ backgroundColor: clipBodyColor(trackColor), ...tornLayerStyle }}
+              />
 
-            {isFinal && (
-              <CornerBadge variant="final" corner="top-right" />
-            )}
+              {/* Track-colored border — a layer inside the clip's box, the same box and radius
+                  as the selection overlay, so the gold selection border fully covers it. A
+                  torn edge has no straight border; the zigzag line below draws it instead. */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0 rounded-md border z-[5]"
+                style={{
+                  borderColor: clipBorderColor(trackColor),
+                  ...tornLayerStyle,
+                  ...(tornLeft ? { borderLeftWidth: 0 } : {}),
+                  ...(tornRight ? { borderRightWidth: 0 } : {}),
+                }}
+              />
+              <TornEdgeLines
+                torn={torn}
+                width={displayWidth}
+                strokeWidth={1}
+                color={clipBorderColor(trackColor)}
+                className="z-[5] overflow-visible"
+              />
 
-            <canvas
-              ref={canvasRef}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
-                zIndex: 2,
-                pointerEvents: 'none',
-                // drawRef reads this back resolved as the bar color; opacity puts the
-                // waveform at ~50% of the track color.
-                color: trackColor,
-                opacity: 0.5,
-              }}
-            />
+              {isFinal && (
+                <CornerBadge variant="final" corner="top-right" />
+              )}
+
+              <canvas
+                ref={canvasRef}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  zIndex: 2,
+                  pointerEvents: 'none',
+                  ...tornLayerStyle,
+                  // drawRef reads this back resolved as the bar color; opacity puts the
+                  // waveform at ~50% of the track color.
+                  color: trackColor,
+                  opacity: 0.5,
+                }}
+              />
 
 
-            {/* Label row — top-left, out of the clip's middle where trimming happens.
-                pr-5 keeps the name clear of the top-right Final badge. */}
-            <div className="absolute top-0 left-0 right-0 z-10 pt-1 pl-1.5 pr-5 flex items-center gap-1 justify-between pointer-events-none">
-              <span className={cn(
-                "min-w-0 text-[10px] leading-none font-semibold text-white/90 truncate select-none [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]",
-                isFinal && "font-bold"
-              )}>
-                {clip.name}
-              </span>
+              {/* Label row — top-left, out of the clip's middle where trimming happens.
+                  pr-5 keeps the name clear of the top-right Final badge. */}
+              <div className="absolute top-0 left-0 right-0 z-10 pt-1 pl-1.5 pr-5 flex items-center gap-1 justify-between pointer-events-none">
+                <span className={cn(
+                  "min-w-0 text-[10px] leading-none font-semibold text-white/90 truncate select-none [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]",
+                  isFinal && "font-bold"
+                )}>
+                  {clip.name}
+                </span>
 
-              {clip.comments && clip.comments.length > 0 && (
-                <div className="flex items-center bg-black/40 rounded px-1 shrink-0">
-                  <MessageSquare size={10} className="text-white/80" />
-                  <span className="text-[10px] font-bold text-white/80 ml-0.5">{clip.comments.length}</span>
-                </div>
+                {clip.comments && clip.comments.length > 0 && (
+                  <div className="flex items-center bg-black/40 rounded px-1 shrink-0">
+                    <MessageSquare size={10} className="text-white/80" />
+                    <span className="text-[10px] font-bold text-white/80 ml-0.5">{clip.comments.length}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* AI trim detection overlay */}
+              {!isOverlay && detectedTrim && (() => {
+                const currentEnd = trimEnd ?? clip.duration;
+                const leftPx = Math.max(0, Math.min(displayWidth, (detectedTrim.trimStart - trimStart) * zoom));
+                const rightPx = Math.max(0, Math.min(displayWidth, (currentEnd - detectedTrim.trimEnd) * zoom));
+                const activeLeft = leftPx;
+                const activeWidth = Math.max(0, displayWidth - leftPx - rightPx);
+                return (
+                  <>
+                    {leftPx > 0 && (
+                      <div style={{ position: 'absolute', top: 0, left: 0, width: leftPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
+                    )}
+                    {rightPx > 0 && (
+                      <div style={{ position: 'absolute', top: 0, right: 0, width: rightPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
+                    )}
+                    <div style={{ position: 'absolute', top: 0, left: activeLeft, width: activeWidth, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 25 }}>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button
+                          onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rawEnd = detectedTrim.trimEnd;
+                            applyTrim({
+                              trimStart: detectedTrim.trimStart,
+                              trimEnd: rawEnd >= clip.duration - 0.01 ? null : rawEnd,
+                            });
+                            setDetectedTrim(null);
+                          }}
+                          style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: '#D4AF37', color: 'black', borderRadius: 3, border: 'none', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}
+                        >
+                          Apply
+                        </button>
+                        <button
+                          onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
+                          onClick={(e) => { e.stopPropagation(); setDetectedTrim(null); }}
+                          style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: 'rgba(0,0,0,0.6)', color: 'rgba(255,255,255,0.7)', borderRadius: 3, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                );
+              })()}
+
+              {/* Selection indicator — persistent gold border + tint; same inset-border technique as flash halo */}
+              {/* Selection outline — in the clip's shape: a torn side has no straight border,
+                  its zigzag line is drawn instead (same colour and width, just inside the edge). */}
+              {!isOverlay && isSelected && (
+                <>
+                  <div
+                    className="pointer-events-none absolute inset-0 rounded-md border-2 border-primary bg-primary/10 z-[19]"
+                    style={{
+                      ...tornLayerStyle,
+                      ...(tornLeft ? { borderLeftWidth: 0 } : {}),
+                      ...(tornRight ? { borderRightWidth: 0 } : {}),
+                    }}
+                  />
+                  <TornEdgeLines torn={torn} width={displayWidth} strokeWidth={2} color="hsl(var(--primary))" className="z-[19]" style={tornLayerStyle} />
+                </>
+              )}
+
+              {/* Hover glow — grey inset ring + soft inner glow; separate child div so it composites
+                  above the color fill. On a clip with a torn edge the ring is a border (an inset
+                  box-shadow can't follow a zigzag) with the torn side drawn as a zigzag line. */}
+              {isHovered && !isOverlay && (torn.clipPath ? (
+                <>
+                  <div
+                    className="pointer-events-none absolute inset-0 z-20"
+                    style={{
+                      border: `2px solid ${HOVER_RING_COLOR}`,
+                      ...(tornLeft ? { borderLeftWidth: 0 } : {}),
+                      ...(tornRight ? { borderRightWidth: 0 } : {}),
+                      boxShadow: 'inset 0 0 14px rgba(180,180,180,0.15)',
+                      ...tornLayerStyle,
+                    }}
+                  />
+                  <TornEdgeLines torn={torn} width={displayWidth} strokeWidth={2} color={HOVER_RING_COLOR} className="z-20" style={tornLayerStyle} />
+                </>
+              ) : (
+                <div
+                  className="pointer-events-none absolute inset-0 z-20"
+                  style={{ boxShadow: `inset 0 0 0 2px ${HOVER_RING_COLOR}, inset 0 0 14px rgba(180,180,180,0.15)` }}
+                />
+              ))}
+
+              {/* Comment indicator badge — mirrors the final-checkmark badge at top-0 right-0 rounded-bl */}
+              {!isOverlay && tcCommentInfo && (
+                <CornerBadge
+                  variant="comment"
+                  corner="bottom-right"
+                  hasUnread={tcHasUnread}
+                  onClick={() => { setShowInfo(true); setFocusComments(true); }}
+                />
               )}
             </div>
-
-            {/* AI trim detection overlay */}
-            {!isOverlay && detectedTrim && (() => {
-              const currentEnd = trimEnd ?? clip.duration;
-              const leftPx = Math.max(0, Math.min(displayWidth, (detectedTrim.trimStart - trimStart) * zoom));
-              const rightPx = Math.max(0, Math.min(displayWidth, (currentEnd - detectedTrim.trimEnd) * zoom));
-              const activeLeft = leftPx;
-              const activeWidth = Math.max(0, displayWidth - leftPx - rightPx);
-              return (
-                <>
-                  {leftPx > 0 && (
-                    <div style={{ position: 'absolute', top: 0, left: 0, width: leftPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
-                  )}
-                  {rightPx > 0 && (
-                    <div style={{ position: 'absolute', top: 0, right: 0, width: rightPx, bottom: 0, backgroundColor: 'rgba(59,130,246,0.4)', zIndex: 15, pointerEvents: 'none' }} />
-                  )}
-                  <div style={{ position: 'absolute', top: 0, left: activeLeft, width: activeWidth, bottom: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 25 }}>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                      <button
-                        onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const newTrimStart = detectedTrim.trimStart;
-                          const rawEnd = detectedTrim.trimEnd;
-                          const newTrimEnd = rawEnd >= clip.duration - 0.01 ? null : rawEnd;
-                          setTrimStart(newTrimStart);
-                          setTrimEnd(newTrimEnd);
-                          trimStartRef.current = newTrimStart;
-                          trimEndRef.current = newTrimEnd;
-                          window.dispatchEvent(new CustomEvent('trim-preview', {
-                            detail: { clipId: clip.id, trimStart: newTrimStart, trimEnd: newTrimEnd },
-                          }));
-                          patchTrim(newTrimStart, newTrimEnd);
-                          setDetectedTrim(null);
-                        }}
-                        style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: '#D4AF37', color: 'black', borderRadius: 3, border: 'none', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap', boxShadow: '0 1px 3px rgba(0,0,0,0.4)' }}
-                      >
-                        Apply
-                      </button>
-                      <button
-                        onPointerDown={(e) => { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); }}
-                        onClick={(e) => { e.stopPropagation(); setDetectedTrim(null); }}
-                        style={{ padding: '1px 6px', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', backgroundColor: 'rgba(0,0,0,0.6)', color: 'rgba(255,255,255,0.7)', borderRadius: 3, border: '1px solid rgba(255,255,255,0.15)', cursor: 'pointer', letterSpacing: '0.05em', whiteSpace: 'nowrap' }}
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                  </div>
-                </>
-              );
-            })()}
-
-            {/* Selection indicator — persistent gold border + tint; same inset-border technique as flash halo */}
-            {!isOverlay && isSelected && (
-              <div className="pointer-events-none absolute inset-0 rounded-md border-2 border-primary bg-primary/10 z-[19]" />
-            )}
-
-            {/* Hover glow — gold inset box-shadow; separate child div so it composites above the color fill */}
-            {isHovered && !isOverlay && (
-              <div
-                className="pointer-events-none absolute inset-0 z-20"
-                style={{ boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)' }}
-              />
-            )}
-
-            {/* Comment indicator badge — mirrors the final-checkmark badge at top-0 right-0 rounded-bl */}
-            {!isOverlay && tcCommentInfo && (
-              <CornerBadge
-                variant="comment"
-                corner="bottom-right"
-                hasUnread={tcHasUnread}
-                onClick={() => { setShowInfo(true); setFocusComments(true); }}
-              />
-            )}
           </div>
         </ContextMenuTrigger>
         <ContextMenuContent className="bg-popover border-border min-w-[160px]">
@@ -1845,18 +2041,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction ref={resetTrimAllButtonRef} onClick={async () => {
               setShowResetTrimAllConfirm(false);
-              try {
-                await fetch('/api/timeline-clips/apply-trim-to-instances', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ trackId, name: clip.name, trimStart: 0, trimEnd: null }),
-                });
-                queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-                queryClient.invalidateQueries({ queryKey: ['songs'] });
-                queryClient.invalidateQueries({ queryKey: ['activity'] });
-              } catch (err) {
-                console.error('Failed to reset trim on instances:', err);
-              }
+              await saveTrimOnInstances(0, null);
             }}>
               Reset All
             </AlertDialogAction>

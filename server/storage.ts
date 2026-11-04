@@ -30,7 +30,7 @@ import {
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 import { layoutTimeline, type TimelineLayout } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -45,6 +45,14 @@ export class LooseFileNotFoundError extends Error {
 // Thrown by setTimelineClipOffsets (and updateTimelineClipKeepingSpot) when the writes
 // would make two clips overlap on one track in one section — the transaction rolls
 // back and the route answers 409.
+// Thrown by writeTimelineClipTrim for trim values it won't write (the route answers 400).
+export class TrimValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TrimValidationError";
+  }
+}
+
 export class TimelineOverlapError extends Error {
   constructor(public trackId: string, public sectionName: string) {
     super(`Clips would overlap: ${trackId} / ${sectionName}`);
@@ -883,27 +891,6 @@ function songIdForTrack(trackId: string): string | undefined {
     .where(eq(instrumentTracks.id, trackId)).get()?.songId;
 }
 
-// Rewrites section_offset for every non-full-take clip in one track + section as the
-// running sum of trimmed lengths, in the order the timeline shows (offset, then rowid;
-// a NULL offset — not expected, every insert path sets one — goes last), closing any
-// gaps. Used only after a trim (the trim route and apply-trim-to-instances), which
-// changes the siblings after the trimmed clip; nothing else re-packs a section. Call
-// inside the transaction that wrote the trim.
-export function recomputeSectionOffsets(trackId: string, sectionName: string): void {
-  const rows = sqlite.prepare(`
-    SELECT id, duration, trim_start AS trimStart, trim_end AS trimEnd
-    FROM timeline_clips
-    WHERE track_id = ? AND section_name = ? AND is_full_take = 0
-    ORDER BY section_offset IS NULL, section_offset, rowid
-  `).all(trackId, sectionName) as { id: string; duration: number; trimStart: number; trimEnd: number | null }[];
-  const setOffset = sqlite.prepare("UPDATE timeline_clips SET section_offset = ? WHERE id = ?");
-  let offset = 0;
-  for (const c of rows) {
-    setOffset.run(offset, c.id);
-    offset += (c.trimEnd ?? c.duration) - c.trimStart;
-  }
-}
-
 // One track's clips in one section (non-full-take) as placement clips: offset and
 // trimmed length, as the database holds them. Reads on the shared connection, so it
 // sees uncommitted writes inside a transaction.
@@ -979,35 +966,130 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
   return appendOffset(sectionPlacementClips(trackId, sectionName));
 }
 
-// Writes a timeline clip's trim points. The one storage write for trimStart/trimEnd
-// shared by the trim route (PATCH /api/timeline-clips/:id/trim) and Replace's
-// cut-short below. Returns the updated row, or undefined if there's no such clip.
-export function writeTimelineClipTrim(clipId: string, trimStart: number, trimEnd: number | null): TimelineClip | undefined {
-  return db.update(timelineClips).set({ trimStart, trimEnd })
-    .where(eq(timelineClips.id, clipId)).returning().get();
+// Writes a timeline clip's trim points — the one write for trimStart/trimEnd on
+// timeline_clips (the trim route, apply/reset trim on all instances, Replace). A
+// sectioned clip's section_offset moves with its trimStart (new offset = old offset +
+// new trimStart − old trimStart), so the audio stays where it is in time and the left
+// edge moves; `keepOffset` (Replace: a different recording) leaves the offset as it is.
+// Nothing else moves and nothing is re-packed. Throws TrimValidationError unless
+// 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file) and the new
+// offset is ≥ 0, and TimelineOverlapError if the clip would overlap another clip on its
+// track in its section; nothing is written then. One transaction (a savepoint inside a
+// caller's). Returns the updated row, or undefined if there's no such clip.
+export function writeTimelineClipTrim(
+  clipId: string, trimStart: number, trimEnd: number | null, opts: { keepOffset?: boolean } = {},
+): TimelineClip | undefined {
+  return sqlite.transaction(() => {
+    const clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
+    if (!clip) return undefined;
+    const eps = PLACEMENT_EPSILON;
+    if (typeof trimStart !== "number" || !Number.isFinite(trimStart) || trimStart < 0) {
+      throw new TrimValidationError("trimStart must be a finite number of seconds, 0 or more");
+    }
+    if (trimEnd !== null && (typeof trimEnd !== "number" || !Number.isFinite(trimEnd))) {
+      throw new TrimValidationError("trimEnd must be a finite number of seconds or null");
+    }
+    if ((trimEnd ?? clip.duration) <= trimStart + eps) {
+      throw new TrimValidationError("trimStart must be before trimEnd");
+    }
+    if (trimEnd !== null && trimEnd > clip.duration + eps) {
+      throw new TrimValidationError("trimEnd can't be past the end of the audio");
+    }
+    const sectioned = !!clip.sectionName && !clip.isFullTake;
+    const oldOffset = clip.sectionOffset ?? 0;
+    let sectionOffset = clip.sectionOffset;
+    if (sectioned && !opts.keepOffset) {
+      const moved = oldOffset + (trimStart - clip.trimStart);
+      if (moved < -eps) throw new TrimValidationError("That trim would move the clip before the start of its section");
+      sectionOffset = Math.max(0, moved);
+    }
+    if (sectioned) {
+      const placed = toPlacementClip({ id: clip.id, sectionOffset, duration: clip.duration, trimStart, trimEnd });
+      const others = sectionPlacementClips(clip.trackId, clip.sectionName!).filter((c) => c.id !== clip.id);
+      if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, clip.sectionName!);
+    }
+    return db.update(timelineClips).set({ trimStart, trimEnd, sectionOffset })
+      .where(eq(timelineClips.id, clipId)).returning().get();
+  })();
+}
+
+export interface InstanceTrimResult {
+  id: string;
+  sectionName: string | null;
+  trimStart: number;
+  trimEnd: number | null;
+  sectionOffset: number | null;
+  clamped: boolean;   // got the closest allowed trim, not the one asked for
+  skipped: boolean;   // no room at all (stored clips already overlapping); left as it was
+}
+
+// Apply / reset trim on every instance of a clip (same track + name). Each instance
+// gets the same trim values; its offset moves with its own trimStart change, and each
+// is clamped at its own neighbours (clampTrim) — an instance that would overlap gets
+// the closest allowed trim. Instances are done in section, then offset order, each
+// against the database as the earlier ones left it. One transaction, every write
+// through writeTimelineClipTrim. The caller validates the values and ownership.
+export function applyTrimToInstances(
+  trackId: string, name: string, trimStart: number, trimEnd: number | null,
+): InstanceTrimResult[] {
+  return sqlite.transaction(() => {
+    const rows = db.select().from(timelineClips)
+      .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
+      .orderBy(asc(timelineClips.sectionName), asc(timelineClips.sectionOffset))
+      .all();
+    return rows.map((row): InstanceTrimResult => {
+      const sectioned = !!row.sectionName && !row.isFullTake;
+      const offset = row.sectionOffset ?? 0;
+      const nb = sectioned
+        ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id))
+        : null;
+      const r = clampTrim(
+        { offset, duration: row.duration, trimStart: row.trimStart, trimEnd: row.trimEnd },
+        { trimStart, trimEnd }, nb,
+      );
+      if (!r) {
+        return { id: row.id, sectionName: row.sectionName, trimStart: row.trimStart, trimEnd: row.trimEnd,
+          sectionOffset: row.sectionOffset, clamped: true, skipped: true };
+      }
+      const updated = writeTimelineClipTrim(row.id, r.trimStart, r.trimEnd)!;
+      return { id: row.id, sectionName: row.sectionName, trimStart: updated.trimStart, trimEnd: updated.trimEnd,
+        sectionOffset: updated.sectionOffset, clamped: r.clamped, skipped: false };
+    });
+  })();
 }
 
 // Replace (and any PATCH that changes a sectioned clip's length): writes the updates,
 // keeping the clip's section and section_offset. The clips after it never move. If its
 // new trimmed length would run into the next clip on its track in its section, it is
-// cut short to end exactly there (trimEnd, through writeTimelineClipTrim); the last
-// clip in a section is never cut — the section grows. One transaction; if the clip
-// still overlaps a sibling afterwards (only possible when an earlier clip already ran
-// past its start), TimelineOverlapError is thrown and nothing is written.
+// cut short to end exactly there; the last clip in a section is never cut — the
+// section grows. The trim (sent, or the cut) is written through writeTimelineClipTrim
+// with keepOffset. One transaction; if the clip still overlaps a sibling afterwards
+// (only possible when an earlier clip already ran past its start), TimelineOverlapError
+// is thrown, and bad trim values throw TrimValidationError; nothing is written then.
 export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<InsertTimelineClip>): TimelineClip | undefined {
   return sqlite.transaction(() => {
-    db.update(timelineClips).set(updates).where(eq(timelineClips.id, clipId)).run();
+    const { trimStart: sentStart, trimEnd: sentEnd, ...rest } = updates;
+    const sentTrim = "trimStart" in updates || "trimEnd" in updates;
+    if (Object.keys(rest).length > 0) db.update(timelineClips).set(rest).where(eq(timelineClips.id, clipId)).run();
     let clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
-    const sectionName = clip?.sectionName;
-    if (!clip || !sectionName || clip.isFullTake) return clip;
-    const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
-    const offset = clip.sectionOffset ?? 0;
-    const cutTo = trimEndBeforeNext(
-      { offset, duration: clip.duration, trimStart: clip.trimStart, trimEnd: clip.trimEnd }, others,
-    );
-    if (cutTo !== null) clip = writeTimelineClipTrim(clip.id, clip.trimStart, cutTo) ?? clip;
-    const placed = toPlacementClip(clip);
-    if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, sectionName);
+    if (!clip) return clip;
+    const trimStart = "trimStart" in updates ? (sentStart as number) : clip.trimStart;
+    let trimEnd = "trimEnd" in updates ? (sentEnd ?? null) : clip.trimEnd;
+    const sectionName = clip.sectionName;
+    let cutTo: number | null = null;
+    if (sectionName && !clip.isFullTake) {
+      const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
+      cutTo = trimEndBeforeNext(
+        { offset: clip.sectionOffset ?? 0, duration: clip.duration, trimStart, trimEnd }, others,
+      );
+      if (cutTo !== null) trimEnd = cutTo;
+    }
+    if (sentTrim || cutTo !== null) clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, { keepOffset: true }) ?? clip;
+    if (sectionName && !clip.isFullTake) {
+      const placed = toPlacementClip(clip);
+      const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
+      if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, sectionName);
+    }
     return clip;
   })();
 }

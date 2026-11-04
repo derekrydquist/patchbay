@@ -291,9 +291,8 @@ function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
 
 // Packs one track's clips in one section end to end: sectionOffset = the sum of the
 // trimmed lengths before it, in array order. Touches sectionOffset only — a clip's
-// position follows from the layout. Run only for a trim preview and a Media Bucket
-// gap-zone drop inside that section; removes, appends, Replace and clip drags leave
-// gaps as they are. Never on a sync or a section reorder. Other tracks and
+// position follows from the layout. Run only for a Media Bucket gap-zone drop inside
+// that section; trims, removes, appends, Replace and clip drags leave gaps as they are. Never on a sync or a section reorder. Other tracks and
 // sections are left exactly as they are.
 function packSectionOffsets(tracks: Track[], trackId: string, sectionName: string): Track[] {
   return tracks.map((track) => {
@@ -685,6 +684,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // timeline poll pauses meanwhile, so it can't put the old positions back on screen
   // before the save lands.
   const [clipOffsetSavesInFlight, setClipOffsetSavesInFlight] = useState(0);
+  // Trim drags and trim saves running (TimelineClip's 'trim-busy' events). The poll
+  // pauses for them too, so it can't snap a trimmed clip back mid-drag or before the
+  // save lands.
+  const [trimsBusy, setTrimsBusy] = useState(0);
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${songId}/timeline`],
     queryFn: async () => {
@@ -694,8 +697,18 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       // Response shape is { songName, tracks } — extract the array.
       return Array.isArray(body) ? body : body.tracks;
     },
-    refetchInterval: clipOffsetSavesInFlight > 0 ? false : 3000,
+    refetchInterval: clipOffsetSavesInFlight > 0 || trimsBusy > 0 ? false : 3000,
   });
+  useEffect(() => {
+    const onTrimBusy = (e: Event) => {
+      const delta = (e as CustomEvent<{ delta: 1 | -1 }>).detail.delta;
+      // A poll already on its way would bring back the old trim — drop it.
+      if (delta > 0) queryClient.cancelQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      setTrimsBusy((n) => Math.max(0, n + delta));
+    };
+    window.addEventListener('trim-busy', onTrimBusy);
+    return () => window.removeEventListener('trim-busy', onTrimBusy);
+  }, [queryClient, songId]);
 
   // Section order and base lengths (song_sections), polled with the timeline so a
   // bandmate's section reorder shows up. Paused while this browser's own reorder is
@@ -1013,21 +1026,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
   useEffect(() => {
     const handleTrimPreview = (e: any) => {
-      const { clipId, trimStart, trimEnd } = e.detail;
-      setTracks((prev) => {
-        const track = prev.find((t) => t.clips.some((c) => c.id === clipId));
-        const clip = track?.clips.find((c) => c.id === clipId);
-        if (!track || !clip) return prev;
-        const updated = prev.map((t) => t.id !== track.id ? t : {
-          ...t,
-          clips: t.clips.map((c) => (c.id === clipId ? { ...c, trimStart, trimEnd } : c)),
-        });
-        // Siblings after the trimmed clip shift; the trim route re-packs the same
-        // offsets on the server, so nothing is PATCHed here.
-        return clip.sectionName && !clip.isFullTake
-          ? packSectionOffsets(updated, track.id, clip.sectionName)
-          : updated;
-      });
+      const { clipId, trimStart, trimEnd, sectionOffset } = e.detail as {
+        clipId: string; trimStart: number; trimEnd: number | null; sectionOffset?: number;
+      };
+      // Only the trimmed clip changes: its trim, and for a sectioned clip the offset
+      // that moves with trimStart (TimelineClip clamps both at its neighbours). The
+      // neighbours never move and nothing is re-packed; the trim route saves it.
+      setTracks((prev) => prev.map((t) => !t.clips.some((c) => c.id === clipId) ? t : {
+        ...t,
+        clips: t.clips.map((c) => c.id !== clipId ? c : {
+          ...c,
+          trimStart,
+          trimEnd,
+          ...(sectionOffset !== undefined && c.sectionName && !c.isFullTake ? { sectionOffset } : {}),
+        }),
+      }));
     };
     window.addEventListener('trim-preview', handleTrimPreview);
     return () => window.removeEventListener('trim-preview', handleTrimPreview);

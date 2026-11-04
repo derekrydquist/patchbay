@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, type PlacementClip } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, type PlacementClip } from './timelinePlacement';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -313,5 +313,101 @@ describe('trimEndBeforeNext (Replace cut-short)', () => {
   });
   it('clips before it never count as the next clip', () => {
     expect(trimEndBeforeNext(at(5, 10), [clip('a', 0, 2)])).toBeNull();
+  });
+});
+
+describe('trimNeighbours', () => {
+  it('finds the end of the clip before and the start of the clip after', () => {
+    expect(trimNeighbours({ offset: 4 }, [clip('a', 0, 2), clip('b', 9, 1), clip('c', 7, 1)]))
+      .toEqual({ prevEnd: 2, nextStart: 7 });
+  });
+  it('no clip before → 0; no clip after → Infinity (the last clip)', () => {
+    expect(trimNeighbours({ offset: 0 }, [])).toEqual({ prevEnd: 0, nextStart: Infinity });
+  });
+});
+
+describe('clampTrim', () => {
+  // A: offset 4, 10 s file, trimmed 2–8 (6 s long, spans 4–10). Neighbours end at 3 and
+  // start at 12.
+  const A = { offset: 4, duration: 10, trimStart: 2, trimEnd: 8 };
+  const nb = { prevEnd: 3, nextStart: 12 };
+  const end = (r: { offset: number; trimStart: number; trimEnd: number | null }, duration = 10) =>
+    r.offset + (r.trimEnd ?? duration) - r.trimStart;
+
+  it('left trim in: the offset moves by the trimStart change; the end stays', () => {
+    const r = clampTrim(A, { trimStart: 3.5, trimEnd: 8 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 3.5, trimEnd: 8, offset: 5.5, clamped: false });
+    expect(end(r)).toBeCloseTo(10);
+  });
+
+  it('left untrim stops at the previous clip', () => {
+    // Asking for trimStart 0 would put the start at 2, inside the clip ending at 3.
+    const r = clampTrim(A, { trimStart: 0, trimEnd: 8 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 1, offset: 3, clamped: true });
+    expect(end(r)).toBeCloseTo(10);
+  });
+
+  it('left untrim stops at offset 0 when there is no previous clip (no pickups)', () => {
+    const r = clampTrim({ offset: 1, duration: 10, trimStart: 3, trimEnd: null }, { trimStart: 0, trimEnd: null }, { prevEnd: 0, nextStart: Infinity })!;
+    expect(r).toMatchObject({ trimStart: 2, offset: 0, clamped: true });
+  });
+
+  it('left untrim stops at trimStart 0', () => {
+    const r = clampTrim({ offset: 5, duration: 10, trimStart: 1, trimEnd: null }, { trimStart: -3, trimEnd: null }, { prevEnd: 0, nextStart: Infinity })!;
+    expect(r).toMatchObject({ trimStart: 0, offset: 4 });
+  });
+
+  it('left trim keeps the minimum length and never moves the right edge', () => {
+    const r = clampTrim(A, { trimStart: 9, trimEnd: 8 }, nb)!;
+    expect(r.trimStart).toBeCloseTo(8 - MIN_TRIM_LENGTH);
+    expect(r.trimEnd).toBe(8);
+    expect(end(r)).toBeCloseTo(10);
+  });
+
+  it('right edge stops at the next clip', () => {
+    const r = clampTrim({ ...A, trimEnd: 6 }, { trimStart: 2, trimEnd: 20 }, { prevEnd: 3, nextStart: 9 })!;
+    // Start 4, next clip at 9 → 5 s of room → trimEnd 7.
+    expect(r).toMatchObject({ trimStart: 2, trimEnd: 7, offset: 4, clamped: true });
+  });
+
+  it('right edge of the last clip goes to the end of the audio (no neighbour limit)', () => {
+    const r = clampTrim(A, { trimStart: 2, trimEnd: 50 }, { prevEnd: 3, nextStart: Infinity })!;
+    expect(r).toMatchObject({ trimStart: 2, trimEnd: null, offset: 4 });
+  });
+
+  it('right edge shortens to the minimum length, never moving the left edge', () => {
+    const r = clampTrim(A, { trimStart: 2, trimEnd: 0 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 2, offset: 4 });
+    expect(r.trimEnd).toBeCloseTo(2 + MIN_TRIM_LENGTH);
+  });
+
+  it('a whole-trim change (reset) is clamped on both edges', () => {
+    // Reset 2–8 → 0–null: the start would be 2 (prev ends at 3) → trimStart 1, offset 3;
+    // the file end then lands exactly at 12, the next clip.
+    const r = clampTrim(A, { trimStart: 0, trimEnd: null }, nb)!;
+    expect(r).toMatchObject({ trimStart: 1, offset: 3, trimEnd: null, clamped: true });
+    expect(end(r)).toBeCloseTo(12);
+  });
+
+  it('no neighbours (full take): only the file limits apply and the offset stays', () => {
+    expect(clampTrim(A, { trimStart: 0, trimEnd: null }, null)).toMatchObject({ trimStart: 0, trimEnd: null, offset: 4, clamped: false });
+  });
+
+  it('apply to instances: each instance is clamped at its own neighbours', () => {
+    const wanted = { trimStart: 1, trimEnd: 9 };
+    // Same 10 s file in three spots: lots of room, a tight previous clip, a tight next clip.
+    const free = clampTrim({ offset: 10, duration: 10, trimStart: 0, trimEnd: null }, wanted, { prevEnd: 0, nextStart: Infinity })!;
+    const tightPrev = clampTrim({ offset: 0, duration: 10, trimStart: 0, trimEnd: null }, wanted, { prevEnd: 0, nextStart: Infinity })!;
+    const tightNext = clampTrim({ offset: 2, duration: 10, trimStart: 2, trimEnd: 6 }, wanted, { prevEnd: 0, nextStart: 8 })!;
+    expect(free).toMatchObject({ trimStart: 1, trimEnd: 9, offset: 11, clamped: false });
+    // At offset 0 already: trimming in to 1 moves the start right to 1, which is allowed.
+    expect(tightPrev).toMatchObject({ trimStart: 1, trimEnd: 9, offset: 1, clamped: false });
+    // Offset 2 → 1 (trimStart 2 → 1), end must stay ≤ 8: trimEnd 1 + 7 = 8.
+    expect(tightNext).toMatchObject({ trimStart: 1, offset: 1, trimEnd: 8, clamped: true });
+    expect(end(tightNext)).toBeCloseTo(8);
+  });
+
+  it('no room at all → null', () => {
+    expect(clampTrim({ offset: 2, duration: 10, trimStart: 0, trimEnd: 4 }, { trimStart: 0, trimEnd: 4 }, { prevEnd: 6, nextStart: 2 })).toBeNull();
   });
 });

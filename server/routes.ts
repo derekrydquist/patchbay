@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, TrimValidationError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
@@ -1789,6 +1789,7 @@ export async function registerRoutes(
       if (err instanceof TimelineOverlapError) {
         return res.status(409).json({ message: "That would overlap another clip in this section." });
       }
+      if (err instanceof TrimValidationError) return res.status(400).json({ message: err.message });
       throw err;
     }
     if (!clip) return res.status(404).json({ message: "Clip not found" });
@@ -1962,17 +1963,23 @@ export async function registerRoutes(
     const clipId = req.params.id as string;
     const tclipSongId = timelineClipSongId(clipId);
     if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
-    const { trimStart, trimEnd } = req.body;
+    const { trimStart, trimEnd } = req.body ?? {};
     if (typeof trimStart !== 'number' || (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number')) {
       return res.status(400).json({ message: "trimStart must be a number; trimEnd must be a number or null" });
     }
-    // Trim and the section's sibling offsets change together (a trim moves every
-    // later clip in the section; clips are contiguous for now).
-    const clip = sqlite.transaction(() => {
-      const updated = writeTimelineClipTrim(clipId, trimStart, trimEnd ?? null);
-      if (updated?.sectionName && !updated.isFullTake) recomputeSectionOffsets(updated.trackId, updated.sectionName);
-      return updated;
-    })();
+    // Trim, and the clip's own section_offset moved by the trimStart change (the server
+    // works it out; an offset in the body is ignored). Neighbours never move; an
+    // overlap is refused (writeTimelineClipTrim).
+    let clip;
+    try {
+      clip = writeTimelineClipTrim(clipId, trimStart, trimEnd ?? null);
+    } catch (err) {
+      if (err instanceof TrimValidationError) return res.status(400).json({ message: err.message });
+      if (err instanceof TimelineOverlapError) {
+        return res.status(409).json({ message: "That trim would overlap another clip in this section." });
+      }
+      throw err;
+    }
     if (!clip) return res.status(404).json({ message: "Clip not found" });
 
     const trimActor = req.session.userId
@@ -1999,25 +2006,16 @@ export async function registerRoutes(
 
   app.post("/api/timeline-clips/apply-trim-to-instances", requireBand, async (req, res) => {
     const { trackId, name, trimStart, trimEnd } = req.body;
-    if (!trackId || !name || typeof trimStart !== 'number') {
-      return res.status(400).json({ message: "trackId, name, and trimStart are required" });
+    if (!trackId || !name || typeof trimStart !== 'number' || !Number.isFinite(trimStart) || trimStart < 0) {
+      return res.status(400).json({ message: "trackId, name, and trimStart (0 or more) are required" });
     }
-    if (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number') {
-      return res.status(400).json({ message: "trimEnd must be a number or null" });
+    if (trimEnd !== null && trimEnd !== undefined && (typeof trimEnd !== 'number' || !Number.isFinite(trimEnd) || trimEnd <= trimStart)) {
+      return res.status(400).json({ message: "trimEnd must be a number after trimStart, or null" });
     }
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
-    sqlite.transaction(() => {
-      const updated = db.update(timelineClips)
-        .set({ trimStart, trimEnd: trimEnd ?? null })
-        .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
-        .returning().all();
-      // Each touched section's later clips move — recompute their offsets too.
-      const sectionNames = new Set(
-        updated.filter((c) => c.sectionName && !c.isFullTake).map((c) => c.sectionName as string),
-      );
-      sectionNames.forEach((sectionName) => recomputeSectionOffsets(trackId, sectionName));
-    })();
+    // Each instance is clamped at its own neighbours; `instances` says which were.
+    const instances = applyTrimToInstances(trackId, name, trimStart, trimEnd ?? null);
 
     const applyTrimActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
@@ -2037,7 +2035,7 @@ export async function registerRoutes(
       }).catch(console.error);
     }
 
-    res.json({ ok: true });
+    res.json({ ok: true, instances });
   });
 
   app.get("/api/timeline-clips/:id/replacements", requireBand, async (req, res) => {
