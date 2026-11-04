@@ -149,6 +149,9 @@ interface ClipProps {
   instanceCount?: number;
   isFlash?: boolean;
   isSelected?: boolean;
+  // The clip being dragged: drawn above everything else on its row (and above its
+  // "picked up" layer and the landing outline in Track.tsx), slightly see-through.
+  isRaised?: boolean;
 }
 
 function InfoStat({ icon: Icon, label, value, mono }: { icon: any, label: string, value: string | number | undefined, mono?: boolean }) {
@@ -1000,7 +1003,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false }: ClipProps) {
+function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1359,7 +1362,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, 
     }
   };
 
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef } = useDraggable({
     id: clip.id,
     data: { clip: { ...clip, isFinal }, type: 'clip', trackId },
   });
@@ -1374,16 +1377,18 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, 
   const displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom;
 
   // Positioned on the whole track row (Track.tsx) at its layout start, so it can be
-  // drawn anywhere on the row. The drag transform is never applied: the source stays
-  // in place and dims while the DragOverlay ghost follows the pointer — translating it
-  // would slide it across the row and grow the timeline's scroll width.
+  // drawn anywhere on the row. The drag transform is never applied: while it's dragged,
+  // Timeline draws it at its preview position through clip.start instead.
   const positionStyle: React.CSSProperties = isOverlay ? { width: displayWidth } : {
     width: displayWidth,
     left: clip.start * zoom,
     top: 0,
     position: 'absolute',
-    // One above neighbouring clips while the landing glow plays, so it isn't covered.
-    zIndex: isFlash ? 2 : 1,
+    // Above neighbouring clips while the landing glow plays, so it isn't covered.
+    // While dragged it floats above the rest of its row — other clips (1–2), the row's
+    // drop border (10) and its own lift layer (11) — and under the landing outline (13).
+    zIndex: isRaised ? 12 : isFlash ? 2 : 1,
+    ...(isRaised ? { opacity: 0.85 } : {}),
     ...(trimEdge !== null || isTrimDragging ? { cursor: 'ew-resize' } : {}),
   };
 
@@ -1459,6 +1464,9 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, 
         <ContextMenuTrigger asChild>
           <div
             ref={combinedRef}
+            // Timeline's floating-clip loop finds the dragged clip by this and moves it
+            // with a transform (React never sets transform here).
+            data-timeline-clip={isOverlay ? undefined : clip.id}
             style={{ ...positionStyle, backgroundColor: clipBodyColor(trackColor) }}
             {...restListeners}
             {...attributes}
@@ -1495,8 +1503,7 @@ export function TimelineClip({ clip, isOverlay, zoom = 80, trackId, trackColor, 
             }}
             className={cn(
               "h-full rounded-md flex items-center overflow-hidden group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
-              isOverlay && "shadow-2xl scale-105 opacity-90",
-              !isOverlay && isDragging && "opacity-40"
+              isOverlay && "shadow-2xl scale-105 opacity-90"
             )}
           >
             {/* Track-colored border — a layer inside the clip's box, the same box and radius
@@ -2115,3 +2122,9 @@ export function BucketClip({ clip, trackId, trackName, trackColor, songId = 'pat
     </>
   );
 }
+
+// Memoized: a timeline row re-renders when any of its clips' preview positions change
+// during a drag, and the clips that didn't move have identical props (the same clip
+// object, primitives otherwise). Shallow prop comparison; a clip's own state, queries
+// (comment badge) and dnd-kit hooks still update it as before.
+export const TimelineClip = React.memo(TimelineClipComponent);

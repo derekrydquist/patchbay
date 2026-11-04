@@ -64,9 +64,17 @@ interface TrackProps {
   controlInteractionRef: React.RefObject<boolean>;
   bpm: number;
   timeSignature: string;
+  // The clip being dragged — drawn above the other clips on its row, "picked up".
+  raisedClipId?: string | null;
+  // Where the dragged clip will land (content px within the lane), for the gold
+  // landing outline. Only the dragged clip's row gets one.
+  landing?: { left: number; width: number } | null;
 }
 
-export function TimelineTrack({
+// Memoized: Timeline re-renders often during a drag (every change of the drag
+// preview), and only the dragged clip's row has new props then. Shallow prop
+// comparison — Timeline keeps every prop stable unless what it describes changed.
+export const TimelineTrack = React.memo(function TimelineTrack({
   track,
   sections,
   invalidSections,
@@ -82,6 +90,8 @@ export function TimelineTrack({
   controlInteractionRef,
   bpm,
   timeSignature,
+  raisedClipId,
+  landing,
 }: TrackProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -115,6 +125,7 @@ export function TimelineTrack({
   });
 
   const trackColor = trackDisplayColor(track);
+  const raisedClip = raisedClipId ? track.clips.find((c) => c.id === raisedClipId) : undefined;
   const isValidTarget = isDragging && !isInvalidDrop;
   const isInvalidTarget = isDragging && isInvalidDrop;
 
@@ -125,7 +136,10 @@ export function TimelineTrack({
   const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
 
   return (
-    <div className={cn('relative flex w-full h-16 bg-card/20 group', isInvalidTarget && 'cursor-not-allowed')}>
+    <div
+      data-timeline-track={track.id}
+      className={cn('relative flex w-full h-16 bg-card/20 group', isInvalidTarget && 'cursor-not-allowed')}
+    >
       {/* Gold border on the valid drop target — explicit inline positioning for scrollable container reliability */}
       {isValidTarget && (
         <div
@@ -300,6 +314,37 @@ export function TimelineTrack({
             />
           ))}
         </div>
+        {/* Timeline clip drag: the landing outline — a dashed gold border, no fill, so it
+            can't be mistaken for the solid gold selection box. Drawn above everything
+            on the row, the floating clip (12) included, so it stays visible when the
+            landing spot is right under the clip; still below other rows' veils (20),
+            insertion lines (29), the playhead (40) and the sticky panels (50). No text;
+            the same rectangle the clip takes on drop. */}
+        {landing && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute top-0 h-full rounded-md border-2 border-dashed border-primary"
+            style={{ left: landing.left, width: landing.width, zIndex: 13 }}
+          />
+        )}
+        {/* The floating clip's "picked up" look — a soft drop shadow. Its own layer,
+            never on the clip's root (flashGold animates the root's box-shadow; the
+            selection overlay sits inside it), drawn at the clip's stored spot and moved
+            with it every frame by Timeline (positionFloatingClip, data-clip-drag-lift),
+            right under the clip. No gold ring: it hid the landing outline. */}
+        {raisedClip && (
+          <div
+            aria-hidden
+            data-clip-drag-lift={raisedClip.id}
+            className="pointer-events-none absolute top-0 h-full rounded-md"
+            style={{
+              left: raisedClip.start * zoom,
+              width: ((raisedClip.trimEnd ?? raisedClip.duration) - (raisedClip.trimStart ?? 0)) * zoom,
+              zIndex: 11,
+              boxShadow: '0 10px 22px rgba(0,0,0,0.6)',
+            }}
+          />
+        )}
         {sections.flatMap((section) =>
           track.clips.filter((c) => !c.isFullTake && c.sectionName === section.name)
         ).map((clip) => (
@@ -313,6 +358,7 @@ export function TimelineTrack({
             instanceCount={track.clips.filter((c) => c.name === clip.name).length}
             isFlash={flashClipId === clip.id}
             isSelected={selectedClipId === clip.id}
+            isRaised={raisedClipId === clip.id}
           />
         ))}
         {track.clips.filter((c) => c.isFullTake).map((clip) => (
@@ -359,4 +405,4 @@ export function TimelineTrack({
       </AlertDialog>
     </div>
   );
-}
+});

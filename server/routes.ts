@@ -18,8 +18,9 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, moveSongSection, insertTimelineClipPlaced, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, recomputeSectionOffsets, getSongSections, computeSongLayout, sectionAppendOffset, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
+import { findOverlap, toPlacementClip } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -1636,8 +1637,86 @@ export async function registerRoutes(
     res.status(201).json(clip);
   });
 
+  // Many timeline clips' section offsets in one save — a clip drag that pushes others
+  // along, or a re-pack after an insert or remove (patchChangedOffsets in Timeline.tsx).
+  // Body: { clips: [{ id, sectionOffset }] }. Every id must be a sectioned (non-full-
+  // take) clip on this song, so in the session's band; any other id refuses the whole
+  // request (404). Offsets must be finite and ≥ 0 (no pickups yet). All writes go in
+  // one transaction, then every track + section touched is checked for overlapping
+  // clips (trimmed lengths) and the whole save rolls back with 409 if any overlap.
+  // One sort-only timeline-reordered feed row per request. Returns the updated clips.
+  app.put("/api/songs/:songId/timeline-clips/offsets", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const body = req.body?.clips;
+    if (!Array.isArray(body)) return res.status(400).json({ message: "clips must be an array" });
+    const updates: { id: string; sectionOffset: number }[] = [];
+    const seen = new Set<string>();
+    for (const item of body) {
+      const id = item?.id;
+      const sectionOffset = item?.sectionOffset;
+      if (typeof id !== 'string' || !id) return res.status(400).json({ message: "Every clip needs an id" });
+      if (seen.has(id)) return res.status(400).json({ message: "A clip appears more than once" });
+      if (typeof sectionOffset !== 'number' || !Number.isFinite(sectionOffset) || sectionOffset < 0) {
+        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+      }
+      seen.add(id);
+      updates.push({ id, sectionOffset });
+    }
+    if (updates.length === 0) return res.json([]);
+
+    const ids = updates.map((u) => u.id);
+    const rows = db.select({
+      id: timelineClips.id,
+      trackId: timelineClips.trackId,
+      sectionName: timelineClips.sectionName,
+      isFullTake: timelineClips.isFullTake,
+      songId: instrumentTracks.songId,
+      trackName: instrumentTracks.name,
+    })
+      .from(timelineClips)
+      .innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
+      .where(inArray(timelineClips.id, ids))
+      .all();
+    if (rows.length !== ids.length || rows.some((r) => r.songId !== songId)) {
+      return res.status(404).json({ message: "Not found" });
+    }
+    if (rows.some((r) => r.isFullTake || !r.sectionName)) {
+      return res.status(400).json({ message: "Only clips in a section have a section offset" });
+    }
+
+    let updated;
+    try {
+      updated = setTimelineClipOffsets(updates);
+    } catch (err) {
+      if (err instanceof TimelineOverlapError) {
+        const trackName = rows.find((r) => r.trackId === err.trackId)?.trackName ?? 'a track';
+        return res.status(409).json({ message: `Clips would overlap on ${trackName} › ${err.sectionName}.` });
+      }
+      throw err;
+    }
+
+    const actor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    const first = rows[0];
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'timeline-reordered',
+      description: `${actor} reordered clips on ${first.trackName}`,
+      timestamp: Date.now(),
+      instrument: first.trackName,
+      sectionName: first.sectionName ?? undefined,
+      author: actor,
+    }).catch(console.error);
+
+    res.json(updated);
+  });
+
   // Every field a client caller of PATCH /api/timeline-clips/:id sends:
-  //   patchChangedOffsets (Timeline.tsx)   sectionOffset
+  //   patchChangedOffsets (Timeline.tsx)   sectionOffset (now sent through PUT
+  //                                         /api/songs/:songId/timeline-clips/offsets)
   //   replace event handler (Timeline.tsx) name, type, color, src
   //   mark final (Clip.tsx)                 isFinal
   //   performReplace (Clip.tsx)            name, src, duration, type, color, trimStart,
@@ -1662,6 +1741,29 @@ export async function registerRoutes(
       : 'Someone';
     const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
+    // A new sectionOffset must be finite and ≥ 0 (no pickups yet), and must not make
+    // the clip overlap another clip on its track in its section (with the length this
+    // same request leaves it).
+    if ('sectionOffset' in clipUpdates) {
+      const offset = clipUpdates.sectionOffset;
+      if (typeof offset !== 'number' || !Number.isFinite(offset) || offset < 0) {
+        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+      }
+      if (existingClip.sectionName && !existingClip.isFullTake) {
+        const after = toPlacementClip({
+          id: existingClip.id,
+          sectionOffset: offset,
+          duration: typeof clipUpdates.duration === 'number' ? clipUpdates.duration : existingClip.duration,
+          trimStart: typeof clipUpdates.trimStart === 'number' ? clipUpdates.trimStart : existingClip.trimStart,
+          trimEnd: 'trimEnd' in clipUpdates ? (clipUpdates.trimEnd ?? null) : existingClip.trimEnd,
+        });
+        const siblings = sectionPlacementClips(existingClip.trackId, existingClip.sectionName)
+          .filter((c) => c.id !== existingClip.id);
+        if (findOverlap([...siblings, after])) {
+          return res.status(409).json({ message: "That position would overlap another clip in this section." });
+        }
+      }
+    }
     // Compute isReplace before the update so we can use existingClip.name in the isFinal block below.
     const isReplace = typeof clipUpdates.name === 'string' && typeof clipUpdates.src === 'string'
       && clipUpdates.name !== existingClip.name;

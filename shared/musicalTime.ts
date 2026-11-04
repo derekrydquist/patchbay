@@ -79,6 +79,39 @@ export function barStartSeconds(
   return (bar - 1) * beatsPerBar * secondsPerBeat(bpm);
 }
 
+// Snap grid for placing clips. 'bar' is the ruler's bar lines, counted from song time 0
+// (bar 1) — not from a section's start, which can fall mid-bar. '1/4' is one beat (the
+// ruler's and BeatGrid's beat: a quarter note, so 6/8 has six), '1/8' half a beat and
+// '1/16' a quarter of one.
+export type SnapUnit = 'bar' | '1/4' | '1/8' | '1/16';
+export const SNAP_UNITS: readonly SnapUnit[] = ['bar', '1/4', '1/8', '1/16'];
+
+export function snapGridSeconds(
+  unit: SnapUnit,
+  bpm: number | null | undefined,
+  timeSignature: string | null | undefined,
+): number {
+  const spb = secondsPerBeat(bpm);
+  switch (unit) {
+    case 'bar': return parseTimeSignature(timeSignature).beatsPerBar * spb;
+    case '1/4': return spb;
+    case '1/8': return spb / 2;
+    case '1/16': return spb / 4;
+  }
+}
+
+// `t` (song seconds) rounded to the nearest grid point; exactly halfway rounds later.
+export function snapTime(
+  t: number,
+  unit: SnapUnit,
+  bpm: number | null | undefined,
+  timeSignature: string | null | undefined,
+): number {
+  if (!Number.isFinite(t)) return t;
+  const grid = snapGridSeconds(unit, bpm, timeSignature);
+  return Math.round(t / grid) * grid;
+}
+
 export interface GridDensity {
   pxPerBeat: number;
   pxPerBar: number;

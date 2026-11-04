@@ -28,8 +28,9 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, effectiveLength, type TimelineLayout } from "@shared/timelineLayout";
+import { layoutTimeline, type TimelineLayout } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
+import { findOverlap, toPlacementClip, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -38,6 +39,15 @@ export class LooseFileNotFoundError extends Error {
   constructor(id: string) {
     super(`Loose file not found: ${id}`);
     this.name = "LooseFileNotFoundError";
+  }
+}
+
+// Thrown by setTimelineClipOffsets when the new offsets would make two clips overlap
+// on one track in one section — the transaction rolls back and the route answers 409.
+export class TimelineOverlapError extends Error {
+  constructor(public trackId: string, public sectionName: string) {
+    super(`Clips would overlap: ${trackId} / ${sectionName}`);
+    this.name = "TimelineOverlapError";
   }
 }
 
@@ -892,6 +902,41 @@ export function recomputeSectionOffsets(trackId: string, sectionName: string): v
   }
 }
 
+// One track's clips in one section (non-full-take) as placement clips: offset and
+// trimmed length, as the database holds them. Reads on the shared connection, so it
+// sees uncommitted writes inside a transaction.
+export function sectionPlacementClips(trackId: string, sectionName: string): PlacementClip[] {
+  return db.select().from(timelineClips)
+    .where(and(
+      eq(timelineClips.trackId, trackId),
+      eq(timelineClips.sectionName, sectionName),
+      eq(timelineClips.isFullTake, false),
+    ))
+    .all()
+    .map(toPlacementClip);
+}
+
+// Writes many timeline clips' section_offset in one transaction, then checks every
+// track + section it touched for overlapping clips (trimmed lengths, the database
+// state after the writes). An overlap throws TimelineOverlapError and nothing is
+// written. The caller checks ownership and that every id is a sectioned clip of one
+// song; offsets must already be finite and ≥ 0. Returns the updated rows.
+export function setTimelineClipOffsets(updates: { id: string; sectionOffset: number }[]): TimelineClip[] {
+  return db.transaction((tx) => {
+    const touched = new Map<string, { trackId: string; sectionName: string }>();
+    for (const u of updates) {
+      tx.update(timelineClips).set({ sectionOffset: u.sectionOffset }).where(eq(timelineClips.id, u.id)).run();
+      const row = tx.select({ trackId: timelineClips.trackId, sectionName: timelineClips.sectionName })
+        .from(timelineClips).where(eq(timelineClips.id, u.id)).get();
+      if (row?.sectionName) touched.set(`${row.trackId}\u0000${row.sectionName}`, { trackId: row.trackId, sectionName: row.sectionName });
+    }
+    for (const { trackId, sectionName } of Array.from(touched.values())) {
+      if (findOverlap(sectionPlacementClips(trackId, sectionName))) throw new TimelineOverlapError(trackId, sectionName);
+    }
+    return updates.map((u) => tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get()!);
+  });
+}
+
 // The song's timeline layout (shared/timelineLayout.ts), built from the same inputs
 // the Workspace timeline uses: song_sections rows (getSongSections), the timeline
 // clips on active tracks, and the song's bpm / time signature (null → 120 and 4/4
@@ -925,17 +970,13 @@ export function computeSongLayout(songId: string): TimelineLayout {
   });
 }
 
-// section_offset for a clip appended to the end of one track's section: the trimmed
-// lengths of the non-full-take clips already there, summed. Call before inserting.
+// section_offset for a clip appended to the end of one track's section: the end of
+// the furthest non-full-take clip already there (offset + trimmed length). For packed
+// clips that's the sum of their lengths; once clips can be placed freely, a gap must
+// not pull the new clip back over a later clip. Call before inserting.
 export function sectionAppendOffset(trackId: string, sectionName: string): number {
-  return db.select().from(timelineClips)
-    .where(and(
-      eq(timelineClips.trackId, trackId),
-      eq(timelineClips.sectionName, sectionName),
-      eq(timelineClips.isFullTake, false),
-    ))
-    .all()
-    .reduce((sum, c) => sum + effectiveLength(c), 0);
+  return sectionPlacementClips(trackId, sectionName)
+    .reduce((end, c) => Math.max(end, c.offset + c.length), 0);
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
