@@ -2287,13 +2287,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // versions) here, the same as SongHome and the Songs quick-browser.
     looseFileOrganizeDnd.handleDragStart(event);
     // Horizontal drop positions (and the new-section line) read this pointer source. A
-    // file from the Media Bucket (a version or a loose file) also edge-scrolls the
-    // timeline; timeline clip drags don't (step 4).
+    // file from the Media Bucket (a version or a loose file) and a timeline clip both
+    // edge-scroll the timeline with createEdgeScroller (dnd-kit's own auto-scroll is
+    // off for timeline clip drags — see dndAutoScroll).
     const startCoords = getEventCoordinates(event.activatorEvent) ?? { x: 0, y: 0 };
     const dragType = event.active.data.current?.type as string | undefined;
     if (dragType === BUCKET_CLIP_DRAG_TYPE || dragType === 'loose-file') {
       startFileEdgeScroll();
       startDragPointer(startCoords, { onMove: fileEdgeScrollMove, onScroll: nudgeDndCollision });
+    } else if (dragType === 'clip') {
+      startClipDrag(startCoords.x, event.active.data.current?.clip as Clip | undefined);
+      startFileEdgeScroll();
+      startDragPointer(startCoords, {
+        onMove: (e) => { readClipDragKeys(e); fileEdgeScrollMove(e); },
+        onScroll: nudgeDndCollision,
+      });
     } else {
       startDragPointer(startCoords);
     }
@@ -2450,9 +2458,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   };
   useEffect(() => () => stopDragPointer(), []);
 
-  // ── Edge scroll for file drags ─────────────────────────────────────────────
-  // A file dragged from the Media Bucket (a version or a loose file) scrolls the
-  // timeline horizontally with createEdgeScroller — the header drag's panel-aware edge
+  // ── Edge scroll for file and timeline clip drags ───────────────────────────
+  // A file dragged from the Media Bucket (a version or a loose file), or a timeline
+  // clip, scrolls the timeline horizontally with createEdgeScroller — the header drag's panel-aware edge
   // scroll, with the playhead's constants — but only while the pointer is over the
   // timeline's track area (below the ruler and header row). The minimum-drag distance
   // counts from where the pointer ENTERED the track area (the scroller restarts on
@@ -2504,13 +2512,84 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // synthetic pointermove at the last pointer position makes the PointerSensor
   // dispatch a move (same coordinates), so collisions re-run against the re-measured
   // rects. Our own capture listener sees it too, which is harmless: same position.
+  // The synthetic move carries the current Shift/Option state, so the timeline clip
+  // drag's modifier tracking (which reads every pointer event) never sees it as released.
   const nudgeDndCollision = () => {
     const x = dragClientXRef.current;
     const y = dragClientYRef.current;
     if (x === null || y === null) return;
-    document.dispatchEvent(new PointerEvent('pointermove', { clientX: x, clientY: y, bubbles: true, isPrimary: true }));
+    const keys = clipDragKeysRef.current;
+    document.dispatchEvent(new PointerEvent('pointermove', {
+      clientX: x, clientY: y, bubbles: true, isPrimary: true,
+      shiftKey: keys.shift, altKey: keys.option,
+    }));
   };
   useEffect(() => () => stopFileEdgeScroll(), []);
+
+  // ── Timeline clip drag: grab point and modifier keys ───────────────────────
+  // Set at a timeline clip's drag start, cleared on drop, cancel and unmount. Nothing
+  // places by these yet (free placement, step 4c, will):
+  //  - grab offset: where in the clip it was grabbed, in seconds from the clip's layout
+  //    start (pointer song time at drag start − clip start). clipDragDropStart() gives
+  //    the clip's start time if it were dropped now.
+  //  - startPointerTime: pointer song time at drag start (content position, so scroll
+  //    during the drag is counted once). handleDragEnd's "moved left" compares to it.
+  //  - Shift / Option: read from each pointer and key event itself (e.shiftKey /
+  //    e.altKey), never toggled, so switching apps mid-drag can't leave one stuck;
+  //    window blur clears both.
+  const clipDragRef = useRef<{ grabOffsetSec: number; startPointerTime: number } | null>(null);
+  const clipDragKeysRef = useRef<{ shift: boolean; option: boolean }>({ shift: false, option: false });
+  const clipDragKeyCleanupRef = useRef<(() => void) | null>(null);
+  const clipDragDropStart = (): number | null => {
+    const drag = clipDragRef.current;
+    const clientX = dragClientXRef.current;
+    if (!drag || clientX === null) return null;
+    return dragPointerTime(clientX) - drag.grabOffsetSec;
+  };
+  const clipDragModifiers = () => ({ ...clipDragKeysRef.current });  const readClipDragKeys = (e: { shiftKey: boolean; altKey: boolean }) => {
+    clipDragKeysRef.current = { shift: e.shiftKey, option: e.altKey };
+  };
+  const startClipDrag = (startClientX: number, clip: Clip | undefined) => {
+    stopClipDrag();
+    const startPointerTime = dragPointerTime(startClientX);
+    const layoutStart = clip ? tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)?.start : undefined;
+    clipDragRef.current = { startPointerTime, grabOffsetSec: startPointerTime - (layoutStart ?? startPointerTime) };
+    clipDragKeysRef.current = { shift: false, option: false };
+    // A key pressed or released under a still pointer: update the state and re-run the
+    // drag's preview step at the last pointer position (the indicators, and dnd-kit's
+    // collision pass via a synthetic move). Shift/Option key events stop here (capture
+    // phase) so the arrow-key selection handler never sees them mid-drag.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Shift' && e.key !== 'Alt') return;
+      e.stopPropagation();
+      const prev = clipDragKeysRef.current;
+      readClipDragKeys(e);
+      const next = clipDragKeysRef.current;
+      if (prev.shift === next.shift && prev.option === next.option) return;
+      recomputeDragIndicatorsRef.current();
+      nudgeDndCollision();
+    };
+    const onBlur = () => { clipDragKeysRef.current = { shift: false, option: false }; };
+    window.addEventListener('keydown', onKey, { capture: true });
+    window.addEventListener('keyup', onKey, { capture: true });
+    window.addEventListener('blur', onBlur);
+    clipDragKeyCleanupRef.current = () => {
+      window.removeEventListener('keydown', onKey, { capture: true });
+      window.removeEventListener('keyup', onKey, { capture: true });
+      window.removeEventListener('blur', onBlur);
+    };
+  };
+  const stopClipDrag = () => {
+    clipDragKeyCleanupRef.current?.();
+    clipDragKeyCleanupRef.current = null;
+    clipDragRef.current = null;
+    clipDragKeysRef.current = { shift: false, option: false };
+  };
+  useEffect(() => () => stopClipDrag(), []);
+  // dnd-kit's own auto-scroll stays on for Media Bucket drags (their columns rely on
+  // it) and is off for timeline clip drags, which edge-scroll with createEdgeScroller.
+  // A ref, not state, so it's already off on the drag's first frame.
+  const dndAutoScroll = React.useMemo(() => ({ canScroll: () => clipDragRef.current === null }), []);
 
   // ── New-section insertion line ─────────────────────────────────────────────
   // While a Media Bucket version whose section has no non-full-take clips on the
@@ -2750,6 +2829,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // The pointer's clientX at release, for every horizontal drop position below
     // (read before stopping the pointer source).
     const pointerClientX = dragClientXRef.current ?? getEventCoordinates(event.activatorEvent)?.x ?? 0;
+    // A timeline clip drag's pointer song time at drag start and at release, both in
+    // timeline content (scrollLeft included once) — read before the drag state clears.
+    const clipDragStartTime = clipDragRef.current?.startPointerTime ?? null;
+    const releasePointerTime = dragPointerTime(pointerClientX);
+    stopClipDrag();
     stopFileEdgeScroll();
     stopDragPointer();
 
@@ -2903,20 +2987,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const clipSection = clip.sectionName;
       if (!clipSection) { setInsertionPoint(null); return; }
 
-      // Bug 1: for leftward drops, confirm the cursor released within the timeline track area
-      // (right of the 256px instrument panel). Releases inside the panel are ignored.
-      // Known issue, left for step 4 (drag rebuild): a timeline clip lives inside the
-      // timeline scroller, so dnd-kit's delta.x here (and in the direction check below)
-      // also includes any timeline scroll since the drag started — it double-counts
-      // scroll. Section header and file drags use the pointer source instead.
-      if (event.delta.x < 0) {
-        const activatorEvent = event.activatorEvent;
-        const startX = 'clientX' in activatorEvent
-          ? (activatorEvent as MouseEvent).clientX
-          : (activatorEvent as TouchEvent).touches?.[0]?.clientX ?? 0;
-        const endX = startX + event.delta.x;
+      // "Moved left": the pointer's content position at release is left of where it was
+      // at drag start (both from the drag pointer source, scroll counted once — a drag
+      // that only edge-scrolls the timeline left counts). No movement → the end.
+      const movedLeft = clipDragStartTime !== null && releasePointerTime < clipDragStartTime;
+
+      // Bug 1: for leftward drops, confirm the cursor released within the timeline
+      // (the real pointer, not left of the timeline's left edge). Such releases are ignored.
+      if (movedLeft) {
         const trackAreaLeft = timelineRef.current?.getBoundingClientRect().left ?? 0;
-        if (endX < trackAreaLeft) {
+        if (pointerClientX < trackAreaLeft) {
           setInsertionPoint(null);
           return;
         }
@@ -2941,7 +3021,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         if (capturedPoint) {
           newIndex = capturedPoint.index;
           if (oldIndex !== -1 && oldIndex < newIndex) newIndex = Math.max(0, newIndex - 1);
-        } else if (event.delta.x < 0) {
+        } else if (movedLeft) {
           // Dragged leftward — move to beginning of section.
           newIndex = 0;
         } else {
@@ -3016,6 +3096,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const handleDragCancel = () => {
     setActiveDragData(null);
     clearNewSectionLine();
+    stopClipDrag();
     stopFileEdgeScroll();
     stopDragPointer();
     setInsertionPoint(null);
@@ -3422,6 +3503,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       sensors={sensors}
       collisionDetection={trackFirstCollision}
       measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+      autoScroll={dndAutoScroll}
       onDragStart={handleDragStart}
       onDragMove={handleDragMove}
       onDragEnd={handleDragEnd}
