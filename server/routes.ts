@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, TrimValidationError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
@@ -1789,6 +1789,7 @@ export async function registerRoutes(
       if (err instanceof TimelineOverlapError) {
         return res.status(409).json({ message: "That would overlap another clip in this section." });
       }
+      if (err instanceof ReplaceTooShortError) return res.status(409).json({ message: err.message });
       if (err instanceof TrimValidationError) return res.status(400).json({ message: err.message });
       throw err;
     }
@@ -2014,7 +2015,9 @@ export async function registerRoutes(
     }
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
-    // Each instance is clamped at its own neighbours; `instances` says which were.
+    // Each instance is clamped at its own neighbours and to the minimum clip length;
+    // `instances` says which were clamped and which were skipped (no room for the
+    // minimum without overlapping a neighbour), and the counts sum them up.
     const instances = applyTrimToInstances(trackId, name, trimStart, trimEnd ?? null);
 
     const applyTrimActor = req.session.userId
@@ -2035,7 +2038,12 @@ export async function registerRoutes(
       }).catch(console.error);
     }
 
-    res.json({ ok: true, instances });
+    res.json({
+      ok: true,
+      instances,
+      clamped: instances.filter((i) => i.clamped && !i.skipped).length,
+      skipped: instances.filter((i) => i.skipped).length,
+    });
   });
 
   app.get("/api/timeline-clips/:id/replacements", requireBand, async (req, res) => {

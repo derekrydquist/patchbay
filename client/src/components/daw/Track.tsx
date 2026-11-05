@@ -49,6 +49,212 @@ function SectionCell({ sectionDuration, zoom, insertionX }: SectionCellProps) {
   );
 }
 
+interface TrackHeaderProps {
+  trackId: string;
+  name: string;
+  type: Track['type'];
+  color: string;
+  muted: boolean;
+  solo: boolean;
+  volume: number;
+  pan: number;
+  songId: string;
+  controlInteractionRef: React.RefObject<boolean>;
+  onDeleteTrack?: (trackId: string) => void;
+}
+
+// The sticky track header (name, mute/solo, volume, pan, Remove Track). Its own memoized
+// component with primitive props, so it doesn't re-render when only the lane changes —
+// e.g. every row's section cells during a timeline clip drag that grows a section.
+const TrackHeader = React.memo(function TrackHeader({
+  trackId, name, type, color, muted, solo, volume, pan, songId, controlInteractionRef, onDeleteTrack,
+}: TrackHeaderProps) {
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
+  const queryClient = useQueryClient();
+
+  const patchPan = useMutation({
+    mutationFn: async (pan: number) => {
+      const r = await fetch(`/api/tracks/${trackId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pan }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}));
+        throw new Error(body.message ?? 'Failed to update pan');
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      queryClient.invalidateQueries({ queryKey: ['songs'] });
+      queryClient.invalidateQueries({ queryKey: ['activity'] });
+    },
+    onError: (err) => console.error('Failed to persist track pan:', err),
+  });
+
+  // Set the ref on pointerdown for any control that could produce a stray native click
+  // on the track header after drag-release. Cleared after the next rAF post-pointerup so
+  // the flag is still true when the resulting click event (wherever its target lands) fires.
+  const handleControlPointerDown = () => { controlInteractionRef.current = true; };
+  const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
+
+  return (
+    <>
+      {/* Track Header */}
+      <ContextMenu>
+      <ContextMenuTrigger asChild>
+      <div
+        className="w-64 shrink-0 bg-card border-r border-b border-border px-3 flex items-center gap-3 sticky left-0 z-50"
+        onClick={() =>
+          window.dispatchEvent(new CustomEvent('timeline-track-selected', { detail: { trackId } }))
+        }
+      >
+        <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: color }} />
+
+        <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
+          {type === 'vocal' ? (
+            <Mic size={14} className="text-muted-foreground" />
+          ) : type === 'instrument' ? (
+            <Activity size={14} className="text-muted-foreground" />
+          ) : (
+            <Headphones size={14} className="text-muted-foreground" />
+          )}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <span className="font-heading font-bold uppercase tracking-wider text-[11px] truncate text-foreground block">
+            {name}
+          </span>
+          <div className="flex items-center gap-2 mt-0.5">
+            <div className="flex gap-0.5">
+              <button
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent('toggle-track-mute', { detail: { trackId } }));
+                }}
+                className={cn(
+                  'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
+                  muted && 'bg-destructive text-destructive-foreground border-destructive'
+                )}
+              >
+                M
+              </button>
+              <button
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent('toggle-track-solo', { detail: { trackId } }));
+                }}
+                className={cn(
+                  'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
+                  solo && 'bg-primary text-primary-foreground border-primary'
+                )}
+              >
+                S
+              </button>
+            </div>
+            <div
+              onPointerDown={handleControlPointerDown}
+              onPointerUp={handleControlPointerUp}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Slider
+                value={[volume ?? 80]}
+                onValueChange={([val]) =>
+                  window.dispatchEvent(
+                    new CustomEvent('update-track-volume', { detail: { trackId: trackId, volume: val } })
+                  )
+                }
+                max={100}
+                step={1}
+                className="w-16 h-1"
+                title={`Volume: ${volume ?? 80}`}
+              />
+            </div>
+            <div className="flex rounded border border-border overflow-hidden">
+              <button
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => { e.stopPropagation(); patchPan.mutate(-65); }}
+                className={cn(
+                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold border-r border-border hover:border-primary hover:text-primary transition-colors',
+                  pan === -65 && 'bg-primary text-primary-foreground border-primary'
+                )}
+              >
+                L
+              </button>
+              <button
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => { e.stopPropagation(); patchPan.mutate(0); }}
+                className={cn(
+                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold border-r border-border hover:border-primary hover:text-primary transition-colors',
+                  pan === 0 && 'bg-primary text-primary-foreground border-primary'
+                )}
+              >
+                C
+              </button>
+              <button
+                onPointerDown={handleControlPointerDown}
+                onPointerUp={handleControlPointerUp}
+                onClick={(e) => { e.stopPropagation(); patchPan.mutate(65); }}
+                className={cn(
+                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
+                  pan === 65 && 'bg-primary text-primary-foreground border-primary'
+                )}
+              >
+                R
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="bg-popover border-border">
+        <ContextMenuItem
+          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
+          onClick={() => setShowDeleteConfirm(true)}
+        >
+          Remove Track
+        </ContextMenuItem>
+      </ContextMenuContent>
+      </ContextMenu>
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent
+          className="bg-[#0c0c0e] border-border"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            removeTrackButtonRef.current?.focus();
+          }}
+          onKeyDown={trapDialogTab}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Track</AlertDialogTitle>
+            <AlertDialogDescription>
+              Removing this track will delete it from the project and permanently delete any files uploaded to it. Would you like to proceed?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              ref={removeTrackButtonRef}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => { onDeleteTrack?.(trackId); setShowDeleteConfirm(false); }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+});
+
 interface TrackProps {
   track: Track;
   sections: SectionInfo[];
@@ -94,31 +300,6 @@ export const TimelineTrack = React.memo(function TimelineTrack({
   raisedClipId,
   landing,
 }: TrackProps) {
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const removeTrackButtonRef = useRef<HTMLButtonElement | null>(null);
-  const queryClient = useQueryClient();
-
-  const patchPan = useMutation({
-    mutationFn: async (pan: number) => {
-      const r = await fetch(`/api/tracks/${track.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pan }),
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => ({}));
-        throw new Error(body.message ?? 'Failed to update pan');
-      }
-      return r.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
-      queryClient.invalidateQueries({ queryKey: ['songs'] });
-      queryClient.invalidateQueries({ queryKey: ['activity'] });
-    },
-    onError: (err) => console.error('Failed to persist track pan:', err),
-  });
-
   const { setNodeRef } = useDroppable({
     id: track.id,
     data: { trackId: track.id, type: 'track' },
@@ -129,12 +310,6 @@ export const TimelineTrack = React.memo(function TimelineTrack({
   const raisedClip = raisedClipId ? track.clips.find((c) => c.id === raisedClipId) : undefined;
   const isValidTarget = isDragging && !isInvalidDrop;
   const isInvalidTarget = isDragging && isInvalidDrop;
-
-  // Set the ref on pointerdown for any control that could produce a stray native click
-  // on the track header after drag-release. Cleared after the next rAF post-pointerup so
-  // the flag is still true when the resulting click event (wherever its target lands) fires.
-  const handleControlPointerDown = () => { controlInteractionRef.current = true; };
-  const handleControlPointerUp = () => { requestAnimationFrame(() => { controlInteractionRef.current = false; }); };
 
   return (
     <div
@@ -171,128 +346,19 @@ export const TimelineTrack = React.memo(function TimelineTrack({
         />
       )}
 
-      {/* Track Header */}
-      <ContextMenu>
-      <ContextMenuTrigger asChild>
-      <div
-        className="w-64 shrink-0 bg-card border-r border-b border-border px-3 flex items-center gap-3 sticky left-0 z-50"
-        onClick={() =>
-          window.dispatchEvent(new CustomEvent('timeline-track-selected', { detail: { trackId: track.id } }))
-        }
-      >
-        <div className="w-1 h-full absolute left-0 top-0 bottom-0" style={{ backgroundColor: track.color }} />
-
-        <div className="w-8 h-8 rounded bg-muted flex items-center justify-center shrink-0">
-          {track.type === 'vocal' ? (
-            <Mic size={14} className="text-muted-foreground" />
-          ) : track.type === 'instrument' ? (
-            <Activity size={14} className="text-muted-foreground" />
-          ) : (
-            <Headphones size={14} className="text-muted-foreground" />
-          )}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <span className="font-heading font-bold uppercase tracking-wider text-[11px] truncate text-foreground block">
-            {track.name}
-          </span>
-          <div className="flex items-center gap-2 mt-0.5">
-            <div className="flex gap-0.5">
-              <button
-                onPointerDown={handleControlPointerDown}
-                onPointerUp={handleControlPointerUp}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  window.dispatchEvent(new CustomEvent('toggle-track-mute', { detail: { trackId: track.id } }));
-                }}
-                className={cn(
-                  'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
-                  track.muted && 'bg-destructive text-destructive-foreground border-destructive'
-                )}
-              >
-                M
-              </button>
-              <button
-                onPointerDown={handleControlPointerDown}
-                onPointerUp={handleControlPointerUp}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  window.dispatchEvent(new CustomEvent('toggle-track-solo', { detail: { trackId: track.id } }));
-                }}
-                className={cn(
-                  'text-[9px] w-4 h-4 rounded border border-border flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
-                  track.solo && 'bg-primary text-primary-foreground border-primary'
-                )}
-              >
-                S
-              </button>
-            </div>
-            <div
-              onPointerDown={handleControlPointerDown}
-              onPointerUp={handleControlPointerUp}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <Slider
-                value={[track.volume ?? 80]}
-                onValueChange={([val]) =>
-                  window.dispatchEvent(
-                    new CustomEvent('update-track-volume', { detail: { trackId: track.id, volume: val } })
-                  )
-                }
-                max={100}
-                step={1}
-                className="w-16 h-1"
-                title={`Volume: ${track.volume ?? 80}`}
-              />
-            </div>
-            <div className="flex rounded border border-border overflow-hidden">
-              <button
-                onPointerDown={handleControlPointerDown}
-                onPointerUp={handleControlPointerUp}
-                onClick={(e) => { e.stopPropagation(); patchPan.mutate(-65); }}
-                className={cn(
-                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold border-r border-border hover:border-primary hover:text-primary transition-colors',
-                  track.pan === -65 && 'bg-primary text-primary-foreground border-primary'
-                )}
-              >
-                L
-              </button>
-              <button
-                onPointerDown={handleControlPointerDown}
-                onPointerUp={handleControlPointerUp}
-                onClick={(e) => { e.stopPropagation(); patchPan.mutate(0); }}
-                className={cn(
-                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold border-r border-border hover:border-primary hover:text-primary transition-colors',
-                  track.pan === 0 && 'bg-primary text-primary-foreground border-primary'
-                )}
-              >
-                C
-              </button>
-              <button
-                onPointerDown={handleControlPointerDown}
-                onPointerUp={handleControlPointerUp}
-                onClick={(e) => { e.stopPropagation(); patchPan.mutate(65); }}
-                className={cn(
-                  'text-[9px] w-4 h-4 flex items-center justify-center font-bold hover:border-primary hover:text-primary transition-colors',
-                  track.pan === 65 && 'bg-primary text-primary-foreground border-primary'
-                )}
-              >
-                R
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-      </ContextMenuTrigger>
-      <ContextMenuContent className="bg-popover border-border">
-        <ContextMenuItem
-          className="text-red-400 focus:text-red-400 focus:bg-red-400/10 text-xs"
-          onClick={() => setShowDeleteConfirm(true)}
-        >
-          Remove Track
-        </ContextMenuItem>
-      </ContextMenuContent>
-      </ContextMenu>
+      <TrackHeader
+        trackId={track.id}
+        name={track.name}
+        type={track.type}
+        color={track.color}
+        muted={track.muted}
+        solo={track.solo}
+        volume={track.volume}
+        pan={track.pan}
+        songId={songId}
+        controlInteractionRef={controlInteractionRef}
+        onDeleteTrack={onDeleteTrack}
+      />
 
       {/* Lane — the full row is the droppable target. Section cells are the background;
           clips are drawn on top at row level, each at its layout start (clip.start, from
@@ -389,33 +455,6 @@ export const TimelineTrack = React.memo(function TimelineTrack({
         ))}
       </div>
 
-      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
-        <AlertDialogContent
-          className="bg-[#0c0c0e] border-border"
-          onOpenAutoFocus={(e) => {
-            e.preventDefault();
-            removeTrackButtonRef.current?.focus();
-          }}
-          onKeyDown={trapDialogTab}
-        >
-          <AlertDialogHeader>
-            <AlertDialogTitle className="font-heading uppercase tracking-wider">Remove Track</AlertDialogTitle>
-            <AlertDialogDescription>
-              Removing this track will delete it from the project and permanently delete any files uploaded to it. Would you like to proceed?
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              ref={removeTrackButtonRef}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              onClick={() => { onDeleteTrack?.(track.id); setShowDeleteConfirm(false); }}
-            >
-              Remove
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 });

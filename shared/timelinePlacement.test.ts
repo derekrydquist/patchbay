@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, type PlacementClip } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, type PlacementClip } from './timelinePlacement';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -409,5 +409,36 @@ describe('clampTrim', () => {
 
   it('no room at all → null', () => {
     expect(clampTrim({ offset: 2, duration: 10, trimStart: 0, trimEnd: 4 }, { trimStart: 0, trimEnd: 4 }, { prevEnd: 6, nextStart: 2 })).toBeNull();
+  });
+});
+
+describe('minimum clip length (minTrimLength)', () => {
+  it('is 0.5 s, or the whole file when the file is shorter', () => {
+    expect(MIN_TRIM_LENGTH).toBe(0.5);
+    expect(minTrimLength(10)).toBe(0.5);
+    expect(minTrimLength(0.3)).toBeCloseTo(0.3);
+    expect(minTrimLength(0)).toBe(0);
+  });
+
+  it('a file shorter than 0.5 s stays trimmable: it keeps its full length', () => {
+    const short = { offset: 2, duration: 0.3, trimStart: 0, trimEnd: null };
+    // Trimming it in from either side can't shorten it below its own length.
+    expect(clampTrim(short, { trimStart: 0.2, trimEnd: null }, { prevEnd: 0, nextStart: Infinity }))
+      .toMatchObject({ trimStart: 0, trimEnd: null, offset: 2 });
+    expect(clampTrim(short, { trimStart: 0, trimEnd: 0.1 }, { prevEnd: 0, nextStart: Infinity }))
+      .toMatchObject({ trimStart: 0, trimEnd: null, offset: 2 });
+  });
+
+  it('an instance with less room than the minimum between its neighbours → null (skipped)', () => {
+    // The instance sits at offset 4 with its previous clip ending at 4 and the next one
+    // starting at 4.3: trimming it to 1–9 can only leave 0.3 s, under the minimum.
+    expect(clampTrim({ offset: 4, duration: 10, trimStart: 0, trimEnd: 0.3 }, { trimStart: 1, trimEnd: 9 }, { prevEnd: 4, nextStart: 4.3 }))
+      .toBeNull();
+  });
+
+  it('an instance with exactly the minimum room is clamped to it, not skipped', () => {
+    const r = clampTrim({ offset: 4, duration: 10, trimStart: 0, trimEnd: 0.5 }, { trimStart: 0, trimEnd: 9 }, { prevEnd: 4, nextStart: 4.5 })!;
+    expect(r).toMatchObject({ trimStart: 0, offset: 4, clamped: true });
+    expect(r.trimEnd).toBeCloseTo(0.5);
   });
 });

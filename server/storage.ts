@@ -30,7 +30,7 @@ import {
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 import { layoutTimeline, type TimelineLayout } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -50,6 +50,16 @@ export class TrimValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TrimValidationError";
+  }
+}
+
+// Thrown by updateTimelineClipKeepingSpot when Replace would have to cut the new
+// version shorter than the minimum clip length to fit before the next clip (the route
+// answers 409; nothing is written).
+export class ReplaceTooShortError extends Error {
+  constructor() {
+    super(`There isn't room for that version here: it would have to be cut shorter than ${MIN_TRIM_LENGTH} s to fit before the next clip.`);
+    this.name = "ReplaceTooShortError";
   }
 }
 
@@ -973,7 +983,8 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
 // edge moves; `keepOffset` (Replace: a different recording) leaves the offset as it is.
 // Nothing else moves and nothing is re-packed. Throws TrimValidationError unless
 // 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file) and the new
-// offset is ≥ 0, and TimelineOverlapError if the clip would overlap another clip on its
+// offset is ≥ 0 and the clip stays at least minTrimLength long (0.5 s, or the whole
+// file when it's shorter), and TimelineOverlapError if the clip would overlap another clip on its
 // track in its section; nothing is written then. One transaction (a savepoint inside a
 // caller's). Returns the updated row, or undefined if there's no such clip.
 export function writeTimelineClipTrim(
@@ -994,6 +1005,11 @@ export function writeTimelineClipTrim(
     }
     if (trimEnd !== null && trimEnd > clip.duration + eps) {
       throw new TrimValidationError("trimEnd can't be past the end of the audio");
+    }
+    if ((trimEnd ?? clip.duration) - trimStart < minTrimLength(clip.duration) - eps) {
+      throw new TrimValidationError(clip.duration < MIN_TRIM_LENGTH
+        ? "This file is shorter than 0.5 s, so it can't be trimmed"
+        : `A clip can't be trimmed shorter than ${MIN_TRIM_LENGTH} s`);
     }
     const sectioned = !!clip.sectionName && !clip.isFullTake;
     const oldOffset = clip.sectionOffset ?? 0;
@@ -1026,7 +1042,9 @@ export interface InstanceTrimResult {
 // Apply / reset trim on every instance of a clip (same track + name). Each instance
 // gets the same trim values; its offset moves with its own trimStart change, and each
 // is clamped at its own neighbours (clampTrim) — an instance that would overlap gets
-// the closest allowed trim. Instances are done in section, then offset order, each
+// the closest allowed trim. An instance whose neighbours leave less room than the
+// minimum clip length (clampTrim returns null) is skipped and left as it was — never an
+// overlap. Instances are done in section, then offset order, each
 // against the database as the earlier ones left it. One transaction, every write
 // through writeTimelineClipTrim. The caller validates the values and ownership.
 export function applyTrimToInstances(
@@ -1062,7 +1080,8 @@ export function applyTrimToInstances(
 // keeping the clip's section and section_offset. The clips after it never move. If its
 // new trimmed length would run into the next clip on its track in its section, it is
 // cut short to end exactly there; the last clip in a section is never cut — the
-// section grows. The trim (sent, or the cut) is written through writeTimelineClipTrim
+// section grows. If the cut would leave it shorter than the minimum clip length,
+// ReplaceTooShortError is thrown instead. The trim (sent, or the cut) is written through writeTimelineClipTrim
 // with keepOffset. One transaction; if the clip still overlaps a sibling afterwards
 // (only possible when an earlier clip already ran past its start), TimelineOverlapError
 // is thrown, and bad trim values throw TrimValidationError; nothing is written then.
@@ -1082,7 +1101,12 @@ export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<I
       cutTo = trimEndBeforeNext(
         { offset: clip.sectionOffset ?? 0, duration: clip.duration, trimStart, trimEnd }, others,
       );
-      if (cutTo !== null) trimEnd = cutTo;
+      if (cutTo !== null) {
+        // The space before the next clip is shorter than the minimum: refuse the
+        // Replace (the transaction rolls back the fields written above).
+        if (cutTo - trimStart < minTrimLength(clip.duration) - PLACEMENT_EPSILON) throw new ReplaceTooShortError();
+        trimEnd = cutTo;
+      }
     }
     if (sentTrim || cutTo !== null) clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, { keepOffset: true }) ?? clip;
     if (sectionName && !clip.isFullTake) {

@@ -48,7 +48,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
-import { clampTrim, type TrimNeighbours } from '@shared/timelinePlacement';
+import { clampTrim, minTrimLength, type TrimNeighbours } from '@shared/timelinePlacement';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
 // loose_file_comments rows, which differ only in their parent-id column.
@@ -1308,8 +1308,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     }));
   };
 
-  // Saves a trim. The server moves the offset with trimStart itself. The timeline poll
-  // stays paused until the save and the refetch after it are done.
+  // Saves a trim. The server moves the offset with trimStart itself. Both timeline polls
+  // stay paused until the save and the refetch after it are done.
   const patchTrim = async (newTrimStart: number, newTrimEnd: number | null) => {
     signalTrimBusy(1);
     try {
@@ -1329,16 +1329,17 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       console.error('Failed to patch trim:', err);
       toast({ title: "Couldn't trim the clip", description: (err as Error).message, variant: 'destructive' });
     } finally {
-      signalTrimBusy(-1);
       // Brings back the server's trim and offsets (the saved ones, or the old ones after
-      // a failure).
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      // a failure); the polls resume only once that refetch is done.
+      await queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] }).catch(() => {});
+      signalTrimBusy(-1);
     }
   };
 
   // One trim drag on either edge. Free movement (no snap). Both edges stop at the
   // neighbouring clips (clampTrim); the left edge moves the clip's start with the audio.
-  // Neighbours never move. Escape cancels: the clip goes back and nothing is saved.
+  // Neighbours never move. Escape or the window losing focus cancels: the clip goes back
+  // and nothing is saved.
   const startTrimDrag = (e: React.PointerEvent, edge: 'left' | 'right') => {
     if (isOverlay) return;
     e.preventDefault();
@@ -1362,7 +1363,13 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', cancel);
       setIsTrimDragging(false);
+    };
+    const cancel = () => {
+      finish();
+      showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
+      signalTrimBusy(-1);
     };
     const onUp = () => {
       finish();
@@ -1380,14 +1387,13 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       if (keyE.key !== 'Escape') return;
       keyE.preventDefault();
       keyE.stopPropagation();
-      finish();
-      showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
-      signalTrimBusy(-1);
+      cancel();
     };
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', cancel);
   };
 
   // A whole-trim change from a menu or the detected-trim Apply: the closest allowed trim
@@ -1445,11 +1451,12 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       }
     }
 
-    // Enforce minimum effective duration of 0.5s
-    if (detectedEnd - detectedStart < 0.5) {
+    // At least the minimum clip length (shared with the trim route).
+    const minLength = minTrimLength(clip.duration);
+    if (detectedEnd - detectedStart < minLength) {
       const mid = (detectedStart + detectedEnd) / 2;
-      detectedStart = Math.max(0, mid - 0.25);
-      detectedEnd = Math.min(clip.duration, mid + 0.25);
+      detectedStart = Math.max(0, Math.min(mid - minLength / 2, clip.duration - minLength));
+      detectedEnd = detectedStart + minLength;
     }
 
     setDetectedTrim({ trimStart: detectedStart, trimEnd: detectedEnd });
@@ -1464,7 +1471,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
 
   // Apply / reset trim on every instance of this clip on its track. The server clamps
   // each instance at its own neighbours and says which it clamped (not shown). The
-  // timeline poll stays paused until the save is done.
+  // timeline polls stay paused until the save and the refetch after it are done.
   const saveTrimOnInstances = async (newTrimStart: number, newTrimEnd: number | null) => {
     signalTrimBusy(1);
     try {
@@ -1483,8 +1490,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       console.error('Failed to save trim on instances:', err);
       toast({ title: "Couldn't trim the clips", description: (err as Error).message, variant: 'destructive' });
     } finally {
+      await queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] }).catch(() => {});
       signalTrimBusy(-1);
-      queryClient.invalidateQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
     }
   };
 
@@ -1598,6 +1605,15 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
         queryClient.invalidateQueries({ queryKey: ['final-clips', songId] });
         queryClient.invalidateQueries({ queryKey: ['activity'] });
         queryClient.invalidateQueries({ queryKey: ['songs'] });
+      } else {
+        // e.g. 409: no room before the next clip for the minimum clip length. Nothing
+        // changed on the server, so nothing changes on screen either.
+        const body = await res.json().catch(() => null);
+        toast({
+          title: "Couldn't replace the clip",
+          description: body?.message ?? `Replace failed (${res.status})`,
+          variant: 'destructive',
+        });
       }
     } catch (err) {
       console.error('Failed to replace clip:', err);

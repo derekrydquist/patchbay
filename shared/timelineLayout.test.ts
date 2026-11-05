@@ -102,3 +102,55 @@ describe('layoutTimeline', () => {
     expect(layout.timelineEnd).toBe(4);
   });
 });
+
+// A timeline clip drag's preview layout: the same layoutTimeline, run on the stored clips
+// with the preview's offsets swapped in (Timeline's clipDragLayout).
+describe('drag preview layouts', () => {
+  // 120 bpm, 4/4: one beat = 0.5 s. Verse (middle) holds v1 0–2 and v2 2–4 on t1;
+  // Intro before it and Chorus after it hold clips on two tracks.
+  const sections = [
+    { name: 'Intro', sortOrder: 0, baseLength: null },
+    { name: 'Verse', sortOrder: 1, baseLength: null },
+    { name: 'Chorus', sortOrder: 2, baseLength: null },
+  ];
+  const stored = [
+    clip({ id: 'i1', sectionName: 'Intro', duration: 2 }),
+    clip({ id: 'v1', sectionName: 'Verse', sectionOffset: 0, duration: 2 }),
+    clip({ id: 'v2', sectionName: 'Verse', sectionOffset: 2, duration: 2 }),
+    clip({ id: 'c1', trackId: 't1', sectionName: 'Chorus', sectionOffset: 0, duration: 2 }),
+    clip({ id: 'c2', trackId: 't2', sectionName: 'Chorus', sectionOffset: 1, duration: 2 }),
+  ];
+  const run = (offsets: Record<string, number>) => layoutTimeline({
+    sections,
+    clips: stored.map((c) => (c.id in offsets ? { ...c, sectionOffset: offsets[c.id] } : c)),
+    bpm: 120,
+    timeSignature: '4/4',
+  });
+  const base = run({});
+  const verse = (l: ReturnType<typeof run>) => l.sections.find((s) => s.name === 'Verse')!;
+
+  it('a clip dragged past its section end grows the section', () => {
+    expect(verse(base).length).toBeCloseTo(4);
+    const grown = run({ v2: 5.2 }); // ends at 7.2 → rounded up to 7.5
+    expect(verse(grown).length).toBeCloseTo(7.5);
+    expect(verse(grown).start).toBeCloseTo(verse(base).start); // earlier sections never move
+  });
+
+  it("the section's last clip dragged earlier shrinks it", () => {
+    // The preview layout just takes the offsets it's given (overlap is placeInGap's
+    // job): v2 at 0.5 → the section needs only max(0 + 2, 0.5 + 2) = 2.5 s, not 4.
+    const shrunk = run({ v2: 0.5 });
+    expect(verse(shrunk).length).toBeCloseTo(2.5);
+  });
+
+  it('later sections move by the same amount on every track', () => {
+    const grown = run({ v2: 5.2 });
+    const shift = verse(grown).length - verse(base).length;
+    expect(shift).toBeCloseTo(3.5);
+    for (const id of ['c1', 'c2']) {
+      expect(grown.clipStarts.get(id)! - base.clipStarts.get(id)!).toBeCloseTo(shift);
+    }
+    expect(grown.clipStarts.get('i1')).toBeCloseTo(base.clipStarts.get('i1')!);
+    expect(grown.timelineEnd - base.timelineEnd).toBeCloseTo(shift);
+  });
+});

@@ -52,7 +52,7 @@ import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
-import { DEFAULT_BPM, snapTime } from '@/lib/musical-time';
+import { DEFAULT_BPM, snapTime, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
 import { placeInGap, toPlacementClip, appendOffset, PLACEMENT_EPSILON } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
@@ -570,6 +570,27 @@ const TRACK_ROW_HEIGHT_PX = 64;
 // <body> with position: fixed, and placed imperatively by the drag pointer source
 // (Timeline's positionSectionDragTag), so following the pointer never re-renders the
 // timeline. Hidden until it has been placed once.
+// The dark veil a timeline clip drag puts over everything but its focus range: two
+// boxes, one left of litLeft and one right of litRight (content px), never catching the
+// pointer. Used twice — in the track rows and in the section header row.
+function ClipDragFocusVeil({ litLeft, litRight, top, height, zIndex }: {
+  litLeft: number;
+  litRight: number;
+  top: number;
+  height: number | string;
+  zIndex: number;
+}) {
+  const veil = 'absolute pointer-events-none bg-[#09090b]/55';
+  return (
+    <>
+      {litLeft > TRACK_PANEL_WIDTH && (
+        <div aria-hidden className={veil} style={{ left: TRACK_PANEL_WIDTH, width: litLeft - TRACK_PANEL_WIDTH, top, height, zIndex }} />
+      )}
+      <div aria-hidden className={veil} style={{ left: litRight, right: 0, top, height, zIndex }} />
+    </>
+  );
+}
+
 function SectionDragTag({ name, tagRef }: { name: string; tagRef: (node: HTMLDivElement | null) => void }) {
   return createPortal(
     <div
@@ -680,14 +701,24 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // Keeps the TimelineClip comment badges current (one observer for the whole timeline).
   useLiveClipCommentSummary(songId);
 
-  // Clip-position saves from a timeline clip drag still waiting for the server. The
-  // timeline poll pauses meanwhile, so it can't put the old positions back on screen
-  // before the save lands.
-  const [clipOffsetSavesInFlight, setClipOffsetSavesInFlight] = useState(0);
-  // Trim drags and trim saves running (TimelineClip's 'trim-busy' events). The poll
-  // pauses for them too, so it can't snap a trimmed clip back mid-drag or before the
+  // Timeline clip drags running, and their position saves (until the refetch after the
+  // save is done) — see takeClipDragHold. Both polls (timeline clips and song
+  // sections) pause meanwhile, so one can't put the old positions or section lengths
+  // back on screen mid-drag or before the save lands.
+  const [clipDragsBusy, setClipDragsBusy] = useState(0);
+  // Trim drags and trim saves running (TimelineClip's 'trim-busy' events). Both polls
+  // pause for them too, so they can't snap a trimmed clip back mid-drag or before the
   // save lands.
   const [trimsBusy, setTrimsBusy] = useState(0);
+  const timelineEditBusy = clipDragsBusy > 0 || trimsBusy > 0;
+  // A poll response already on its way when a drag or trim starts would bring back the
+  // old state — drop it (both polls).
+  const dropPollsInFlight = () => {
+    queryClient.cancelQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+    queryClient.cancelQueries({ queryKey: songSectionsKey(songId) });
+  };
+  const dropPollsInFlightRef = useRef(dropPollsInFlight);
+  dropPollsInFlightRef.current = dropPollsInFlight;
   const { data: apiTracks } = useQuery<ApiTrack[]>({
     queryKey: [`/api/songs/${songId}/timeline`],
     queryFn: async () => {
@@ -697,13 +728,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       // Response shape is { songName, tracks } — extract the array.
       return Array.isArray(body) ? body : body.tracks;
     },
-    refetchInterval: clipOffsetSavesInFlight > 0 || trimsBusy > 0 ? false : 3000,
+    refetchInterval: timelineEditBusy ? false : 3000,
   });
   useEffect(() => {
     const onTrimBusy = (e: Event) => {
       const delta = (e as CustomEvent<{ delta: 1 | -1 }>).detail.delta;
       // A poll already on its way would bring back the old trim — drop it.
-      if (delta > 0) queryClient.cancelQueries({ queryKey: [`/api/songs/${songId}/timeline`] });
+      if (delta > 0) dropPollsInFlightRef.current();
       setTrimsBusy((n) => Math.max(0, n + delta));
     };
     window.addEventListener('trim-busy', onTrimBusy);
@@ -720,7 +751,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const { data: songSections } = useQuery<SongSectionRow[]>({
     queryKey: songSectionsKey(songId),
     queryFn: () => fetchSongSections(songId),
-    refetchInterval: sectionOrderSaving || firstClipPostsInFlight > 0 ? false : 3000,
+    refetchInterval: sectionOrderSaving || firstClipPostsInFlight > 0 || timelineEditBusy ? false : 3000,
   });
   const sections = songSections ?? EMPTY_SECTIONS;
 
@@ -753,6 +784,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     [layout]
   );
   const endOfTimeline = layout.timelineEnd;
+  // The content's right end as last rendered (contentEnd below), for the edge-scroll cap.
+  const contentEndRef = useRef(endOfTimeline);
 
   useEffect(() => { tracksRef.current = tracks; }, [tracks]);
 
@@ -2259,8 +2292,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       : 0;
     const scroller = createEdgeScroller({
       getEl: () => timelineRef.current,
+      // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
       rightScrollCap: (el) => Math.max(0, Math.min(
-        endOfTimeline * zoom - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
+        contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
         el.scrollWidth - el.clientWidth,
       )),
       onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
@@ -2525,8 +2559,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     fileDragInTrackAreaRef.current = false;
     fileEdgeScrollerRef.current = createEdgeScroller({
       getEl: () => timelineRef.current,
+      // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
       rightScrollCap: (el) => Math.max(0, Math.min(
-        endOfTimeline * zoom - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
+        contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
         el.scrollWidth - el.clientWidth,
       )),
       onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
@@ -2588,6 +2623,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   //    e.altKey), never toggled, so switching apps mid-drag can't leave one stuck;
   //    window blur clears both. Shift places freely (no snap) for this drag.
   const clipDragRef = useRef<{ grabOffsetSec: number; clipId: string; trackId: string } | null>(null);
+  // The widest content end (seconds) the drag's preview layout has reached — see
+  // contentEnd in the render.
+  const clipDragMaxEndRef = useRef(0);
   const clipDragKeysRef = useRef<{ shift: boolean; option: boolean }>({ shift: false, option: false });
   const clipDragKeyCleanupRef = useRef<(() => void) | null>(null);
   const clipDragDropStart = (): number | null => {
@@ -2600,8 +2638,32 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const readClipDragKeys = (e: { shiftKey: boolean; altKey: boolean }) => {
     clipDragKeysRef.current = { shift: e.shiftKey, option: e.altKey };
   };
+  // The polls' hold for one timeline clip drag: taken when the drag starts (any poll
+  // response already on its way is dropped), and released exactly once — when the
+  // drag ends with nothing to save (Esc, blur, a release that changes nothing), or
+  // after its save and the refetch after it, whether the save worked or not.
+  const clipDragHoldRef = useRef(false);
+  const holdPollsForClipDrag = () => {
+    if (clipDragHoldRef.current) return;
+    clipDragHoldRef.current = true;
+    setClipDragsBusy((n) => n + 1);
+    dropPollsInFlight();
+  };
+  const takeClipDragHold = (): (() => void) => {
+    if (!clipDragHoldRef.current) return () => {};
+    clipDragHoldRef.current = false;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      setClipDragsBusy((n) => Math.max(0, n - 1));
+    };
+  };
   const startClipDrag = (startClientX: number, clip: Clip, trackId: string) => {
     stopClipDrag();
+    takeClipDragHold()();
+    holdPollsForClipDrag();
+    clipDragMaxEndRef.current = layout.timelineEnd;
     const startPointerTime = dragPointerTime(startClientX);
     const layoutStart = tracks.flatMap((t) => t.clips).find((c) => c.id === clip.id)?.start;
     clipDragRef.current = {
@@ -2624,10 +2686,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       recomputeDragIndicatorsRef.current();
       nudgeDndCollision();
     };
+    // Losing focus (switching apps) cancels the drag, like Esc: the pointer's release
+    // may never reach this window. dnd-kit's pointer sensor cancels on a window
+    // 'visibilitychange' event, which runs handleDragCancel.
     const onBlur = () => {
       clipDragKeysRef.current = { shift: false, option: false };
       clipDragCursorStyleRef.current?.remove();
       clipDragCursorStyleRef.current = null;
+      if (clipDragRef.current) window.dispatchEvent(new Event('visibilitychange'));
     };
     // The closed grabbing hand everywhere on the page for the length of the drag
     // (elements' own cursors would otherwise win), until drop, Esc or blur.
@@ -2790,7 +2856,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
   // Drop: applies the placement at once (no packing) and saves the clips that moved in
   // one batch request. If the save fails, every one of them goes back where it was.
-  const commitClipDragPlacement = (placement: ClipDragPlacement) => {
+  // `releaseHold` (the drag's poll hold) runs once the save and the refetch after it
+  // are done, or at once when there is nothing to save.
+  const commitClipDragPlacement = (placement: ClipDragPlacement, releaseHold: () => void) => {
     const track = trackState.find((t) => t.id === placement.trackId);
     if (!track) return;
     const before = new Map(track.clips
@@ -2799,7 +2867,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const changes = Array.from(placement.offsets)
       .filter(([id, offset]) => before.has(id) && Math.abs(offset - before.get(id)!) > PLACEMENT_EPSILON)
       .map(([id, sectionOffset]) => ({ id, sectionOffset }));
-    if (changes.length === 0) return;
+    if (changes.length === 0) { releaseHold(); return; }
     const applyOffsets = (offsets: Map<string, number>) => setTracks((prev) => prev.map((t) =>
       t.id !== placement.trackId ? t : {
         ...t,
@@ -2807,7 +2875,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       }));
     applyOffsets(new Map(changes.map((c) => [c.id, c.sectionOffset])));
     const timelineKey = [`/api/songs/${songId}/timeline`];
-    setClipOffsetSavesInFlight((n) => n + 1);
     queryClient.cancelQueries({ queryKey: timelineKey });
     saveClipOffsets(songId, changes)
       .then(() => Promise.all([
@@ -2821,8 +2888,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         toast({ title: "Couldn't move the clip", description: err.message, variant: 'destructive' });
       })
       .finally(() => {
-        setClipOffsetSavesInFlight((n) => n - 1);
-        queryClient.invalidateQueries({ queryKey: timelineKey });
+        queryClient.invalidateQueries({ queryKey: timelineKey }).catch(() => {}).finally(releaseHold);
       });
   };
   // dnd-kit's own auto-scroll stays on for Media Bucket drags (their columns rely on
@@ -3079,6 +3145,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // release position, before the drag state clears. null = released off its own
     // track row (or nothing to place), so nothing moves.
     const clipPlacement = clipDragRef.current ? computeClipDragPlacement() : null;
+    const releaseClipDragHold = takeClipDragHold();
     stopClipDrag();
     stopFileEdgeScroll();
     stopDragPointer();
@@ -3098,9 +3165,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // by `over`, so the drop always matches the preview. No change → nothing is saved.
     if (activeType === 'clip') {
       setInsertionPoint(null);
-      if (clipPlacement?.changed) commitClipDragPlacement(clipPlacement);
+      if (clipPlacement?.changed) commitClipDragPlacement(clipPlacement, releaseClipDragHold);
+      else releaseClipDragHold();
       return;
     }
+    releaseClipDragHold(); // a no-op: only timeline clip drags take the hold
 
     if (!over) { setInsertionPoint(null); return; }
     const clip = (active.data.current?.clip ?? dragData?.clip) as Clip;
@@ -3235,6 +3304,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const handleDragCancel = () => {
     setActiveDragData(null);
     clearNewSectionLine();
+    takeClipDragHold()();
     stopClipDrag();
     stopFileEdgeScroll();
     stopDragPointer();
@@ -3632,54 +3702,105 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   };
 
   // ── Render inputs for the memoized track rows ───────────────────────────────
-  // While a timeline clip is dragged, only its own row changes: the clip floats with the
-  // pointer (positionFloatingClip), the dashed outline marks where it lands, and the
-  // clips it would push are drawn at their pushed spots (dragPreviewTrack). Every other
-  // clip stays at its stored spot.
+  // While a timeline clip is dragged, the clip floats with the pointer
+  // (positionFloatingClip) and the timeline is drawn from the drag's preview layout:
+  // the shared layoutTimeline run on the stored clips plus the preview's offsets (the
+  // dragged clip's landing offset and every clip it pushes). So the home section grows
+  // or shrinks live, and every later section slides with everything in it, on all
+  // tracks together. It lives only in drag-preview state, never in the tracks, and is
+  // recomputed only when the placement changes (clipDragPreview is replaced only then).
+  // null = the stored layout: no drag, the pointer off the clip's row (a release there
+  // changes nothing), or a placement that changes nothing.
+  const clipDragLayout = React.useMemo(() => {
+    const preview = clipDragPreview;
+    if (!preview || !preview.changed) return null;
+    const previewTracks = trackState.map((t) => t.id !== preview.trackId ? t : {
+      ...t,
+      clips: t.clips.map((c) => preview.offsets.has(c.id) ? { ...c, sectionOffset: preview.offsets.get(c.id)! } : c),
+    });
+    return deriveLayout(previewTracks, sections, bpm, timeSignature);
+  }, [clipDragPreview, trackState, sections, bpm, timeSignature]);
+  const displayLayout = clipDragLayout ?? layout;
+  // The tracks as drawn: every clip at its preview-layout start, except the dragged
+  // clip (it floats). A track none of whose clips move keeps its object, so its
+  // memoized row re-renders only if the sections themselves change; a clip that doesn't
+  // move keeps its object too.
+  const draggedClipId = activeDragData?.type === 'clip' ? activeDragData.clip.id : null;
+  const displayTracks = React.useMemo(() => {
+    if (!clipDragLayout) return tracks;
+    return tracks.map((track) => {
+      let moved = false;
+      const clips = track.clips.map((c) => {
+        if (c.id === draggedClipId) return c;
+        const start = clipDragLayout.clipStarts.get(c.id);
+        if (start === undefined || start === c.start) return c;
+        moved = true;
+        return { ...c, start };
+      });
+      return moved ? { ...track, clips } : track;
+    });
+  }, [tracks, clipDragLayout, draggedClipId]);
+  // Section geometry as drawn (headers, section cells). Kept as the same array while
+  // nothing about it changes, so the rows' `sections` prop stays stable.
+  const displaySectionsRef = useRef<SectionInfo[]>(sectionLayout);
+  const displaySectionLayout = React.useMemo<SectionInfo[]>(() => {
+    if (!clipDragLayout) return sectionLayout;
+    const next = clipDragLayout.sections.map((sec) => ({ name: sec.name, start: sec.start, duration: sec.length }));
+    const prev = displaySectionsRef.current;
+    const same = prev.length === next.length
+      && prev.every((p, i) => p.name === next[i].name && p.start === next[i].start && p.duration === next[i].duration);
+    return same ? prev : next;
+  }, [clipDragLayout, sectionLayout]);
+  displaySectionsRef.current = displaySectionLayout;
+  // The content's right end (seconds) for the scrollable width, the ruler and the
+  // edge-scroll cap. During a timeline clip drag it follows the preview layout but
+  // never shrinks (the widest seen since the drag started), so the browser never
+  // clamps scrollLeft and nothing jumps under the pointer; after the drag it is the
+  // stored layout's end again.
+  let contentEnd = endOfTimeline;
+  if (draggedClipId) {
+    clipDragMaxEndRef.current = Math.max(clipDragMaxEndRef.current, displayLayout.timelineEnd, endOfTimeline);
+    contentEnd = clipDragMaxEndRef.current;
+  }
+  contentEndRef.current = contentEnd;
   // The dashed landing outline: where the dragged clip lands if released now, or its
   // own spot when nothing would change (or the pointer is off its row); trimmed length
   // wide.
-  const draggedClipId = activeDragData?.type === 'clip' ? activeDragData.clip.id : null;
   const clipDragLanding = React.useMemo(() => {
     if (!draggedClipId) return null;
     const track = tracks.find((t) => t.clips.some((c) => c.id === draggedClipId));
     const clip = track?.clips.find((c) => c.id === draggedClipId);
     if (!track || !clip) return null;
-    const preview = clipDragPreview?.trackId === track.id ? clipDragPreview : null;
-    const previewOffset = preview?.offsets.get(clip.id);
-    const start = previewOffset !== undefined ? preview!.sectionStart + previewOffset : clip.start;
+    const start = clipDragLayout?.clipStarts.get(clip.id) ?? clip.start;
     return {
       trackId: track.id,
       clipId: clip.id,
       rect: { left: start * zoom, width: clipLength(clip) * zoom },
     };
-  }, [draggedClipId, tracks, clipDragPreview, zoom]);
-  // The dragged clip's row with the clips it would push drawn at their pushed spots
-  // (the preview's offsets, the dragged clip itself excluded — it floats). Only those
-  // clip objects are replaced; the rest keep their identity, so only the pushed clips
-  // re-render. null = nothing is pushed; the row renders `tracks` as it is.
-  const dragPreviewTrack = React.useMemo(() => {
-    const preview = clipDragPreview;
-    if (!preview || preview.offsets.size < 2) return null;
-    const track = tracks.find((t) => t.id === preview.trackId);
-    if (!track) return null;
-    return {
-      ...track,
-      clips: track.clips.map((c) => {
-        const offset = c.id === preview.draggedId ? undefined : preview.offsets.get(c.id);
-        return offset === undefined ? c : { ...c, start: preview.sectionStart + offset };
-      }),
-    };
-  }, [clipDragPreview, tracks]);
+  }, [draggedClipId, tracks, clipDragLayout, zoom]);
+  // Focus during a timeline clip drag: the home section (at its live length) and the
+  // one bar before it (pickup reach) stay bright; everything else in the track rows and
+  // the section header row is dimmed by a veil (ClipDragFocusVeil). Song seconds.
+  const clipDragFocus = React.useMemo(() => {
+    if (!draggedClipId) return null;
+    const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === draggedClipId);
+    if (!clip || clip.isFullTake || !clip.sectionName) return null;
+    const home = displayLayout.sections.find((sec) => sec.name === clip.sectionName);
+    if (!home) return null;
+    const bar = snapGridSeconds('bar', bpm, timeSignature);
+    return { litStart: Math.max(0, home.start - bar), litEnd: home.end };
+  }, [draggedClipId, tracks, displayLayout, bpm, timeSignature]);
   // Sections a drag's clip can't land in — the same for every row, so one shared set.
   const draggedSectionName = activeDragData?.clip?.sectionName;
+  // Keyed on the names only, so a drag that just changes section lengths keeps the set.
+  const sectionNamesKey = sectionLayout.map((s) => s.name).join('\u0000');
   const invalidSectionsDuringDrag = React.useMemo(() => {
     const set = new Set<string>();
     if (draggedSectionName) {
       sectionLayout.forEach(({ name }) => { if (name !== draggedSectionName) set.add(name); });
     }
     return set;
-  }, [draggedSectionName, sectionLayout]);
+  }, [draggedSectionName, sectionNamesKey]);
 
   // The Media Bucket doesn't take part in a timeline clip drag, so during one it keeps
   // the element from the drag's start: React skips a subtree whose element is the
@@ -3804,7 +3925,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             <div
               className="relative"
               style={{
-                width: `${Math.max(endOfTimeline + 15, 0) * zoom + 256}px`,
+                width: `${Math.max(contentEnd + 15, 0) * zoom + 256}px`,
                 minWidth: `${TRACK_PANEL_WIDTH + 100 * zoom}px`,
               }}
               onContextMenu={handleTimelineContextMenu}
@@ -3853,7 +3974,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 bpm={bpm}
                 timeSignature={timeSignature}
                 // Same span as the content div's width/minWidth below, minus the track panel.
-                contentSeconds={Math.max(endOfTimeline + 15, 100)}
+                contentSeconds={Math.max(contentEnd + 15, 100)}
               />
               {/* Ruler spacer — same pattern: content-root sibling, overlaps the 32px ruler.
                   It also holds the snap controls, in the corner above the track names
@@ -3955,10 +4076,22 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                       cover its border-b, which otherwise left a 1px gap at y 62. Over the
                       track panel it sits under the z-50 section-band spacer. */}
                   <div ref={setHeaderLineLayer} className="absolute inset-x-0 top-0 -bottom-px z-10 pointer-events-none" />
+                  {/* Timeline clip drag focus: dims every header but the home section's
+                      (and the bar before it). Below the line layer; over the track
+                      panel the z-50 section-band spacer covers it. */}
+                  {clipDragFocus && (
+                    <ClipDragFocusVeil
+                      litLeft={TRACK_PANEL_WIDTH + clipDragFocus.litStart * zoom}
+                      litRight={TRACK_PANEL_WIDTH + clipDragFocus.litEnd * zoom}
+                      top={0}
+                      height="100%"
+                      zIndex={5}
+                    />
+                  )}
                   {/* Layout placeholder — z-50 cover provided by content-root sibling spacer below */}
                   <div className="w-64 shrink-0 bg-card border-r border-border h-full" />
                   <div className="flex relative">
-                    {sectionLayout.map((sec) => (
+                    {displaySectionLayout.map((sec) => (
                       <DraggableSectionHeader
                         key={sec.name}
                         name={sec.name}
@@ -3973,7 +4106,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
               {/* Section-band spacer — content-root sibling, overlaps the 24px section band. */}
               <div className="-mt-6 sticky left-0 top-[38px] z-50 w-64 h-6 bg-card pointer-events-none" />
 
-              {tracks.map((track) => {
+              {/* Timeline clip drag focus, track rows: z-9 — above the clips (1–2), below
+                  the valid-track border (10), the floating clip (11–12), the landing
+                  outline (13), the wrong-track veil (20), insertion lines (29), the sticky
+                  ruler/header row (30), the playhead (40) and the track panel (50). */}
+              {clipDragFocus && (
+                <ClipDragFocusVeil
+                  litLeft={TRACK_PANEL_WIDTH + clipDragFocus.litStart * zoom}
+                  litRight={TRACK_PANEL_WIDTH + clipDragFocus.litEnd * zoom}
+                  top={TRACK_ROWS_TOP_PX}
+                  height={TRACK_ROW_HEIGHT_PX * tracks.length}
+                  zIndex={9}
+                />
+              )}
+
+              {displayTracks.map((track) => {
                 let isInvalidDrop = false;
 
                 if (activeDragData) {
@@ -4004,18 +4151,19 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 }
 
                 // TimelineTrack is memoized: every prop below is stable from render to
-                // render unless what it describes changed (tracks, the shared
-                // invalidSectionsDuringDrag set, clipDragLanding, dragPreviewTrack, the
-                // useCallback'd handleDeleteTrack), so a drag preview change re-renders
-                // only the dragged clip's row.
+                // render unless what it describes changed (displayTracks, the shared
+                // displaySectionLayout and invalidSectionsDuringDrag, clipDragLanding,
+                // the useCallback'd handleDeleteTrack). A drag preview change that
+                // moves no section re-renders only the dragged clip's row; one that
+                // does re-renders every row (their cells and later clips move).
                 const isDragRow = clipDragLanding?.trackId === track.id;
                 return (
                   <TimelineTrack
                     key={track.id}
-                    track={dragPreviewTrack?.id === track.id ? dragPreviewTrack : track}
+                    track={track}
                     raisedClipId={isDragRow ? clipDragLanding.clipId : null}
                     landing={isDragRow ? clipDragLanding.rect : null}
-                    sections={sectionLayout}
+                    sections={displaySectionLayout}
                     invalidSections={invalidSectionsDuringDrag}
                     isInvalidDrop={isInvalidDrop}
                     isDragging={activeDragData !== null}

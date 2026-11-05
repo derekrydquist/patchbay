@@ -133,8 +133,16 @@ export function trimEndBeforeNext(
 // section. The left edge moves the clip's start with the audio: when trimStart changes
 // by d, the clip's offset changes by the same d, so the audio stays where it is in time.
 
-// The shortest a trim can make a clip, in seconds.
+// The shortest a clip on the timeline can be, in seconds — the client's live trim, the
+// trim route (writeTimelineClipTrim), apply/reset trim on all instances and Replace's
+// cut-short all use it, through minTrimLength.
 export const MIN_TRIM_LENGTH = 0.5;
+
+// The minimum length for one clip: MIN_TRIM_LENGTH, or the file's full duration when the
+// file itself is shorter (so a very short file stays trimmable and savable).
+export function minTrimLength(duration: number): number {
+  return Math.min(MIN_TRIM_LENGTH, Math.max(0, duration));
+}
 
 // What limits a clip's edges: the end of the clip before it (0 when there is none) and
 // the start of the clip after it (Infinity when it's the last clip there — its right
@@ -175,12 +183,13 @@ export interface TrimResult {
 // means no neighbours and no offset limits (a legacy full take, or an unsectioned
 // clip): only 0 ≤ trimStart and trimEnd ≤ duration apply, and the offset stays.
 //   Left edge:  trimStart ≥ 0; the new offset ≥ 0 (no pickups yet) and ≥ the previous
-//               clip's end; the clip stays at least MIN_TRIM_LENGTH long.
+//               clip's end; the clip stays at least minTrimLength long.
 //   Right edge: trimEnd ≤ duration; the clip's end ≤ the next clip's start (no limit
-//               for the last clip); at least MIN_TRIM_LENGTH long.
+//               for the last clip); at least minTrimLength long.
 // The left edge is settled first, so a left-only change (trimEnd as it was) never moves
-// the right edge, and a right-only change never moves the left edge. Returns null only
-// when there is no room at all (stored clips already overlapping).
+// the right edge, and a right-only change never moves the left edge. Returns null when
+// there is no allowed trim: the neighbours leave less room than the minimum length (or
+// the stored clips already overlap).
 export function clampTrim(
   clip: TrimClip,
   wanted: { trimStart: number; trimEnd: number | null },
@@ -188,6 +197,7 @@ export function clampTrim(
 ): TrimResult | null {
   const wantedEnd = wanted.trimEnd ?? clip.duration;
   const wantedStart = Number.isFinite(wanted.trimStart) ? wanted.trimStart : clip.trimStart;
+  const minLength = minTrimLength(clip.duration);
   // ── Left edge ──
   const lowStart = nb
     ? Math.max(0, clip.trimStart + (Math.max(0, nb.prevEnd) - clip.offset))
@@ -195,14 +205,15 @@ export function clampTrim(
   // Moving the left edge keeps the minimum length against the wanted right edge; a
   // right-only change leaves the left edge alone (the right edge yields instead).
   const leftMoves = Math.abs(wantedStart - clip.trimStart) > PLACEMENT_EPSILON;
-  const highStart = leftMoves ? Math.min(wantedEnd, clip.duration) - MIN_TRIM_LENGTH : Infinity;
+  const highStart = leftMoves ? Math.min(wantedEnd, clip.duration) - minLength : Infinity;
   const trimStart = Math.max(lowStart, Math.min(wantedStart, highStart));
   const offset = nb ? clip.offset + (trimStart - clip.trimStart) : clip.offset;
   // ── Right edge ──
   const highEnd = nb ? Math.min(clip.duration, trimStart + (nb.nextStart - offset)) : clip.duration;
-  const lowEnd = trimStart + MIN_TRIM_LENGTH;
+  const lowEnd = trimStart + minLength;
   let trimEnd = Math.min(highEnd, Math.max(lowEnd, Number.isFinite(wantedEnd) ? wantedEnd : clip.duration));
   if (trimEnd <= trimStart + PLACEMENT_EPSILON) return null;
+  if (trimEnd - trimStart < minLength - PLACEMENT_EPSILON) return null;
   const storedEnd = trimEnd >= clip.duration - PLACEMENT_EPSILON ? null : trimEnd;
   if (storedEnd === null) trimEnd = clip.duration;
   const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON
