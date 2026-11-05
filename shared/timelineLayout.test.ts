@@ -154,3 +154,129 @@ describe('drag preview layouts', () => {
     expect(grown.timelineEnd - base.timelineEnd).toBeCloseTo(shift);
   });
 });
+
+// Pickups (a negative sectionOffset), step 4e1 — "cut, don't push": a pickup never moves
+// a section; without room its head is cut. 120 bpm 4/4: a beat is 0.5 s, a bar 2 s.
+describe('layoutTimeline — pickups', () => {
+  const AB = [
+    { name: 'A', sortOrder: 0, baseLength: null },
+    { name: 'B', sortOrder: 1, baseLength: null },
+  ];
+  const lay = (clips: LayoutClipInput[], sections = AB) =>
+    layoutTimeline({ sections, clips, bpm: 120, timeSignature: '4/4' });
+  const geometry = (l: ReturnType<typeof lay>) =>
+    l.sections.map((s) => ({ name: s.name, start: s.start, length: s.length, lengthBeats: s.lengthBeats }));
+  // Section A is 0–4 s on every test that uses it: t2 fills it.
+  const aFill = clip({ id: 'a2', sectionName: 'A', trackId: 't2', duration: 4 });
+
+  it('every clip has a head cut of 0 when there are no pickups', () => {
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill, clip({ id: 'b1', sectionName: 'B', duration: 1 })]);
+    expect(Array.from(l.clipHeadCuts.values())).toEqual([0, 0, 0]);
+  });
+
+  it('section starts and lengths are the same with and without a pickup', () => {
+    const others = [clip({ id: 'a1', sectionName: 'A', duration: 4 }), aFill, clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 4 })];
+    const plain = lay([...others, clip({ id: 'b1', sectionName: 'B', sectionOffset: 0, duration: 2 })]);
+    const pickup = lay([...others, clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 2 })]);
+    expect(geometry(pickup)).toEqual(geometry(plain));
+    expect(pickup.timelineEnd).toBe(plain.timelineEnd);
+    for (const id of ['a1', 'a2', 'b2']) expect(pickup.clipStarts.get(id)).toBe(plain.clipStarts.get(id));
+  });
+
+  it('a pickup with room starts before its section, uncut', () => {
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill, clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 3 })]);
+    expect(l.sections[1].start).toBe(4);
+    expect(l.clipHeadCuts.get('b1')).toBe(0);
+    expect(l.clipStarts.get('b1')).toBe(3);
+    expect(l.clipEnds.get('b1')).toBe(6);
+  });
+
+  it("a pickup whose track's previous clip ends at the section end is cut to the downbeat", () => {
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 4 }), aFill, clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 3 })]);
+    expect(l.clipHeadCuts.get('b1')).toBeCloseTo(1, 12);
+    expect(l.clipStarts.get('b1')).toBeCloseTo(l.sections[1].start, 12);
+    expect(l.clipEnds.get('b1')).toBe(6); // the end never moves
+  });
+
+  it('partial room: the previous clip ends half a beat before the downbeat', () => {
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 3.75 }), aFill,
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: -0.5, duration: 2 }), // wants one beat
+    ]);
+    expect(l.clipHeadCuts.get('b1')).toBeCloseTo(0.25, 12);
+    expect(l.clipStarts.get('b1')).toBeCloseTo(3.75, 12);
+  });
+
+  it("the track's previous clip in an earlier section (none in the section before): no cut", () => {
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill,
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 4 }), // B 4–8, nothing on t1
+      clip({ id: 'c1', sectionName: 'C', sectionOffset: -1, duration: 2 }),
+    ], [...AB, { name: 'C', sortOrder: 2, baseLength: null }]);
+    expect(l.sections[2].start).toBe(8);
+    expect(l.clipHeadCuts.get('c1')).toBe(0);
+    expect(l.clipStarts.get('c1')).toBe(7);
+  });
+
+  it('a pickup in the first section is cut at song time 0, and is whole again when the section moves later', () => {
+    const clips = [
+      clip({ id: 'a1', sectionName: 'A', sectionOffset: -1, duration: 3 }),
+      clip({ id: 'b1', sectionName: 'B', duration: 2 }),
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 4 }),
+    ];
+    const first = lay(clips);
+    expect(first.sections[0].name).toBe('A');
+    expect(first.clipHeadCuts.get('a1')).toBe(1);
+    expect(first.clipStarts.get('a1')).toBe(0);
+    const later = lay(clips, [
+      { name: 'A', sortOrder: 1, baseLength: null },
+      { name: 'B', sortOrder: 0, baseLength: null },
+    ]);
+    expect(later.sections.map((s) => s.name)).toEqual(['B', 'A']);
+    expect(later.clipHeadCuts.get('a1')).toBe(0);
+    expect(later.clipStarts.get('a1')).toBe(3); // A starts at 4; t1 is free from 2
+  });
+
+  it("one track's pickup or cut never affects another track", () => {
+    const others = [clip({ id: 'a1', sectionName: 'A', duration: 4 }), aFill, clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 2 })];
+    const cut = lay([...others, clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 3 })]);
+    const none = lay([...others, clip({ id: 'b1', sectionName: 'B', sectionOffset: 0, duration: 2 })]);
+    expect(cut.clipHeadCuts.get('b1')).toBeGreaterThan(0);
+    for (const id of ['a1', 'a2', 'b2']) {
+      expect(cut.clipStarts.get(id)).toBe(none.clipStarts.get(id));
+      expect(cut.clipEnds.get(id)).toBe(none.clipEnds.get(id));
+      expect(cut.clipHeadCuts.get(id)).toBe(0);
+    }
+  });
+
+  it('a section holding only a pickup that ends on its downbeat is one beat long; with no room the clip has zero length', () => {
+    const pickup = clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 1 });
+    const room = lay([clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill, pickup]);
+    expect(room.sections[1].lengthBeats).toBe(1);
+    expect(room.sections[1].length).toBe(0.5);
+    expect(room.clipHeadCuts.get('b1')).toBe(0);
+    expect(room.clipStarts.get('b1')).toBe(3);
+    const noRoom = lay([clip({ id: 'a1', sectionName: 'A', duration: 4 }), aFill, pickup]);
+    expect(noRoom.sections[1].lengthBeats).toBe(1);
+    expect(noRoom.clipHeadCuts.get('b1')).toBe(1); // the whole trimmed length
+    expect(noRoom.clipStarts.get('b1')).toBe(noRoom.clipEnds.get('b1'));
+  });
+
+  it('a pickup longer than one bar (as after a tempo change) is not clamped', () => {
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 0.5 }), aFill, clip({ id: 'b1', sectionName: 'B', sectionOffset: -3, duration: 4 })]);
+    expect(l.clipHeadCuts.get('b1')).toBe(0);
+    expect(l.clipStarts.get('b1')).toBe(1);
+  });
+
+  it("legacy full takes don't count toward a track's furthest end", () => {
+    const l = lay([
+      clip({ id: 'ft', sectionName: 'Full Takes', isFullTake: true, start: 0, duration: 4 }),
+      clip({ id: 'a1', sectionName: 'A', duration: 1 }), aFill,
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 2 }),
+    ]);
+    expect(l.clipHeadCuts.get('ft')).toBe(0);
+    expect(l.clipStarts.get('ft')).toBe(0);
+    expect(l.clipHeadCuts.get('b1')).toBe(0);
+    expect(l.clipStarts.get('b1')).toBe(3);
+  });
+});

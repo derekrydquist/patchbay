@@ -30,7 +30,10 @@ type ApiTrack = {
   timelineClips: TimelineClip[];
 };
 
-type ExportClip = { src: string; start: number; duration: number; volume: number; trimStart: number; trimEnd: number | null };
+// start: where the clip plays from on the song timeline (the layout's clipStarts).
+// headCut: seconds of the clip's trimmed audio skipped at its start because the layout
+// cut a pickup's head (layout clipHeadCuts; 0 for every other clip).
+type ExportClip = { src: string; start: number; duration: number; volume: number; trimStart: number; trimEnd: number | null; headCut: number };
 
 type Progress = { phase: string; done: number; total: number };
 
@@ -153,6 +156,7 @@ async function renderClips(
   const frameCount = Math.max(1, Math.ceil(totalDuration * SR));
   console.log('[Export] renderClips — clips:', clips.length, '| totalDuration:', totalDuration, '| frameCount:', frameCount);
   const ctx = new OfflineAudioContext(2, frameCount, SR);
+  let warnedBeforeZero = false;
 
   await Promise.all(
     clips.map(async (clip, idx) => {
@@ -166,9 +170,20 @@ async function renderClips(
         const decoded = await ctx.decodeAudioData(ab);
         console.log(`[Export] clip[${idx}] decoded: ${decoded.duration.toFixed(2)}s | ${decoded.numberOfChannels}ch | ${decoded.sampleRate}Hz`);
         onDecoded();
-        const trimStartSecs = clip.trimStart ?? 0;
         const trimEndSecs = clip.trimEnd ?? decoded.duration;
+        // A cut pickup plays from trimStart + headCut (the layout already moved its start).
+        let when = clip.start;
+        let trimStartSecs = (clip.trimStart ?? 0) + clip.headCut;
+        // Defensive: the layout never starts a clip before song time 0, but if one ever
+        // does, play it from 0 and skip the part before it — source.start would throw.
+        if (when < 0) {
+          if (!warnedBeforeZero) console.warn(`[Export] a clip starts before song time 0 (${when}s); skipping the part before 0`);
+          warnedBeforeZero = true;
+          trimStartSecs -= when;
+          when = 0;
+        }
         const trimDuration = Math.max(0, trimEndSecs - trimStartSecs);
+        if (trimDuration <= 0) return; // zero length in the layout: nothing to play
         const source = ctx.createBufferSource();
         source.buffer = decoded;
         if (clip.volume !== 1) {
@@ -179,8 +194,8 @@ async function renderClips(
         } else {
           source.connect(ctx.destination);
         }
-        source.start(clip.start, trimStartSecs, trimDuration);
-        console.log(`[Export] clip[${idx}] scheduled at start=${clip.start}s offset=${trimStartSecs}s duration=${trimDuration}s`);
+        source.start(when, trimStartSecs, trimDuration);
+        console.log(`[Export] clip[${idx}] scheduled at start=${when}s offset=${trimStartSecs}s duration=${trimDuration}s`);
       } catch (err) {
         console.error(`[Export] clip[${idx}] FAILED (${clip.src}):`, err);
         onDecoded();
@@ -320,21 +335,31 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
         return;
       }
 
-      const allClips: ExportClip[] = tracksWithClips.flatMap((t) =>
-        t.timelineClips.filter((c) => c.src).map((c) => ({
-          src: c.src!,
-          start: layout.clipStarts.get(c.id) ?? c.start,
-          duration: c.duration,
-          volume: VOLUME,
-          trimStart: c.trimStart ?? 0,
-          trimEnd: c.trimEnd ?? null,
-        })),
-      );
+      // A track's clips as Export plays them: from the layout's start, with a cut
+      // pickup's head skipped; a clip with zero length in the layout (a pickup with no
+      // room at all) is left out.
+      const exportClipsFor = (t: ApiTrack): ExportClip[] =>
+        t.timelineClips.flatMap((c) => {
+          if (!c.src) return [];
+          const start = layout.clipStarts.get(c.id) ?? c.start;
+          const end = layout.clipEnds.get(c.id);
+          if (end !== undefined && end - start <= 1e-9) return [];
+          return [{
+            src: c.src,
+            start,
+            duration: c.duration,
+            volume: VOLUME,
+            trimStart: c.trimStart ?? 0,
+            trimEnd: c.trimEnd ?? null,
+            headCut: layout.clipHeadCuts.get(c.id) ?? 0,
+          }];
+        });
+      const allClips: ExportClip[] = tracksWithClips.flatMap(exportClipsFor);
       // The end of the last section, or later if a clip (a full take) ends past it — no
       // audio is ever cut off.
       const totalDuration = Math.max(
         layout.timelineEnd,
-        ...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart),
+        ...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart - c.headCut),
       );
       console.log('[Export] allClips:', allClips, '| totalDuration:', totalDuration);
       const ext = format === 'mp3' ? 'mp3' : 'wav';
@@ -344,16 +369,7 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
         let stemsDone = 0;
 
         for (const track of tracksWithClips) {
-          const stemClips: ExportClip[] = track.timelineClips
-            .filter((c) => c.src)
-            .map((c) => ({
-              src: c.src!,
-              start: layout.clipStarts.get(c.id) ?? c.start,
-              duration: c.duration,
-              volume: VOLUME,
-              trimStart: c.trimStart ?? 0,
-              trimEnd: c.trimEnd ?? null,
-            }));
+          const stemClips: ExportClip[] = exportClipsFor(track);
 
           let clipsDone = 0;
           setProgress({ phase: `Rendering ${track.name} (0/${stemClips.length} clips)…`, done: stemsDone, total: tracksWithClips.length });

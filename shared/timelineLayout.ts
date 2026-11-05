@@ -11,6 +11,12 @@
 //     Every section starts on a beat; bar 1 is song time 0.
 //   - A sectioned clip sits at its section's start + sectionOffset. Its stored start
 //     is ignored.
+//   - Pickups (a negative sectionOffset) hang back into the end of the previous
+//     section and never move a section ("cut, don't push"). Where there isn't room —
+//     the clip would start before the end of the furthest clip already placed on its
+//     track in an earlier section, or before song time 0 — its head is cut: it is laid
+//     out from the point where there is room (clipHeadCuts), and the stored offset is
+//     left alone, so the full pickup comes back by itself when room returns.
 //   - Legacy full takes keep their stored absolute start and take no part in the
 //     section layout (they go away in step 8). Non-full-take clips with no section
 //     name are treated the same way.
@@ -60,14 +66,25 @@ export interface TimelineLayoutInput {
 
 export interface TimelineLayout {
   sections: LayoutSection[]; // display order
+  // Where each clip is drawn and played from: its section's start + sectionOffset +
+  // its head cut (a full take or unsectioned clip: its stored start).
   clipStarts: Map<string | number, number>;
+  // Where each clip ends: the uncut end, which a head cut never moves.
   clipEnds: Map<string | number, number>;
+  // Seconds cut from the start of each clip because there was no room for its pickup
+  // (0 for every clip that isn't a cut pickup). Drawn/played length = trimmed length −
+  // head cut; a clip whose head cut is its whole trimmed length has zero length in this
+  // layout (clipStarts = clipEnds) and must be skipped.
+  clipHeadCuts: Map<string | number, number>;
   timelineEnd: number;       // end of the last section; 0 with no sections
   orphans: string[];         // section names that had clips but no song_sections row
 }
 
 // Float noise allowed when rounding up to a beat, in beats.
 const BEAT_EPSILON = 1e-6;
+// A head cut shorter than this (seconds) is float noise — a previous clip that ends
+// exactly where the pickup starts — and counts as no cut.
+const HEAD_CUT_EPSILON = 1e-9;
 
 export function effectiveLength(clip: Pick<LayoutClipInput, 'duration' | 'trimStart' | 'trimEnd'>): number {
   return (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
@@ -110,9 +127,9 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   const contentNeed = new Map<string, number>();
   for (const clip of clips) {
     if (!isSectioned(clip)) continue;
+    // A pickup's part before the section start (a negative sectionOffset) counts toward
+    // no section's length: pickups never move a section; the layout cuts them instead.
     const end = (clip.sectionOffset ?? 0) + effectiveLength(clip) - (clip.tailSeconds ?? 0);
-    // Step 4 (pickups): a negative sectionOffset hangs into the previous section; the
-    // room it needs there will be added to that section's content need here.
     contentNeed.set(clip.sectionName, Math.max(contentNeed.get(clip.sectionName) ?? 0, end));
   }
 
@@ -129,8 +146,9 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   let startBeat = 0;
   const place = (name: string, baseLength: number | null) => {
     const need = contentNeed.get(name) ?? 0;
-    let lengthBeats = Math.max(beatsToHold(baseLength ?? 0, spb), beatsToHold(need, spb));
-    if (need > 0) lengthBeats = Math.max(1, lengthBeats);
+    // Every placed section has clips, and gets at least one beat — even one whose
+    // clips all end at or before its start (only a pickup ending on its downbeat).
+    const lengthBeats = Math.max(1, beatsToHold(baseLength ?? 0, spb), beatsToHold(need, spb));
     layoutSections.push({
       name,
       start: startBeat * spb,
@@ -147,16 +165,52 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   for (const row of orderedRows) place(row.name, row.baseLength);
   for (const name of orphans) place(name, null);
 
-  const sectionStart = new Map(layoutSections.map((s) => [s.name, s.start]));
   const clipStarts = new Map<string | number, number>();
   const clipEnds = new Map<string | number, number>();
+  const clipHeadCuts = new Map<string | number, number>();
+
+  // Legacy full takes and unsectioned clips: their stored start, never cut.
   for (const clip of clips) {
-    // Offsets may be negative (pickups, step 4); nothing here assumes ≥ 0.
-    const start = isSectioned(clip)
-      ? sectionStart.get(clip.sectionName)! + (clip.sectionOffset ?? 0)
-      : clip.start;
-    clipStarts.set(clip.id, start);
-    clipEnds.set(clip.id, start + effectiveLength(clip));
+    if (isSectioned(clip)) continue;
+    clipStarts.set(clip.id, clip.start);
+    clipEnds.set(clip.id, clip.start + effectiveLength(clip));
+    clipHeadCuts.set(clip.id, 0);
+  }
+
+  // Sectioned clips, section by section in arrangement order. furthestEnd: per track,
+  // the furthest end (full end, tail included) of the clips placed on it in earlier
+  // sections — the room a pickup in a later section has, with song time 0.
+  const clipsBySection = new Map<string, (LayoutClipInput & { sectionName: string })[]>();
+  for (const clip of clips) {
+    if (!isSectioned(clip)) continue;
+    const list = clipsBySection.get(clip.sectionName);
+    if (list) list.push(clip);
+    else clipsBySection.set(clip.sectionName, [clip]);
+  }
+  const furthestEnd = new Map<string | number, number>();
+  for (const section of layoutSections) {
+    const sectionClips = clipsBySection.get(section.name) ?? [];
+    for (const clip of sectionClips) {
+      const offset = clip.sectionOffset ?? 0;
+      const length = effectiveLength(clip);
+      const uncutStart = section.start + offset;
+      let headCut = 0;
+      if (offset < 0) {
+        const earliest = Math.max(0, furthestEnd.get(clip.trackId) ?? 0);
+        const wanted = earliest - uncutStart;
+        // Capped at the whole trimmed length: a pickup with no room at all has zero
+        // length here (start = end), and is never drawn or played.
+        if (wanted > HEAD_CUT_EPSILON) headCut = Math.min(Math.max(0, length), wanted);
+      }
+      clipStarts.set(clip.id, uncutStart + headCut);
+      clipEnds.set(clip.id, uncutStart + length);
+      clipHeadCuts.set(clip.id, headCut);
+    }
+    // Only after the whole section: clips in the same section never limit each other.
+    for (const clip of sectionClips) {
+      const end = clipEnds.get(clip.id)!;
+      furthestEnd.set(clip.trackId, Math.max(furthestEnd.get(clip.trackId) ?? -Infinity, end));
+    }
   }
 
   const last = layoutSections[layoutSections.length - 1];
@@ -164,6 +218,7 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     sections: layoutSections,
     clipStarts,
     clipEnds,
+    clipHeadCuts,
     timelineEnd: last ? last.end : 0,
     orphans,
   };
