@@ -2732,6 +2732,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     clipDragRef.current = null;
     clipDragKeysRef.current = { shift: false, option: false };
     setClipDragPreview(null);
+    setClipDragOffTimeline(false);
   };
   useEffect(() => () => stopClipDrag(), []);
 
@@ -2780,9 +2781,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // that section with placeInGap (shared/timelinePlacement.ts): it goes into the gap it
   // points at (a clip's first or second half picks the gap before or after it), and
   // when that gap is too small, the clips after it move later together to make room.
-  // Nothing ever moves earlier. Nothing is placed while the pointer is off the clip's
-  // own track row (another track, the Media Bucket, outside the timeline): the clip
-  // would stay where it is.
+  // Nothing ever moves earlier. A clip never changes track, so only the pointer's
+  // horizontal position counts: anywhere over the timeline (any track row, the header
+  // row, the ruler, the track names panel, the empty space below the tracks) places it
+  // the same way. Off the timeline (the Media Bucket, anywhere outside it) nothing is
+  // placed: a release there cancels.
   const [snap, setSnapState] = useState<SnapSetting>(readSnapSetting);
   const setSnap = (next: SnapSetting) => {
     setSnapState(next);
@@ -2795,25 +2798,22 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     offsets: Map<string, number>;    // the dragged clip and every clip it pushes → new sectionOffset
     changed: boolean;                // false = everything would stay where it is
   }
-  // Whether the pointer is over the dragged clip's own track row, inside the
-  // timeline's visible track area (the sticky track panel counts as the row).
-  const isPointerOverClipTrack = (trackId: string, x: number, y: number): boolean => {
+  // Whether the pointer is over the timeline's visible scroll area — rows, header row,
+  // ruler, track names panel and the space below the last track — and not over the
+  // Media Bucket.
+  const isPointerOverTimeline = (x: number, y: number): boolean => {
     const el = timelineRef.current;
     if (!el || isPointerInMediaBucket(x, y)) return false;
     const rect = el.getBoundingClientRect();
-    if (x < rect.left || x > rect.left + el.clientWidth) return false;
-    if (y < rect.top + TRACK_ROWS_TOP_PX || y > rect.top + el.clientHeight) return false;
-    const row = el.querySelector<HTMLElement>(`[data-timeline-track="${CSS.escape(trackId)}"]`);
-    if (!row) return false;
-    const r = row.getBoundingClientRect();
-    return y >= r.top && y < r.bottom;
+    return x >= rect.left && x <= rect.left + el.clientWidth
+      && y >= rect.top && y <= rect.top + el.clientHeight;
   };
   const computeClipDragPlacement = (): ClipDragPlacement | null => {
     const drag = clipDragRef.current;
     const x = dragClientXRef.current;
     const y = dragClientYRef.current;
     if (!drag || x === null || y === null) return null;
-    if (!isPointerOverClipTrack(drag.trackId, x, y)) return null;
+    if (!isPointerOverTimeline(x, y)) return null;
     const track = trackState.find((t) => t.id === drag.trackId);
     const clip = track?.clips.find((c) => c.id === drag.clipId);
     if (!track || !clip || clip.isFullTake || !clip.sectionName) return null;
@@ -2835,10 +2835,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // The drag preview: the placement a release would apply now — it drives the landing
   // outline, the pushed clips' live positions (no other clip is drawn moved during the
   // drag), and the drop. Its own state, never written into the tracks, so a live-sync poll can't
-  // overwrite it mid-drag. null = the pointer is off the clip's row: nothing would change.
+  // overwrite it mid-drag. null = the pointer is off the timeline: nothing would change.
   const [clipDragPreview, setClipDragPreview] = useState<ClipDragPlacement | null>(null);
+  // The pointer is outside the timeline mid-drag: the stored layout shows and the
+  // landing outline is hidden, since a release there cancels.
+  const [clipDragOffTimeline, setClipDragOffTimeline] = useState(false);
   const updateClipDragPreview = () => {
     const next = clipDragRef.current ? computeClipDragPlacement() : null;
+    const x = dragClientXRef.current;
+    const y = dragClientYRef.current;
+    setClipDragOffTimeline(!!clipDragRef.current && x !== null && y !== null && !isPointerOverTimeline(x, y));
     setClipDragPreview((prev) => {
       if (prev === next) return prev;
       if (prev && next && prev.trackId === next.trackId && prev.sectionStart === next.sectionStart
@@ -3764,8 +3770,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   }
   contentEndRef.current = contentEnd;
   // The dashed landing outline: where the dragged clip lands if released now, or its
-  // own spot when nothing would change (or the pointer is off its row); trimmed length
-  // wide.
+  // own spot when nothing would change; trimmed length wide. Hidden while the pointer
+  // is off the timeline (clipDragOffTimeline).
   const clipDragLanding = React.useMemo(() => {
     if (!draggedClipId) return null;
     const track = tracks.find((t) => t.clips.some((c) => c.id === draggedClipId));
@@ -4125,10 +4131,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
                 if (activeDragData) {
                   const { clip, type, trackId: draggedTrackId } = activeDragData;
-                  const sourceTrack =
-                    type === 'clip'
-                      ? tracks.find((t) => t.clips.some((c) => c.id === clip.id))
-                      : null;
 
                   // Track-level invalidity — disables the droppable entirely.
                   if (type === 'bucket-clip') {
@@ -4143,7 +4145,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                       if (sourceInstrument && sourceInstrument.name !== track.name) isInvalidDrop = true;
                     }
                   }
-                  if (type === 'clip' && sourceTrack && sourceTrack.id !== track.id) isInvalidDrop = true;
+                  // A timeline clip drag has no wrong track: the clip always stays on its
+                  // own (computeClipDragPlacement), so no row is disabled or veiled.
                   if (type === 'loose-file') {
                     // Loose files aren't instrument-locked yet — every track is a
                     // valid target. No instrument-identity check applies.
@@ -4162,11 +4165,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     key={track.id}
                     track={track}
                     raisedClipId={isDragRow ? clipDragLanding.clipId : null}
-                    landing={isDragRow ? clipDragLanding.rect : null}
+                    landing={isDragRow && !clipDragOffTimeline ? clipDragLanding.rect : null}
                     sections={displaySectionLayout}
                     invalidSections={invalidSectionsDuringDrag}
                     isInvalidDrop={isInvalidDrop}
-                    isDragging={activeDragData !== null}
+                    // The valid-track border and wrong-track veil are for Media Bucket
+                    // drags only.
+                    isDragging={activeDragData !== null && activeDragData.type !== 'clip'}
                     zoom={zoom}
                     insertionPoint={
                       insertionPoint?.trackId === track.id
