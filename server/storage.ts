@@ -28,9 +28,9 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, type TimelineLayout } from "@shared/timelineLayout";
+import { layoutTimeline, effectiveLength, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -57,9 +57,18 @@ export class TrimValidationError extends Error {
 // version shorter than the minimum clip length to fit before the next clip (the route
 // answers 409; nothing is written).
 export class ReplaceTooShortError extends Error {
-  constructor() {
-    super(`There isn't room for that version here: it would have to be cut shorter than ${MIN_TRIM_LENGTH} s to fit before the next clip.`);
+  constructor(message = `There isn't room for that version here: it would have to be cut shorter than ${MIN_TRIM_LENGTH} s to fit before the next clip.`) {
+    super(message);
     this.name = "ReplaceTooShortError";
+  }
+}
+
+// A section offset outside the pickup limits (shared pickupOffsetError): before the
+// pickup's left limit, or a pickup whose end stops before its section's downbeat.
+export class PickupLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PickupLimitError";
   }
 }
 
@@ -918,19 +927,36 @@ export function sectionPlacementClips(trackId: string, sectionName: string): Pla
 // Writes many timeline clips' section_offset in one transaction, then checks every
 // track + section it touched for overlapping clips (trimmed lengths, the database
 // state after the writes). An overlap throws TimelineOverlapError and nothing is
-// written. The caller checks ownership and that every id is a sectioned clip of one
-// song; offsets must already be finite and ≥ 0. Returns the updated rows.
-export function setTimelineClipOffsets(updates: { id: string; sectionOffset: number }[]): TimelineClip[] {
+// written. Then every written offset is checked against the pickup limits
+// (pickupOffsetError) in the song's layout after the whole batch — a batch can move
+// several clips at once, and an earlier section's clips set a later pickup's limit —
+// with each clip's offset before the batch as its leniency floor; a refusal throws
+// PickupLimitError and nothing is written. The caller checks ownership and that every
+// id is a sectioned clip of `songId`; offsets must already be finite. Returns the
+// updated rows.
+export function setTimelineClipOffsets(songId: string, updates: { id: string; sectionOffset: number }[]): TimelineClip[] {
   return db.transaction((tx) => {
     const touched = new Map<string, { trackId: string; sectionName: string }>();
+    const before = new Map<string, TimelineClip>();
     for (const u of updates) {
+      const row = tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get();
+      if (row) before.set(u.id, row);
       tx.update(timelineClips).set({ sectionOffset: u.sectionOffset }).where(eq(timelineClips.id, u.id)).run();
-      const row = tx.select({ trackId: timelineClips.trackId, sectionName: timelineClips.sectionName })
-        .from(timelineClips).where(eq(timelineClips.id, u.id)).get();
       if (row?.sectionName) touched.set(`${row.trackId}\u0000${row.sectionName}`, { trackId: row.trackId, sectionName: row.sectionName });
     }
     for (const { trackId, sectionName } of Array.from(touched.values())) {
       if (findOverlap(sectionPlacementClips(trackId, sectionName))) throw new TimelineOverlapError(trackId, sectionName);
+    }
+    const input = songLayoutInput(songId);
+    const layout = layoutTimeline(input);
+    for (const u of updates) {
+      const row = before.get(u.id);
+      if (!row?.sectionName || row.isFullTake) continue;
+      const error = pickupOffsetError(
+        u.sectionOffset, effectiveLength(row), row.sectionOffset ?? 0,
+        pickupLeftLimit(input, layout, row.trackId, row.sectionName),
+      );
+      if (error) throw new PickupLimitError(error);
     }
     return updates.map((u) => tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get()!);
   });
@@ -943,6 +969,11 @@ export function setTimelineClipOffsets(updates: { id: string; sectionOffset: num
 // stored start it writes comes from here. Reads on the shared connection, so it sees
 // uncommitted writes when called inside a transaction.
 export function computeSongLayout(songId: string): TimelineLayout {
+  return layoutTimeline(songLayoutInput(songId));
+}
+
+// computeSongLayout's inputs, for callers that also need them (pickupLeftLimit).
+export function songLayoutInput(songId: string): TimelineLayoutInput {
   const song = db.select({ bpm: songs.bpm, timeSignature: songs.timeSignature })
     .from(songs).where(eq(songs.id, songId)).get();
   const trackIds = db.select({ id: instrumentTracks.id }).from(instrumentTracks)
@@ -951,7 +982,7 @@ export function computeSongLayout(songId: string): TimelineLayout {
   const clipRows = trackIds.length
     ? db.select().from(timelineClips).where(inArray(timelineClips.trackId, trackIds)).all()
     : [];
-  return layoutTimeline({
+  return {
     sections: getSongSections(songId),
     clips: clipRows.map((c) => ({
       id: c.id,
@@ -966,7 +997,15 @@ export function computeSongLayout(songId: string): TimelineLayout {
     })),
     bpm: song?.bpm ?? null,
     timeSignature: song?.timeSignature ?? null,
-  });
+  };
+}
+
+// A pickup's left limit (shared pickupLeftLimit) for one track's section, from the
+// song's layout as the database holds it now (uncommitted writes included inside a
+// transaction). An offset from the section start, 0 or negative.
+export function songPickupLeftLimit(songId: string, trackId: string, sectionName: string): number {
+  const input = songLayoutInput(songId);
+  return pickupLeftLimit(input, layoutTimeline(input), trackId, sectionName);
 }
 
 // section_offset for a clip appended to the end of one track's section: the end of
@@ -982,9 +1021,11 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
 // new trimStart − old trimStart), so the audio stays where it is in time and the left
 // edge moves; `keepOffset` (Replace: a different recording) leaves the offset as it is.
 // Nothing else moves and nothing is re-packed. Throws TrimValidationError unless
-// 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file) and the new
-// offset is ≥ 0 and the clip stays at least minTrimLength long (0.5 s, or the whole
-// file when it's shorter), and TimelineOverlapError if the clip would overlap another clip on its
+// 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file), the clip
+// stays at least minTrimLength long (0.5 s, or the whole file when it's shorter), the
+// new offset is ≥ 0 — for a pickup (offset < 0) ≥ its left limit (pickupLeftLimit), or
+// its own old offset if that's already further left — and a pickup still ends at or
+// after its section's downbeat; and TimelineOverlapError if the clip would overlap another clip on its
 // track in its section; nothing is written then. One transaction (a savepoint inside a
 // caller's). Returns the updated row, or undefined if there's no such clip.
 export function writeTimelineClipTrim(
@@ -1016,8 +1057,23 @@ export function writeTimelineClipTrim(
     let sectionOffset = clip.sectionOffset;
     if (sectioned && !opts.keepOffset) {
       const moved = oldOffset + (trimStart - clip.trimStart);
-      if (moved < -eps) throw new TrimValidationError("That trim would move the clip before the start of its section");
-      sectionOffset = Math.max(0, moved);
+      // The lowest offset this trim may leave: 0, or for a pickup its left limit (the
+      // same as clampTrim's, through trimNeighbours).
+      const isPickup = oldOffset < -eps;
+      const songId = isPickup && moved < oldOffset - eps ? songIdForTrack(clip.trackId) : undefined;
+      const floor = !isPickup ? 0
+        : songId ? Math.min(songPickupLeftLimit(songId, clip.trackId, clip.sectionName!), oldOffset)
+        : Math.min(0, oldOffset);
+      if (moved < floor - eps) {
+        throw new TrimValidationError(isPickup
+          ? "That trim would move the pickup more than one bar before its section, before the end of the previous clip on its track, or before the start of the song"
+          : "That trim would move the clip before the start of its section");
+      }
+      sectionOffset = Math.max(floor, moved);
+    }
+    if (sectioned && (sectionOffset ?? 0) < -eps
+      && (sectionOffset ?? 0) + (trimEnd ?? clip.duration) - trimStart < -eps) {
+      throw new TrimValidationError("A pickup has to reach its section's downbeat");
     }
     if (sectioned) {
       const placed = toPlacementClip({ id: clip.id, sectionOffset, duration: clip.duration, trimStart, trimEnd });
@@ -1051,6 +1107,7 @@ export function applyTrimToInstances(
   trackId: string, name: string, trimStart: number, trimEnd: number | null,
 ): InstanceTrimResult[] {
   return sqlite.transaction(() => {
+    const songId = songIdForTrack(trackId);
     const rows = db.select().from(timelineClips)
       .where(and(eq(timelineClips.trackId, trackId), eq(timelineClips.name, name)))
       .orderBy(asc(timelineClips.sectionName), asc(timelineClips.sectionOffset))
@@ -1058,8 +1115,13 @@ export function applyTrimToInstances(
     return rows.map((row): InstanceTrimResult => {
       const sectioned = !!row.sectionName && !row.isFullTake;
       const offset = row.sectionOffset ?? 0;
+      // A pickup instance keeps its own left limit, from the layout as the earlier
+      // instances left it.
+      const pickupLimit = sectioned && songId && offset < -PLACEMENT_EPSILON
+        ? songPickupLeftLimit(songId, trackId, row.sectionName!)
+        : 0;
       const nb = sectioned
-        ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id))
+        ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id), pickupLimit)
         : null;
       const r = clampTrim(
         { offset, duration: row.duration, trimStart: row.trimStart, trimEnd: row.trimEnd },
@@ -1106,6 +1168,12 @@ export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<I
         // Replace (the transaction rolls back the fields written above).
         if (cutTo - trimStart < minTrimLength(clip.duration) - PLACEMENT_EPSILON) throw new ReplaceTooShortError();
         trimEnd = cutTo;
+      }
+      // A pickup keeps its offset; a new file too short for its end to reach the
+      // downbeat is refused (the transaction rolls back the fields written above).
+      const offset = clip.sectionOffset ?? 0;
+      if (offset < -PLACEMENT_EPSILON && offset + (trimEnd ?? clip.duration) - trimStart < -PLACEMENT_EPSILON) {
+        throw new ReplaceTooShortError("That version is too short for this pickup: it would end before the section's downbeat.");
       }
     }
     if (sentTrim || cutTo !== null) clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, { keepOffset: true }) ?? clip;

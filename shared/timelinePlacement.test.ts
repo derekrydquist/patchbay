@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, type PlacementClip } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -440,5 +441,264 @@ describe('minimum clip length (minTrimLength)', () => {
     const r = clampTrim({ offset: 4, duration: 10, trimStart: 0, trimEnd: 0.5 }, { trimStart: 0, trimEnd: 9 }, { prevEnd: 4, nextStart: 4.5 })!;
     expect(r).toMatchObject({ trimStart: 0, offset: 4, clamped: true });
     expect(r.trimEnd).toBeCloseTo(0.5);
+  });
+});
+
+// ── Pickups ──────────────────────────────────────────────────────────────────
+
+// A sectioned layout clip: `length` seconds of a file that long, untrimmed.
+const lc = (id: string, trackId: string, sectionName: string, sectionOffset: number, length: number): LayoutClipInput => ({
+  id, trackId, sectionName, sectionOffset, duration: length, trimStart: 0, trimEnd: null, isFullTake: false, start: 0,
+});
+const limitFor = (input: TimelineLayoutInput, trackId: string, sectionName: string) =>
+  pickupLeftLimit(input, layoutTimeline(input), trackId, sectionName);
+const rows = (...names: string[]) => names.map((name, i) => ({ name, sortOrder: i, baseLength: null }));
+
+describe('pickupLeftLimit', () => {
+  // 120 bpm, 4/4: a beat is 0.5 s, a bar 2 s.
+  it('one bar before the section start, when the previous clip ends well before that', () => {
+    // Intro 0–8 (drums 0–1 only; bass fills it), Verse starts at 8; drums' previous clip
+    // ends at 1, so the bar (6) wins: L = −2.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 1), lc('b1', 'bass', 'Intro', 0, 8), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    expect(limitFor(input, 'drums', 'Verse')).toBeCloseTo(-2);
+  });
+
+  it('song start: 0 in the first section on the timeline', () => {
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 4), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    expect(limitFor(input, 'drums', 'Intro')).toBe(0);
+    // A section starting less than a bar in: song time 0 wins over the bar.
+    const short: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('b1', 'bass', 'Intro', 0, 1), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    expect(limitFor(short, 'drums', 'Verse')).toBeCloseTo(-1);
+  });
+
+  it("the previous clip's end on the same track", () => {
+    // Intro 0–8, drums there end at 7.5; Verse starts at 8 → L = −0.5 (the bar would be −2).
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.5), lc('b1', 'bass', 'Intro', 0, 8), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    expect(limitFor(input, 'drums', 'Verse')).toBeCloseTo(-0.5);
+    // Other tracks' clips never limit it.
+    // Bass's previous clip ends at 8, the section start → 0.
+    expect(limitFor(input, 'bass', 'Verse')).toBe(0);
+  });
+
+  it('the previous clip in an earlier, non-adjacent section', () => {
+    // Intro (drums 0–7.75), Verse (bass only, 8–16), Chorus at 16: drums' previous clip is
+    // in the Intro and ends at 7.75, far back → the bar wins (−2).
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse', 'Chorus'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.75), lc('b1', 'bass', 'Verse', 0, 8), lc('d3', 'drums', 'Chorus', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    const chorus = layout.sections.find((s) => s.name === 'Chorus')!;
+    expect(chorus.start).toBeCloseTo(16);
+    expect(pickupLeftLimit(input, layout, 'drums', 'Chorus')).toBeCloseTo(-2);
+    // Now the Verse is short (bass 0–1): Intro 0–8, Verse 8–9, Chorus at 9. The Intro
+    // drums clip ends at 7.75, inside the bar before 9 → L = 7.75 − 9 = −1.25.
+    const tight = { ...input, clips: [lc('d1', 'drums', 'Intro', 0, 7.75), lc('b1', 'bass', 'Verse', 0, 1), lc('d3', 'drums', 'Chorus', 0, 4)] };
+    expect(limitFor(tight, 'drums', 'Chorus')).toBeCloseTo(-1.25);
+  });
+
+  it('6/8: a bar is six beats', () => {
+    // 120 bpm, 6/8 → bar = 3 s. Intro 0–8, Verse at 8 → L = −3.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('b1', 'bass', 'Intro', 0, 8), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '6/8',
+    };
+    expect(limitFor(input, 'drums', 'Verse')).toBeCloseTo(-3);
+  });
+
+  it('a fast tempo: the bar wins over a previous clip further back', () => {
+    // 240 bpm, 4/4 → bar = 1 s. Intro 0–8 (drums end at 6), Verse at 8 → bar (7) wins: −1.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 6), lc('b1', 'bass', 'Intro', 0, 8), lc('d2', 'drums', 'Verse', 0, 4)],
+      bpm: 240, timeSignature: '4/4',
+    };
+    expect(limitFor(input, 'drums', 'Verse')).toBeCloseTo(-1);
+  });
+
+  it("doesn't depend on the clips in its own section (the moved clip can stay in)", () => {
+    const base = [lc('d1', 'drums', 'Intro', 0, 6), lc('b1', 'bass', 'Intro', 0, 8)];
+    const a: TimelineLayoutInput = { sections: rows('Intro', 'Verse'), clips: [...base, lc('d2', 'drums', 'Verse', 0, 4)], bpm: 120, timeSignature: '4/4' };
+    const b: TimelineLayoutInput = { ...a, clips: [...base, lc('d2', 'drums', 'Verse', -1.5, 30)] };
+    expect(limitFor(a, 'drums', 'Verse')).toBeCloseTo(limitFor(b, 'drums', 'Verse'));
+  });
+
+  it('ignores legacy full takes, and a section not on the timeline gives 0', () => {
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [
+        lc('b1', 'bass', 'Intro', 0, 8),
+        { ...lc('ft', 'drums', 'Full Takes', 0, 7.9), isFullTake: true, start: 0 },
+        lc('d2', 'drums', 'Verse', 0, 4),
+      ],
+      bpm: 120, timeSignature: '4/4',
+    };
+    expect(limitFor(input, 'drums', 'Verse')).toBeCloseTo(-2);
+    expect(limitFor(input, 'drums', 'Bridge')).toBe(0);
+  });
+});
+
+describe('pickupOffsetError', () => {
+  it('accepts offsets within the limit whose end reaches the downbeat', () => {
+    expect(pickupOffsetError(-1, 2, 0, -2)).toBeNull();
+    expect(pickupOffsetError(-2, 2, 0, -2)).toBeNull(); // ends exactly on the downbeat
+    expect(pickupOffsetError(3, 2, 0, -2)).toBeNull();  // not a pickup
+  });
+  it('refuses past the limit, and an end before the downbeat', () => {
+    expect(pickupOffsetError(-2.5, 4, 0, -2)).toMatch(/one bar/);
+    expect(pickupOffsetError(-1.5, 1, 0, -2)).toMatch(/downbeat/);
+  });
+  it('leniency: a clip already below its limit can stay or move right, never further left', () => {
+    expect(pickupOffsetError(-3, 4, -3, -2)).toBeNull();
+    expect(pickupOffsetError(-2.5, 4, -3, -2)).toBeNull();
+    expect(pickupOffsetError(-3.5, 4, -3, -2)).toMatch(/one bar/);
+  });
+});
+
+describe('trimNeighbours — pickups', () => {
+  it("a pickup's left edge stops at its limit when nothing is before it", () => {
+    expect(trimNeighbours({ offset: -1 }, [clip('a', 2, 1)], -2)).toEqual({ prevEnd: -2, nextStart: 2 });
+  });
+  it('a pickup already below its limit stops at its own offset', () => {
+    expect(trimNeighbours({ offset: -3 }, [], -2).prevEnd).toBe(-3);
+  });
+  it('the limit is ignored for a clip that is not a pickup', () => {
+    expect(trimNeighbours({ offset: 1 }, [], -2)).toEqual({ prevEnd: 0, nextStart: Infinity });
+  });
+});
+
+describe('clampTrim — pickups', () => {
+  // P: offset −1.5, 10 s file trimmed 2–6 (4 s, spans −1.5 to 2.5). Limit −2, next clip at 4.
+  const P = { offset: -1.5, duration: 10, trimStart: 2, trimEnd: 6 };
+  const nb = trimNeighbours({ offset: P.offset }, [clip('n', 4, 1)], -2);
+  const end = (r: { offset: number; trimStart: number; trimEnd: number | null }, duration = 10) =>
+    r.offset + (r.trimEnd ?? duration) - r.trimStart;
+
+  it('a right trim never touches the left edge (no edge at 0)', () => {
+    const r = clampTrim(P, { trimStart: 2, trimEnd: 5 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 2, trimEnd: 5, offset: -1.5, clamped: false });
+  });
+
+  it('a right trim stops where the end reaches the downbeat', () => {
+    const r = clampTrim(P, { trimStart: 2, trimEnd: 2.6 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 2, offset: -1.5, clamped: true });
+    expect(r.trimEnd).toBeCloseTo(3.5);
+    expect(end(r)).toBeCloseTo(0);
+  });
+
+  it('a right trim still stops at the next clip', () => {
+    const r = clampTrim(P, { trimStart: 2, trimEnd: 20 }, nb)!;
+    expect(end(r)).toBeCloseTo(4);
+  });
+
+  it('a left untrim stops at the left limit', () => {
+    const r = clampTrim(P, { trimStart: 0, trimEnd: 6 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 1.5, offset: -2, trimEnd: 6, clamped: true });
+  });
+
+  it("a left untrim stops at the clip's own audio (trimStart 0)", () => {
+    const r = clampTrim({ ...P, trimStart: 0.2, trimEnd: 4.2 }, { trimStart: 0, trimEnd: 4.2 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 0, trimEnd: 4.2, clamped: false });
+    expect(r.offset).toBeCloseTo(-1.7);
+  });
+
+  it('a left trim in moves the start right, across the downbeat if asked', () => {
+    const r = clampTrim(P, { trimStart: 4, trimEnd: 6 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 4, offset: 0.5, trimEnd: 6, clamped: false });
+  });
+
+  it('keeps the minimum length', () => {
+    const r = clampTrim(P, { trimStart: 7, trimEnd: 6 }, nb)!;
+    expect(r.trimStart).toBeCloseTo(6 - MIN_TRIM_LENGTH);
+    expect(r.trimEnd).toBe(6);
+  });
+
+  it('leniency: a pickup below its limit can be right-trimmed and left-trimmed in, never further left', () => {
+    const low = { offset: -3, duration: 10, trimStart: 2, trimEnd: 7 };
+    const lnb = trimNeighbours({ offset: -3 }, [], -2);
+    expect(clampTrim(low, { trimStart: 2, trimEnd: 6 }, lnb)).toMatchObject({ trimStart: 2, trimEnd: 6, offset: -3, clamped: false });
+    expect(clampTrim(low, { trimStart: 2.5, trimEnd: 7 }, lnb)).toMatchObject({ trimStart: 2.5, offset: -2.5, clamped: false });
+    expect(clampTrim(low, { trimStart: 1, trimEnd: 7 }, lnb)).toMatchObject({ trimStart: 2, offset: -3, clamped: true });
+  });
+
+  it('a normal clip still stops at the downbeat on a left untrim, whatever the limit', () => {
+    const r = clampTrim({ offset: 1, duration: 10, trimStart: 3, trimEnd: null }, { trimStart: 0, trimEnd: null }, trimNeighbours({ offset: 1 }, [], -2))!;
+    expect(r).toMatchObject({ trimStart: 2, offset: 0, clamped: true });
+  });
+});
+
+// clampTrim and trimNeighbours as they were before pickups (4e1), for the "no pickups →
+// identical results" sweep.
+function oldTrimNeighbours(c: { offset: number }, others: PlacementClip[]): TrimNeighbours {
+  let prevEnd = 0;
+  let nextStart = Infinity;
+  for (const o of others) {
+    if (o.offset < c.offset - PLACEMENT_EPSILON) prevEnd = Math.max(prevEnd, o.offset + o.length);
+    else nextStart = Math.min(nextStart, o.offset);
+  }
+  return { prevEnd, nextStart };
+}
+function oldClampTrim(c: TrimClip, wanted: { trimStart: number; trimEnd: number | null }, nb: TrimNeighbours | null): TrimResult | null {
+  const wantedEnd = wanted.trimEnd ?? c.duration;
+  const wantedStart = Number.isFinite(wanted.trimStart) ? wanted.trimStart : c.trimStart;
+  const minLength = minTrimLength(c.duration);
+  const lowStart = nb ? Math.max(0, c.trimStart + (Math.max(0, nb.prevEnd) - c.offset)) : 0;
+  const leftMoves = Math.abs(wantedStart - c.trimStart) > PLACEMENT_EPSILON;
+  const highStart = leftMoves ? Math.min(wantedEnd, c.duration) - minLength : Infinity;
+  const trimStart = Math.max(lowStart, Math.min(wantedStart, highStart));
+  const offset = nb ? c.offset + (trimStart - c.trimStart) : c.offset;
+  const highEnd = nb ? Math.min(c.duration, trimStart + (nb.nextStart - offset)) : c.duration;
+  const lowEnd = trimStart + minLength;
+  let trimEnd = Math.min(highEnd, Math.max(lowEnd, Number.isFinite(wantedEnd) ? wantedEnd : c.duration));
+  if (trimEnd <= trimStart + PLACEMENT_EPSILON) return null;
+  if (trimEnd - trimStart < minLength - PLACEMENT_EPSILON) return null;
+  const storedEnd = trimEnd >= c.duration - PLACEMENT_EPSILON ? null : trimEnd;
+  if (storedEnd === null) trimEnd = c.duration;
+  const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON || Math.abs(trimEnd - wantedEnd) > PLACEMENT_EPSILON;
+  return { trimStart, trimEnd: storedEnd, offset, clamped };
+}
+
+describe('no pickups → identical trim results', () => {
+  it('trimNeighbours and clampTrim match the pre-pickup versions for every clip at offset ≥ 0', () => {
+    const others = [clip('a', 0, 1.5), clip('b', 6, 2), clip('c', 9.25, 0.75)];
+    let checked = 0;
+    for (const offset of [0, 1.5, 2, 3.25, 8, 10]) {
+      for (const [trimStart, trimEnd] of [[0, null], [1, 4], [0.5, 9], [2, 2.6]] as [number, number | null][]) {
+        const c = { offset, duration: 10, trimStart, trimEnd };
+        const mine = others.filter((o) => Math.abs(o.offset - offset) > 1e-9);
+        for (const limit of [0, -2]) {
+          const nbNew = trimNeighbours({ offset }, mine, limit);
+          const nbOld = oldTrimNeighbours({ offset }, mine);
+          expect(nbNew).toEqual(nbOld);
+          for (const ws of [-1, 0, 0.3, 1, 3, 9.9]) {
+            for (const we of [null, 0, 2, 5, 9, 20]) {
+              expect(clampTrim(c, { trimStart: ws, trimEnd: we }, nbNew)).toEqual(oldClampTrim(c, { trimStart: ws, trimEnd: we }, nbOld));
+              expect(clampTrim(c, { trimStart: trimStart, trimEnd: we }, nbNew)).toEqual(oldClampTrim(c, { trimStart, trimEnd: we }, nbOld));
+              checked++;
+            }
+          }
+        }
+        expect(clampTrim(c, { trimStart: 0, trimEnd: null }, null)).toEqual(oldClampTrim(c, { trimStart: 0, trimEnd: null }, null));
+      }
+    }
+    expect(checked).toBeGreaterThan(1000);
   });
 });

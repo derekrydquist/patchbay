@@ -18,9 +18,9 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, pickupOffsetError } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
   type InstrumentTrack,
@@ -1565,6 +1565,12 @@ export async function registerRoutes(
     if (!parsed.success) {
       return res.status(400).json({ message: parsed.error.issues[0].message });
     }
+    // A new clip never starts as a pickup (file drops never make one): a sent
+    // sectionOffset must be a finite number, 0 or more.
+    const sentOffset = parsed.data.sectionOffset;
+    if (sentOffset != null && (typeof sentOffset !== 'number' || !Number.isFinite(sentOffset) || sentOffset < 0)) {
+      return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+    }
     // A sectioned clip sent with no sectionOffset is appended to the end of this
     // track's section (trimmed lengths), the same rule as Place on Timeline, and its
     // start cache comes from the layout. A sent offset (and start) is kept as is.
@@ -1641,9 +1647,11 @@ export async function registerRoutes(
   // along, or a re-pack after an insert or remove (patchChangedOffsets in Timeline.tsx).
   // Body: { clips: [{ id, sectionOffset }] }. Every id must be a sectioned (non-full-
   // take) clip on this song, so in the session's band; any other id refuses the whole
-  // request (404). Offsets must be finite and ≥ 0 (no pickups yet). All writes go in
-  // one transaction, then every track + section touched is checked for overlapping
-  // clips (trimmed lengths) and the whole save rolls back with 409 if any overlap.
+  // request (404). Offsets must be finite; a negative one is a pickup. All writes go
+  // in one transaction, then every track + section touched is checked for overlapping
+  // clips (trimmed lengths) — 409 — and every written offset against the pickup limits
+  // in the layout after the whole batch (setTimelineClipOffsets) — 400; either rolls
+  // the whole save back.
   // One sort-only timeline-reordered feed row per request. Returns the updated clips.
   app.put("/api/songs/:songId/timeline-clips/offsets", requireBand, async (req, res) => {
     const songId = req.params.songId as string;
@@ -1657,8 +1665,8 @@ export async function registerRoutes(
       const sectionOffset = item?.sectionOffset;
       if (typeof id !== 'string' || !id) return res.status(400).json({ message: "Every clip needs an id" });
       if (seen.has(id)) return res.status(400).json({ message: "A clip appears more than once" });
-      if (typeof sectionOffset !== 'number' || !Number.isFinite(sectionOffset) || sectionOffset < 0) {
-        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+      if (typeof sectionOffset !== 'number' || !Number.isFinite(sectionOffset)) {
+        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds" });
       }
       seen.add(id);
       updates.push({ id, sectionOffset });
@@ -1687,8 +1695,9 @@ export async function registerRoutes(
 
     let updated;
     try {
-      updated = setTimelineClipOffsets(updates);
+      updated = setTimelineClipOffsets(songId, updates);
     } catch (err) {
+      if (err instanceof PickupLimitError) return res.status(400).json({ message: err.message });
       if (err instanceof TimelineOverlapError) {
         const trackName = rows.find((r) => r.trackId === err.trackId)?.trackName ?? 'a track';
         return res.status(409).json({ message: `Clips would overlap on ${trackName} › ${err.sectionName}.` });
@@ -1742,13 +1751,18 @@ export async function registerRoutes(
       : 'Someone';
     const existingClip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
-    // A new sectionOffset must be finite and ≥ 0 (no pickups yet), and must not make
-    // the clip overlap another clip on its track in its section (with the length this
-    // same request leaves it).
+    // A new sectionOffset must be finite, stay within the pickup limits (a negative
+    // offset is a pickup: no earlier than its left limit, or its own current offset if
+    // that's further left, and ending at or after the downbeat — 400), and must not
+    // make the clip overlap another clip on its track in its section (409), all with
+    // the length this same request leaves it.
     if ('sectionOffset' in clipUpdates) {
       const offset = clipUpdates.sectionOffset;
-      if (typeof offset !== 'number' || !Number.isFinite(offset) || offset < 0) {
-        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+      if (typeof offset !== 'number' || !Number.isFinite(offset)) {
+        return res.status(400).json({ message: "sectionOffset must be a finite number of seconds" });
+      }
+      if ((!existingClip.sectionName || existingClip.isFullTake) && offset < 0) {
+        return res.status(400).json({ message: "Only clips in a section can be pickups" });
       }
       if (existingClip.sectionName && !existingClip.isFullTake) {
         const after = toPlacementClip({
@@ -1758,6 +1772,11 @@ export async function registerRoutes(
           trimStart: typeof clipUpdates.trimStart === 'number' ? clipUpdates.trimStart : existingClip.trimStart,
           trimEnd: 'trimEnd' in clipUpdates ? (clipUpdates.trimEnd ?? null) : existingClip.trimEnd,
         });
+        const pickupError = pickupOffsetError(
+          offset, after.length, existingClip.sectionOffset ?? 0,
+          offset < 0 ? songPickupLeftLimit(tclipSongId, existingClip.trackId, existingClip.sectionName) : 0,
+        );
+        if (pickupError) return res.status(400).json({ message: pickupError });
         const siblings = sectionPlacementClips(existingClip.trackId, existingClip.sectionName)
           .filter((c) => c.id !== existingClip.id);
         if (findOverlap([...siblings, after])) {

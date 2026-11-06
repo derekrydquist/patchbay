@@ -258,6 +258,9 @@ const TrackHeader = React.memo(function TrackHeader({
 interface TrackProps {
   track: Track;
   sections: SectionInfo[];
+  // Left limit (shared pickupLeftLimit) of each pickup clip on this track, by clip id;
+  // clips that aren't pickups are absent.
+  pickupLimits?: ReadonlyMap<string, number>;
   invalidSections: Set<string>;
   isInvalidDrop: boolean;
   isDragging: boolean;
@@ -284,6 +287,7 @@ interface TrackProps {
 export const TimelineTrack = React.memo(function TimelineTrack({
   track,
   sections,
+  pickupLimits,
   invalidSections,
   isInvalidDrop,
   isDragging,
@@ -422,6 +426,7 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             track.clips
               .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
               .map((c) => ({ id: c.id, offset: c.sectionOffset ?? 0, length: (c.trimEnd ?? c.duration) - (c.trimStart ?? 0) })),
+            pickupLimits?.get(clip.id) ?? 0,
           );
           return (
           <TimelineClip

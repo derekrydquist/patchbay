@@ -6,7 +6,8 @@
 // section's start, lengths are trimmed lengths (effectiveLength). Legacy full takes
 // sit outside sections and never take part.
 
-import { effectiveLength, type LayoutClipInput } from './timelineLayout';
+import { effectiveLength, type LayoutClipInput, type TimelineLayout, type TimelineLayoutInput } from './timelineLayout';
+import { parseTimeSignature, secondsPerBeat } from './musicalTime';
 
 // Float noise allowed when comparing positions, in seconds. Touching edges are never
 // an overlap.
@@ -127,6 +128,68 @@ export function trimEndBeforeNext(
   return length > room + PLACEMENT_EPSILON ? clip.trimStart + room : null;
 }
 
+// ── Pickups ──────────────────────────────────────────────────────────────────
+// A pickup is a clip with a negative section offset: it belongs to its section but
+// starts before the section's downbeat. Hard limits, the same on client and server:
+//   - its start is no earlier than pickupLeftLimit (below);
+//   - its end reaches the downbeat: offset + trimmed length ≥ 0 (touching is fine);
+//   - "cut, don't push": nothing else ever moves to make room.
+// Leniency: a clip already sitting below its limit (a later tempo change, a previous
+// clip moved later, a bandmate's edit) stays saveable — a write that doesn't move its
+// start further left is always allowed (pickupOffsetError).
+
+// The earliest offset (seconds from the section start, so 0 or negative) a pickup on
+// `trackId` in `sectionName` may start at: the latest of one bar before the section
+// start (bar length from the song's tempo and time signature), song time 0, and the
+// end of the previous clip on that track — the furthest end (layout.clipEnds) of the
+// track's clips in earlier sections, legacy full takes and unsectioned clips ignored,
+// as the layout's head cut uses. Depends only on earlier sections, never on the clips
+// in this section ("cut, don't push": a clip never moves its own section), so the clip
+// being moved can stay in the layout. A section that isn't on the timeline (no clips)
+// has no start: 0, no pickup.
+export function pickupLeftLimit(
+  input: Pick<TimelineLayoutInput, 'bpm' | 'timeSignature'> & {
+    clips: Pick<LayoutClipInput, 'id' | 'trackId' | 'sectionName' | 'isFullTake'>[];
+  },
+  layout: Pick<TimelineLayout, 'sections' | 'clipEnds'>,
+  trackId: string | number,
+  sectionName: string,
+): number {
+  const index = layout.sections.findIndex((s) => s.name === sectionName);
+  if (index < 0) return 0;
+  const sectionStart = layout.sections[index].start;
+  const barLength = parseTimeSignature(input.timeSignature).beatsPerBar * secondsPerBeat(input.bpm);
+  const earlier = new Set(layout.sections.slice(0, index).map((s) => s.name));
+  let previousEnd = -Infinity;
+  for (const c of input.clips) {
+    if (c.trackId !== trackId || c.isFullTake || !c.sectionName || !earlier.has(c.sectionName)) continue;
+    const end = layout.clipEnds.get(c.id);
+    if (end !== undefined) previousEnd = Math.max(previousEnd, end);
+  }
+  return Math.min(0, Math.max(sectionStart - barLength, 0, previousEnd) - sectionStart);
+}
+
+// Why a sectioned clip can't be saved at `offset` with trimmed length `length`, or null
+// when it can. `currentOffset` is the clip's stored offset before this write (null for
+// a new clip): an offset at or after it is always allowed (leniency); otherwise the
+// offset must be ≥ `leftLimit` (pickupLeftLimit) and, when negative, end at or after
+// the downbeat.
+export function pickupOffsetError(
+  offset: number,
+  length: number,
+  currentOffset: number | null,
+  leftLimit: number,
+): string | null {
+  const floor = currentOffset === null ? Math.min(0, leftLimit) : Math.min(leftLimit, currentOffset);
+  if (offset < floor - PLACEMENT_EPSILON) {
+    return "A pickup can't start more than one bar before its section, before the end of the previous clip on its track, or before the start of the song.";
+  }
+  if (offset < -PLACEMENT_EPSILON && offset + length < -PLACEMENT_EPSILON) {
+    return "A pickup has to reach its section's downbeat.";
+  }
+  return null;
+}
+
 // ── Trims ────────────────────────────────────────────────────────────────────
 // A trim changes one clip and nothing else: its neighbours never move and nothing is
 // re-packed. Both edges stop at the neighbouring clip on the same track in the same
@@ -144,9 +207,9 @@ export function minTrimLength(duration: number): number {
   return Math.min(MIN_TRIM_LENGTH, Math.max(0, duration));
 }
 
-// What limits a clip's edges: the end of the clip before it (0 when there is none) and
-// the start of the clip after it (Infinity when it's the last clip there — its right
-// edge can grow the section).
+// What limits a clip's edges: the end of the clip before it (when there is none: 0, or
+// for a pickup its left limit — see trimNeighbours) and the start of the clip after it
+// (Infinity when it's the last clip there — its right edge can grow the section).
 export interface TrimNeighbours {
   prevEnd: number;
   nextStart: number;
@@ -154,9 +217,12 @@ export interface TrimNeighbours {
 
 // A clip's neighbours among `others` — the other clips on its track in its section,
 // never the clip itself. A clip that starts before it is before it; one that starts at
-// or after it is after it.
-export function trimNeighbours(clip: { offset: number }, others: PlacementClip[]): TrimNeighbours {
-  let prevEnd = 0;
+// or after it is after it. `pickupLimit` (pickupLeftLimit) matters only for a pickup
+// (offset < 0): its left edge stops there, or at its own offset if it already sits
+// below it (leniency); any other clip's left edge stops at the downbeat, 0 (crossing
+// it is a drag with Option, not a trim).
+export function trimNeighbours(clip: { offset: number }, others: PlacementClip[], pickupLimit = 0): TrimNeighbours {
+  let prevEnd = clip.offset < -PLACEMENT_EPSILON ? Math.min(pickupLimit, clip.offset) : 0;
   let nextStart = Infinity;
   for (const c of others) {
     if (c.offset < clip.offset - PLACEMENT_EPSILON) prevEnd = Math.max(prevEnd, c.offset + c.length);
@@ -182,10 +248,12 @@ export interface TrimResult {
 // The closest allowed trim to `wanted` for `clip`, from its current state. `nb` null
 // means no neighbours and no offset limits (a legacy full take, or an unsectioned
 // clip): only 0 ≤ trimStart and trimEnd ≤ duration apply, and the offset stays.
-//   Left edge:  trimStart ≥ 0; the new offset ≥ 0 (no pickups yet) and ≥ the previous
-//               clip's end; the clip stays at least minTrimLength long.
+//   Left edge:  trimStart ≥ 0; the new offset ≥ nb.prevEnd (the previous clip's end;
+//               with none, 0 — or a pickup's left limit); a clip that isn't a pickup
+//               never goes below 0; the clip stays at least minTrimLength long.
 //   Right edge: trimEnd ≤ duration; the clip's end ≤ the next clip's start (no limit
-//               for the last clip); at least minTrimLength long.
+//               for the last clip); a pickup's end stays at or after the downbeat; at
+//               least minTrimLength long.
 // The left edge is settled first, so a left-only change (trimEnd as it was) never moves
 // the right edge, and a right-only change never moves the left edge. Returns null when
 // there is no allowed trim: the neighbours leave less room than the minimum length (or
@@ -198,22 +266,29 @@ export function clampTrim(
   const wantedEnd = wanted.trimEnd ?? clip.duration;
   const wantedStart = Number.isFinite(wanted.trimStart) ? wanted.trimStart : clip.trimStart;
   const minLength = minTrimLength(clip.duration);
+  const isPickup = !!nb && clip.offset < -PLACEMENT_EPSILON;
   // ── Left edge ──
-  const lowStart = nb
-    ? Math.max(0, clip.trimStart + (Math.max(0, nb.prevEnd) - clip.offset))
-    : 0;
+  // A pickup's lowest offset is nb.prevEnd as given (its left limit, from
+  // trimNeighbours); any other clip's never goes below 0.
+  const lowOffset = nb ? (isPickup ? nb.prevEnd : Math.max(0, nb.prevEnd)) : 0;
+  const lowStart = nb ? Math.max(0, clip.trimStart + (lowOffset - clip.offset)) : 0;
   // Moving the left edge keeps the minimum length against the wanted right edge; a
-  // right-only change leaves the left edge alone (the right edge yields instead).
+  // right-only change leaves the left edge alone (the right edge yields instead) — for
+  // a pickup exactly where it is, whatever its limits say.
   const leftMoves = Math.abs(wantedStart - clip.trimStart) > PLACEMENT_EPSILON;
   const highStart = leftMoves ? Math.min(wantedEnd, clip.duration) - minLength : Infinity;
-  const trimStart = Math.max(lowStart, Math.min(wantedStart, highStart));
+  const trimStart = isPickup && !leftMoves
+    ? clip.trimStart
+    : Math.max(lowStart, Math.min(wantedStart, highStart));
   const offset = nb ? clip.offset + (trimStart - clip.trimStart) : clip.offset;
   // ── Right edge ──
   const highEnd = nb ? Math.min(clip.duration, trimStart + (nb.nextStart - offset)) : clip.duration;
-  const lowEnd = trimStart + minLength;
+  // A pickup (after the left edge has settled) ends at or after the downbeat.
+  const lowEnd = Math.max(trimStart + minLength, nb && offset < -PLACEMENT_EPSILON ? trimStart - offset : -Infinity);
   let trimEnd = Math.min(highEnd, Math.max(lowEnd, Number.isFinite(wantedEnd) ? wantedEnd : clip.duration));
   if (trimEnd <= trimStart + PLACEMENT_EPSILON) return null;
   if (trimEnd - trimStart < minLength - PLACEMENT_EPSILON) return null;
+  if (nb && offset < -PLACEMENT_EPSILON && offset + (trimEnd - trimStart) < -PLACEMENT_EPSILON) return null;
   const storedEnd = trimEnd >= clip.duration - PLACEMENT_EPSILON ? null : trimEnd;
   if (storedEnd === null) trimEnd = clip.duration;
   const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON
