@@ -28,7 +28,7 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, effectiveLength, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
+import { layoutTimeline, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
@@ -64,7 +64,7 @@ export class ReplaceTooShortError extends Error {
 }
 
 // A section offset outside the pickup limits (shared pickupOffsetError): before the
-// pickup's left limit, or a pickup whose end stops before its section's downbeat.
+// pickup's left limit.
 export class PickupLimitError extends Error {
   constructor(message: string) {
     super(message);
@@ -953,7 +953,7 @@ export function setTimelineClipOffsets(songId: string, updates: { id: string; se
       const row = before.get(u.id);
       if (!row?.sectionName || row.isFullTake) continue;
       const error = pickupOffsetError(
-        u.sectionOffset, effectiveLength(row), row.sectionOffset ?? 0,
+        u.sectionOffset, row.sectionOffset ?? 0,
         pickupLeftLimit(input, layout, row.trackId, row.sectionName),
       );
       if (error) throw new PickupLimitError(error);
@@ -1024,8 +1024,8 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
 // 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file), the clip
 // stays at least minTrimLength long (0.5 s, or the whole file when it's shorter), the
 // new offset is ≥ 0 — for a pickup (offset < 0) ≥ its left limit (pickupLeftLimit), or
-// its own old offset if that's already further left — and a pickup still ends at or
-// after its section's downbeat; and TimelineOverlapError if the clip would overlap another clip on its
+// its own old offset if that's already further left (a pickup may end before its
+// section's downbeat); and TimelineOverlapError if the clip would overlap another clip on its
 // track in its section; nothing is written then. One transaction (a savepoint inside a
 // caller's). Returns the updated row, or undefined if there's no such clip.
 export function writeTimelineClipTrim(
@@ -1070,10 +1070,6 @@ export function writeTimelineClipTrim(
           : "That trim would move the clip before the start of its section");
       }
       sectionOffset = Math.max(floor, moved);
-    }
-    if (sectioned && (sectionOffset ?? 0) < -eps
-      && (sectionOffset ?? 0) + (trimEnd ?? clip.duration) - trimStart < -eps) {
-      throw new TrimValidationError("A pickup has to reach its section's downbeat");
     }
     if (sectioned) {
       const placed = toPlacementClip({ id: clip.id, sectionOffset, duration: clip.duration, trimStart, trimEnd });
@@ -1169,12 +1165,8 @@ export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<I
         if (cutTo - trimStart < minTrimLength(clip.duration) - PLACEMENT_EPSILON) throw new ReplaceTooShortError();
         trimEnd = cutTo;
       }
-      // A pickup keeps its offset; a new file too short for its end to reach the
-      // downbeat is refused (the transaction rolls back the fields written above).
-      const offset = clip.sectionOffset ?? 0;
-      if (offset < -PLACEMENT_EPSILON && offset + (trimEnd ?? clip.duration) - trimStart < -PLACEMENT_EPSILON) {
-        throw new ReplaceTooShortError("That version is too short for this pickup: it would end before the section's downbeat.");
-      }
+      // A pickup keeps its offset, however short the new file (it may end before the
+      // downbeat).
     }
     if (sentTrim || cutTo !== null) clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, { keepOffset: true }) ?? clip;
     if (sectionName && !clip.isFullTake) {

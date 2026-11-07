@@ -49,6 +49,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 import { clampTrim, minTrimLength, type TrimNeighbours } from '@shared/timelinePlacement';
+import { playedSpan } from '@/lib/clip-span';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
 // loose_file_comments rows, which differ only in their parent-id column.
@@ -1174,8 +1175,10 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     const channelData = buffer.getChannelData(0);
     const sampleRate = buffer.sampleRate;
 
-    const startSample = Math.floor(trimStart * sampleRate);
-    const endSample = Math.floor((trimEnd ?? clip.duration) * sampleRate);
+    // The played part of the file: trim plus a pickup's head cut (playedSpan).
+    const { inPoint, outPoint } = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut });
+    const startSample = Math.floor(inPoint * sampleRate);
+    const endSample = Math.floor(outPoint * sampleRate);
     const samples = channelData.slice(startSample, Math.min(endSample, channelData.length));
 
     ctx.clearRect(0, 0, w, h);
@@ -1237,7 +1240,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   // Redraw when trim or the track color changes — buffer already decoded, no re-fetch needed
   useEffect(() => {
     drawRef.current?.();
-  }, [trimStart, trimEnd, clip.duration, trackColor]);
+  }, [trimStart, trimEnd, clip.duration, clip.headCut, trackColor]);
 
   // Redraw on zoom/resize — fires whenever the canvas CSS width changes
   useEffect(() => {
@@ -1512,10 +1515,14 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     setNodeRef(node);
   }, [setNodeRef]);
 
-  const displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom;
+  // Drawn span: the live trim (local state, so a trim drag shows at once) plus the
+  // layout's head cut for a pickup with no room (clip.headCut, from Timeline).
+  const span = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut });
+  const displayWidth = span.length * zoom;
 
-  // Torn edges where audio is hidden behind the edge; straight once fully untrimmed.
-  const tornLeft = trimStart > 0.001;
+  // Torn edges where audio is hidden behind the edge — by a trim or a head cut;
+  // straight once fully untrimmed.
+  const tornLeft = span.inPoint > 0.001;
   const tornRight = trimEnd !== null && trimEnd < clip.duration - 0.001;
   const torn = tornEdges(displayWidth, tornLeft, tornRight);
   // For the body, waveform and border layers: the torn shape, square corners on a torn side.

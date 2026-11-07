@@ -54,7 +54,8 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapTime, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
-import { placeInGap, toPlacementClip, appendOffset, pickupLeftLimit, PLACEMENT_EPSILON } from '@shared/timelinePlacement';
+import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
+import { placeInGap, toPlacementClip, appendOffset, pickupLeftLimit, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -279,16 +280,23 @@ function deriveLayout(
   });
 }
 
-// Tracks with every clip's in-memory start taken from the layout, so code that reads
-// clip.start (playback, keyboard nav, skip, Track.tsx) sees layout positions.
+// Tracks with every clip's in-memory start and head cut taken from the layout, so code
+// that reads clip.start (playback, keyboard nav, skip, Track.tsx) sees layout positions.
+// clip.start is the cut start; its in-point and length come from playedSpan
+// (lib/clip-span.ts), which counts the head cut. Always overwrites headCut, so a value
+// copied back into the tracks state by a write path never survives a layout.
 function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
   return tracks.map((track) => ({
     ...track,
-    clips: track.clips.map((clip) => {
-      const start = layout.clipStarts.get(clip.id);
-      return start === undefined || start === clip.start ? clip : { ...clip, start };
-    }),
+    clips: track.clips.map((clip) => withLayoutPosition(clip, layout)),
   }));
+}
+
+// One clip at its layout start and head cut; the same object when neither changes.
+function withLayoutPosition(clip: Clip, layout: TimelineLayout): Clip {
+  const start = layout.clipStarts.get(clip.id) ?? clip.start;
+  const headCut = layout.clipHeadCuts.get(clip.id) ?? 0;
+  return start === clip.start && headCut === (clip.headCut ?? 0) ? clip : { ...clip, start, headCut };
 }
 
 // Packs one track's clips in one section end to end: sectionOffset = the sum of the
@@ -296,20 +304,32 @@ function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
 // position follows from the layout. Run only for a Media Bucket gap-zone drop inside
 // that section; trims, removes, appends, Replace and clip drags leave gaps as they are. Never on a sync or a section reorder. Other tracks and
 // sections are left exactly as they are.
+// A pickup (a negative sectionOffset, kept first by insertClipInSection) is never moved
+// or wiped: it keeps its offset and the packing of the clips after it starts at its end.
+// Until the gap zones go (4f).
 function packSectionOffsets(tracks: Track[], trackId: string, sectionName: string): Track[] {
   return tracks.map((track) => {
     if (track.id !== trackId) return track;
-    const cursor = new Map<string, number>();
+    let cursor = 0;
     return {
       ...track,
       clips: track.clips.map((clip) => {
         if (clip.isFullTake || clip.sectionName !== sectionName) return clip;
-        const offset = cursor.get(clip.sectionName) ?? 0;
-        cursor.set(clip.sectionName, offset + clipLength(clip));
+        if ((clip.sectionOffset ?? 0) < -PLACEMENT_EPSILON) {
+          cursor = Math.max(cursor, clip.sectionOffset! + clipLength(clip));
+          return clip;
+        }
+        const offset = cursor;
+        cursor = offset + clipLength(clip);
         return clip.sectionOffset === offset ? clip : { ...clip, sectionOffset: offset };
       }),
     };
   });
+}
+
+// Whether a timeline clip is a pickup: it starts before its section's downbeat.
+function isPickupClip(c: Pick<Clip, 'sectionOffset' | 'isFullTake'>): boolean {
+  return !c.isFullTake && (c.sectionOffset ?? 0) < -PLACEMENT_EPSILON;
 }
 
 // A section header drag as PUT /api/songs/:songId/sections/order sends it: the
@@ -787,8 +807,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   );
   // Each pickup clip's left limit (shared pickupLeftLimit), per track, for its trim
   // edges (Track.tsx → trimNeighbours). Tracks with no pickup share one empty map.
+  // pickupLeftLimit's input: every stored clip, the tempo and time signature.
+  const pickupLimitInput = React.useMemo(() => ({
+    clips: trackState.flatMap((t) => t.clips.map((c) => ({ id: c.id, trackId: t.id, sectionName: c.sectionName, isFullTake: !!c.isFullTake }))),
+    bpm,
+    timeSignature,
+  }), [trackState, bpm, timeSignature]);
   const pickupLimitsByTrack = React.useMemo(() => {
-    const input = { clips: trackState.flatMap((t) => t.clips.map((c) => ({ id: c.id, trackId: t.id, sectionName: c.sectionName, isFullTake: !!c.isFullTake }))), bpm, timeSignature };
+    const input = pickupLimitInput;
     const byTrack = new Map<string, ReadonlyMap<string, number>>();
     for (const t of trackState) {
       const limits = new Map<string, number>();
@@ -799,7 +825,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       byTrack.set(t.id, limits.size ? limits : NO_PICKUP_LIMITS);
     }
     return byTrack;
-  }, [trackState, layout, bpm, timeSignature]);
+  }, [trackState, layout, pickupLimitInput]);
   const endOfTimeline = layout.timelineEnd;
   // The content's right end as last rendered (contentEnd below), for the edge-scroll cap.
   const contentEndRef = useRef(endOfTimeline);
@@ -1046,8 +1072,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // Clips are packed end to end, so the boundaries are the section start and each
     // clip's end (positions from the layout).
     const sectionClips = track.clips.filter((c) => c.sectionName === sectionName && !c.isFullTake);
-    const lefts = [sectionInfo.start, ...sectionClips.map((c) => c.start + clipLength(c))];
-    return lefts.map((posSec, i) => ({ id: `gap||${i}`, left: 256 + posSec * zoom }));
+    const lefts = [sectionInfo.start, ...sectionClips.map((c) => c.start + playedSpan(c).length)];
+    // Pickups first in the section: a drop never goes before or between them
+    // (insertClipInSection lands it after them), so gap||0…gap||k−1 aren't offered and
+    // gap||k (after the last pickup) is the first — at the downbeat, or at the last
+    // pickup's end when it runs past it.
+    let k = 0;
+    while (k < sectionClips.length && isPickupClip(sectionClips[k])) k++;
+    return lefts
+      .map((posSec, i) => ({ id: `gap||${i}`, left: 256 + (i === k ? Math.max(sectionInfo.start, posSec) : posSec) * zoom }))
+      .slice(k);
   }, [activeDragData, tracks, sectionLayout, zoom]);
 
   useEffect(() => {
@@ -1239,8 +1273,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const raw: number[] = [];
       for (const track of currentTracks) {
         for (const clip of track.clips) {
+          if (!hasPlayedLength(clip)) continue; // a pickup cut to nothing: not on the timeline
           raw.push(clip.start);
-          raw.push(clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0));
+          raw.push(clip.start + playedSpan(clip).length);
         }
       }
 
@@ -1300,13 +1335,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       // Clips newly entering or leaving range are handled by the existing rAF branches.
       for (const track of currentTracks) {
         for (const clip of track.clips) {
-          const clipEnd = clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
+          const span = playedSpan(clip);
+          const clipEnd = clip.start + span.length;
           const wasInRange = currentTime >= clip.start && currentTime < clipEnd;
           const isStillInRange = targetTime >= clip.start && targetTime < clipEnd;
           if (wasInRange && isStillInRange) {
             const audio = customAudioRefs.current[clip.id];
             if (audio) {
-              audio.currentTime = (clip.trimStart ?? 0) + Math.max(0, targetTime - clip.start);
+              audio.currentTime = span.inPoint + Math.max(0, targetTime - clip.start);
             }
           }
         }
@@ -1550,7 +1586,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         if (track.muted) { trackMuteStates[track.id] = true; continue; }
         let isOverClip = false;
         for (const clip of track.clips) {
-          if (playheadTime >= clip.start && playheadTime < clip.start + (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)) {
+          if (playheadTime >= clip.start && playheadTime < clip.start + playedSpan(clip).length) {
             isOverClip = true;
             break;
           }
@@ -2045,9 +2081,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 if (!audio || !clip.src) continue;
 
                 const clipStart = clip.start;
-                const trimStart = clip.trimStart ?? 0;
-                const trimEnd = clip.trimEnd ?? clip.duration;
-                const effectiveDuration = trimEnd - trimStart;
+                // In-point and out-point in the file: trim plus the layout's head cut
+                // (a pickup with no room). A clip cut to nothing is never in range.
+                const { inPoint: trimStart, outPoint: trimEnd, length: effectiveDuration } = playedSpan(clip);
                 const clipEnd = clipStart + effectiveDuration;
                 const inRange = newTime >= clipStart && newTime < clipEnd;
 
@@ -2644,6 +2680,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // contentEnd in the render.
   const clipDragMaxEndRef = useRef(0);
   const clipDragKeysRef = useRef<{ shift: boolean; option: boolean }>({ shift: false, option: false });
+  // Whether this drag may place the clip before its downbeat without Option (shared
+  // pickupAllowed): set at drag start from its stored offset, updated by each placement.
+  const clipDragPickupRef = useRef<PickupDragState>({ wasPickup: false, crossedDownbeat: false });
   const clipDragKeyCleanupRef = useRef<(() => void) | null>(null);
   const clipDragDropStart = (): number | null => {
     const drag = clipDragRef.current;
@@ -2689,6 +2728,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       trackId,
     };
     clipDragKeysRef.current = { shift: false, option: false };
+    const storedClip = trackState.find((t) => t.id === trackId)?.clips.find((c) => c.id === clip.id);
+    clipDragPickupRef.current = startPickupDrag(storedClip?.sectionOffset);
     // A key pressed or released under a still pointer: update the state and re-run the
     // drag's preview step at the last pointer position (the indicators, and dnd-kit's
     // collision pass via a synthetic move). Shift/Option key events stop here (capture
@@ -2842,11 +2883,25 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const others = track.clips
       .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
       .map((c) => toPlacementClip(placementInput(c)));
-    const result = placeInGap(others, effectiveLength(placementInput(clip)), wantedStart - section.start);
+    // Pickups: Option (read live, so pressing or releasing it mid-drag re-places at
+    // once), or a clip that was a pickup at drag start and hasn't been on or after the
+    // downbeat since, may start before the downbeat — down to its left limit (from the
+    // stored layout: a clip never moves its own section); its end may stop before the
+    // downbeat. Otherwise it stops at the downbeat, however fast the drag overshoots.
+    const length = effectiveLength(placementInput(clip));
+    const allowPickup = pickupAllowed(clipDragPickupRef.current, clipDragModifiers().option);
+    const minOffset = clipDragMinOffset(
+      allowPickup,
+      allowPickup ? pickupLeftLimit(pickupLimitInput, layout, track.id, clip.sectionName) : 0,
+    );
+    const result = placeInGap(others, length, wantedStart - section.start, minOffset);
+    clipDragPickupRef.current = afterPickupPlacement(clipDragPickupRef.current, result.offset);
     const offsets = new Map<string, number>([[clip.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
-    const changed = result.moved.length > 0
-      || Math.abs(result.offset - (clip.sectionOffset ?? 0)) > PLACEMENT_EPSILON;
+    // Released on its own drawn spot (its stored offset + head cut — the cut start for a
+    // cut pickup) with nothing pushed: no change, nothing saved, the stored offset kept.
+    const drawnOffset = (clip.sectionOffset ?? 0) + (layout.clipHeadCuts.get(clip.id) ?? 0);
+    const changed = placementChanged(result, drawnOffset);
     return { trackId: track.id, sectionStart: section.start, draggedId: clip.id, offsets, changed };
   };
   // The drag preview: the placement a release would apply now — it drives the landing
@@ -3075,8 +3130,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
       const sectionClips = targetTrack.clips.filter((c) => c.sectionName === sectionName && !c.isFullTake);
       const otherClips = targetTrack.clips.filter((c) => !(c.sectionName === sectionName && !c.isFullTake));
-      const insertAt = index ?? sectionClips.length;
-      const added: Clip = { ...clip, id: newId, sectionName, trimStart: 0, trimEnd: null, bucketClipId: clip.id, isFullTake: false };
+      // A pickup on this track in this section stays first: a drop aimed before it
+      // lands right after it (packSectionOffsets keeps its offset).
+      const lastPickupIndex = sectionClips.reduce((last, c, i) => (isPickupClip(c) ? i : last), -1);
+      const insertAt = Math.max(index ?? sectionClips.length, lastPickupIndex + 1);
+      // A file drop itself is never a pickup.
+      const added: Clip = { ...clip, id: newId, sectionName, sectionOffset: 0, trimStart: 0, trimEnd: null, bucketClipId: clip.id, isFullTake: false };
       if (index === undefined) added.sectionOffset = appendOffset(sectionClips.map((c) => toPlacementClip(placementInput(c))));
       const newSectionClips = [
         ...sectionClips.slice(0, insertAt),
@@ -3460,17 +3519,20 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
   // Arrow keys → navigate selection between clips and tracks.
   useEffect(() => {
+    // The clips arrow keys move between: every clip that is drawn (a pickup cut to
+    // nothing isn't).
+    const navTracks = tracks.map((t) => (t.clips.every(hasPlayedLength) ? t : { ...t, clips: t.clips.filter(hasPlayedLength) }));
     // Scrolls the timeline to bring a clip into view when keyboard nav moves selection off-screen.
     // Only fires when the clip is not already fully visible. Applies a directional overscroll margin
     // so the user can see a preview of what's next. Clamped to actual scrollable bounds.
     const scrollClipIntoView = (
-      clip: { start: number; duration: number; trimStart?: number | null; trimEnd?: number | null },
+      clip: Pick<Clip, 'start' | 'duration' | 'trimStart' | 'trimEnd' | 'headCut'>,
       direction: 'left' | 'right' | 'vertical',
     ) => {
       const el = timelineRef.current;
       if (!el) return;
       const z = zoomRef.current;
-      const effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
+      const effectiveDuration = playedSpan(clip).length;
       const clipLeft = TRACK_PANEL_WIDTH + clip.start * z;
       const clipRight = clipLeft + effectiveDuration * z;
       const { scrollLeft, clientWidth, scrollWidth } = el;
@@ -3517,7 +3579,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       // Nothing selected → find the first track in render order that has at least one clip
       // and select its first clip. No-op if every track is empty.
       if (!selectedTimelineTrackId) {
-        const firstNonEmpty = tracks.find((t) => t.clips.length > 0);
+        const firstNonEmpty = navTracks.find((t) => t.clips.length > 0);
         if (!firstNonEmpty) return;
         const initialClip = firstClipOf(firstNonEmpty);
         selectClipOnTrack(firstNonEmpty, initialClip.id);
@@ -3526,9 +3588,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         return;
       }
 
-      const trackIndex = tracks.findIndex((t) => t.id === selectedTimelineTrackId);
+      const trackIndex = navTracks.findIndex((t) => t.id === selectedTimelineTrackId);
       if (trackIndex === -1) return;
-      const currentTrack = tracks[trackIndex];
+      const currentTrack = navTracks[trackIndex];
 
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         const sorted = [...currentTrack.clips].sort((a, b) => a.start - b.start);
@@ -3556,10 +3618,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
             // First clip on this track — fall through upward, picking the latest clip on each
             // candidate track whose start is strictly less than the reference clip's start.
             for (let i = trackIndex - 1; i >= 0; i--) {
-              const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
+              const candidateSorted = [...navTracks[i].clips].sort((a, b) => a.start - b.start);
               const match = [...candidateSorted].reverse().find((c) => c.start < refStart);
               if (match) {
-                selectClipOnTrack(tracks[i], match.id);
+                selectClipOnTrack(navTracks[i], match.id);
                 scrollClipIntoView(match, 'left');
                 return;
               }
@@ -3573,11 +3635,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           } else {
             // Last clip on this track — fall through downward, picking the earliest clip on each
             // candidate track whose start is strictly greater than the reference clip's start.
-            for (let i = trackIndex + 1; i < tracks.length; i++) {
-              const candidateSorted = [...tracks[i].clips].sort((a, b) => a.start - b.start);
+            for (let i = trackIndex + 1; i < navTracks.length; i++) {
+              const candidateSorted = [...navTracks[i].clips].sort((a, b) => a.start - b.start);
               const match = candidateSorted.find((c) => c.start > refStart);
               if (match) {
-                selectClipOnTrack(tracks[i], match.id);
+                selectClipOnTrack(navTracks[i], match.id);
                 scrollClipIntoView(match, 'right');
                 return;
               }
@@ -3597,10 +3659,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         const currentClip = currentTrack.clips.find((c) => c.id === selectedTimelineClipId);
         if (!currentClip) return;
 
-        for (let i = trackIndex + step; i >= 0 && i < tracks.length; i += step) {
-          const candidate = tracks[i];
+        for (let i = trackIndex + step; i >= 0 && i < navTracks.length; i += step) {
+          const candidate = navTracks[i];
           const match = candidate.clips.find((c) => {
-            const effectiveDuration = (c.trimEnd ?? c.duration) - (c.trimStart ?? 0);
+            const effectiveDuration = playedSpan(c).length;
             return currentClip.start >= c.start && currentClip.start < c.start + effectiveDuration;
           });
           if (match) {
@@ -3615,8 +3677,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
       // Track-only selected: step until a track with at least one clip is found, then select
       // its first clip in time order. No-op if no non-empty track exists before the boundary.
-      for (let i = trackIndex + step; i >= 0 && i < tracks.length; i += step) {
-        const candidate = tracks[i];
+      for (let i = trackIndex + step; i >= 0 && i < navTracks.length; i += step) {
+        const candidate = navTracks[i];
         if (candidate.clips.length > 0) {
           const clip = firstClipOf(candidate);
           selectClipOnTrack(candidate, clip.id);
@@ -3744,7 +3806,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     return deriveLayout(previewTracks, sections, bpm, timeSignature);
   }, [clipDragPreview, trackState, sections, bpm, timeSignature]);
   const displayLayout = clipDragLayout ?? layout;
-  // The tracks as drawn: every clip at its preview-layout start, except the dragged
+  // The tracks as drawn: every clip at its preview-layout start and head cut (a push can
+  // take a later pickup's room away, or give it back), except the dragged
   // clip (it floats). A track none of whose clips move keeps its object, so its
   // memoized row re-renders only if the sections themselves change; a clip that doesn't
   // move keeps its object too.
@@ -3755,10 +3818,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       let moved = false;
       const clips = track.clips.map((c) => {
         if (c.id === draggedClipId) return c;
-        const start = clipDragLayout.clipStarts.get(c.id);
-        if (start === undefined || start === c.start) return c;
-        moved = true;
-        return { ...c, start };
+        const next = withLayoutPosition(c, clipDragLayout);
+        if (next !== c) moved = true;
+        return next;
       });
       return moved ? { ...track, clips } : track;
     });
@@ -3794,11 +3856,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const track = tracks.find((t) => t.clips.some((c) => c.id === draggedClipId));
     const clip = track?.clips.find((c) => c.id === draggedClipId);
     if (!track || !clip) return null;
-    const start = clipDragLayout?.clipStarts.get(clip.id) ?? clip.start;
+    // Its drawn span in the layout it lands in: cut start and played length.
+    const landed = clipDragLayout ? withLayoutPosition(clip, clipDragLayout) : clip;
     return {
       trackId: track.id,
       clipId: clip.id,
-      rect: { left: start * zoom, width: clipLength(clip) * zoom },
+      rect: { left: landed.start * zoom, width: playedSpan(landed).length * zoom },
     };
   }, [draggedClipId, tracks, clipDragLayout, zoom]);
   // Focus during a timeline clip drag: the home section (at its live length) and the

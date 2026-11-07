@@ -46,21 +46,29 @@ export function toPlacementClip(
 //      gap (g1 − g0) now sits between A's end and the next clip, and the gaps between
 //      the pushed clips keep their size. Clips before the gap never move; the section
 //      grows on drop if they run past it.
-//   4. No clip ever moves earlier — no reorders, swaps or rotations. Offsets never go
-//      below 0 (no pickups yet).
+//   4. No clip ever moves earlier — no reorders, swaps or rotations.
+//   5. `minOffset` (default 0, the downbeat) is the lowest offset A may take: the first
+//      gap starts there instead of at 0. Below 0 only for a pickup drag (clipDragMinOffset).
+//      A clip among `others` that starts before minOffset (an existing pickup, when A
+//      may not be one) never moves: the first gap starts at its end instead.
 // Assumes the stored clips don't overlap (the server refuses any save that would).
 export function placeInGap(
   others: PlacementClip[],
   draggedLength: number,
   wantedOffset: number,
+  minOffset = 0,
 ): PlacementResult {
-  const sorted = [...others].sort((a, b) => a.offset - b.offset);
+  const min = Number.isFinite(minOffset) ? Math.min(0, minOffset) : 0;
   const end = (c: PlacementClip) => c.offset + c.length;
-  const s = Number.isFinite(wantedOffset) ? Math.max(0, wantedOffset) : 0;
-  // The end of the last clip that ends at or before `at`, or 0; the start of the first
-  // clip that starts at or after `at`, or no limit.
+  // Clips starting before the minimum stay where they are and only raise the floor.
+  const fixed = others.filter((c) => c.offset < min - PLACEMENT_EPSILON);
+  const floor = fixed.reduce((m, c) => Math.max(m, end(c)), min);
+  const sorted = others.filter((c) => !fixed.includes(c)).sort((a, b) => a.offset - b.offset);
+  const s = Number.isFinite(wantedOffset) ? Math.max(floor, wantedOffset) : Math.max(floor, 0);
+  // The end of the last clip that ends at or before `at`, or the floor; the start of the
+  // first clip that starts at or after `at`, or no limit.
   const gapStartBefore = (at: number) =>
-    sorted.filter((c) => end(c) <= at + PLACEMENT_EPSILON).reduce((m, c) => Math.max(m, end(c)), 0);
+    sorted.filter((c) => end(c) <= at + PLACEMENT_EPSILON).reduce((m, c) => Math.max(m, end(c)), floor);
   const gapEndAfter = (at: number) =>
     sorted.find((c) => c.offset >= at - PLACEMENT_EPSILON)?.offset ?? Infinity;
 
@@ -130,9 +138,10 @@ export function trimEndBeforeNext(
 
 // ── Pickups ──────────────────────────────────────────────────────────────────
 // A pickup is a clip with a negative section offset: it belongs to its section but
-// starts before the section's downbeat. Hard limits, the same on client and server:
+// starts before the section's downbeat. It can sit anywhere in the pickup area: its
+// end may stop before the downbeat (a stick click on beat 2 of the bar before). Hard
+// limits, the same on client and server:
 //   - its start is no earlier than pickupLeftLimit (below);
-//   - its end reaches the downbeat: offset + trimmed length ≥ 0 (touching is fine);
 //   - "cut, don't push": nothing else ever moves to make room.
 // Leniency: a clip already sitting below its limit (a later tempo change, a previous
 // clip moved later, a bandmate's edit) stays saveable — a write that doesn't move its
@@ -169,14 +178,12 @@ export function pickupLeftLimit(
   return Math.min(0, Math.max(sectionStart - barLength, 0, previousEnd) - sectionStart);
 }
 
-// Why a sectioned clip can't be saved at `offset` with trimmed length `length`, or null
-// when it can. `currentOffset` is the clip's stored offset before this write (null for
-// a new clip): an offset at or after it is always allowed (leniency); otherwise the
-// offset must be ≥ `leftLimit` (pickupLeftLimit) and, when negative, end at or after
-// the downbeat.
+// Why a sectioned clip can't be saved at `offset`, or null when it can. `currentOffset`
+// is the clip's stored offset before this write (null for a new clip): an offset at or
+// after it is always allowed (leniency); otherwise the offset must be ≥ `leftLimit`
+// (pickupLeftLimit). Where the clip ends doesn't matter.
 export function pickupOffsetError(
   offset: number,
-  length: number,
   currentOffset: number | null,
   leftLimit: number,
 ): string | null {
@@ -184,10 +191,47 @@ export function pickupOffsetError(
   if (offset < floor - PLACEMENT_EPSILON) {
     return "A pickup can't start more than one bar before its section, before the end of the previous clip on its track, or before the start of the song.";
   }
-  if (offset < -PLACEMENT_EPSILON && offset + length < -PLACEMENT_EPSILON) {
-    return "A pickup has to reach its section's downbeat.";
-  }
   return null;
+}
+
+// Whether releasing a dragged clip with placement `result` changes anything: no clip
+// pushed, and the dragged clip landing on its drawn offset (within PLACEMENT_EPSILON),
+// is a no-op and nothing is saved. `drawnOffset` is where it is drawn now, from its
+// section start: its stored offset + the layout's head cut (clipHeadCuts). For a cut
+// pickup that is its cut start, not its stored offset, so a drag released back on its
+// own spot keeps the stored offset, and the full pickup comes back when room returns.
+export function placementChanged(result: PlacementResult, drawnOffset: number): boolean {
+  return result.moved.length > 0 || Math.abs(result.offset - drawnOffset) > PLACEMENT_EPSILON;
+}
+
+// ── Pickup drags ─────────────────────────────────────────────────────────────
+// Only Option creates a pickup. A clip that is a pickup when its drag starts may move
+// within the pickup area without Option, until it is dragged on or after the downbeat:
+// then it's a normal clip for the rest of that drag, and crossing back needs Option.
+
+export interface PickupDragState {
+  wasPickup: boolean;      // its stored offset was below 0 when the drag started
+  crossedDownbeat: boolean; // it has landed on or after the downbeat in this drag
+}
+
+export function startPickupDrag(storedOffset: number | null | undefined): PickupDragState {
+  return { wasPickup: (storedOffset ?? 0) < -PLACEMENT_EPSILON, crossedDownbeat: false };
+}
+
+// Whether the drag may place the clip before the downbeat now.
+export function pickupAllowed(state: PickupDragState, option: boolean): boolean {
+  return option || (state.wasPickup && !state.crossedDownbeat);
+}
+
+// The state after a placement at `landedOffset`.
+export function afterPickupPlacement(state: PickupDragState, landedOffset: number): PickupDragState {
+  return !state.crossedDownbeat && landedOffset >= -PLACEMENT_EPSILON ? { ...state, crossedDownbeat: true } : state;
+}
+
+// The lowest offset a dragged clip may take (placeInGap's minOffset): 0 when no pickup
+// is allowed; otherwise its left limit (pickupLeftLimit), never above 0.
+export function clipDragMinOffset(allowPickup: boolean, leftLimit: number): number {
+  return allowPickup ? Math.min(0, leftLimit) : 0;
 }
 
 // ── Trims ────────────────────────────────────────────────────────────────────
@@ -252,8 +296,8 @@ export interface TrimResult {
 //               with none, 0 — or a pickup's left limit); a clip that isn't a pickup
 //               never goes below 0; the clip stays at least minTrimLength long.
 //   Right edge: trimEnd ≤ duration; the clip's end ≤ the next clip's start (no limit
-//               for the last clip); a pickup's end stays at or after the downbeat; at
-//               least minTrimLength long.
+//               for the last clip); at least minTrimLength long. A pickup's end may
+//               go before the downbeat.
 // The left edge is settled first, so a left-only change (trimEnd as it was) never moves
 // the right edge, and a right-only change never moves the left edge. Returns null when
 // there is no allowed trim: the neighbours leave less room than the minimum length (or
@@ -283,12 +327,10 @@ export function clampTrim(
   const offset = nb ? clip.offset + (trimStart - clip.trimStart) : clip.offset;
   // ── Right edge ──
   const highEnd = nb ? Math.min(clip.duration, trimStart + (nb.nextStart - offset)) : clip.duration;
-  // A pickup (after the left edge has settled) ends at or after the downbeat.
-  const lowEnd = Math.max(trimStart + minLength, nb && offset < -PLACEMENT_EPSILON ? trimStart - offset : -Infinity);
+  const lowEnd = trimStart + minLength;
   let trimEnd = Math.min(highEnd, Math.max(lowEnd, Number.isFinite(wantedEnd) ? wantedEnd : clip.duration));
   if (trimEnd <= trimStart + PLACEMENT_EPSILON) return null;
   if (trimEnd - trimStart < minLength - PLACEMENT_EPSILON) return null;
-  if (nb && offset < -PLACEMENT_EPSILON && offset + (trimEnd - trimStart) < -PLACEMENT_EPSILON) return null;
   const storedEnd = trimEnd >= clip.duration - PLACEMENT_EPSILON ? null : trimEnd;
   if (storedEnd === null) trimEnd = clip.duration;
   const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON

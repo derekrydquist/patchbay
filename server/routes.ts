@@ -1753,7 +1753,7 @@ export async function registerRoutes(
     if (!existingClip) return res.status(404).json({ message: "Clip not found" });
     // A new sectionOffset must be finite, stay within the pickup limits (a negative
     // offset is a pickup: no earlier than its left limit, or its own current offset if
-    // that's further left, and ending at or after the downbeat — 400), and must not
+    // that's further left — 400; it may end before the downbeat), and must not
     // make the clip overlap another clip on its track in its section (409), all with
     // the length this same request leaves it.
     if ('sectionOffset' in clipUpdates) {
@@ -1773,7 +1773,7 @@ export async function registerRoutes(
           trimEnd: 'trimEnd' in clipUpdates ? (clipUpdates.trimEnd ?? null) : existingClip.trimEnd,
         });
         const pickupError = pickupOffsetError(
-          offset, after.length, existingClip.sectionOffset ?? 0,
+          offset, existingClip.sectionOffset ?? 0,
           offset < 0 ? songPickupLeftLimit(tclipSongId, existingClip.trackId, existingClip.sectionName) : 0,
         );
         if (pickupError) return res.status(400).json({ message: pickupError });

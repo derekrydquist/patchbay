@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip } from '@/lib/daw-data';
 import { TimelineClip } from './Clip';
+import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { BeatGrid } from './BeatGrid';
 import { trackDisplayColor } from '@/lib/track-color';
 import { trimNeighbours } from '@shared/timelinePlacement';
@@ -410,14 +411,15 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             className="pointer-events-none absolute top-0 h-full rounded-md"
             style={{
               left: raisedClip.start * zoom,
-              width: ((raisedClip.trimEnd ?? raisedClip.duration) - (raisedClip.trimStart ?? 0)) * zoom,
+              width: playedSpan(raisedClip).length * zoom,
               zIndex: 11,
               boxShadow: '0 10px 22px rgba(0,0,0,0.6)',
             }}
           />
         )}
         {sections.flatMap((section) =>
-          track.clips.filter((c) => !c.isFullTake && c.sectionName === section.name)
+          // A pickup whose head cut leaves nothing isn't drawn; it comes back when room returns.
+          track.clips.filter((c) => !c.isFullTake && c.sectionName === section.name && hasPlayedLength(c))
         ).map((clip) => {
           // What stops this clip's trim edges: the clips around it on this track in
           // its section (passed as two numbers so the memoized clip doesn't re-render).

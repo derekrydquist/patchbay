@@ -44,6 +44,10 @@ export interface Clip {
   // Timeline clips only: seconds from the home section's start (timeline_clips.section_offset).
   // Kept equal to start − section start by recalcAllStarts; null for full takes.
   sectionOffset?: number | null;
+  // Timeline clips only, in memory only (never saved or sent): seconds the layout cut
+  // from the start of a pickup that has no room (shared layoutTimeline, clipHeadCuts),
+  // set with start by positionTracks. Read it through playedSpan (lib/clip-span.ts).
+  headCut?: number;
   bucketClipId?: string;
   // Bucket versions only: the ideas row (section) the version lives in. Carried so a
   // version drag knows its own section; timeline clips never set it.

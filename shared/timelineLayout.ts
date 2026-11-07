@@ -147,7 +147,7 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   const place = (name: string, baseLength: number | null) => {
     const need = contentNeed.get(name) ?? 0;
     // Every placed section has clips, and gets at least one beat — even one whose
-    // clips all end at or before its start (only a pickup ending on its downbeat).
+    // clips all end at or before its start (only pickups, which may end before it).
     const lengthBeats = Math.max(1, beatsToHold(baseLength ?? 0, spb), beatsToHold(need, spb));
     layoutSections.push({
       name,

@@ -262,6 +262,30 @@ describe('layoutTimeline — pickups', () => {
     expect(noRoom.clipStarts.get('b1')).toBe(noRoom.clipEnds.get('b1'));
   });
 
+  it('a section holding only pickups that end before its downbeat gets one beat; they add nothing to its need', () => {
+    // Two short pickups in B, at −1.5 (0.5 s) and −0.75 (0.25 s): both end before B's start.
+    const p1 = clip({ id: 'b1', sectionName: 'B', sectionOffset: -1.5, duration: 0.5 });
+    const p2 = clip({ id: 'b2', sectionName: 'B', sectionOffset: -0.75, duration: 0.25 });
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill, p1, p2]);
+    expect(l.sections[1]).toMatchObject({ name: 'B', start: 4, lengthBeats: 1, length: 0.5 });
+    expect(l.clipStarts.get('b1')).toBe(2.5);
+    expect(l.clipEnds.get('b1')).toBe(3);
+    expect(l.clipHeadCuts.get('b1')).toBe(0);
+    expect(l.clipStarts.get('b2')).toBe(3.25);
+    expect(l.timelineEnd).toBe(4.5);
+  });
+
+  it('a pickup ending before the downbeat is hidden whole once the previous clip ends after it', () => {
+    // a1 runs to 3.5; the pickup sits at 2.5–3 (−1.5 for 0.5 s): no room at all.
+    const p = clip({ id: 'b1', sectionName: 'B', sectionOffset: -1.5, duration: 0.5 });
+    const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 3.5 }), aFill, p]);
+    expect(l.clipHeadCuts.get('b1')).toBe(0.5); // its whole trimmed length
+    expect(l.clipStarts.get('b1')).toBe(l.clipEnds.get('b1'));
+    // When room returns (a1 shorter again), it comes back whole.
+    const back = lay([clip({ id: 'a1', sectionName: 'A', duration: 2 }), aFill, p]);
+    expect(back.clipHeadCuts.get('b1')).toBe(0);
+  });
+
   it('a pickup longer than one bar (as after a tempo change) is not clamped', () => {
     const l = lay([clip({ id: 'a1', sectionName: 'A', duration: 0.5 }), aFill, clip({ id: 'b1', sectionName: 'B', sectionOffset: -3, duration: 4 })]);
     expect(l.clipHeadCuts.get('b1')).toBe(0);

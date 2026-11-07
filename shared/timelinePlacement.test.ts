@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
@@ -108,7 +108,7 @@ describe('placeInGap — a too-small gap stays', () => {
 });
 
 describe('placeInGap — minimum offset and exact edges', () => {
-  it('clamps the offset at 0 (no pickups yet)', () => {
+  it('clamps the offset at 0 by default (no pickup)', () => {
     expect(placeInGap([], 2, -1.5)).toEqual({ offset: 0, moved: [] });
     // Gap 0–4 before b fits 3 s: −1 → 0.
     expect(placeInGap([clip('b', 4, 2)], 3, -1)).toEqual({ offset: 0, moved: [] });
@@ -557,19 +557,22 @@ describe('pickupLeftLimit', () => {
 });
 
 describe('pickupOffsetError', () => {
-  it('accepts offsets within the limit whose end reaches the downbeat', () => {
-    expect(pickupOffsetError(-1, 2, 0, -2)).toBeNull();
-    expect(pickupOffsetError(-2, 2, 0, -2)).toBeNull(); // ends exactly on the downbeat
-    expect(pickupOffsetError(3, 2, 0, -2)).toBeNull();  // not a pickup
+  it('accepts offsets within the limit', () => {
+    expect(pickupOffsetError(-1, 0, -2)).toBeNull();
+    expect(pickupOffsetError(-2, 0, -2)).toBeNull();
+    expect(pickupOffsetError(3, 0, -2)).toBeNull();  // not a pickup
   });
-  it('refuses past the limit, and an end before the downbeat', () => {
-    expect(pickupOffsetError(-2.5, 4, 0, -2)).toMatch(/one bar/);
-    expect(pickupOffsetError(-1.5, 1, 0, -2)).toMatch(/downbeat/);
+  it('accepts a pickup ending before the downbeat (a 0.5 s clip at −1.5)', () => {
+    expect(pickupOffsetError(-1.5, 0, -2)).toBeNull();
+  });
+  it('refuses past the limit', () => {
+    expect(pickupOffsetError(-2.5, 0, -2)).toMatch(/one bar/);
+    expect(pickupOffsetError(-0.5, null, 0)).toMatch(/one bar/); // a new clip, no room
   });
   it('leniency: a clip already below its limit can stay or move right, never further left', () => {
-    expect(pickupOffsetError(-3, 4, -3, -2)).toBeNull();
-    expect(pickupOffsetError(-2.5, 4, -3, -2)).toBeNull();
-    expect(pickupOffsetError(-3.5, 4, -3, -2)).toMatch(/one bar/);
+    expect(pickupOffsetError(-3, -3, -2)).toBeNull();
+    expect(pickupOffsetError(-2.5, -3, -2)).toBeNull();
+    expect(pickupOffsetError(-3.5, -3, -2)).toMatch(/one bar/);
   });
 });
 
@@ -597,11 +600,16 @@ describe('clampTrim — pickups', () => {
     expect(r).toMatchObject({ trimStart: 2, trimEnd: 5, offset: -1.5, clamped: false });
   });
 
-  it('a right trim stops where the end reaches the downbeat', () => {
-    const r = clampTrim(P, { trimStart: 2, trimEnd: 2.6 }, nb)!;
-    expect(r).toMatchObject({ trimStart: 2, offset: -1.5, clamped: true });
-    expect(r.trimEnd).toBeCloseTo(3.5);
-    expect(end(r)).toBeCloseTo(0);
+  it('a right trim can pull the end before the downbeat, down to the minimum length', () => {
+    // P runs −1.5…2.5. Trimmed to 1 s it ends at −0.5, before the downbeat.
+    const r = clampTrim(P, { trimStart: 2, trimEnd: 3 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 2, trimEnd: 3, offset: -1.5, clamped: false });
+    expect(end(r)).toBeCloseTo(-0.5);
+    // Asked for shorter than 0.5 s: held at the minimum, the left edge untouched.
+    const min = clampTrim(P, { trimStart: 2, trimEnd: 2.1 }, nb)!;
+    expect(min).toMatchObject({ trimStart: 2, offset: -1.5, clamped: true });
+    expect(min.trimEnd).toBeCloseTo(2 + MIN_TRIM_LENGTH);
+    expect(end(min)).toBeCloseTo(-1);
   });
 
   it('a right trim still stops at the next clip', () => {
@@ -700,5 +708,170 @@ describe('no pickups → identical trim results', () => {
       }
     }
     expect(checked).toBeGreaterThan(1000);
+  });
+});
+
+describe('clipDragMinOffset', () => {
+  it('is 0 when no pickup is allowed, whatever the limit', () => {
+    expect(clipDragMinOffset(false, -2)).toBe(0);
+  });
+  it('is the left limit, whatever the clip length', () => {
+    expect(clipDragMinOffset(true, -2)).toBe(-2);
+    expect(clipDragMinOffset(true, 0)).toBe(0);
+  });
+});
+
+describe('pickup drag state', () => {
+  it('only Option allows a pickup for a clip that was not one', () => {
+    const st = startPickupDrag(0);
+    expect(pickupAllowed(st, false)).toBe(false);
+    expect(pickupAllowed(st, true)).toBe(true);
+    expect(startPickupDrag(null).wasPickup).toBe(false);
+  });
+  it('an existing pickup is allowed without Option until it lands on or after the downbeat', () => {
+    let st = startPickupDrag(-1);
+    expect(pickupAllowed(st, false)).toBe(true);
+    st = afterPickupPlacement(st, -0.5);
+    expect(pickupAllowed(st, false)).toBe(true);
+    st = afterPickupPlacement(st, 0); // on the downbeat counts
+    expect(pickupAllowed(st, false)).toBe(false);
+    expect(pickupAllowed(st, true)).toBe(true);
+    // It stays a normal clip for the rest of the drag, even after landing back before it.
+    expect(pickupAllowed(afterPickupPlacement(st, -1), false)).toBe(false);
+  });
+});
+
+// One timeline clip drag as Timeline runs it: per pointer step, whether a pickup is
+// allowed (Option, or a pickup at drag start not yet on/after the downbeat), the minimum
+// offset, the placement, then the state update. Returns each step's landing offset.
+function drag(
+  input: TimelineLayoutInput,
+  trackId: string,
+  sectionName: string,
+  stored: number,
+  length: number,
+  others: PlacementClip[],
+  steps: { wanted: number; option?: boolean }[],
+): number[] {
+  let state = startPickupDrag(stored);
+  return steps.map(({ wanted, option = false }) => {
+    const allow = pickupAllowed(state, option);
+    const min = clipDragMinOffset(allow, allow ? limitFor(input, trackId, sectionName) : 0);
+    const r = placeInGap(others, length, wanted, min);
+    state = afterPickupPlacement(state, r.offset);
+    return r.offset;
+  });
+}
+
+describe('timeline clip drag — minimum offset (pickups)', () => {
+  // 120 bpm, 4/4: a bar is 2 s. Intro 0–8 (bass fills it; drums 0–1), Verse at 8.
+  // Drums' Verse clip A (4 s) is dragged; its left limit is the bar, −2.
+  const input: TimelineLayoutInput = {
+    sections: rows('Intro', 'Verse'),
+    clips: [lc('d1', 'drums', 'Intro', 0, 1), lc('b1', 'bass', 'Intro', 0, 8), lc('A', 'drums', 'Verse', 0, 4)],
+    bpm: 120, timeSignature: '4/4',
+  };
+
+  it('no Option: stops at the downbeat, however far it overshoots', () => {
+    expect(drag(input, 'drums', 'Verse', 0, 4, [], [{ wanted: -1.5 }, { wanted: -100 }, { wanted: 1 }])).toEqual([0, 0, 1]);
+  });
+
+  it('Option: lands before the downbeat where aimed, down to the left limit', () => {
+    expect(drag(input, 'drums', 'Verse', 0, 4, [], [{ wanted: -1.5, option: true }, { wanted: -5, option: true }])).toEqual([-1.5, -2]);
+  });
+
+  it('Option pressed and released mid-drag', () => {
+    expect(drag(input, 'drums', 'Verse', 0, 4, [], [
+      { wanted: -1 }, { wanted: -1, option: true }, { wanted: -1 },
+    ])).toEqual([0, -1, 0]);
+  });
+
+  it('an existing pickup moves within the pickup area without Option', () => {
+    expect(drag(input, 'drums', 'Verse', -1, 4, [], [{ wanted: -1.5 }, { wanted: -0.25 }, { wanted: -3 }])).toEqual([-1.5, -0.25, -2]);
+  });
+
+  it('an existing pickup dragged past the downbeat is a normal clip; back needs Option', () => {
+    expect(drag(input, 'drums', 'Verse', -1, 4, [], [
+      { wanted: -1 }, { wanted: 0.5 }, { wanted: -1 }, { wanted: -1, option: true },
+    ])).toEqual([-1, 0.5, 0, -1]);
+    // Exactly on the downbeat counts as crossing it.
+    expect(drag(input, 'drums', 'Verse', -1, 4, [], [{ wanted: 0 }, { wanted: -1 }])).toEqual([0, 0]);
+  });
+
+  it('the first section on the timeline: no room before song time 0', () => {
+    const first: TimelineLayoutInput = { ...input, clips: [lc('A', 'drums', 'Intro', 0, 4)] };
+    expect(drag(first, 'drums', 'Intro', 0, 4, [], [{ wanted: -1, option: true }])).toEqual([0]);
+  });
+
+  it("the previous clip's end on the track is the limit", () => {
+    // Drums' Intro clip ends at 7.5: the limit is −0.5, not the bar.
+    const prev: TimelineLayoutInput = {
+      ...input,
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.5), lc('b1', 'bass', 'Intro', 0, 8), lc('A', 'drums', 'Verse', 0, 4)],
+    };
+    expect(drag(prev, 'drums', 'Verse', 0, 4, [], [{ wanted: -1.5, option: true }])).toEqual([-0.5]);
+  });
+
+  it('a one-beat clip Option-dragged to the very start of the bar before lands one bar early, ending before the downbeat', () => {
+    // 0.5 s (one beat at 120 bpm), aimed at and past the bar line: lands at −2, ends at −1.5.
+    expect(drag(input, 'drums', 'Verse', 0, 0.5, [], [{ wanted: -2, option: true }])).toEqual([-2]);
+    expect(drag(input, 'drums', 'Verse', 0, 0.5, [], [{ wanted: -3, option: true }])).toEqual([-2]);
+    // Anywhere in the bar: beat 2 of the bar before (−1.5).
+    expect(drag(input, 'drums', 'Verse', 0, 0.5, [], [{ wanted: -1.5, option: true }])).toEqual([-1.5]);
+  });
+
+  it('Option with a too-small first gap: A at the limit, the clips after it move later by its length', () => {
+    // b at 0.5–2.5; the first gap is −2…0.5 (2.5 s), too small for A (3 s).
+    const others = [clip('b', 0.5, 2), clip('c', 4, 1)];
+    const r = placeInGap(others, 3, -1.5, clipDragMinOffset(true, -2));
+    expect(r).toEqual({ offset: -2, moved: [{ id: 'b', offset: 3.5 }, { id: 'c', offset: 7 }] });
+    expect(findOverlap(apply(others, 3, r))).toBeNull();
+  });
+
+  it('Option with a first gap that fits: lands where aimed, held within the gap', () => {
+    // b at 1; the first gap −2…1 fits A (2 s) — aimed at −0.5, it would run to 1.5, so it lands at −1.
+    expect(placeInGap([clip('b', 1, 2)], 2, -0.5, clipDragMinOffset(true, -2))).toEqual({ offset: -1, moved: [] });
+  });
+
+  it("a normal clip next to another track clip's pickup never moves it: it goes after its end", () => {
+    // p is a pickup (−1…1) among the others; A without Option aimed at −0.5 / 0.2.
+    const others = [clip('p', -1, 2), clip('b', 4, 1)];
+    expect(placeInGap(others, 2, -0.5)).toEqual({ offset: 1, moved: [] });
+    expect(placeInGap(others, 2, 0.2)).toEqual({ offset: 1, moved: [] });
+    // Too big for the gap 1–4: A at 1, b moves later; p never moves.
+    expect(placeInGap(others, 4, 0.2)).toEqual({ offset: 1, moved: [{ id: 'b', offset: 8 }] });
+  });
+});
+
+describe('placementChanged — released back on its own spot', () => {
+  it('a normal clip: no push and landing on its offset is a no-op', () => {
+    expect(placementChanged({ offset: 2, moved: [] }, 2)).toBe(false);
+    expect(placementChanged({ offset: 2 + 1e-9, moved: [] }, 2)).toBe(false);
+    expect(placementChanged({ offset: 2.5, moved: [] }, 2)).toBe(true);
+    expect(placementChanged({ offset: 2, moved: [{ id: 'b', offset: 5 }] }, 2)).toBe(true);
+  });
+
+  it('a cut pickup released on its drawn (cut) start saves nothing, though it differs from the stored offset', () => {
+    // 120 bpm 4/4. Drums in Intro run to 7.5; Verse starts at 8. Drums' Verse pickup is
+    // stored at −1.5 (left over from before the Intro clip grew), so the layout cuts
+    // 1 s of its head: it is drawn from −0.5, and its limit is −0.5 too.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.5), lc('b1', 'bass', 'Intro', 0, 8), lc('P', 'drums', 'Verse', -1.5, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    const stored = -1.5;
+    const drawn = stored + layout.clipHeadCuts.get('P')!;
+    expect(drawn).toBeCloseTo(-0.5);
+    // A drag aimed back where it was drawn (or further left) lands at the limit, −0.5.
+    const steps = drag(input, 'drums', 'Verse', stored, 4, [], [{ wanted: -0.5 }, { wanted: -3 }]);
+    expect(steps[0]).toBeCloseTo(-0.5);
+    expect(steps[1]).toBeCloseTo(-0.5);
+    for (const offset of steps) expect(placementChanged({ offset, moved: [] }, drawn)).toBe(false);
+    // Measured against the stored offset it would have looked like a move (the old rule).
+    expect(placementChanged({ offset: steps[0], moved: [] }, stored)).toBe(true);
+    // A real move is still saved.
+    expect(placementChanged({ offset: 0.5, moved: [] }, drawn)).toBe(true);
   });
 });
