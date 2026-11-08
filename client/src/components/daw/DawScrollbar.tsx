@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { MIN_ZOOM, MAX_ZOOM } from '@/lib/timeline-zoom';
 
 interface DawScrollbarProps {
   timelineRef: React.RefObject<HTMLDivElement>;
@@ -6,9 +7,6 @@ interface DawScrollbarProps {
   setZoom: (zoom: number) => void;
   projectDuration: number;
 }
-
-const MIN_ZOOM = 10; // px per sec
-const MAX_ZOOM = 300; // px per sec
 
 export function DawScrollbar({ timelineRef, zoom, setZoom, projectDuration }: DawScrollbarProps) {
   const [, setForceRender] = useState(0);

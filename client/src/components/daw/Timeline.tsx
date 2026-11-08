@@ -55,6 +55,7 @@ import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
+import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
 import { placeInGap, snapDragStart, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
@@ -958,11 +959,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     setPlayheadTimeState(playheadRef.current);
   }, []);
 
-  const [zoom, setZoom] = useState(() => {
-    const saved = localStorage.getItem(`patchbay-zoom-${songId}`);
-    if (saved) { const z = Number(saved); if (z >= 20 && z <= 400) return z; }
-    return 80;
-  });
+  const [zoom, setZoom] = useState(() => parseSavedZoom(localStorage.getItem(`patchbay-zoom-${songId}`)) ?? DEFAULT_ZOOM);
   const [isLooping, setIsLooping] = useState(() => localStorage.getItem(`patchbay-loop-${songId}`) === 'true');
   const [isMetronomeOn, setIsMetronomeOn] = useState(() => localStorage.getItem(`patchbay-metronome-${songId}`) === 'true');
   const [selectedTimelineTrackId, setSelectedTimelineTrackId] = useState<string | null>(null);
@@ -1413,11 +1410,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     } catch {}
 
     // Zoom
-    const savedZoom = localStorage.getItem(`patchbay-zoom-${songId}`);
-    if (savedZoom) {
-      const z = Number(savedZoom);
-      if (z >= 20 && z <= 400) { setZoom(z); }
-    }
+    const savedZoom = parseSavedZoom(localStorage.getItem(`patchbay-zoom-${songId}`));
+    if (savedZoom !== null) setZoom(savedZoom);
 
     // Scroll — deferred one frame so the content has rendered at the new zoom.
     // Horizontal and vertical restore share a single rAF so both land on the same
@@ -1562,7 +1556,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
         const currentZoom = zoomRef.current;
         const factor = Math.exp(-accumulated * 0.0040);
-        const newZoom = Math.max(10, Math.min(300, currentZoom * factor));
+        const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom * factor));
 
         if (Math.abs(newZoom - currentZoom) < 0.01) return;
 
