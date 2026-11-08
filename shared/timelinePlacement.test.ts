@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, snapDragStart, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
+import { snapTime } from './musicalTime';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -1083,5 +1084,153 @@ describe('apply trim to all instances — never creates a pickup', () => {
     const r = instanceTrim({ offset: 0, duration: 10, trimStart: 0, trimEnd: 5 }, { trimStart: 0, trimEnd: null }, [], 0, 6.5)!;
     expect(r.trimEnd).toBeCloseTo(6.5);
     expect(r.clamped).toBe(true);
+  });
+});
+
+// ── Snap for clip drags: beats and clips (snapDragStart) ─────────────────────
+describe('snapDragStart — snap to beats and to clips', () => {
+  // 120 bpm, 4/4: a beat is 0.5 s, a bar 2 s.
+  const beat = (sectionStart: number) => ({ step: 0.5, sectionStart });
+  const span = (start: number, length: number) => ({ start, end: start + length });
+
+  it("Derek's case: a clip at the section start, a gap under a beat before the next; dragging right snaps flush", () => {
+    // A (2.3 s) at 0; B at 2.6 — a 0.3 s gap. Dragged 0.2 s right.
+    const wanted = snapDragStart({ freeOffset: 0.2, grid: beat(6.5), others: [span(2.6, 4)], draggedLength: 2.3, minOffset: 0 });
+    // Candidates: beat 0 (0.2 away), section start 0, B's end 6.6, flush before B 0.3 (0.1 away) → 0.3.
+    expect(wanted).toBeCloseTo(0.3, 9);
+    const r = placeInGap([clip('B', 2.6, 4)], 2.3, wanted);
+    expect(r).toEqual({ offset: wanted, moved: [] });
+    expect(r.offset + 2.3).toBeCloseTo(2.6, 9);
+    expect(placementChanged(r, 0)).toBe(true);
+    // The beat alone (today) went back to 0: no change.
+    expect(placementChanged(placeInGap([clip('B', 2.6, 4)], 2.3, snapTime(6.7, '1/4', 120, '4/4') - 6.5), 0)).toBe(false);
+  });
+
+  it('open space: snaps to beats exactly as snapTime', () => {
+    for (const free of [0.7, 1.24, 1.26, 3.37, 9.9]) {
+      const wanted = snapDragStart({ freeOffset: free, grid: beat(6.5), others: [], draggedLength: 2, minOffset: 0 });
+      expect(wanted, `free = ${free}`).toBeCloseTo(snapTime(6.5 + free, '1/4', 120, '4/4') - 6.5, 9);
+    }
+  });
+
+  it('the nearest wins between a beat and a clip edge', () => {
+    const others = [span(0, 3.1)];
+    // 3.2: beat 3.0 is 0.2 away, flush after the clip (3.1) 0.1 → 3.1.
+    expect(snapDragStart({ freeOffset: 3.2, grid: beat(6.5), others, draggedLength: 1, minOffset: 0 })).toBeCloseTo(3.1, 9);
+    // 3.45: beat 3.5 is 0.05 away, 3.1 is 0.35 → 3.5.
+    expect(snapDragStart({ freeOffset: 3.45, grid: beat(6.5), others, draggedLength: 1, minOffset: 0 })).toBeCloseTo(3.5, 9);
+    // Exactly halfway between 3.1 and 3.5 (3.3): the later spot, as snapTime rounds.
+    expect(snapDragStart({ freeOffset: 3.3, grid: beat(6.5), others, draggedLength: 1, minOffset: 0 })).toBeCloseTo(3.5, 9);
+  });
+
+  it('Bar snap with a section starting mid-bar can reach offset 0', () => {
+    // The section starts at 7 s, beat 3 of bar 4: its bar lines are offsets −1, 1, 3…
+    const bar = { step: 2, sectionStart: 7 };
+    expect(snapDragStart({ freeOffset: 0.3, grid: bar, others: [], draggedLength: 1, minOffset: 0 })).toBe(0);
+    expect(snapDragStart({ freeOffset: 0.8, grid: bar, others: [], draggedLength: 1, minOffset: 0 })).toBeCloseTo(1, 9);
+    // snapTime alone could only give 1 (or −1, before the section).
+    expect(snapTime(7.3, 'bar', 120, '4/4') - 7).toBeCloseTo(1, 9);
+  });
+
+  it('an Option pickup snaps flush to the previous section\'s last clip (the pickup limit)', () => {
+    // Intro: drums end at 6.3, bass fills it to 8; Verse at 8. Drums' limit: −1.7.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 6.3), lc('b1', 'bass', 'Intro', 0, 8), lc('A', 'drums', 'Verse', 0, 4)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    const verse = layout.sections.find((x) => x.name === 'Verse')!;
+    const minOffset = clipDragMinOffset(true, pickupLeftLimit(input, layout, 'drums', 'Verse'));
+    expect(minOffset).toBeCloseTo(-1.7, 9);
+    // −1.68: the beat −1.5 is 0.18 away, the limit 0.02 → the limit.
+    const wanted = snapDragStart({ freeOffset: -1.68, grid: beat(verse.start), others: [], draggedLength: 4, minOffset });
+    expect(wanted).toBeCloseTo(-1.7, 9);
+    expect(placeInGap([], 4, wanted, minOffset).offset).toBeCloseTo(-1.7, 9);
+    // Without a pickup (minimum 0), the limit isn't a candidate.
+    expect(snapDragStart({ freeOffset: -1.68, grid: beat(verse.start), others: [], draggedLength: 4, minOffset: 0 })).toBeCloseTo(-1.5, 9);
+  });
+
+  it('a cut pickup counts where it is drawn', () => {
+    // Intro: drums end at 7.4, bass to 8; Verse at 8. Drums' pickup P (stored −1.5, 2 s)
+    // has room only from 7.4, so it's cut by 0.9 and drawn from offset −0.6 to 0.5.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.4), lc('b1', 'bass', 'Intro', 0, 8), lc('P', 'drums', 'Verse', -1.5, 2), lc('A', 'drums', 'Verse', 2, 1)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    const verse = layout.sections.find((x) => x.name === 'Verse')!;
+    const drawn = { start: layout.clipStarts.get('P')! - verse.start, end: layout.clipEnds.get('P')! - verse.start };
+    expect(drawn.start).toBeCloseTo(-0.6, 9);
+    expect(drawn.end).toBeCloseTo(0.5, 9);
+    // Flush before P where it's drawn: −0.6 − 1 = −1.6 (from its stored start it'd be −2.5).
+    expect(snapDragStart({ freeOffset: -1.62, grid: beat(verse.start), others: [drawn], draggedLength: 1, minOffset: -2 })).toBeCloseTo(-1.6, 9);
+    // Flush after it: 0.5.
+    expect(snapDragStart({ freeOffset: 0.6, grid: beat(verse.start), others: [drawn], draggedLength: 1, minOffset: 0 })).toBeCloseTo(0.5, 9);
+  });
+
+  it("the dragged clip's current spot is a candidate: dropped back near it, it stays", () => {
+    // A sits off the grid at 1.23 with nothing else in its section.
+    const at = (free: number) => snapDragStart({ freeOffset: free, grid: beat(6.5), others: [], draggedLength: 2, minOffset: 0, currentOffset: 1.23 });
+    // 1.2: its spot (0.03 away) beats the beat at 1.0 (0.2) → stays, nothing saved.
+    expect(at(1.2)).toBe(1.23);
+    expect(placementChanged(placeInGap([], 2, at(1.2)), 1.23)).toBe(false);
+    // 1.1: the beat at 1.0 (0.1 away) beats its spot (0.13) → 1.0.
+    expect(at(1.1)).toBeCloseTo(1, 9);
+    expect(placementChanged(placeInGap([], 2, at(1.1)), 1.23)).toBe(true);
+  });
+
+  it("a cut pickup's current spot is its drawn (cut) start", () => {
+    // As above: P stored at −1.5, cut by 0.9, drawn from −0.6. Dragging P itself.
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [lc('d1', 'drums', 'Intro', 0, 7.4), lc('b1', 'bass', 'Intro', 0, 8), lc('P', 'drums', 'Verse', -1.5, 2)],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    const verse = layout.sections.find((x) => x.name === 'Verse')!;
+    const drawnOffset = -1.5 + (layout.clipHeadCuts.get('P') ?? 0);
+    expect(drawnOffset).toBeCloseTo(-0.6, 9);
+    const minOffset = clipDragMinOffset(true, pickupLeftLimit(input, layout, 'drums', 'Verse'));
+    // −0.58: its drawn start (0.02 away) beats the beat at −0.5 (0.08); the stored −1.5 isn't one.
+    const wanted = snapDragStart({ freeOffset: -0.58, grid: beat(verse.start), others: [], draggedLength: 1.1, minOffset, currentOffset: drawnOffset });
+    expect(wanted).toBeCloseTo(-0.6, 9);
+    expect(placementChanged(placeInGap([], 2, wanted, minOffset), drawnOffset)).toBe(false);
+  });
+
+  it('with no grid (Shift, snap off) its current spot changes nothing', () => {
+    expect(snapDragStart({ freeOffset: 1.2, grid: null, others: [], draggedLength: 2, minOffset: 0, currentOffset: 1.23 })).toBe(1.2);
+  });
+
+  it('Shift and snap off: the free start, and the same placement as today', () => {
+    const others = [clip('a', 0, 2), clip('b', 6, 2)];
+    for (const free of [-0.4, 1.3, 2.77, 4.1, 7.2, 11.05]) {
+      expect(snapDragStart({ freeOffset: free, grid: null, others: others.map((c) => span(c.offset, c.length)), draggedLength: 2, minOffset: 0 })).toBe(free);
+      expect(placeInGap(others, 2, free)).toEqual(placeInGap(others, 2, snapDragStart({ freeOffset: free, grid: null, others: [], draggedLength: 2, minOffset: 0 })));
+    }
+  });
+
+  it('a packed run: dragging the middle clip within its own slot changes nothing', () => {
+    // b1, A, b3 end to end (4.84 + 3.17 + 5.03); the section starts at 6.5.
+    const others = [clip('b1', 0, 4.84), clip('b3', 8.01, 5.03)];
+    const spans = others.map((c) => span(c.offset, c.length));
+    for (let free = 2.45; free <= 10.5; free += 0.01) {
+      const wanted = snapDragStart({ freeOffset: free, grid: beat(6.5), others: spans, draggedLength: 3.17, minOffset: 0 });
+      const r = placeInGap(others, 3.17, wanted);
+      expect(placementChanged(r, 4.84), `free = ${free}, wanted = ${wanted}`).toBe(false);
+    }
+  });
+
+  it('the result is always one of the candidates, or the free start with no grid', () => {
+    const spans = [span(0.4, 1.3), span(3.05, 2)];
+    for (let free = -2; free <= 8; free += 0.01) {
+      const wanted = snapDragStart({ freeOffset: free, grid: beat(6.5), others: spans, draggedLength: 1.1, minOffset: -1.7 });
+      const grid = Math.round((6.5 + free) / 0.5) * 0.5 - 6.5;
+      const candidates = [grid, 0, 1.7, 0.4 - 1.1, 5.05, 3.05 - 1.1, -1.7];
+      expect(candidates.some((c) => Math.abs(c - wanted) < 1e-9), `free = ${free}`).toBe(true);
+      // Nothing is nearer than the chosen one.
+      for (const c of candidates) expect(Math.abs(wanted - free), `free = ${free}`).toBeLessThanOrEqual(Math.abs(c - free) + 1e-9);
+    }
   });
 });

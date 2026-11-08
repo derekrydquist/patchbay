@@ -100,6 +100,49 @@ export function placeInGap(
   };
 }
 
+// ── Snap for clip drags ──────────────────────────────────────────────────────
+// With snap on (and no Shift), a dragged clip's start snaps to whichever candidate is
+// nearest its free (unsnapped) start, all as offsets from its section's start:
+//   - the nearest grid point: the snap step in song time, as snapTime rounds it ("Bar"
+//     = the ruler's bar lines), so k × step − sectionStart;
+//   - the section's start (0) — with Bar snap a section can start mid-bar;
+//   - flush against every other clip on its track in its section, where it's drawn
+//     (cut pickups at their cut start): starting at its end, and ending at its start
+//     (its start − the dragged clip's played length);
+//   - the drag's minimum offset, when it's below 0 (a pickup allowed: the pickup limit);
+//   - the dragged clip's current drawn start (stored offset + head cut), so dropping it
+//     back near where it was keeps it exactly there, even off the beat.
+// A tie goes to the later spot, as snapTime rounds halfway later. `grid` null (snap off
+// or Shift) → the free start, unchanged. The result goes into placeInGap as the wanted
+// offset; the gaps model decides where it lands. Pass the other clips only in `others`,
+// never the dragged clip itself (its current spot comes in as `currentOffset`).
+export interface SnapDragStartInput {
+  freeOffset: number;                           // the unsnapped start, from the section start
+  grid: { step: number; sectionStart: number } | null; // snapGridSeconds + the section's layout start
+  others: { start: number; end: number }[];     // the other clips' drawn spans, as offsets
+  draggedLength: number;                        // the dragged clip's played length
+  minOffset: number;                            // clipDragMinOffset
+  currentOffset?: number;                       // the dragged clip's drawn start now
+}
+
+export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffset, currentOffset }: SnapDragStartInput): number {
+  if (!grid || !Number.isFinite(freeOffset) || !(grid.step > 0)) return freeOffset;
+  const candidates = [
+    Math.round((grid.sectionStart + freeOffset) / grid.step) * grid.step - grid.sectionStart,
+    0,
+  ];
+  for (const o of others) candidates.push(o.end, o.start - draggedLength);
+  if (minOffset < 0) candidates.push(minOffset);
+  if (currentOffset !== undefined && Number.isFinite(currentOffset)) candidates.push(currentOffset);
+  let best = candidates[0];
+  for (const c of candidates) {
+    const d = Math.abs(c - freeOffset);
+    const bestD = Math.abs(best - freeOffset);
+    if (d < bestD - PLACEMENT_EPSILON || (Math.abs(d - bestD) <= PLACEMENT_EPSILON && c > best)) best = c;
+  }
+  return best;
+}
+
 // The first pair of clips in `clips` that overlap, or null. Touching edges (within
 // PLACEMENT_EPSILON) don't count.
 export function findOverlap(clips: PlacementClip[]): [PlacementClip, PlacementClip] | null {

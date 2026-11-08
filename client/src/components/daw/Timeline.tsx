@@ -52,10 +52,10 @@ import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo, type TrackTrimLimits } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
-import { DEFAULT_BPM, snapTime, snapGridSeconds } from '@/lib/musical-time';
+import { DEFAULT_BPM, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
-import { placeInGap, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
+import { placeInGap, snapDragStart, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -2850,8 +2850,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
   // ── Timeline clip drag: free placement ─────────────────────────────────────
   // A dragged clip stays in its home section; the pointer only decides where in it.
-  // Its wanted start (clipDragDropStart) is snapped to the grid in song time unless
-  // snap is off or Shift is held, then placed among the other clips on its track in
+  // Its wanted start (clipDragDropStart) is snapped — to the nearest beat, its section's
+  // start, flush against another clip on its track in that section, or the pickup limit
+  // (snapDragStart) — unless snap is off or Shift is held, then placed among the other clips on its track in
   // that section with placeInGap (shared/timelinePlacement.ts): it goes into the gap it
   // points at (a clip's first or second half picks the gap before or after it), and
   // when that gap is too small, the clips after it move later together to make room.
@@ -2895,7 +2896,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const dropStart = clipDragDropStart();
     if (!section || dropStart === null) return null;
     const free = !snap.on || clipDragModifiers().shift;
-    const wantedStart = free ? dropStart : snapTime(dropStart, snap.unit, bpm, timeSignature);
     const others = track.clips
       .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
       .map((c) => toPlacementClip(placementInput(c)));
@@ -2910,13 +2910,32 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       allowPickup,
       allowPickup ? pickupLeftLimit(pickupLimitInput, layout, track.id, clip.sectionName) : 0,
     );
-    const result = placeInGap(others, length, wantedStart - section.start, minOffset);
+    // Where it's drawn now, from its section start: its stored offset + head cut (the cut
+    // start for a cut pickup).
+    const drawnOffset = (clip.sectionOffset ?? 0) + (layout.clipHeadCuts.get(clip.id) ?? 0);
+    // Snap (on, no Shift): to the nearest beat, the section start, flush against another
+    // clip on this track in this section where it's drawn, the pickup limit, or its own
+    // current spot (snapDragStart). Drawn spans come from the positioned tracks (layout
+    // start + head cut, playedSpan), so a cut pickup counts where it's drawn.
+    const drawnTrack = tracks.find((t) => t.id === track.id);
+    const drawnSpan = (c: Clip) => ({ start: c.start - section.start, end: c.start - section.start + playedSpan(c).length });
+    const drawnClip = drawnTrack?.clips.find((c) => c.id === clip.id);
+    const wantedOffset = snapDragStart({
+      freeOffset: dropStart - section.start,
+      grid: free ? null : { step: snapGridSeconds(snap.unit, bpm, timeSignature), sectionStart: section.start },
+      others: (drawnTrack?.clips ?? [])
+        .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName && hasPlayedLength(c))
+        .map(drawnSpan),
+      draggedLength: drawnClip ? playedSpan(drawnClip).length : length,
+      minOffset,
+      currentOffset: drawnOffset,
+    });
+    const result = placeInGap(others, length, wantedOffset, minOffset);
     clipDragPickupRef.current = afterPickupPlacement(clipDragPickupRef.current, result.offset);
     const offsets = new Map<string, number>([[clip.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
-    // Released on its own drawn spot (its stored offset + head cut — the cut start for a
-    // cut pickup) with nothing pushed: no change, nothing saved, the stored offset kept.
-    const drawnOffset = (clip.sectionOffset ?? 0) + (layout.clipHeadCuts.get(clip.id) ?? 0);
+    // Released on its own drawn spot with nothing pushed: no change, nothing saved, the
+    // stored offset kept.
     const changed = placementChanged(result, drawnOffset);
     return { trackId: track.id, sectionStart: section.start, draggedId: clip.id, offsets, changed };
   };
