@@ -27,3 +27,16 @@ export function playedSpan(clip: Pick<Clip, 'duration' | 'trimStart' | 'trimEnd'
 export function hasPlayedLength(clip: Pick<Clip, 'duration' | 'trimStart' | 'trimEnd' | 'headCut'>): boolean {
   return playedSpan(clip).length > PLAYED_LENGTH_EPSILON;
 }
+
+// Where a pickup's own section starts, in seconds from the clip's drawn start (its cut
+// start). Null unless the clip is a sectioned clip whose drawn span starts before its
+// section's start (sectionOffset + head cut < 0) and is drawn at all. Larger than the
+// drawn length when the pickup ends before its section starts.
+export function sectionStartInClip(
+  clip: Pick<Clip, 'duration' | 'trimStart' | 'trimEnd' | 'headCut' | 'sectionOffset' | 'isFullTake'>,
+): number | null {
+  if (clip.isFullTake || clip.sectionOffset === null || clip.sectionOffset === undefined) return null;
+  if (!hasPlayedLength(clip)) return null;
+  const drawnOffset = clip.sectionOffset + (clip.headCut ?? 0);
+  return drawnOffset < -PLAYED_LENGTH_EPSILON ? -drawnOffset : null;
+}

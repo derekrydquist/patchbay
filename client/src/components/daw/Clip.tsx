@@ -49,7 +49,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, type TrimNeighbours } from '@shared/timelinePlacement';
-import { playedSpan } from '@/lib/clip-span';
+import { playedSpan, sectionStartInClip } from '@/lib/clip-span';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
 // loose_file_comments rows, which differ only in their parent-id column.
@@ -241,6 +241,25 @@ function TornEdgeLines({ torn, width, strokeWidth, color, className, style }: {
         />
       ))}
     </svg>
+  );
+}
+
+// A pickup's ownership marker: the part of the clip before its own section's start is
+// drawn dimmer, so it reads as belonging to that section while it sits under the
+// previous one's header (the whole clip when it ends before its section starts).
+// `atPx` is the section start in px from the clip's left edge (sectionStartInClip ×
+// zoom). Drawn in the clip's clipped box with the torn shape, never on the root's border
+// or box-shadow (flashGold's glow): z-6, over the waveform and border (2, 5), under the
+// label (10) and the selection (19).
+function PickupMarker({ atPx, width, tornLayerStyle }: {
+  atPx: number;
+  width: number;
+  tornLayerStyle: React.CSSProperties;
+}) {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 z-[6]" style={tornLayerStyle}>
+      <div className="absolute inset-y-0 left-0 bg-black/35" style={{ width: Math.min(atPx, width) }} />
+    </div>
   );
 }
 
@@ -1576,6 +1595,11 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     ...tornCornerStyle,
   } : {};
 
+  // A pickup's own section start, in px from the clip's left edge (null: not a pickup
+  // drawn before its section). Live through trims and drags: both update sectionOffset.
+  const sectionStartSecs = isOverlay ? null : sectionStartInClip({ ...clip, trimStart, trimEnd });
+  const pickupMarkerPx = sectionStartSecs === null ? null : sectionStartSecs * zoom;
+
   // Positioned on the whole track row (Track.tsx) at its layout start, so it can be
   // drawn anywhere on the row. The drag transform is never applied: while it's dragged,
   // Timeline draws it at its preview position through clip.start instead.
@@ -1748,6 +1772,10 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
                 color={clipBorderColor(trackColor)}
                 className="z-[5] overflow-visible"
               />
+
+              {pickupMarkerPx !== null && (
+                <PickupMarker atPx={pickupMarkerPx} width={displayWidth} tornLayerStyle={tornLayerStyle} />
+              )}
 
               {isFinal && (
                 <CornerBadge variant="final" corner="top-right" />

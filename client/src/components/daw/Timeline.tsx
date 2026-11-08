@@ -4170,14 +4170,31 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                       style={{ width: sec.duration * zoom, opacity: 0.55, visibility: 'hidden' }}
                     >
                       {/* One bar per track row that has clips in this section — the old
-                          DragOverlay's shapes, without its header label. */}
-                      {tracks.map((track) => (
-                        <div key={track.id} className="h-16 flex items-center px-1.5">
-                          {track.clips.some((c) => c.sectionName === activeSectionName) && (
-                            <div className="h-8 rounded flex-1" style={{ backgroundColor: trackDisplayColor(track) }} />
-                          )}
-                        </div>
-                      ))}
+                          DragOverlay's shapes, without its header label — plus its pickups,
+                          hanging before the ghost's start at their stored offset, uncut
+                          (the ghost shows the stored arrangement, not the layout's head cut). */}
+                      {tracks.map((track) => {
+                        const sectionClips = track.clips.filter((c) => c.sectionName === activeSectionName && !c.isFullTake);
+                        const pickups = sectionClips.filter(isPickupClip);
+                        return (
+                          <div key={track.id} className="relative h-16 flex items-center px-1.5">
+                            {sectionClips.some((c) => !isPickupClip(c)) && (
+                              <div className="h-8 rounded flex-1" style={{ backgroundColor: trackDisplayColor(track) }} />
+                            )}
+                            {pickups.map((c) => (
+                              <div
+                                key={c.id}
+                                className="absolute top-4 h-8 rounded"
+                                style={{
+                                  left: c.sectionOffset! * zoom,
+                                  width: clipLength(c) * zoom,
+                                  backgroundColor: trackDisplayColor(track),
+                                }}
+                              />
+                            ))}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
