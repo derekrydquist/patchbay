@@ -875,15 +875,19 @@ export function sectionHasTimelineClips(songId: string, sectionName: string): bo
 // placeFirstClipSection). Call only for a section with no non-full-take timeline clips,
 // before its first clip is inserted. Never for Full Takes.
 export function placeSectionInArrangement(songId: string, sectionName: string, hint?: SectionPlacementHint | null): void {
+  sqlite.transaction(() => placeSectionInArrangementRows(songId, sectionName, hint))();
+}
+
+// placeSectionInArrangement's writes, with no transaction of its own — for callers
+// that already hold one.
+function placeSectionInArrangementRows(songId: string, sectionName: string, hint?: SectionPlacementHint | null): void {
   const update = sqlite.prepare("UPDATE song_sections SET sort_order = ? WHERE song_id = ? AND section_name = ?");
-  sqlite.transaction(() => {
-    const names = getSongSections(songId).map((s) => s.name);
-    const onTimeline = sectionsOnTimeline(songId);
-    onTimeline.delete(sectionName);
-    if (!names.includes(sectionName)) ensureSongSection(songId, sectionName);
-    placeFirstClipSection(names, onTimeline, sectionName, hint)
-      .forEach((name, i) => update.run(i, songId, name));
-  })();
+  const names = getSongSections(songId).map((s) => s.name);
+  const onTimeline = sectionsOnTimeline(songId);
+  onTimeline.delete(sectionName);
+  if (!names.includes(sectionName)) ensureSongSection(songId, sectionName);
+  placeFirstClipSection(names, onTimeline, sectionName, hint)
+    .forEach((name, i) => update.run(i, songId, name));
 }
 
 // Inserts a timeline clip. A sectioned, non-full-take clip that is the first in its
@@ -892,15 +896,82 @@ export function placeSectionInArrangement(songId: string, sectionName: string, h
 export function insertTimelineClipPlaced(
   songId: string, data: InsertTimelineClip, hint?: SectionPlacementHint | null,
 ): TimelineClip {
+  return sqlite.transaction(() => insertTimelineClipPlacedRows(songId, data, hint))();
+}
+
+// insertTimelineClipPlaced's writes, with no transaction of its own.
+function insertTimelineClipPlacedRows(
+  songId: string, data: InsertTimelineClip, hint?: SectionPlacementHint | null,
+): TimelineClip {
+  const sectioned = !!data.sectionName && !data.isFullTake;
+  if (sectioned && !sectionHasTimelineClips(songId, data.sectionName!)) {
+    placeSectionInArrangementRows(songId, data.sectionName!, hint);
+  } else if (sectioned) {
+    ensureSongSection(songId, data.sectionName!);
+  }
+  db.insert(timelineClips).values(data).run();
+  return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
+}
+
+// Thrown by insertTimelineClipWithPushes for a pushed clip it won't move: `status` is
+// 404 for an id that isn't a timeline clip on the new clip's song, 400 otherwise.
+// Nothing is written.
+export class PushedClipError extends Error {
+  constructor(public status: 400 | 404, message: string) {
+    super(message);
+    this.name = "PushedClipError";
+  }
+}
+
+// A file dropped into a gap on the timeline, and the later clips it pushes along, in
+// one transaction: the new clip is inserted (insertTimelineClipPlaced's rules,
+// placement hint included), the pushed clips' offsets are written
+// (setTimelineClipOffsets' rules), then the new clip's track + section is checked for
+// overlapping clips, and the stored start cache of the new clip and every pushed clip
+// is refreshed from the layout. Every pushed clip must be a non-full-take clip on the
+// new clip's track in its section, already at or after the downbeat (a file drop never
+// pushes a pickup), moving later or staying put. Throws PushedClipError,
+// TimelineOverlapError or PickupLimitError, and nothing is written. The caller checks
+// ownership of the track and that `data` has a finite sectionOffset ≥ 0 and a section.
+// Returns the new clip.
+export function insertTimelineClipWithPushes(
+  songId: string,
+  data: InsertTimelineClip,
+  pushed: { id: string; sectionOffset: number }[],
+  hint?: SectionPlacementHint | null,
+): TimelineClip {
   return sqlite.transaction(() => {
-    const sectioned = !!data.sectionName && !data.isFullTake;
-    if (sectioned && !sectionHasTimelineClips(songId, data.sectionName!)) {
-      placeSectionInArrangement(songId, data.sectionName!, hint);
-    } else if (sectioned) {
-      ensureSongSection(songId, data.sectionName!);
+    for (const p of pushed) {
+      const row = db.select({
+        trackId: timelineClips.trackId,
+        sectionName: timelineClips.sectionName,
+        sectionOffset: timelineClips.sectionOffset,
+        isFullTake: timelineClips.isFullTake,
+        songId: instrumentTracks.songId,
+      })
+        .from(timelineClips)
+        .innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
+        .where(eq(timelineClips.id, p.id))
+        .get();
+      if (!row || row.songId !== songId) throw new PushedClipError(404, "Not found");
+      if (row.isFullTake || row.trackId !== data.trackId || row.sectionName !== data.sectionName) {
+        throw new PushedClipError(400, "Only clips on the same track in the same section can be pushed");
+      }
+      const stored = row.sectionOffset ?? 0;
+      if (stored < -PLACEMENT_EPSILON) throw new PushedClipError(400, "A pickup can't be pushed");
+      if (p.sectionOffset < stored - PLACEMENT_EPSILON) throw new PushedClipError(400, "A pushed clip can only move later");
     }
-    db.insert(timelineClips).values(data).run();
-    return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
+    const clip = insertTimelineClipPlacedRows(songId, data, hint);
+    writeTimelineClipOffsets(songId, pushed);
+    if (findOverlap(sectionPlacementClips(data.trackId, data.sectionName!))) {
+      throw new TimelineOverlapError(data.trackId, data.sectionName!);
+    }
+    const starts = computeSongLayout(songId).clipStarts;
+    for (const id of [clip.id, ...pushed.map((p) => p.id)]) {
+      const start = starts.get(id);
+      if (start !== undefined) db.update(timelineClips).set({ start }).where(eq(timelineClips.id, id)).run();
+    }
+    return db.select().from(timelineClips).where(eq(timelineClips.id, clip.id)).get()!;
   })();
 }
 
@@ -936,30 +1007,36 @@ export function sectionPlacementClips(trackId: string, sectionName: string): Pla
 // updated rows.
 export function setTimelineClipOffsets(songId: string, updates: { id: string; sectionOffset: number }[]): TimelineClip[] {
   return db.transaction((tx) => {
-    const touched = new Map<string, { trackId: string; sectionName: string }>();
-    const before = new Map<string, TimelineClip>();
-    for (const u of updates) {
-      const row = tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get();
-      if (row) before.set(u.id, row);
-      tx.update(timelineClips).set({ sectionOffset: u.sectionOffset }).where(eq(timelineClips.id, u.id)).run();
-      if (row?.sectionName) touched.set(`${row.trackId}\u0000${row.sectionName}`, { trackId: row.trackId, sectionName: row.sectionName });
-    }
-    for (const { trackId, sectionName } of Array.from(touched.values())) {
-      if (findOverlap(sectionPlacementClips(trackId, sectionName))) throw new TimelineOverlapError(trackId, sectionName);
-    }
-    const input = songLayoutInput(songId);
-    const layout = layoutTimeline(input);
-    for (const u of updates) {
-      const row = before.get(u.id);
-      if (!row?.sectionName || row.isFullTake) continue;
-      const error = pickupOffsetError(
-        u.sectionOffset, row.sectionOffset ?? 0,
-        pickupLeftLimit(input, layout, row.trackId, row.sectionName),
-      );
-      if (error) throw new PickupLimitError(error);
-    }
+    writeTimelineClipOffsets(songId, updates);
     return updates.map((u) => tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get()!);
   });
+}
+
+// setTimelineClipOffsets' writes and checks, with no transaction of its own — for
+// callers that already hold one (a throw rolls back the caller's transaction).
+function writeTimelineClipOffsets(songId: string, updates: { id: string; sectionOffset: number }[]): void {
+  const touched = new Map<string, { trackId: string; sectionName: string }>();
+  const before = new Map<string, TimelineClip>();
+  for (const u of updates) {
+    const row = db.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get();
+    if (row) before.set(u.id, row);
+    db.update(timelineClips).set({ sectionOffset: u.sectionOffset }).where(eq(timelineClips.id, u.id)).run();
+    if (row?.sectionName) touched.set(`${row.trackId}\u0000${row.sectionName}`, { trackId: row.trackId, sectionName: row.sectionName });
+  }
+  for (const { trackId, sectionName } of Array.from(touched.values())) {
+    if (findOverlap(sectionPlacementClips(trackId, sectionName))) throw new TimelineOverlapError(trackId, sectionName);
+  }
+  const input = songLayoutInput(songId);
+  const layout = layoutTimeline(input);
+  for (const u of updates) {
+    const row = before.get(u.id);
+    if (!row?.sectionName || row.isFullTake) continue;
+    const error = pickupOffsetError(
+      u.sectionOffset, row.sectionOffset ?? 0,
+      pickupLeftLimit(input, layout, row.trackId, row.sectionName),
+    );
+    if (error) throw new PickupLimitError(error);
+  }
 }
 
 // The song's timeline layout (shared/timelineLayout.ts), built from the same inputs

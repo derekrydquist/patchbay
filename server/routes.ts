@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, insertTimelineClipWithPushes, PushedClipError, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip, pickupOffsetError } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
@@ -1554,12 +1554,42 @@ export async function registerRoutes(
     return { before: nameOrNull(before), after: nameOrNull(after) };
   }
 
+  // The optional `pushed` body field of POST /api/tracks/:trackId/clips:
+  // [{ id, sectionOffset }], the later clips a gap drop pushes along. Returns the list,
+  // or an error message (400) for anything that isn't an array of distinct string ids
+  // with finite offsets.
+  function parsePushedClips(raw: unknown): { id: string; sectionOffset: number }[] | string {
+    if (!Array.isArray(raw)) return "pushed must be an array";
+    const pushed: { id: string; sectionOffset: number }[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      const id = item?.id;
+      const sectionOffset = item?.sectionOffset;
+      if (typeof id !== 'string' || !id) return "Every pushed clip needs an id";
+      if (seen.has(id)) return "A clip appears more than once";
+      if (typeof sectionOffset !== 'number' || !Number.isFinite(sectionOffset)) {
+        return "sectionOffset must be a finite number of seconds";
+      }
+      seen.add(id);
+      pushed.push({ id, sectionOffset });
+    }
+    return pushed;
+  }
+
+  // Creates a timeline clip. With `pushed` in the body (a gap drop, even an empty
+  // list), the new clip needs an explicit section and sectionOffset, and it and the
+  // pushed clips' new offsets are saved together (insertTimelineClipWithPushes): any
+  // pushed clip it won't move → 404 / 400, an overlap → 409, a pickup limit → 400, and
+  // nothing is written. The pushes add no feed row of their own. Without `pushed`,
+  // nothing is checked for overlap, as before.
   app.post("/api/tracks/:trackId/clips", requireBand, async (req, res) => {
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
+    const { pushed: rawPushed, ...body } = req.body ?? {};
+    const hasPushed = req.body != null && typeof req.body === 'object' && 'pushed' in req.body;
     const parsed = insertTimelineClipSchema.safeParse({
-      ...req.body,
+      ...body,
       trackId,
     });
     if (!parsed.success) {
@@ -1571,6 +1601,15 @@ export async function registerRoutes(
     if (sentOffset != null && (typeof sentOffset !== 'number' || !Number.isFinite(sentOffset) || sentOffset < 0)) {
       return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
     }
+    let pushed: { id: string; sectionOffset: number }[] | null = null;
+    if (hasPushed) {
+      const result = parsePushedClips(rawPushed);
+      if (typeof result === 'string') return res.status(400).json({ message: result });
+      if (sentOffset == null || !parsed.data.sectionName || parsed.data.isFullTake) {
+        return res.status(400).json({ message: "A clip sent with pushed clips needs a section and a sectionOffset" });
+      }
+      pushed = result;
+    }
     // A sectioned clip sent with no sectionOffset is appended to the end of this
     // track's section (trimmed lengths), the same rule as Place on Timeline, and its
     // start cache comes from the layout. A sent offset (and start) is kept as is.
@@ -1579,11 +1618,28 @@ export async function registerRoutes(
     // `placement` ({ before, after }: the timeline sections the drop landed between) is
     // used only when this is the section's first non-full-take clip — see
     // placeSectionInArrangement. Missing or unusable → the end rule.
-    let clip = insertTimelineClipPlaced(trackSongIdVal, parsed.data, parsePlacementHint(req.body?.placement));
-    if (fillOffset) {
-      const start = computeSongLayout(trackSongIdVal).clipStarts.get(clip.id);
-      if (start !== undefined && start !== clip.start) {
-        clip = (await storage.updateTimelineClip(clip.id, { start })) ?? clip;
+    const hint = parsePlacementHint(req.body?.placement);
+    let clip;
+    if (pushed) {
+      try {
+        clip = insertTimelineClipWithPushes(trackSongIdVal, parsed.data, pushed, hint);
+      } catch (err) {
+        if (err instanceof PushedClipError) return res.status(err.status).json({ message: err.message });
+        if (err instanceof PickupLimitError) return res.status(400).json({ message: err.message });
+        if (err instanceof TimelineOverlapError) {
+          const trackName = db.select({ name: instrumentTracks.name }).from(instrumentTracks)
+            .where(eq(instrumentTracks.id, trackId)).get()?.name ?? 'a track';
+          return res.status(409).json({ message: `Clips would overlap on ${trackName} › ${err.sectionName}.` });
+        }
+        throw err;
+      }
+    } else {
+      clip = insertTimelineClipPlaced(trackSongIdVal, parsed.data, hint);
+      if (fillOffset) {
+        const start = computeSongLayout(trackSongIdVal).clipStarts.get(clip.id);
+        if (start !== undefined && start !== clip.start) {
+          clip = (await storage.updateTimelineClip(clip.id, { start })) ?? clip;
+        }
       }
     }
 
