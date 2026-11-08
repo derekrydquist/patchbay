@@ -256,12 +256,18 @@ const TrackHeader = React.memo(function TrackHeader({
   );
 });
 
+// Trim limits for one track's clips, by section name: the pickup left limit (shared
+// pickupLeftLimit) and where the right edge stops for a later section's pickup (shared
+// nextPickupStop; Infinity for none). Both are offsets from the section start.
+export interface TrackTrimLimits {
+  pickupLimits: ReadonlyMap<string, number>;
+  pickupStops: ReadonlyMap<string, number>;
+}
+
 interface TrackProps {
   track: Track;
   sections: SectionInfo[];
-  // Left limit (shared pickupLeftLimit) of each pickup clip on this track, by clip id;
-  // clips that aren't pickups are absent.
-  pickupLimits?: ReadonlyMap<string, number>;
+  trimLimits?: TrackTrimLimits;
   invalidSections: Set<string>;
   isInvalidDrop: boolean;
   isDragging: boolean;
@@ -288,7 +294,7 @@ interface TrackProps {
 export const TimelineTrack = React.memo(function TimelineTrack({
   track,
   sections,
-  pickupLimits,
+  trimLimits,
   invalidSections,
   isInvalidDrop,
   isDragging,
@@ -422,14 +428,17 @@ export const TimelineTrack = React.memo(function TimelineTrack({
           track.clips.filter((c) => !c.isFullTake && c.sectionName === section.name && hasPlayedLength(c))
         ).map((clip) => {
           // What stops this clip's trim edges: the clips around it on this track in
-          // its section (passed as two numbers so the memoized clip doesn't re-render).
-          const nb = trimNeighbours(
-            { offset: clip.sectionOffset ?? 0 },
-            track.clips
-              .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
-              .map((c) => ({ id: c.id, offset: c.sectionOffset ?? 0, length: (c.trimEnd ?? c.duration) - (c.trimStart ?? 0) })),
-            pickupLimits?.get(clip.id) ?? 0,
-          );
+          // its section, a later section's pickup (right edge), and — when a pickup is
+          // allowed (Option, or a pickup at trim start) — its pickup left limit (left
+          // edge). Passed as numbers so the memoized clip doesn't re-render.
+          const offset = clip.sectionOffset ?? 0;
+          const others = track.clips
+            .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
+            .map((c) => ({ id: c.id, offset: c.sectionOffset ?? 0, length: (c.trimEnd ?? c.duration) - (c.trimStart ?? 0) }));
+          const pickupLimit = trimLimits?.pickupLimits.get(clip.sectionName ?? '') ?? 0;
+          const nextPickupStop = trimLimits?.pickupStops.get(clip.sectionName ?? '') ?? Infinity;
+          const nb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: false, nextPickupStop });
+          const pickupNb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: true, nextPickupStop });
           return (
           <TimelineClip
             key={clip.id}
@@ -439,6 +448,7 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             trackColor={trackColor}
             songId={songId}
             trimPrevEnd={nb.prevEnd}
+            trimPickupPrevEnd={pickupNb.prevEnd}
             trimNextStart={nb.nextStart}
             instanceCount={track.clips.filter((c) => c.name === clip.name).length}
             isFlash={flashClipId === clip.id}

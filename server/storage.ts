@@ -30,7 +30,7 @@ import {
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
 import { layoutTimeline, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
@@ -1023,9 +1023,11 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
 // Nothing else moves and nothing is re-packed. Throws TrimValidationError unless
 // 0 ≤ trimStart < trimEnd ≤ duration (trimEnd null = the end of the file), the clip
 // stays at least minTrimLength long (0.5 s, or the whole file when it's shorter), the
-// new offset is ≥ 0 — for a pickup (offset < 0) ≥ its left limit (pickupLeftLimit), or
-// its own old offset if that's already further left (a pickup may end before its
-// section's downbeat); and TimelineOverlapError if the clip would overlap another clip on its
+// new offset is ≥ its left limit (pickupLeftLimit — so a trim may make a pickup), or its
+// own old offset if that's already further left (pickupOffsetError's leniency; a pickup
+// may end before its section's downbeat). Only Option creates a pickup and the right
+// edge stops at a later section's pickup: both client rules, not checked here; and
+// TimelineOverlapError if the clip would overlap another clip on its
 // track in its section; nothing is written then. One transaction (a savepoint inside a
 // caller's). Returns the updated row, or undefined if there's no such clip.
 export function writeTimelineClipTrim(
@@ -1057,17 +1059,16 @@ export function writeTimelineClipTrim(
     let sectionOffset = clip.sectionOffset;
     if (sectioned && !opts.keepOffset) {
       const moved = oldOffset + (trimStart - clip.trimStart);
-      // The lowest offset this trim may leave: 0, or for a pickup its left limit (the
-      // same as clampTrim's, through trimNeighbours).
-      const isPickup = oldOffset < -eps;
-      const songId = isPickup && moved < oldOffset - eps ? songIdForTrack(clip.trackId) : undefined;
-      const floor = !isPickup ? 0
-        : songId ? Math.min(songPickupLeftLimit(songId, clip.trackId, clip.sectionName!), oldOffset)
+      // The lowest offset this trim may leave: its left limit (pickupLeftLimit), or its
+      // old offset if already further left. Looked up only when the start goes below 0
+      // and further left than it was.
+      const songId = moved < Math.min(0, oldOffset) - eps ? songIdForTrack(clip.trackId) : undefined;
+      const floor = songId
+        ? Math.min(songPickupLeftLimit(songId, clip.trackId, clip.sectionName!), oldOffset)
         : Math.min(0, oldOffset);
       if (moved < floor - eps) {
-        throw new TrimValidationError(isPickup
-          ? "That trim would move the pickup more than one bar before its section, before the end of the previous clip on its track, or before the start of the song"
-          : "That trim would move the clip before the start of its section");
+        throw new TrimValidationError(
+          "That trim would move the clip more than one bar before its section, before the end of the previous clip on its track, or before the start of the song");
       }
       sectionOffset = Math.max(floor, moved);
     }
@@ -1093,7 +1094,10 @@ export interface InstanceTrimResult {
 
 // Apply / reset trim on every instance of a clip (same track + name). Each instance
 // gets the same trim values; its offset moves with its own trimStart change, and each
-// is clamped at its own neighbours (clampTrim) — an instance that would overlap gets
+// is clamped at its own neighbours (clampTrim). It never creates a pickup: a normal
+// instance's left edge stops at its section's downbeat, a pickup instance's at its own
+// left limit; every right edge stops at a later section's pickup on the track
+// (nextPickupStop) — an instance that would overlap gets
 // the closest allowed trim. An instance whose neighbours leave less room than the
 // minimum clip length (clampTrim returns null) is skipped and left as it was — never an
 // overlap. Instances are done in section, then offset order, each
@@ -1111,13 +1115,16 @@ export function applyTrimToInstances(
     return rows.map((row): InstanceTrimResult => {
       const sectioned = !!row.sectionName && !row.isFullTake;
       const offset = row.sectionOffset ?? 0;
-      // A pickup instance keeps its own left limit, from the layout as the earlier
-      // instances left it.
-      const pickupLimit = sectioned && songId && offset < -PLACEMENT_EPSILON
-        ? songPickupLeftLimit(songId, trackId, row.sectionName!)
+      // A pickup instance keeps its own left limit, and every instance stops at a later
+      // pickup, from the layout as the earlier instances left it.
+      const input = sectioned && songId ? songLayoutInput(songId) : null;
+      const songLayout = input ? layoutTimeline(input) : null;
+      const pickupLimit = input && songLayout && offset < -PLACEMENT_EPSILON
+        ? pickupLeftLimit(input, songLayout, trackId, row.sectionName!)
         : 0;
+      const pickupStop = input && songLayout ? nextPickupStop(input, songLayout, trackId, row.sectionName!) : Infinity;
       const nb = sectioned
-        ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id), pickupLimit)
+        ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id), pickupLimit, { nextPickupStop: pickupStop })
         : null;
       const r = clampTrim(
         { offset, duration: row.duration, trimStart: row.trimStart, trimEnd: row.trimEnd },

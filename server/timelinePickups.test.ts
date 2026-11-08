@@ -47,6 +47,15 @@ describe.skipIf(!fs.existsSync(SOURCE))('timeline pickups — server', () => {
     addClip('b1', 'bass', 'Intro', 0, 8);
     addClip('click', 'drums', 'Verse', 0, 0.5); // one beat
     addClip('fill', 'drums', 'Verse', 1, 4);
+    // Keys, for pickup trims: two instances of "Keys" (Intro 0–5 of a 10 s file; Verse
+    // at 0.5, trimmed from 3) and a 1 s Verse pickup at −1.5 (drawn 6.5–7.5).
+    raw.prepare("INSERT INTO instrument_tracks (id, song_id, name, type, sort_order) VALUES ('keys', 's1', 'Keys', 'instrument', 2)").run();
+    const addKeys = (id: string, name: string, section: string, offset: number, duration: number, trimStart: number, trimEnd: number | null) =>
+      raw.prepare("INSERT INTO timeline_clips (id, track_id, name, type, color, duration, section_name, section_offset, trim_start, trim_end) VALUES (?, 'keys', ?, 'audio', 'x', ?, ?, ?, ?, ?)")
+        .run(id, name, duration, section, offset, trimStart, trimEnd);
+    addKeys('ki', 'Keys', 'Intro', 0, 10, 0, 5);
+    addKeys('kv', 'Keys', 'Verse', 0.5, 10, 3, null);
+    addKeys('kp', 'Keys pickup', 'Verse', -1.5, 1, 0, null);
   });
 
   afterAll(() => {
@@ -78,6 +87,30 @@ describe.skipIf(!fs.existsSync(SOURCE))('timeline pickups — server', () => {
     const min = store.writeTimelineClipTrim('fill', 0, 0.5)!; // the minimum: ends at −1
     expect(min.trimEnd).toBeCloseTo(0.5);
     expect(() => store.writeTimelineClipTrim('fill', 0, 0.4)).toThrow(/shorter than 0.5/);
+  });
+
+  it('apply trim to all instances never creates a pickup and stops at the next pickup', () => {
+    const result = store.applyTrimToInstances('keys', 'Keys', 0, null);
+    const ki = result.find((r) => r.id === 'ki')!;
+    const kv = result.find((r) => r.id === 'kv')!;
+    // Intro instance: its right edge stops where the Verse pickup is drawn, 6.5.
+    expect(ki).toMatchObject({ trimStart: 0, clamped: true, skipped: false });
+    expect(ki.trimEnd).toBeCloseTo(6.5);
+    // Verse instance: its left edge stops at the downbeat (trimStart 2.5, offset 0).
+    expect(kv.sectionOffset).toBeCloseTo(0);
+    expect(kv.trimStart).toBeCloseTo(2.5);
+    expect(kv.clamped).toBe(true);
+  });
+
+  it('a trim may make a normal clip a pickup (Option is a client rule), down to its left limit', () => {
+    // kv at 0 (trimStart 2.5) → trimStart 2.2 moves its start to −0.3: a pickup.
+    expect(store.writeTimelineClipTrim('kv', 2.2, null)!.sectionOffset).toBeCloseTo(-0.3);
+    raw.prepare("DELETE FROM timeline_clips WHERE id = 'kp'").run();
+    // The left limit is the end of the Intro keys clip (6.5, after the apply above),
+    // −1.5 — later than the bar: −1.6 is refused, −1.5 is fine.
+    expect(() => store.writeTimelineClipTrim('kv', 0.9, null)).toThrow(/one bar/);
+    expect(offsetOf('kv')).toBeCloseTo(-0.3);
+    expect(store.writeTimelineClipTrim('kv', 1, null)!.sectionOffset).toBeCloseTo(-1.5);
   });
 
   it('Replace with a short file on a pickup keeps its offset', () => {

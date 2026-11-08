@@ -49,13 +49,13 @@ import { apiRequest } from '@/lib/queryClient';
 import { trackDisplayColor } from '@/lib/track-color';
 import { VersionMoveInUseDialog } from './ClipInUseDialog';
 import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
-import { TimelineTrack, SectionInfo } from './Track';
+import { TimelineTrack, SectionInfo, type TrackTrimLimits } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapTime, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
-import { placeInGap, toPlacementClip, appendOffset, pickupLeftLimit, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
+import { placeInGap, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -233,8 +233,14 @@ type ApiTrack = {
 type InsertionPoint = { trackId: string; sectionName: string; index: number; x: number };
 
 const EMPTY_SECTIONS: SongSectionRow[] = [];
-// A track with no pickups: one shared empty map, so the memoized row isn't re-rendered.
-const NO_PICKUP_LIMITS: ReadonlyMap<string, number> = new Map();
+// A track with no sectioned clips: no trim limits.
+const NO_TRIM_LIMITS: TrackTrimLimits = { pickupLimits: new Map(), pickupStops: new Map() };
+
+function sameNumberMap(a: ReadonlyMap<string, number>, b: ReadonlyMap<string, number>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of Array.from(a)) if (b.get(k) !== v) return false;
+  return true;
+}
 
 // dnd-kit sensor options, as constants: useSensor memoizes on its options object, so
 // options written inline made new sensors on every Timeline render — new activators,
@@ -805,25 +811,35 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     () => layout.sections.map((s) => ({ name: s.name, start: s.start, duration: s.length })),
     [layout]
   );
-  // Each pickup clip's left limit (shared pickupLeftLimit), per track, for its trim
-  // edges (Track.tsx → trimNeighbours). Tracks with no pickup share one empty map.
-  // pickupLeftLimit's input: every stored clip, the tempo and time signature.
+  // Trim limits per track, by section name (Track.tsx → trimNeighbours): each section's
+  // pickup left limit (shared pickupLeftLimit — a pickup's left edge, or with Option any
+  // clip's) and where its clips' right edges stop for a later section's pickup (shared
+  // nextPickupStop). A trim reads them as they were when it started.
+  // Their input: every stored clip, the tempo and time signature.
   const pickupLimitInput = React.useMemo(() => ({
-    clips: trackState.flatMap((t) => t.clips.map((c) => ({ id: c.id, trackId: t.id, sectionName: c.sectionName, isFullTake: !!c.isFullTake }))),
+    clips: trackState.flatMap((t) => t.clips.map((c) => ({ id: c.id, trackId: t.id, sectionName: c.sectionName, sectionOffset: c.sectionOffset ?? null, isFullTake: !!c.isFullTake }))),
     bpm,
     timeSignature,
   }), [trackState, bpm, timeSignature]);
-  const pickupLimitsByTrack = React.useMemo(() => {
+  // A track keeps its previous limits object while the values are the same, so its
+  // memoized row isn't re-rendered (a trim preview changes trackState on every move).
+  const trimLimitsRef = useRef(new Map<string, TrackTrimLimits>());
+  const trimLimitsByTrack = React.useMemo(() => {
     const input = pickupLimitInput;
-    const byTrack = new Map<string, ReadonlyMap<string, number>>();
+    const byTrack = new Map<string, TrackTrimLimits>();
     for (const t of trackState) {
-      const limits = new Map<string, number>();
+      const pickupLimits = new Map<string, number>();
+      const pickupStops = new Map<string, number>();
       for (const c of t.clips) {
-        if (c.isFullTake || !c.sectionName || !((c.sectionOffset ?? 0) < -PLACEMENT_EPSILON)) continue;
-        limits.set(c.id, pickupLeftLimit(input, layout, t.id, c.sectionName));
+        if (c.isFullTake || !c.sectionName || pickupLimits.has(c.sectionName)) continue;
+        pickupLimits.set(c.sectionName, pickupLeftLimit(input, layout, t.id, c.sectionName));
+        pickupStops.set(c.sectionName, nextPickupStop(input, layout, t.id, c.sectionName));
       }
-      byTrack.set(t.id, limits.size ? limits : NO_PICKUP_LIMITS);
+      const prev = trimLimitsRef.current.get(t.id);
+      const same = prev && sameNumberMap(prev.pickupLimits, pickupLimits) && sameNumberMap(prev.pickupStops, pickupStops);
+      byTrack.set(t.id, same ? prev : { pickupLimits, pickupStops });
     }
+    trimLimitsRef.current = byTrack;
     return byTrack;
   }, [trackState, layout, pickupLimitInput]);
   const endOfTimeline = layout.timelineEnd;
@@ -4247,7 +4263,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     raisedClipId={isDragRow ? clipDragLanding.clipId : null}
                     landing={isDragRow && !clipDragOffTimeline ? clipDragLanding.rect : null}
                     sections={displaySectionLayout}
-                    pickupLimits={pickupLimitsByTrack.get(track.id) ?? NO_PICKUP_LIMITS}
+                    trimLimits={trimLimitsByTrack.get(track.id) ?? NO_TRIM_LIMITS}
                     invalidSections={invalidSectionsDuringDrag}
                     isInvalidDrop={isInvalidDrop}
                     // The valid-track border and wrong-track veil are for Media Bucket

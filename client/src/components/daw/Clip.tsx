@@ -48,7 +48,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
-import { clampTrim, minTrimLength, type TrimNeighbours } from '@shared/timelinePlacement';
+import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, type TrimNeighbours } from '@shared/timelinePlacement';
 import { playedSpan } from '@/lib/clip-span';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
@@ -155,9 +155,12 @@ interface ClipProps {
   // "picked up" layer and the landing outline in Track.tsx), slightly see-through.
   isRaised?: boolean;
   // Sectioned timeline clips: where its trim edges stop — the end of the clip before it
-  // on its track in its section (0 if none) and the start of the clip after it
-  // (Infinity if it's the last). Undefined for full takes: no neighbours, no offset.
+  // on its track in its section (0 if none), the same when a pickup is allowed (its
+  // pickup left limit if none; Option, or a pickup at trim start), and the start of the
+  // clip after it or a later section's pickup (Infinity if neither). Undefined for full
+  // takes: no neighbours, no offset.
   trimPrevEnd?: number;
+  trimPickupPrevEnd?: number;
   trimNextStart?: number;
 }
 
@@ -1090,7 +1093,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimNextStart }: ClipProps) {
+function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimPickupPrevEnd, trimNextStart }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1285,6 +1288,10 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   const trimNb: TrimNeighbours | null = trimPrevEnd === undefined || trimNextStart === undefined
     ? null
     : { prevEnd: trimPrevEnd, nextStart: trimNextStart };
+  // The same with a pickup allowed: the left edge may go below the downbeat.
+  const trimPickupNb: TrimNeighbours | null = trimNb
+    ? { prevEnd: trimPickupPrevEnd ?? trimNb.prevEnd, nextStart: trimNb.nextStart }
+    : null;
 
   // The clip as it stands now, for clampTrim.
   const currentTrimClip = () => ({
@@ -1340,9 +1347,15 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   };
 
   // One trim drag on either edge. Free movement (no snap). Both edges stop at the
-  // neighbouring clips (clampTrim); the left edge moves the clip's start with the audio.
-  // Neighbours never move. Escape or the window losing focus cancels: the clip goes back
-  // and nothing is saved.
+  // neighbouring clips (clampTrim), the right edge also at a later section's pickup; the
+  // left edge moves the clip's start with the audio. Neighbours never move. Pickups, as
+  // for clip drags (shared pickupAllowed): Option lets the left edge go past the
+  // downbeat down to the pickup left limit; a clip that was a pickup at trim start may
+  // without Option until its left edge reaches the downbeat. Option is read live from
+  // every pointer event and from Alt keydown/keyup (re-placing the edge at once), and
+  // cleared on release, Escape and blur. The limits are the ones from the render the
+  // trim started in. Escape or the window losing focus cancels: the clip goes back and
+  // nothing is saved.
   const startTrimDrag = (e: React.PointerEvent, edge: 'left' | 'right') => {
     if (isOverlay) return;
     e.preventDefault();
@@ -1353,19 +1366,34 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     const startX = e.clientX;
     const start = currentTrimClip();
     const startOffset = start.offset;
+    const nb = trimNb;
+    const pickupNb = trimPickupNb;
+    let pickup = startPickupDrag(start.offset);
+    let option = e.altKey;
+    let deltaSecs = 0;
 
-    const onMove = (moveE: PointerEvent) => {
-      const deltaSecs = (moveE.clientX - startX) / zoom;
+    // Shows the trim for the current pointer position and Option state.
+    const place = () => {
       const wanted = edge === 'left'
         ? { trimStart: start.trimStart + deltaSecs, trimEnd: start.trimEnd }
         : { trimStart: start.trimStart, trimEnd: (start.trimEnd ?? clip.duration) + deltaSecs };
-      const next = clampTrim(start, wanted, trimNb);
-      if (next) showTrim(next);
+      const allowPickup = !!nb && pickupAllowed(pickup, option);
+      const next = clampTrim(start, wanted, allowPickup ? pickupNb : nb, { allowPickup });
+      if (!next) return;
+      if (nb) pickup = afterPickupPlacement(pickup, next.offset);
+      showTrim(next);
+    };
+    const onMove = (moveE: PointerEvent) => {
+      option = moveE.altKey;
+      deltaSecs = (moveE.clientX - startX) / zoom;
+      place();
     };
     const finish = () => {
+      option = false;
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keyup', onKey, true);
       window.removeEventListener('blur', cancel);
       setIsTrimDragging(false);
     };
@@ -1386,8 +1414,19 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       if (changed) patchTrim(trimStartRef.current, storedEnd);
       signalTrimBusy(-1);
     };
+    // Escape cancels. Option pressed or released under a still pointer re-places the
+    // edge; its key events stop here so the timeline's key handlers never see them.
     const onKey = (keyE: KeyboardEvent) => {
-      if (keyE.key !== 'Escape') return;
+      if (keyE.key === 'Alt') {
+        keyE.stopPropagation();
+        const held = keyE.type === 'keydown';
+        if (held !== option) {
+          option = held;
+          place();
+        }
+        return;
+      }
+      if (keyE.type !== 'keydown' || keyE.key !== 'Escape') return;
       keyE.preventDefault();
       keyE.stopPropagation();
       cancel();
@@ -1396,6 +1435,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keyup', onKey, true);
     window.addEventListener('blur', cancel);
   };
 

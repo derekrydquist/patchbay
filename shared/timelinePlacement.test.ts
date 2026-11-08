@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
@@ -873,5 +873,215 @@ describe('placementChanged — released back on its own spot', () => {
     expect(placementChanged({ offset: steps[0], moved: [] }, stored)).toBe(true);
     // A real move is still saved.
     expect(placementChanged({ offset: 0.5, moved: [] }, drawn)).toBe(true);
+  });
+});
+
+// ── Pickup trims (4e4) ───────────────────────────────────────────────────────
+
+// One trim drag as TimelineClip runs it: the neighbours both ways (with and without a
+// pickup allowed) fixed at trim start; per step, Option, the wanted edge, clampTrim
+// with the matching neighbours, then the pickup state update. Returns each step's result.
+function trimDrag(
+  start: TrimClip,
+  others: PlacementClip[],
+  pickupLimit: number,
+  pickupStop: number,
+  edge: 'left' | 'right',
+  steps: { delta: number; option?: boolean }[],
+): TrimResult[] {
+  const nb = trimNeighbours({ offset: start.offset }, others, pickupLimit, { allowPickup: false, nextPickupStop: pickupStop });
+  const pickupNb = trimNeighbours({ offset: start.offset }, others, pickupLimit, { allowPickup: true, nextPickupStop: pickupStop });
+  let state = startPickupDrag(start.offset);
+  return steps.map(({ delta, option = false }) => {
+    const wanted = edge === 'left'
+      ? { trimStart: start.trimStart + delta, trimEnd: start.trimEnd }
+      : { trimStart: start.trimStart, trimEnd: (start.trimEnd ?? start.duration) + delta };
+    const allowPickup = pickupAllowed(state, option);
+    const r = clampTrim(start, wanted, allowPickup ? pickupNb : nb, { allowPickup })!;
+    state = afterPickupPlacement(state, r.offset);
+    return r;
+  });
+}
+
+describe('pickup trims — left edge', () => {
+  // 120 bpm, 4/4: a bar is 2 s. Intro 0–8 (bass fills it; drums 0–1), Verse at 8. Drums'
+  // Verse left limit is the bar, −2.
+  const input: TimelineLayoutInput = {
+    sections: rows('Intro', 'Verse'),
+    clips: [lc('d1', 'drums', 'Intro', 0, 1), lc('b1', 'bass', 'Intro', 0, 8), lc('A', 'drums', 'Verse', 0.5, 4)],
+    bpm: 120, timeSignature: '4/4',
+  };
+  const limit = limitFor(input, 'drums', 'Verse');
+  // A: offset 0.5, a 10 s file trimmed 3–7.
+  const A: TrimClip = { offset: 0.5, duration: 10, trimStart: 3, trimEnd: 7 };
+
+  it('the limit is one bar', () => {
+    expect(limit).toBeCloseTo(-2);
+  });
+
+  it('a normal clip without Option stops at its section\'s start', () => {
+    const [r] = trimDrag(A, [], limit, Infinity, 'left', [{ delta: -3 }]);
+    expect(r).toMatchObject({ trimStart: 2.5, trimEnd: 7, clamped: true });
+    expect(r.offset).toBeCloseTo(0);
+  });
+
+  it('with Option it goes on to the pickup left limit, the audio staying put', () => {
+    const [r] = trimDrag(A, [], limit, Infinity, 'left', [{ delta: -3, option: true }]);
+    expect(r.offset).toBeCloseTo(-2);
+    expect(r.trimStart).toBeCloseTo(0.5);
+    expect(r.trimEnd).toBe(7);
+    // The end didn't move: 0.5 + (7 − 3) = 4.5.
+    expect(r.offset + (r.trimEnd! - r.trimStart)).toBeCloseTo(4.5);
+  });
+
+  it('pressing or releasing Option mid-trim re-places the edge', () => {
+    const steps = trimDrag(A, [], limit, Infinity, 'left', [
+      { delta: -2, option: true }, { delta: -2 }, { delta: -2, option: true },
+    ]);
+    expect(steps.map((r) => r.offset)).toEqual([
+      expect.closeTo(-1.5), expect.closeTo(0), expect.closeTo(-1.5),
+    ]);
+  });
+
+  it('trimStart never goes below 0, Option or not', () => {
+    const [r] = trimDrag({ ...A, trimStart: 1 }, [], limit, Infinity, 'left', [{ delta: -5, option: true }]);
+    expect(r.trimStart).toBe(0);
+    expect(r.offset).toBeCloseTo(-0.5);
+  });
+
+  it('with Option it still stops at an earlier clip in its section', () => {
+    // A clip before A in the Verse, 0–0.25: Option can't take A past its end.
+    const [r] = trimDrag(A, [clip('x', 0, 0.25)], limit, Infinity, 'left', [{ delta: -3, option: true }]);
+    expect(r.offset).toBeCloseTo(0.25);
+  });
+
+  it('an existing pickup moves within its limits without Option', () => {
+    const P: TrimClip = { offset: -1, duration: 10, trimStart: 2, trimEnd: 6 };
+    const steps = trimDrag(P, [], limit, Infinity, 'left', [{ delta: -3 }, { delta: 0.5 }]);
+    expect(steps[0].offset).toBeCloseTo(-2);
+    expect(steps[0].trimStart).toBeCloseTo(1);
+    expect(steps[1].offset).toBeCloseTo(-0.5);
+  });
+
+  it('a pickup pulled to its section\'s start is a normal clip for the rest of the trim: back needs Option', () => {
+    const P: TrimClip = { offset: -1, duration: 10, trimStart: 2, trimEnd: 6 };
+    const steps = trimDrag(P, [], limit, Infinity, 'left', [
+      { delta: 1 },                 // left edge on the downbeat
+      { delta: -0.5 },              // back without Option: held at the downbeat
+      { delta: -0.5, option: true }, // with Option: a pickup again
+    ]);
+    expect(steps.map((r) => r.offset)).toEqual([expect.closeTo(0), expect.closeTo(0), expect.closeTo(-1.5)]);
+  });
+
+  it('a right trim of a pickup never moves its left edge', () => {
+    const P: TrimClip = { offset: -1, duration: 10, trimStart: 2, trimEnd: 6 };
+    const [r] = trimDrag(P, [], limit, Infinity, 'right', [{ delta: 2 }]);
+    expect(r).toMatchObject({ trimStart: 2, trimEnd: 8, offset: -1 });
+  });
+});
+
+describe('pickup trims — right edge stops at the next section\'s pickup (nextPickupStop)', () => {
+  // 120 bpm, 4/4. Bass fills Intro 0–8; Verse starts at 8. Drums' Intro clip d1 is a
+  // 10 s file trimmed to `end`; drums' Verse holds `verse`.
+  const setup = (end: number, verse: LayoutClipInput[]) => {
+    const input: TimelineLayoutInput = {
+      sections: rows('Intro', 'Verse'),
+      clips: [
+        { ...lc('d1', 'drums', 'Intro', 0, 10), trimEnd: end },
+        lc('b1', 'bass', 'Intro', 0, 8),
+        ...verse,
+      ],
+      bpm: 120, timeSignature: '4/4',
+    };
+    const layout = layoutTimeline(input);
+    return { input, layout, stop: nextPickupStop(input, layout, 'drums', 'Intro') };
+  };
+  const d1 = (end: number): TrimClip => ({ offset: 0, duration: 10, trimStart: 0, trimEnd: end });
+
+  it('stops where the pickup starts', () => {
+    // Pickup P at −1.5 in the Verse → drawn from 6.5.
+    const { stop } = setup(5, [lc('P', 'drums', 'Verse', -1.5, 4)]);
+    expect(stop).toBeCloseTo(6.5);
+    const [r] = trimDrag(d1(5), [], 0, stop, 'right', [{ delta: 4 }]);
+    expect(r.trimEnd).toBeCloseTo(6.5);
+    expect(r.clamped).toBe(true);
+  });
+
+  it('a cut pickup: stops where it is drawn, so the edge can\'t extend', () => {
+    // d1 ends at 7; P at −1.5 would start at 6.5, so its head is cut to 7.
+    const { layout, stop } = setup(7, [lc('P', 'drums', 'Verse', -1.5, 4)]);
+    expect(layout.clipHeadCuts.get('P')).toBeCloseTo(0.5);
+    expect(stop).toBeCloseTo(7);
+    const [r] = trimDrag(d1(7), [], 0, stop, 'right', [{ delta: 2 }]);
+    expect(r.trimEnd).toBeCloseTo(7);
+    // Shortening still works.
+    const [s] = trimDrag(d1(7), [], 0, stop, 'right', [{ delta: -1 }]);
+    expect(s.trimEnd).toBeCloseTo(6);
+  });
+
+  it('a clip in the next section that is not a pickup sets no limit (it moves with the section)', () => {
+    const { stop } = setup(5, [lc('V', 'drums', 'Verse', 0, 4)]);
+    expect(stop).toBe(Infinity);
+    const [r] = trimDrag(d1(5), [], 0, stop, 'right', [{ delta: 4 }]);
+    expect(r.trimEnd).toBeCloseTo(9);
+  });
+
+  it('another track\'s pickup sets no limit', () => {
+    const { stop } = setup(5, [lc('P', 'bass', 'Verse', -1.5, 4)]);
+    expect(stop).toBe(Infinity);
+  });
+
+  it('a pickup cut to nothing (not drawn) sets no limit', () => {
+    // d1 ends at 7.95; P (0.4 s at −0.5) would sit 7.5–7.9: all of it is cut.
+    const { layout, stop } = setup(7.95, [lc('P', 'drums', 'Verse', -0.5, 0.4)]);
+    expect(layout.clipStarts.get('P')).toBeCloseTo(layout.clipEnds.get('P')!);
+    expect(stop).toBe(Infinity);
+  });
+
+  it('the earliest of several pickups wins', () => {
+    const { stop } = setup(5, [lc('P', 'drums', 'Verse', -1.5, 0.5), lc('Q', 'drums', 'Verse', -0.5, 1)]);
+    expect(stop).toBeCloseTo(6.5);
+  });
+
+  it('only the last clip there is affected: an earlier one stops at the next clip in its section', () => {
+    const { stop } = setup(5, [lc('P', 'drums', 'Verse', -1.5, 4)]);
+    const nb = trimNeighbours({ offset: 0 }, [clip('n', 3, 1)], 0, { nextPickupStop: stop });
+    expect(nb.nextStart).toBe(3);
+  });
+
+  it('a section not on the timeline → no limit', () => {
+    const { input, layout } = setup(5, []);
+    expect(nextPickupStop(input, layout, 'drums', 'Nope')).toBe(Infinity);
+  });
+});
+
+// As the server's applyTrimToInstances runs each instance: default trimNeighbours (a
+// pickup only for a pickup instance) and default clampTrim, plus the pickup stop.
+const instanceTrim = (c: TrimClip, wanted: { trimStart: number; trimEnd: number | null }, others: PlacementClip[], pickupLimit: number, pickupStop = Infinity) =>
+  clampTrim(c, wanted, trimNeighbours({ offset: c.offset }, others, c.offset < 0 ? pickupLimit : 0, { nextPickupStop: pickupStop }));
+
+describe('apply trim to all instances — never creates a pickup', () => {
+  it("a normal instance's left edge clamps at its section's start", () => {
+    const r = instanceTrim({ offset: 0.5, duration: 10, trimStart: 3, trimEnd: 7 }, { trimStart: 0, trimEnd: 7 }, [], -2)!;
+    expect(r.offset).toBeCloseTo(0);
+    expect(r).toMatchObject({ trimStart: 2.5, clamped: true });
+  });
+
+  it('even with a limit passed, a normal instance never goes below 0', () => {
+    const c = { offset: 0.5, duration: 10, trimStart: 3, trimEnd: 7 };
+    const r = clampTrim(c, { trimStart: 0, trimEnd: 7 }, trimNeighbours({ offset: 0.5 }, [], -2))!;
+    expect(r.offset).toBeCloseTo(0);
+  });
+
+  it('a pickup instance clamps at its own left limit', () => {
+    const r = instanceTrim({ offset: -1, duration: 10, trimStart: 2, trimEnd: 6 }, { trimStart: 0, trimEnd: 6 }, [], -2)!;
+    expect(r.offset).toBeCloseTo(-2);
+    expect(r).toMatchObject({ trimStart: 1, clamped: true });
+  });
+
+  it("every instance's right edge clamps at the next section's pickup", () => {
+    const r = instanceTrim({ offset: 0, duration: 10, trimStart: 0, trimEnd: 5 }, { trimStart: 0, trimEnd: null }, [], 0, 6.5)!;
+    expect(r.trimEnd).toBeCloseTo(6.5);
+    expect(r.clamped).toBe(true);
   });
 });
