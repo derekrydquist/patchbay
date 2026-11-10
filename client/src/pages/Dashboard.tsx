@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, createContext, useContext, KeyboardEvent } from 'react';
+import { useColumnEdgeScroll, columnScrollAttrs, columnSafeAutoScroll } from '@/hooks/use-column-edge-scroll';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize, trapDialogTab } from '@/lib/utils';
 import { useLocation, useSearch } from 'wouter';
@@ -917,9 +918,12 @@ function useSongsActiveDrag(): ActiveOrganizeDrag | null {
 function SongsDragSurface({ className, children }: { className?: string; children: React.ReactNode }) {
   const dragSurfaceAttrs = useDragSurfaceAttrs();
   const activeDrag = useActiveOrganizeDrag();
+  // Columns edge-scroll vertically during a drag (dnd-kit can't: see the hook).
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  useColumnEdgeScroll(surfaceRef);
   return (
     <SongsActiveDragContext.Provider value={activeDrag}>
-      <div {...dragSurfaceAttrs} className={cn(DRAG_SURFACE_GROUP, className)}>
+      <div ref={surfaceRef} {...dragSurfaceAttrs} className={cn(DRAG_SURFACE_GROUP, className)}>
         {children}
       </div>
     </SongsActiveDragContext.Provider>
@@ -3139,6 +3143,7 @@ export default function Dashboard() {
               onDragStart={looseFileOrganizeDnd.handleDragStart}
               onDragEnd={handleSongsDragEnd}
               onDragCancel={looseFileOrganizeDnd.handleDragCancel}
+              autoScroll={columnSafeAutoScroll}
             >
             <SongsSpringLoadedRows options={songsSpringOptions} />
             <SongsDragSurface className="bg-[#181C26] rounded-xl border border-white/5 overflow-hidden flex h-[560px] relative">
@@ -3154,7 +3159,7 @@ export default function Dashboard() {
                     <Plus size={12} />
                   </button>
                 </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <div {...columnScrollAttrs} className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {filteredFiles.length === 0 ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-8 px-2 uppercase tracking-widest leading-relaxed">No songs yet — create one</p>
                   ) : filteredFiles.map(item => {
@@ -3290,7 +3295,7 @@ export default function Dashboard() {
                     </DropdownMenu>
                   )}
                 </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <div {...columnScrollAttrs} className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedFile ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">Select a project</p>
                   ) : (
@@ -3344,7 +3349,7 @@ export default function Dashboard() {
                     </button>
                   )}
                 </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <div {...columnScrollAttrs} className="flex-1 overflow-y-auto p-2 space-y-1 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedInstrument ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       Select {selectedFile?.type === 'idea' ? 'a folder' : 'a track'}
@@ -3413,7 +3418,7 @@ export default function Dashboard() {
                     </div>
                   )}
                 </div>
-                <div className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
+                <div {...columnScrollAttrs} className="flex-1 overflow-y-auto p-3 space-y-2 [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-white/10 [&::-webkit-scrollbar-track]:bg-transparent">
                   {!selectedSection ? (
                     <p className="text-[10px] text-muted-foreground/40 italic text-center mt-10 px-3 uppercase tracking-widest leading-relaxed">
                       {!selectedInstrument

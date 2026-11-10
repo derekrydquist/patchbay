@@ -38,6 +38,7 @@ import {
   Upload, Plus, Loader2, AlertCircle,
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useColumnEdgeScroll, columnScrollAttrs } from '@/hooks/use-column-edge-scroll';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import {
@@ -804,6 +805,9 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
 
   // data-dnd-active on the root during any drag — rows drop their plain hover.
   const dragSurfaceAttrs = useDragSurfaceAttrs();
+  // Columns edge-scroll vertically during a drag (dnd-kit can't: see the hook).
+  const bucketRootRef = useRef<HTMLDivElement | null>(null);
+  useColumnEdgeScroll(bucketRootRef);
 
   // One More Info / Add Note window for every loose-file row in this bucket.
   const looseFileInfo = useLooseFileInfoWindow();
@@ -814,7 +818,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
     <LooseFileInfoProvider value={looseFileInfo.open}>
     {/* data-media-bucket: Timeline's collision detection skips timeline track rows and
         gap zones while the pointer is inside these bounds (see trackFirstCollision). */}
-    <div data-media-bucket="" {...dragSurfaceAttrs} className={cn('w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0', DRAG_SURFACE_GROUP)}>
+    <div ref={bucketRootRef} data-media-bucket="" {...dragSurfaceAttrs} className={cn('w-full flex-1 border-b border-border bg-sidebar/80 backdrop-blur-xl flex flex-col z-20 min-h-0', DRAG_SURFACE_GROUP)}>
 
       {/* Header */}
       <div className={cn('flex items-center px-6 h-14 border-b border-white/5 shrink-0', modeTabs ? 'justify-between' : 'justify-end')}>
@@ -873,7 +877,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1" {...columnScrollAttrs}>
             <div className="p-2 space-y-1">
               {isLoading && (
                 <div className="flex items-center justify-center mt-10 gap-2 text-[10px] text-muted-foreground/40">
@@ -949,7 +953,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <ScrollArea className="flex-1">
+          <ScrollArea className="flex-1" {...columnScrollAttrs}>
             <div className="p-2 space-y-1">
               {selectedTrack ? (
                 <>
@@ -1008,7 +1012,7 @@ export function MediaBucket({ songId, onAddToTimeline, modeTabs }: MediaBucketPr
               </div>
             </div>
           ) : (
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1" {...columnScrollAttrs}>
               <div className="p-2 space-y-1">
                 {selectedIdea ? (
                   <>

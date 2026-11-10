@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useRef, useEffect, useLayoutEffect } from 'react';
+import { columnSafeAutoScroll } from '@/hooks/use-column-edge-scroll';
 import { useAuth } from '@/contexts/AuthContext';
 import { capitalize } from '@/lib/utils';
 import { useParams, useLocation, useSearch } from 'wouter';
@@ -2454,6 +2455,7 @@ export default function SongHome() {
                 onDragStart={looseFileOrganizeDnd.handleDragStart}
                 onDragEnd={handleFilesDragEnd}
                 onDragCancel={looseFileOrganizeDnd.handleDragCancel}
+                autoScroll={columnSafeAutoScroll}
               >
                 {/* "Remove from Section" on version cards — real songs only. */}
                 <VersionMoveOutContext.Provider value={song?.type === 'song' ? versionMoveDnd.moveOutOfSection : null}>

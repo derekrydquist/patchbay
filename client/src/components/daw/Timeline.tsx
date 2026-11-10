@@ -61,6 +61,8 @@ import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } fro
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
 import { DawScrollbar } from './DawScrollbar';
+import { isColumnScrollElement } from '@/hooks/use-column-edge-scroll';
+import { createEdgeScroller, type EdgeScroller, SCROLL_SPEED_PX, EDGE_ZONE_PX, EDGE_ZONE_RELEASE_PX, MIN_DRAG_DISTANCE_PX } from '@/lib/edge-scroller';
 import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
 import {
@@ -74,144 +76,6 @@ import { Button } from '@/components/ui/button';
 
 const TRACK_PANEL_WIDTH = 256;
 
-// Edge-scroll constants — the playhead drag's (handlePlayheadPointerDown), shared by the
-// section header drag's createEdgeScroller below. EDGE_ZONE_PX / EDGE_ZONE_RELEASE_PX are
-// hysteresis thresholds ONLY — they decide when the auto-scroll zone turns on/off in the
-// playhead's handlePointerMove. They are
-// deliberately NOT used by clampToVisibleWindow's bound formula. Those two jobs (zone
-// activation vs. position-clamp bound) have different correctness requirements: the clamp
-// bound must reach exactly 0 / endOfTimeline at the true scroll limits with a constant
-// (undistorted) rate throughout, which a shared hysteresis-distance constant cannot express
-// without either leaving a residual floor/ceiling (a fixed margin) or a variable-rate taper
-// (margin that shrinks with scrollLeft — tried and reverted; a linear taper doubles the
-// effective rate throughout the tapered region, and a smoothstep taper only matches the rate
-// AT the two endpoints while leaving a ~2.5x mid-taper speed bump). See clampToVisibleWindow
-// below for the constant-rate, no-margin formula that replaced both.
-const SCROLL_SPEED_PX = 300;       // pixels/second of viewport scroll when the zone is active
-const EDGE_ZONE_PX = 150;          // pointer within this px of the edge → zone ON
-const EDGE_ZONE_RELEASE_PX = 210;  // pointer must clear this px from the edge → zone OFF
-// Minimum total pointer displacement from the pointerdown origin before a zone can engage AT
-// ALL. Filters the case where the flag happens to already render within EDGE_ZONE_PX at the
-// moment of pointerdown (e.g. after a prior manual scroll) — without this, any sub-pixel
-// jitter from a real hand trying to hold still would immediately trigger full-speed
-// auto-scroll on a click the user never intended as a drag toward the edge. History: 6 -> 24
-// -> 48 -> 96 -> 72. At 96 against a 100px EDGE_ZONE_PX (96% of the zone width), a natural
-// drag toward the edge from a starting position already inside the zone required the cursor
-// to cross onto the instrument panel (leftDist going negative) before the displacement gate
-// was satisfied — confirmed via live testing, not just reasoned about. EDGE_ZONE_PX was raised
-// to 150 and this lowered to 72 together to restore a real gap (78px) between the two, so a
-// drag toward the edge from anywhere inside the zone can satisfy both conditions without
-// needing to overshoot past the panel. Each step up from 6 still read as too sensitive for
-// real trackpad input, whose OS-level pointer-acceleration curve can turn a small physical
-// touch into a much larger on-screen CSS-pixel delta than the same gesture produces via direct
-// pixel-targeted input. Gating logic itself confirmed correct and unbypassable; this value is
-// a pure feel/tuning knob, not a correctness fix — but it and EDGE_ZONE_PX are not
-// independently tunable without checking this relationship.
-const MIN_DRAG_DISTANCE_PX = 72;
-
-// Panel-aware edge scroll for a drag over the timeline, with the playhead drag's rules
-// and constants: the zone turns on within EDGE_ZONE_PX of the visible track area's left
-// edge (the sticky track panel's edge, not the container's) or of the right edge, once
-// the pointer has moved MIN_DRAG_DISTANCE_PX from the drag origin; it turns off past
-// EDGE_ZONE_RELEASE_PX; any movement away from the edge pauses scrolling until the
-// pointer moves toward it again; rightward scrolling stops at endScrollCap. It only
-// moves scrollLeft — the caller recomputes from the timeline's scroll event. Used by
-// the section header drag; the playhead drag keeps its own copy of this logic, inside
-// handlePlayheadPointerDown, because it also derives playhead time each frame.
-// axis 'y' applies the same rules vertically and moves only scrollTop: the top edge is
-// the bottom of the sticky ruler and section header (TRACK_ROWS_TOP_PX), the bottom edge
-// the bottom of the visible area (clientHeight, above any horizontal scrollbar).
-interface EdgeScroller {
-  start: (originX: number, originY: number) => void;
-  onPointerMove: (e: PointerEvent) => void;
-  stop: () => void;
-}
-function createEdgeScroller(opts: {
-  getEl: () => HTMLDivElement | null;
-  axis?: 'x' | 'y';
-  // Forward (right / down) scrolling stops here; defaults to the element's max scroll.
-  endScrollCap?: (el: HTMLDivElement) => number;
-  onScrolled?: (scroll: number) => void;
-}): EdgeScroller {
-  const vertical = opts.axis === 'y';
-  const getScroll = (el: HTMLDivElement) => vertical ? el.scrollTop : el.scrollLeft;
-  const setScroll = (el: HTMLDivElement, v: number) => { if (vertical) el.scrollTop = v; else el.scrollLeft = v; };
-  const getMaxScroll = (el: HTMLDivElement) => Math.max(0, vertical
-    ? el.scrollHeight - el.clientHeight
-    : el.scrollWidth - el.clientWidth);
-  let zone: 'off' | 'on-left' | 'on-right' = 'off'; // left/right = top/bottom on axis 'y'
-  let raf: number | null = null;
-  let lastTs: number | null = null;
-  let lastDist: number | null = null;
-  let paused = false;
-  let origin = { x: 0, y: 0 };
-
-  const stopLoop = () => {
-    if (raf !== null) cancelAnimationFrame(raf);
-    raf = null;
-    lastTs = null;
-  };
-  const turnOff = () => {
-    zone = 'off';
-    lastDist = null;
-    paused = false;
-  };
-  const frame = (timestamp: number) => {
-    const el = opts.getEl();
-    if (!el || zone === 'off') { stopLoop(); return; }
-    if (lastTs === null) { lastTs = timestamp; raf = requestAnimationFrame(frame); return; }
-    const dt = (timestamp - lastTs) / 1000;
-    lastTs = timestamp;
-    const dir = zone === 'on-left' ? -1 : 1;
-    const maxScroll = getMaxScroll(el);
-    const ceiling = dir === 1 ? (opts.endScrollCap?.(el) ?? maxScroll) : maxScroll;
-    const speed = paused ? 0 : SCROLL_SPEED_PX;
-    const next = Math.max(0, Math.min(getScroll(el) + dir * speed * dt, ceiling));
-    setScroll(el, next);
-    opts.onScrolled?.(next);
-    if (next <= 0 || next >= ceiling) { stopLoop(); turnOff(); return; }
-    raf = requestAnimationFrame(frame);
-  };
-
-  return {
-    start(originX, originY) {
-      origin = { x: originX, y: originY };
-      stopLoop();
-      turnOff();
-    },
-    onPointerMove(e) {
-      const el = opts.getEl();
-      if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const viewportPos = vertical ? e.clientY - rect.top : e.clientX - rect.left;
-      const leftDist = viewportPos - (vertical ? TRACK_ROWS_TOP_PX : TRACK_PANEL_WIDTH);
-      const rightDist = (vertical ? el.clientHeight : el.clientWidth) - viewportPos;
-      const movedEnough = Math.hypot(e.clientX - origin.x, e.clientY - origin.y) >= MIN_DRAG_DISTANCE_PX;
-      const prev = zone;
-      if (prev === 'off') {
-        if (movedEnough && leftDist < EDGE_ZONE_PX) { zone = 'on-left'; lastDist = leftDist; paused = false; }
-        else if (movedEnough && rightDist < EDGE_ZONE_PX) { zone = 'on-right'; lastDist = rightDist; paused = false; }
-      } else {
-        const dist = prev === 'on-left' ? leftDist : rightDist;
-        if (dist >= EDGE_ZONE_RELEASE_PX) {
-          turnOff();
-        } else {
-          if (lastDist !== null) {
-            if (dist > lastDist) paused = true;
-            else if (dist < lastDist) paused = false;
-          }
-          lastDist = dist;
-        }
-      }
-      if (prev === 'off' && zone !== 'off' && raf === null) { lastTs = null; raf = requestAnimationFrame(frame); }
-      if (zone === 'off' && raf !== null) stopLoop();
-    },
-    stop() {
-      stopLoop();
-      turnOff();
-    },
-  };
-}
 const KEYBOARD_NAV_OVERSCROLL_PX = 80; // extra px past the clip edge when keyboard nav triggers a scroll
 // Ticks per quarter-note beat for each metronome subdivision setting.
 const METRONOME_SUBDIVISION_FACTORS: Record<string, number> = { '1/4': 1, '1/8': 2, '1/16': 4 };
@@ -2367,6 +2231,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       : 0;
     const scroller = createEdgeScroller({
       getEl: () => timelineRef.current,
+      startInset: TRACK_PANEL_WIDTH,
       // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
       endScrollCap: (el) => Math.max(0, Math.min(
         contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
@@ -2643,12 +2508,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     fileEdgeScrollerRef.current?.stop();
     fileVEdgeScrollerRef.current?.stop();
     fileVEdgeScrollerRef.current = opts?.vertical
-      ? createEdgeScroller({ getEl: () => timelineRef.current, axis: 'y' })
+      ? createEdgeScroller({ getEl: () => timelineRef.current, axis: 'y', startInset: TRACK_ROWS_TOP_PX })
       : null;
     fileDragInTrackAreaRef.current = false;
     fileDragInTimelineRef.current = false;
     fileEdgeScrollerRef.current = createEdgeScroller({
       getEl: () => timelineRef.current,
+      startInset: TRACK_PANEL_WIDTH,
       // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
       endScrollCap: (el) => Math.max(0, Math.min(
         contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
@@ -3060,13 +2926,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         queryClient.invalidateQueries({ queryKey: timelineKey }).catch(() => {}).finally(releaseHold);
       });
   };
-  // dnd-kit's own auto-scroll stays on for Media Bucket drags (their columns and the
-  // page rely on it) but never moves the timeline itself, which file drags edge-scroll
-  // on both axes with createEdgeScroller (otherwise it scrolled twice). It's off
+  // dnd-kit's own auto-scroll stays on for Media Bucket drags (the page relies on it)
+  // but never moves the timeline itself, which file drags edge-scroll on both axes with
+  // createEdgeScroller (otherwise it scrolled twice), nor the Media Bucket's columns,
+  // which useColumnEdgeScroll scrolls. It's off
   // entirely for timeline clip drags. A ref, not state, so it's already off on the
   // drag's first frame.
   const dndAutoScroll = React.useMemo(() => ({
-    canScroll: (el: Element) => clipDragRef.current === null && el !== timelineRef.current,
+    canScroll: (el: Element) => clipDragRef.current === null && el !== timelineRef.current && !isColumnScrollElement(el),
   }), []);
 
   // ── New-section insertion line ─────────────────────────────────────────────
