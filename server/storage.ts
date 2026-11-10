@@ -32,6 +32,15 @@ import { layoutTimeline, type TimelineLayout, type TimelineLayoutInput } from "@
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
+// Thrown by materializeLooseFileToTimeline for a drop position in a section that has
+// no timeline clips (it may have emptied since the drag began) — the route answers 409.
+export class SectionNotOnTimelineError extends Error {
+  constructor(public sectionName: string) {
+    super(`${sectionName} isn't on the timeline any more.`);
+    this.name = "SectionNotOnTimelineError";
+  }
+}
+
 // Thrown by materializeLooseFile / materializeLooseFileToTimeline when the loose file
 // id doesn't resolve — callers translate this to a 404, as distinct from the
 // "idea missing" case below, which is a genuine invariant violation (500).
@@ -380,6 +389,7 @@ export interface IStorage {
     trackId: string,
     sectionName: string,
     hint?: SectionPlacementHint | null,
+    options?: LoosePlacementOptions,
   ): Promise<{ clip: Clip; timelineClip: TimelineClip }>;
 
   // Activity
@@ -940,39 +950,95 @@ export function insertTimelineClipWithPushes(
   pushed: { id: string; sectionOffset: number }[],
   hint?: SectionPlacementHint | null,
 ): TimelineClip {
-  return sqlite.transaction(() => {
-    for (const p of pushed) {
-      const row = db.select({
-        trackId: timelineClips.trackId,
-        sectionName: timelineClips.sectionName,
-        sectionOffset: timelineClips.sectionOffset,
-        isFullTake: timelineClips.isFullTake,
-        songId: instrumentTracks.songId,
-      })
-        .from(timelineClips)
-        .innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
-        .where(eq(timelineClips.id, p.id))
-        .get();
-      if (!row || row.songId !== songId) throw new PushedClipError(404, "Not found");
-      if (row.isFullTake || row.trackId !== data.trackId || row.sectionName !== data.sectionName) {
-        throw new PushedClipError(400, "Only clips on the same track in the same section can be pushed");
-      }
-      const stored = row.sectionOffset ?? 0;
-      if (stored < -PLACEMENT_EPSILON) throw new PushedClipError(400, "A pickup can't be pushed");
-      if (p.sectionOffset < stored - PLACEMENT_EPSILON) throw new PushedClipError(400, "A pushed clip can only move later");
+  return sqlite.transaction(() => insertTimelineClipWithPushesRows(songId, data, pushed, hint))();
+}
+
+// insertTimelineClipWithPushes' checks and writes, with no transaction of its own — for
+// callers that already hold one (a throw rolls back the caller's transaction).
+function insertTimelineClipWithPushesRows(
+  songId: string,
+  data: InsertTimelineClip,
+  pushed: { id: string; sectionOffset: number }[],
+  hint?: SectionPlacementHint | null,
+): TimelineClip {
+  for (const p of pushed) {
+    const row = db.select({
+      trackId: timelineClips.trackId,
+      sectionName: timelineClips.sectionName,
+      sectionOffset: timelineClips.sectionOffset,
+      isFullTake: timelineClips.isFullTake,
+      songId: instrumentTracks.songId,
+    })
+      .from(timelineClips)
+      .innerJoin(instrumentTracks, eq(timelineClips.trackId, instrumentTracks.id))
+      .where(eq(timelineClips.id, p.id))
+      .get();
+    if (!row || row.songId !== songId) throw new PushedClipError(404, "Not found");
+    if (row.isFullTake || row.trackId !== data.trackId || row.sectionName !== data.sectionName) {
+      throw new PushedClipError(400, "Only clips on the same track in the same section can be pushed");
     }
-    const clip = insertTimelineClipPlacedRows(songId, data, hint);
-    writeTimelineClipOffsets(songId, pushed);
-    if (findOverlap(sectionPlacementClips(data.trackId, data.sectionName!))) {
-      throw new TimelineOverlapError(data.trackId, data.sectionName!);
-    }
-    const starts = computeSongLayout(songId).clipStarts;
-    for (const id of [clip.id, ...pushed.map((p) => p.id)]) {
-      const start = starts.get(id);
-      if (start !== undefined) db.update(timelineClips).set({ start }).where(eq(timelineClips.id, id)).run();
-    }
-    return db.select().from(timelineClips).where(eq(timelineClips.id, clip.id)).get()!;
-  })();
+    const stored = row.sectionOffset ?? 0;
+    if (stored < -PLACEMENT_EPSILON) throw new PushedClipError(400, "A pickup can't be pushed");
+    if (p.sectionOffset < stored - PLACEMENT_EPSILON) throw new PushedClipError(400, "A pushed clip can only move later");
+  }
+  const clip = insertTimelineClipPlacedRows(songId, data, hint);
+  writeTimelineClipOffsets(songId, pushed);
+  if (findOverlap(sectionPlacementClips(data.trackId, data.sectionName!))) {
+    throw new TimelineOverlapError(data.trackId, data.sectionName!);
+  }
+  const starts = computeSongLayout(songId).clipStarts;
+  for (const id of [clip.id, ...pushed.map((p) => p.id)]) {
+    const start = starts.get(id);
+    if (start !== undefined) db.update(timelineClips).set({ start }).where(eq(timelineClips.id, id)).run();
+  }
+  return db.select().from(timelineClips).where(eq(timelineClips.id, clip.id)).get()!;
+}
+
+// Where a loose-file drop lands (materializeLooseFileToTimeline): the new clip's
+// section_offset and the later clips it pushes. `id` is the new timeline clip's id
+// (the client's preview id), with or without a position.
+export interface LoosePlacementOptions {
+  id?: string;
+  position?: { sectionOffset: number; pushed: { id: string; sectionOffset: number }[] } | null;
+}
+
+// A loose file dropped at a position on the timeline, in one transaction: the section
+// must already be on the timeline (SectionNotOnTimelineError otherwise — only the
+// append path brings a new section on), the loose file becomes a version in that track
+// and section (materializeLooseFileCore), and the timeline clip is inserted at
+// sectionOffset with its pushes (insertTimelineClipWithPushes' rules: PushedClipError,
+// PickupLimitError, TimelineOverlapError). Any throw rolls everything back, so the file
+// stays loose. The caller checks ownership and that sectionOffset is finite and ≥ 0.
+function materializeLooseFileAtPosition(
+  looseFileId: string,
+  trackId: string,
+  sectionName: string,
+  position: { sectionOffset: number; pushed: { id: string; sectionOffset: number }[] },
+  id?: string,
+): { clip: Clip; timelineClip: TimelineClip } {
+  return db.transaction((tx) => {
+    const songId = songIdForTrack(trackId);
+    if (!songId || !sectionHasTimelineClips(songId, sectionName)) throw new SectionNotOnTimelineError(sectionName);
+    const clip = materializeLooseFileCore(tx, looseFileId, trackId, sectionName);
+    const timelineClip = insertTimelineClipWithPushesRows(songId, {
+      id: id ?? randomUUID(),
+      trackId,
+      name: clip.name,
+      type: clip.type,
+      color: clip.color,
+      start: 0, // replaced by the layout's value
+      duration: clip.duration,
+      src: clip.src,
+      sectionName,
+      isFinal: false,
+      trimStart: 0,
+      trimEnd: null,
+      bucketClipId: clip.id,
+      isFullTake: false,
+      sectionOffset: position.sectionOffset,
+    }, position.pushed);
+    return { clip, timelineClip };
+  });
 }
 
 // Song id for a track, for ensureSongSection callers that only hold a trackId.
@@ -2255,7 +2321,9 @@ export class SQLiteStorage implements IStorage {
     trackId: string,
     sectionName: string,
     hint?: SectionPlacementHint | null,
+    options?: LoosePlacementOptions,
   ): Promise<{ clip: Clip; timelineClip: TimelineClip }> {
+    if (options?.position) return materializeLooseFileAtPosition(looseFileId, trackId, sectionName, options.position, options.id);
     return db.transaction((tx) => {
       const clip = materializeLooseFileCore(tx, looseFileId, trackId, sectionName);
 
@@ -2271,7 +2339,7 @@ export class SQLiteStorage implements IStorage {
       }
 
       const timelineClip: TimelineClip = {
-        id: randomUUID(),
+        id: options?.id ?? randomUUID(),
         trackId,
         name: clip.name,
         type: clip.type,

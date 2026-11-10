@@ -18,7 +18,7 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, insertTimelineClipWithPushes, PushedClipError, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, insertTimelineClipWithPushes, PushedClipError, SectionNotOnTimelineError, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip, pickupOffsetError } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
@@ -3409,7 +3409,8 @@ export async function registerRoutes(
   /**
    * POST /api/loose-files/:id/place-on-timeline — materialize a loose file into a
    * clips row AND a timeline_clips row in the same transaction. Same two-ID
-   * ownership assertion as organize.
+   * ownership assertion as organize. Optional body: sectionOffset, pushed, id
+   * (see below); pushed clips are checked against the song here, so in the band.
    */
   app.post("/api/loose-files/:id/place-on-timeline", requireBand, async (req, res) => {
     const looseFileId = req.params.id as string;
@@ -3424,16 +3425,50 @@ export async function registerRoutes(
     const destSongId = trackSongId(trackId);
     if (!destSongId || !assertSongOwned(req, res, destSongId)) return;
 
+    // Optional drop position (a timeline drag + confirm): the new clip's sectionOffset,
+    // the later clips it pushes (POST clips' `pushed` rules), and the client's id for
+    // the new timeline clip. With a position the section must already be on the
+    // timeline (409 otherwise) and an overlap → 409; either way nothing is written and
+    // the file stays loose. Without one the clip is appended, as before.
+    const body = req.body as { sectionOffset?: unknown; pushed?: unknown; id?: unknown };
+    const hasOffset = 'sectionOffset' in body;
+    if (hasOffset && (typeof body.sectionOffset !== 'number' || !Number.isFinite(body.sectionOffset) || body.sectionOffset < 0)) {
+      return res.status(400).json({ message: "sectionOffset must be a finite number of seconds, 0 or more" });
+    }
+    let position: { sectionOffset: number; pushed: { id: string; sectionOffset: number }[] } | null = null;
+    if ('pushed' in body) {
+      if (!hasOffset) return res.status(400).json({ message: "Pushed clips need a sectionOffset" });
+      const pushed = parsePushedClips(body.pushed);
+      if (typeof pushed === 'string') return res.status(400).json({ message: pushed });
+      position = { sectionOffset: body.sectionOffset as number, pushed };
+    } else if (hasOffset) {
+      position = { sectionOffset: body.sectionOffset as number, pushed: [] };
+    }
+    if (body.id !== undefined && (typeof body.id !== 'string' || !body.id)) {
+      return res.status(400).json({ message: "id must be a non-empty string" });
+    }
+    const newClipId = body.id as string | undefined;
+
     const placeActor = req.session.userId
       ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
       : 'Someone';
 
     let result;
     try {
-      result = await storage.materializeLooseFileToTimeline(looseFileId, trackId, sectionName, parsePlacementHint(req.body?.placement));
+      result = await storage.materializeLooseFileToTimeline(
+        looseFileId, trackId, sectionName, parsePlacementHint(req.body?.placement), { id: newClipId, position },
+      );
     } catch (err) {
       if (err instanceof LooseFileNotFoundError) {
         return res.status(404).json({ message: "Loose file not found." });
+      }
+      if (err instanceof SectionNotOnTimelineError) return res.status(409).json({ message: err.message });
+      if (err instanceof PushedClipError) return res.status(err.status).json({ message: err.message });
+      if (err instanceof PickupLimitError) return res.status(400).json({ message: err.message });
+      if (err instanceof TimelineOverlapError) {
+        const trackName = db.select({ name: instrumentTracks.name }).from(instrumentTracks)
+          .where(eq(instrumentTracks.id, trackId)).get()?.name ?? 'a track';
+        return res.status(409).json({ message: `Clips would overlap on ${trackName} › ${err.sectionName}.` });
       }
       console.error("[loose-files/:id/place-on-timeline] materialize failed:", err);
       return res.status(500).json({ message: "Failed to place loose file on the timeline." });
