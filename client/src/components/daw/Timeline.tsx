@@ -114,10 +114,13 @@ const MIN_DRAG_DISTANCE_PX = 72;
 // edge (the sticky track panel's edge, not the container's) or of the right edge, once
 // the pointer has moved MIN_DRAG_DISTANCE_PX from the drag origin; it turns off past
 // EDGE_ZONE_RELEASE_PX; any movement away from the edge pauses scrolling until the
-// pointer moves toward it again; rightward scrolling stops at rightScrollCap. It only
+// pointer moves toward it again; rightward scrolling stops at endScrollCap. It only
 // moves scrollLeft — the caller recomputes from the timeline's scroll event. Used by
 // the section header drag; the playhead drag keeps its own copy of this logic, inside
 // handlePlayheadPointerDown, because it also derives playhead time each frame.
+// axis 'y' applies the same rules vertically and moves only scrollTop: the top edge is
+// the bottom of the sticky ruler and section header (TRACK_ROWS_TOP_PX), the bottom edge
+// the bottom of the visible area (clientHeight, above any horizontal scrollbar).
 interface EdgeScroller {
   start: (originX: number, originY: number) => void;
   onPointerMove: (e: PointerEvent) => void;
@@ -125,10 +128,18 @@ interface EdgeScroller {
 }
 function createEdgeScroller(opts: {
   getEl: () => HTMLDivElement | null;
-  rightScrollCap: (el: HTMLDivElement) => number;
-  onScrolled: (scrollLeft: number) => void;
+  axis?: 'x' | 'y';
+  // Forward (right / down) scrolling stops here; defaults to the element's max scroll.
+  endScrollCap?: (el: HTMLDivElement) => number;
+  onScrolled?: (scroll: number) => void;
 }): EdgeScroller {
-  let zone: 'off' | 'on-left' | 'on-right' = 'off';
+  const vertical = opts.axis === 'y';
+  const getScroll = (el: HTMLDivElement) => vertical ? el.scrollTop : el.scrollLeft;
+  const setScroll = (el: HTMLDivElement, v: number) => { if (vertical) el.scrollTop = v; else el.scrollLeft = v; };
+  const getMaxScroll = (el: HTMLDivElement) => Math.max(0, vertical
+    ? el.scrollHeight - el.clientHeight
+    : el.scrollWidth - el.clientWidth);
+  let zone: 'off' | 'on-left' | 'on-right' = 'off'; // left/right = top/bottom on axis 'y'
   let raf: number | null = null;
   let lastTs: number | null = null;
   let lastDist: number | null = null;
@@ -152,12 +163,12 @@ function createEdgeScroller(opts: {
     const dt = (timestamp - lastTs) / 1000;
     lastTs = timestamp;
     const dir = zone === 'on-left' ? -1 : 1;
-    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-    const ceiling = dir === 1 ? opts.rightScrollCap(el) : maxScroll;
+    const maxScroll = getMaxScroll(el);
+    const ceiling = dir === 1 ? (opts.endScrollCap?.(el) ?? maxScroll) : maxScroll;
     const speed = paused ? 0 : SCROLL_SPEED_PX;
-    const next = Math.max(0, Math.min(el.scrollLeft + dir * speed * dt, ceiling));
-    el.scrollLeft = next;
-    opts.onScrolled(next);
+    const next = Math.max(0, Math.min(getScroll(el) + dir * speed * dt, ceiling));
+    setScroll(el, next);
+    opts.onScrolled?.(next);
     if (next <= 0 || next >= ceiling) { stopLoop(); turnOff(); return; }
     raf = requestAnimationFrame(frame);
   };
@@ -171,9 +182,10 @@ function createEdgeScroller(opts: {
     onPointerMove(e) {
       const el = opts.getEl();
       if (!el) return;
-      const viewportX = e.clientX - el.getBoundingClientRect().left;
-      const leftDist = viewportX - TRACK_PANEL_WIDTH;
-      const rightDist = el.clientWidth - viewportX;
+      const rect = el.getBoundingClientRect();
+      const viewportPos = vertical ? e.clientY - rect.top : e.clientX - rect.left;
+      const leftDist = viewportPos - (vertical ? TRACK_ROWS_TOP_PX : TRACK_PANEL_WIDTH);
+      const rightDist = (vertical ? el.clientHeight : el.clientWidth) - viewportPos;
       const movedEnough = Math.hypot(e.clientX - origin.x, e.clientY - origin.y) >= MIN_DRAG_DISTANCE_PX;
       const prev = zone;
       if (prev === 'off') {
@@ -2356,7 +2368,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const scroller = createEdgeScroller({
       getEl: () => timelineRef.current,
       // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
-      rightScrollCap: (el) => Math.max(0, Math.min(
+      endScrollCap: (el) => Math.max(0, Math.min(
         contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
         el.scrollWidth - el.clientWidth,
       )),
@@ -2433,12 +2445,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     looseFileOrganizeDnd.handleDragStart(event);
     // Horizontal drop positions (and the new-section line) read this pointer source. A
     // file from the Media Bucket (a version or a loose file) and a timeline clip both
-    // edge-scroll the timeline with createEdgeScroller (dnd-kit's own auto-scroll is
-    // off for timeline clip drags — see dndAutoScroll).
+    // edge-scroll the timeline with createEdgeScroller, a file on both axes (dnd-kit's
+    // own auto-scroll never moves the timeline — see dndAutoScroll).
     const startCoords = getEventCoordinates(event.activatorEvent) ?? { x: 0, y: 0 };
     const dragType = event.active.data.current?.type as string | undefined;
     if (dragType === BUCKET_CLIP_DRAG_TYPE || dragType === 'loose-file') {
-      startFileEdgeScroll();
+      startFileEdgeScroll({ vertical: true });
+      startFileDragBlurCancel();
       startDragPointer(startCoords, { onMove: fileEdgeScrollMove, onScroll: nudgeDndCollision });
     } else if (dragType === 'clip' && event.active.data.current?.clip && event.active.data.current?.trackId) {
       const dragClip = event.active.data.current.clip as Clip;
@@ -2615,33 +2628,82 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // counts from where the pointer ENTERED the track area (the scroller restarts on
   // each entry), not from the drag's origin in the Media Bucket. Leaving the track
   // area stops it; drop, cancel and unmount stop it too.
+  // A file drag (not a timeline clip drag) also scrolls vertically: a second scroller
+  // on axis 'y', so both run in a corner. Its area is the whole timeline element, ruler
+  // and header rows included, while its zone is still measured from the track rows'
+  // top: an overshoot up into the sticky header reads as a negative distance and stays
+  // engaged (like the track panel for horizontal) instead of stopping it and restarting
+  // the 72 px gate on re-entry. dnd-kit's auto-scroll never moves the timeline (see
+  // dndAutoScroll).
   const fileEdgeScrollerRef = useRef<EdgeScroller | null>(null);
+  const fileVEdgeScrollerRef = useRef<EdgeScroller | null>(null);
   const fileDragInTrackAreaRef = useRef(false);
-  const startFileEdgeScroll = () => {
+  const fileDragInTimelineRef = useRef(false);
+  const startFileEdgeScroll = (opts?: { vertical?: boolean }) => {
     fileEdgeScrollerRef.current?.stop();
+    fileVEdgeScrollerRef.current?.stop();
+    fileVEdgeScrollerRef.current = opts?.vertical
+      ? createEdgeScroller({ getEl: () => timelineRef.current, axis: 'y' })
+      : null;
     fileDragInTrackAreaRef.current = false;
+    fileDragInTimelineRef.current = false;
     fileEdgeScrollerRef.current = createEdgeScroller({
       getEl: () => timelineRef.current,
       // Read live: a timeline clip drag's preview layout can grow the content mid-drag.
-      rightScrollCap: (el) => Math.max(0, Math.min(
+      endScrollCap: (el) => Math.max(0, Math.min(
         contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
         el.scrollWidth - el.clientWidth,
       )),
       onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
     });
   };
+  // Losing focus (switching apps) during a file drag cancels it, like Esc: the
+  // pointer's release may never reach this window, and the edge scrollers' rAF loops
+  // keep running in a visible but unfocused window. Same mechanism as clip drags
+  // (startClipDrag): dnd-kit's pointer sensor cancels on a window 'visibilitychange'
+  // event, which runs handleDragCancel. Removed in stopFileEdgeScroll.
+  const fileDragBlurCleanupRef = useRef<(() => void) | null>(null);
+  const startFileDragBlurCancel = () => {
+    fileDragBlurCleanupRef.current?.();
+    const onBlur = () => window.dispatchEvent(new Event('visibilitychange'));
+    window.addEventListener('blur', onBlur);
+    fileDragBlurCleanupRef.current = () => window.removeEventListener('blur', onBlur);
+  };
   const stopFileEdgeScroll = () => {
+    fileDragBlurCleanupRef.current?.();
+    fileDragBlurCleanupRef.current = null;
     fileEdgeScrollerRef.current?.stop();
     fileEdgeScrollerRef.current = null;
+    fileVEdgeScrollerRef.current?.stop();
+    fileVEdgeScrollerRef.current = null;
     fileDragInTrackAreaRef.current = false;
+    fileDragInTimelineRef.current = false;
   };
   const fileEdgeScrollMove = (e: PointerEvent) => {
     const scroller = fileEdgeScrollerRef.current;
+    const vScroller = fileVEdgeScrollerRef.current;
     const el = timelineRef.current;
     if (!scroller || !el) return;
     const rect = el.getBoundingClientRect();
-    const inTrackArea = e.clientX >= rect.left && e.clientX <= rect.left + el.clientWidth
+    const inTimelineX = e.clientX >= rect.left && e.clientX <= rect.left + el.clientWidth;
+    const inTimeline = inTimelineX
+      && e.clientY >= rect.top && e.clientY <= rect.top + el.clientHeight;
+    const inTrackArea = inTimelineX
       && e.clientY >= rect.top + TRACK_ROWS_TOP_PX && e.clientY <= rect.top + el.clientHeight;
+    if (vScroller) {
+      if (!inTimeline) {
+        if (fileDragInTimelineRef.current) {
+          vScroller.stop();
+          fileDragInTimelineRef.current = false;
+        }
+      } else {
+        if (!fileDragInTimelineRef.current) {
+          fileDragInTimelineRef.current = true;
+          vScroller.start(e.clientX, e.clientY);
+        }
+        vScroller.onPointerMove(e);
+      }
+    }
     if (!inTrackArea) {
       if (fileDragInTrackAreaRef.current) {
         scroller.stop();
@@ -2998,10 +3060,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         queryClient.invalidateQueries({ queryKey: timelineKey }).catch(() => {}).finally(releaseHold);
       });
   };
-  // dnd-kit's own auto-scroll stays on for Media Bucket drags (their columns rely on
-  // it) and is off for timeline clip drags, which edge-scroll with createEdgeScroller.
-  // A ref, not state, so it's already off on the drag's first frame.
-  const dndAutoScroll = React.useMemo(() => ({ canScroll: () => clipDragRef.current === null }), []);
+  // dnd-kit's own auto-scroll stays on for Media Bucket drags (their columns and the
+  // page rely on it) but never moves the timeline itself, which file drags edge-scroll
+  // on both axes with createEdgeScroller (otherwise it scrolled twice). It's off
+  // entirely for timeline clip drags. A ref, not state, so it's already off on the
+  // drag's first frame.
+  const dndAutoScroll = React.useMemo(() => ({
+    canScroll: (el: Element) => clipDragRef.current === null && el !== timelineRef.current,
+  }), []);
 
   // ── New-section insertion line ─────────────────────────────────────────────
   // While a Media Bucket version whose section has no non-full-take clips on the
