@@ -923,8 +923,8 @@ export class PushedClipError extends Error {
   }
 }
 
-// A file dropped into a gap on the timeline, and the later clips it pushes along, in
-// one transaction: the new clip is inserted (insertTimelineClipPlaced's rules,
+// A new sectioned timeline clip (a version drop, Add to Timeline), and the later clips
+// it pushes along (none for an append), in one transaction: the new clip is inserted (insertTimelineClipPlaced's rules,
 // placement hint included), the pushed clips' offsets are written
 // (setTimelineClipOffsets' rules), then the new clip's track + section is checked for
 // overlapping clips, and the stored start cache of the new clip and every pushed clip

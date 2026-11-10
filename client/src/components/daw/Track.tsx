@@ -27,26 +27,18 @@ export interface SectionInfo {
 interface SectionCellProps {
   sectionDuration: number;
   zoom: number;
-  insertionX?: number;
 }
 
 // One section's width on a track row: the background behind the clips, with its
 // divider. The clips themselves are drawn at row level (TimelineTrack), not in here.
-function SectionCell({ sectionDuration, zoom, insertionX }: SectionCellProps) {
+function SectionCell({ sectionDuration, zoom }: SectionCellProps) {
   return (
     <div
       // Divider is an inset shadow, not border-r: a border would take the cell's last
       // pixel column.
       className="relative h-full shadow-[inset_-1px_0_0_hsl(var(--border)/0.2)]"
       style={{ width: sectionDuration * zoom, minWidth: sectionDuration * zoom }}
-    >
-      {insertionX !== undefined && (
-        <div
-          className="absolute top-0 bottom-0 w-0.5 bg-primary shadow-[0_0_8px_rgba(212,175,55,0.8)] z-20 pointer-events-none"
-          style={{ left: insertionX }}
-        />
-      )}
-    </div>
+    />
   );
 }
 
@@ -272,7 +264,6 @@ interface TrackProps {
   isInvalidDrop: boolean;
   isDragging: boolean;
   zoom: number;
-  insertionPoint?: { sectionName: string; index: number; x: number };
   onDeleteTrack?: (trackId: string) => void;
   songId: string;
   flashClipId?: string | null;
@@ -299,7 +290,6 @@ export const TimelineTrack = React.memo(function TimelineTrack({
   isInvalidDrop,
   isDragging,
   zoom,
-  insertionPoint,
   onDeleteTrack,
   songId,
   flashClipId,
@@ -386,9 +376,6 @@ export const TimelineTrack = React.memo(function TimelineTrack({
               key={section.name}
               sectionDuration={section.duration}
               zoom={zoom}
-              insertionX={
-                insertionPoint?.sectionName === section.name ? insertionPoint.x : undefined
-              }
             />
           ))}
         </div>

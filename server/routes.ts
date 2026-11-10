@@ -1576,12 +1576,13 @@ export async function registerRoutes(
     return pushed;
   }
 
-  // Creates a timeline clip. With `pushed` in the body (a gap drop, even an empty
-  // list), the new clip needs an explicit section and sectionOffset, and it and the
-  // pushed clips' new offsets are saved together (insertTimelineClipWithPushes): any
-  // pushed clip it won't move → 404 / 400, an overlap → 409, a pickup limit → 400, and
-  // nothing is written. The pushes add no feed row of their own. Without `pushed`,
-  // nothing is checked for overlap, as before.
+  // Creates a timeline clip. Every sectioned (non-full-take) clip is saved through
+  // insertTimelineClipWithPushes, so an overlap with another clip on its track in its
+  // section → 409 and nothing is written, with or without `pushed`. With `pushed` in
+  // the body (a version drop, even an empty list), the new clip needs an explicit
+  // section and sectionOffset, and the pushed clips' new offsets are saved in the same
+  // transaction: any pushed clip it won't move → 404 / 400, a pickup limit → 400. The
+  // pushes add no feed row of their own. A legacy full take is never checked.
   app.post("/api/tracks/:trackId/clips", requireBand, async (req, res) => {
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
@@ -1611,18 +1612,20 @@ export async function registerRoutes(
       pushed = result;
     }
     // A sectioned clip sent with no sectionOffset is appended to the end of this
-    // track's section (trimmed lengths), the same rule as Place on Timeline, and its
-    // start cache comes from the layout. A sent offset (and start) is kept as is.
-    const fillOffset = !!parsed.data.sectionName && !parsed.data.isFullTake && parsed.data.sectionOffset == null;
-    if (fillOffset) parsed.data.sectionOffset = sectionAppendOffset(trackId, parsed.data.sectionName!);
+    // track's section (trimmed lengths), the same rule as Place on Timeline. A
+    // sectioned clip's start cache always comes from the layout.
+    const sectioned = !!parsed.data.sectionName && !parsed.data.isFullTake;
+    if (sectioned && parsed.data.sectionOffset == null) {
+      parsed.data.sectionOffset = sectionAppendOffset(trackId, parsed.data.sectionName!);
+    }
     // `placement` ({ before, after }: the timeline sections the drop landed between) is
     // used only when this is the section's first non-full-take clip — see
     // placeSectionInArrangement. Missing or unusable → the end rule.
     const hint = parsePlacementHint(req.body?.placement);
     let clip;
-    if (pushed) {
+    if (sectioned) {
       try {
-        clip = insertTimelineClipWithPushes(trackSongIdVal, parsed.data, pushed, hint);
+        clip = insertTimelineClipWithPushes(trackSongIdVal, parsed.data, pushed ?? [], hint);
       } catch (err) {
         if (err instanceof PushedClipError) return res.status(err.status).json({ message: err.message });
         if (err instanceof PickupLimitError) return res.status(400).json({ message: err.message });
@@ -1635,12 +1638,6 @@ export async function registerRoutes(
       }
     } else {
       clip = insertTimelineClipPlaced(trackSongIdVal, parsed.data, hint);
-      if (fillOffset) {
-        const start = computeSongLayout(trackSongIdVal).clipStarts.get(clip.id);
-        if (start !== undefined && start !== clip.start) {
-          clip = (await storage.updateTimelineClip(clip.id, { start })) ?? clip;
-        }
-      }
     }
 
     // If there's already a final bucket clip for this track+section, mark the new timeline clip final too

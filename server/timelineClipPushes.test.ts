@@ -1,5 +1,6 @@
-// POST /api/tracks/:trackId/clips with `pushed` (a gap drop saving the new clip and the
-// clips it pushes in one transaction), through the real route over HTTP with a stub
+// POST /api/tracks/:trackId/clips with `pushed` (a version drop saving the new clip and
+// the clips it pushes in one transaction) and without it (the overlap check applies to
+// every new sectioned clip), through the real route over HTTP with a stub
 // session. Runs against a throwaway SQLite file with patchbay.db's schema only (no
 // data; patchbay.db is opened read-only), as timelinePickups.test.ts does. Skipped when
 // there is no local patchbay.db to copy the schema from.
@@ -193,13 +194,35 @@ describe.skipIf(!fs.existsSync(SOURCE))('POST timeline clip with pushed clips', 
     expect(row('n')).toBeUndefined();
   });
 
-  it('without pushed, nothing is checked for overlap (the current gap-zone path)', async () => {
+  it('without pushed, an overlapping clip is refused with 409 and nothing is saved', async () => {
     const res = await post(newClip('n', 'Intro', 1.5, 1));
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('Clips would overlap on Drums › Intro.');
+    expect(row('n')).toBeUndefined();
+    unchanged();
+    expect(await feedRows()).toEqual([]);
+  });
+
+  it('without pushed, an append (no sectionOffset) still works, after the furthest clip end', async () => {
+    const res = await post(newClip('n', 'Intro', undefined, 1));
     expect(res.status).toBe(201);
-    expect(res.body.start).toBe(99); // a sent offset keeps the sent start, as before
-    expect(row('n')).toEqual({ offset: 1.5, start: 99 });
+    expect(res.body).toMatchObject({ id: 'n', sectionOffset: 4, start: 4 });
+    expect(row('n')).toEqual({ offset: 4, start: 4 });
     unchanged();
     expect(await feedRows()).toEqual([{ type: 'clip-added-to-timeline' }]);
+  });
+
+  it('without pushed, a sent offset in a free spot is saved, its start cache from the layout', async () => {
+    const res = await post(newClip('n', 'Intro', 2, 1));
+    expect(res.status).toBe(201);
+    expect(row('n')).toEqual({ offset: 2, start: 2 });
+    unchanged();
+  });
+
+  it('a legacy full take is never checked for overlap', async () => {
+    const res = await post({ id: 'ft2', name: 'ft2', type: 'audio', color: 'x', duration: 20, start: 0, sectionName: 'Full Takes', isFullTake: true });
+    expect(res.status).toBe(201);
+    expect(row('ft2')).toEqual({ offset: null, start: 0 });
   });
 
   it("a section's first clip with pushed: [] places the section by the hint", async () => {
