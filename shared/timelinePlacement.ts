@@ -143,6 +143,52 @@ export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffs
   return best;
 }
 
+// ── Placing a dragged clip: snap, then the gaps model ────────────────────────
+// The core both drag kinds share — a timeline clip drag (computeClipDragPlacement in
+// Timeline.tsx) and a Media Bucket version drag (computeFileDropPlacement below): the
+// wanted start is snapped (snapDragStart) and then placed among the other clips on its
+// track in its section (placeInGap). The other clips come in twice: as stored
+// (`others`, offset + trimmed length, for the gaps) and as drawn (`drawnOthers`, a cut
+// pickup at its cut start, for flush snapping).
+export interface DragPlacementInput {
+  freeOffset: number;                           // the unsnapped start, from the section start
+  grid: { step: number; sectionStart: number } | null; // null = snap off or Shift
+  others: PlacementClip[];                      // the other clips as stored
+  drawnOthers: { start: number; end: number }[]; // the other clips' drawn spans, as offsets
+  length: number;                               // the dragged clip's trimmed length
+  drawnLength: number;                          // its played length (flush snap against a clip's start)
+  minOffset: number;                            // placeInGap's minOffset (clipDragMinOffset)
+  currentOffset?: number;                       // its drawn start now (a clip already placed)
+}
+
+export function placeDraggedClip(input: DragPlacementInput): PlacementResult {
+  const wantedOffset = snapDragStart({
+    freeOffset: input.freeOffset,
+    grid: input.grid,
+    others: input.drawnOthers,
+    draggedLength: input.drawnLength,
+    minOffset: input.minOffset,
+    currentOffset: input.currentOffset,
+  });
+  return placeInGap(input.others, input.length, wantedOffset, input.minOffset);
+}
+
+// A file dragged in from the Media Bucket (a version): a new clip with no current
+// offset, its full file length (bucket clips have no trim), never a pickup — so its
+// minimum offset is the section's start (0): a drop aimed before the section's start
+// lands at its start, after any pickups there. `others` / `drawnOthers` are every
+// non-full-take clip on its track in its section. Snap and the gaps model are the same
+// as for a timeline clip drag.
+export function computeFileDropPlacement(input: {
+  freeOffset: number;
+  grid: { step: number; sectionStart: number } | null;
+  others: PlacementClip[];
+  drawnOthers: { start: number; end: number }[];
+  length: number;
+}): PlacementResult {
+  return placeDraggedClip({ ...input, drawnLength: input.length, minOffset: 0 });
+}
+
 // The first pair of clips in `clips` that overlap, or null. Touching edges (within
 // PLACEMENT_EPSILON) don't count.
 export function findOverlap(clips: PlacementClip[]): [PlacementClip, PlacementClip] | null {

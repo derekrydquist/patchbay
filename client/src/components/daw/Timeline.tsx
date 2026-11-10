@@ -56,7 +56,7 @@ import { DEFAULT_BPM, snapGridSeconds } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
-import { placeInGap, snapDragStart, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
+import { placeDraggedClip, computeFileDropPlacement, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -607,7 +607,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   useLiveClipCommentSummary(songId);
 
   // Timeline clip drags running, and their position saves (until the refetch after the
-  // save is done) — see takeClipDragHold. Both polls (timeline clips and song
+  // save is done) — see takeClipDragHold — and Media Bucket version drags (until the
+  // drop; startFileDropPreview). Both polls (timeline clips and song
   // sections) pause meanwhile, so one can't put the old positions or section lengths
   // back on screen mid-drag or before the save lands.
   const [clipDragsBusy, setClipDragsBusy] = useState(0);
@@ -2314,7 +2315,23 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // own auto-scroll never moves the timeline — see dndAutoScroll).
     const startCoords = getEventCoordinates(event.activatorEvent) ?? { x: 0, y: 0 };
     const dragType = event.active.data.current?.type as string | undefined;
-    if (dragType === BUCKET_CLIP_DRAG_TYPE || dragType === 'loose-file') {
+    if (dragType === BUCKET_CLIP_DRAG_TYPE) {
+      // A version: also the live placement preview (startFileDropPreview), which reads
+      // Shift from every pointer event, as a timeline clip drag does.
+      startFileEdgeScroll({ vertical: true });
+      startFileDragBlurCancel();
+      const data = event.active.data.current;
+      if (data?.clip) {
+        startFileDropPreview(
+          { ...(data.clip as Clip), isFullTake: !!(data.clip.isFullTake || data.isFullTake) },
+          data.trackId as string | undefined,
+        );
+      }
+      startDragPointer(startCoords, {
+        onMove: (e) => { readClipDragKeys(e); fileEdgeScrollMove(e); },
+        onScroll: nudgeDndCollision,
+      });
+    } else if (dragType === 'loose-file') {
       startFileEdgeScroll({ vertical: true });
       startFileDragBlurCancel();
       startDragPointer(startCoords, { onMove: fileEdgeScrollMove, onScroll: nudgeDndCollision });
@@ -2794,7 +2811,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     draggedId: string;
     offsets: Map<string, number>;    // the dragged clip and every clip it pushes → new sectionOffset
     changed: boolean;                // false = everything would stay where it is
+    // A Media Bucket version drag: the new clip it would make (id = draggedId), added to
+    // the preview layout at offsets.get(draggedId). null for a timeline clip drag.
+    virtual: Clip | null;
   }
+  // The other clips on a track in a section, both ways the drag placement takes them
+  // (shared placeDraggedClip): as stored, and drawn (layout start + head cut, playedSpan,
+  // so a cut pickup counts where it's drawn), as offsets from the section's start.
+  const storedClipsInSection = (track: Track, sectionName: string, excludeId: string | null) =>
+    track.clips
+      .filter((c) => c.id !== excludeId && !c.isFullTake && c.sectionName === sectionName)
+      .map((c) => toPlacementClip(placementInput(c)));
+  const drawnSpansInSection = (trackId: string, sectionName: string, sectionStart: number, excludeId: string | null) =>
+    (tracks.find((t) => t.id === trackId)?.clips ?? [])
+      .filter((c) => c.id !== excludeId && !c.isFullTake && c.sectionName === sectionName && hasPlayedLength(c))
+      .map((c) => ({ start: c.start - sectionStart, end: c.start - sectionStart + playedSpan(c).length }));
   // Whether the pointer is over the timeline's visible scroll area — rows, header row,
   // ruler, track names panel and the space below the last track — and not over the
   // Media Bucket.
@@ -2818,9 +2849,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const dropStart = clipDragDropStart();
     if (!section || dropStart === null) return null;
     const free = !snap.on || clipDragModifiers().shift;
-    const others = track.clips
-      .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName)
-      .map((c) => toPlacementClip(placementInput(c)));
+    const others = storedClipsInSection(track, clip.sectionName, clip.id);
     // Pickups: Option (read live, so pressing or releasing it mid-drag re-places at
     // once), or a clip that was a pickup at drag start and hasn't been on or after the
     // downbeat since, may start before the downbeat — down to its left limit (from the
@@ -2837,29 +2866,124 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const drawnOffset = (clip.sectionOffset ?? 0) + (layout.clipHeadCuts.get(clip.id) ?? 0);
     // Snap (on, no Shift): to the nearest beat, the section start, flush against another
     // clip on this track in this section where it's drawn, the pickup limit, or its own
-    // current spot (snapDragStart). Drawn spans come from the positioned tracks (layout
-    // start + head cut, playedSpan), so a cut pickup counts where it's drawn.
-    const drawnTrack = tracks.find((t) => t.id === track.id);
-    const drawnSpan = (c: Clip) => ({ start: c.start - section.start, end: c.start - section.start + playedSpan(c).length });
-    const drawnClip = drawnTrack?.clips.find((c) => c.id === clip.id);
-    const wantedOffset = snapDragStart({
+    // current spot (snapDragStart), then the gaps model (shared placeDraggedClip).
+    const drawnClip = tracks.find((t) => t.id === track.id)?.clips.find((c) => c.id === clip.id);
+    const result = placeDraggedClip({
       freeOffset: dropStart - section.start,
       grid: free ? null : { step: snapGridSeconds(snap.unit, bpm, timeSignature), sectionStart: section.start },
-      others: (drawnTrack?.clips ?? [])
-        .filter((c) => c.id !== clip.id && !c.isFullTake && c.sectionName === clip.sectionName && hasPlayedLength(c))
-        .map(drawnSpan),
-      draggedLength: drawnClip ? playedSpan(drawnClip).length : length,
+      others,
+      drawnOthers: drawnSpansInSection(track.id, clip.sectionName, section.start, clip.id),
+      length,
+      drawnLength: drawnClip ? playedSpan(drawnClip).length : length,
       minOffset,
       currentOffset: drawnOffset,
     });
-    const result = placeInGap(others, length, wantedOffset, minOffset);
     clipDragPickupRef.current = afterPickupPlacement(clipDragPickupRef.current, result.offset);
     const offsets = new Map<string, number>([[clip.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
     // Released on its own drawn spot with nothing pushed: no change, nothing saved, the
     // stored offset kept.
     const changed = placementChanged(result, drawnOffset);
-    return { trackId: track.id, sectionStart: section.start, draggedId: clip.id, offsets, changed };
+    return { trackId: track.id, sectionStart: section.start, draggedId: clip.id, offsets, changed, virtual: null };
+  };
+
+  // ── Media Bucket version drag: live placement preview ──────────────────────
+  // A version dragged from the Media Bucket over the timeline is previewed like a
+  // timeline clip drag: a "virtual clip" (a new id made at drag start — 4f4 POSTs it
+  // under that id — the file's full length, no trim, never a pickup) on the version's
+  // own track in its own section. Its wanted start is the drag chip's left edge
+  // (firstClipDropTime — there is no grab offset), then the same snap and gaps model as
+  // a clip drag (shared computeFileDropPlacement): the section grows live and later
+  // sections slide. Only for a version whose section is already on the timeline; a
+  // section's first clip keeps the new-section line, and a legacy full take is
+  // unchanged. Preview only: the drop still goes through the gap zones / track-row
+  // append (handleDragEnd). Set at drag start, cleared on drop, cancel and unmount.
+  interface FileDropDrag { virtual: Clip; trackId: string; sectionName: string }
+  const fileDropRef = useRef<FileDropDrag | null>(null);
+  // The same, as state, for the render (contentEnd, the veils and the landing outline).
+  const [fileDrop, setFileDropState] = useState<FileDropDrag | null>(null);
+  const setFileDrop = (next: FileDropDrag | null) => {
+    fileDropRef.current = next;
+    setFileDropState(next);
+  };
+  const fileDropKeyCleanupRef = useRef<(() => void) | null>(null);
+  const startFileDropPreview = (clip: Clip, trackId: string | undefined) => {
+    stopFileDropPreview();
+    const sectionName = clip.sectionName;
+    if (clip.isFullTake || !sectionName || !trackId) return;
+    if (!trackState.some((t) => t.id === trackId)) return;
+    // Both polls pause for the whole drag, so the preview never jumps mid-drag (also
+    // for a first-clip drag, whose section must stay off the timeline until the drop).
+    takeClipDragHold()();
+    holdPollsForClipDrag();
+    if (!layout.sections.some((s) => s.name === sectionName)) return; // first clip: no preview
+    clipDragMaxEndRef.current = layout.timelineEnd;
+    clipDragKeysRef.current = { shift: false, option: false };
+    setFileDrop({
+      virtual: {
+        ...clip,
+        id: nanoid(),
+        sectionName,
+        sectionOffset: 0,
+        trimStart: 0,
+        trimEnd: null,
+        headCut: 0,
+        isFullTake: false,
+        isFinal: false,
+        bucketClipId: clip.id,
+      },
+      trackId,
+      sectionName,
+    });
+    // Shift pressed or released under a still pointer: place again at once. Option is
+    // ignored (a version is never a pickup). Shift key events stop here (capture phase)
+    // so the arrow-key selection handler never sees them mid-drag.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Shift') return;
+      e.stopPropagation();
+      const prev = clipDragKeysRef.current.shift;
+      readClipDragKeys(e);
+      if (prev === clipDragKeysRef.current.shift) return;
+      recomputeDragIndicatorsRef.current();
+      nudgeDndCollision();
+    };
+    window.addEventListener('keydown', onKey, { capture: true });
+    window.addEventListener('keyup', onKey, { capture: true });
+    fileDropKeyCleanupRef.current = () => {
+      window.removeEventListener('keydown', onKey, { capture: true });
+      window.removeEventListener('keyup', onKey, { capture: true });
+    };
+  };
+  const stopFileDropPreview = () => {
+    fileDropKeyCleanupRef.current?.();
+    fileDropKeyCleanupRef.current = null;
+    if (!fileDropRef.current) return;
+    setFileDrop(null);
+    clipDragKeysRef.current = { shift: false, option: false };
+    setClipDragPreview(null);
+    setClipDragOffTimeline(false);
+  };
+  useEffect(() => () => fileDropKeyCleanupRef.current?.(), []);
+  const computeFileDragPlacement = (): ClipDragPlacement | null => {
+    const drag = fileDropRef.current;
+    const x = dragClientXRef.current;
+    const y = dragClientYRef.current;
+    if (!drag || x === null || y === null) return null;
+    if (!isPointerOverTimeline(x, y)) return null;
+    const track = trackState.find((t) => t.id === drag.trackId);
+    const section = layout.sections.find((s) => s.name === drag.sectionName);
+    if (!track || !section) return null;
+    const free = !snap.on || clipDragModifiers().shift;
+    const result = computeFileDropPlacement({
+      freeOffset: firstClipDropTime(x) - section.start,
+      grid: free ? null : { step: snapGridSeconds(snap.unit, bpm, timeSignature), sectionStart: section.start },
+      others: storedClipsInSection(track, drag.sectionName, null),
+      drawnOthers: drawnSpansInSection(track.id, drag.sectionName, section.start, null),
+      length: clipLength(drag.virtual),
+    });
+    const offsets = new Map<string, number>([[drag.virtual.id, result.offset]]);
+    for (const m of result.moved) offsets.set(m.id, m.offset);
+    return { trackId: track.id, sectionStart: section.start, draggedId: drag.virtual.id, offsets, changed: true, virtual: drag.virtual };
   };
   // The drag preview: the placement a release would apply now — it drives the landing
   // outline, the pushed clips' live positions (no other clip is drawn moved during the
@@ -2869,15 +2993,20 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // The pointer is outside the timeline mid-drag: the stored layout shows and the
   // landing outline is hidden, since a release there cancels.
   const [clipDragOffTimeline, setClipDragOffTimeline] = useState(false);
+  // Shared by both drag kinds (a timeline clip, or a Media Bucket version — see
+  // computeFileDragPlacement): only one runs at a time.
   const updateClipDragPreview = () => {
-    const next = clipDragRef.current ? computeClipDragPlacement() : null;
+    const dragging = !!clipDragRef.current || !!fileDropRef.current;
+    const next = clipDragRef.current ? computeClipDragPlacement()
+      : fileDropRef.current ? computeFileDragPlacement()
+      : null;
     const x = dragClientXRef.current;
     const y = dragClientYRef.current;
-    setClipDragOffTimeline(!!clipDragRef.current && x !== null && y !== null && !isPointerOverTimeline(x, y));
+    setClipDragOffTimeline(dragging && x !== null && y !== null && !isPointerOverTimeline(x, y));
     setClipDragPreview((prev) => {
       if (prev === next) return prev;
       if (prev && next && prev.trackId === next.trackId && prev.sectionStart === next.sectionStart
-          && prev.changed === next.changed && prev.offsets.size === next.offsets.size
+          && prev.changed === next.changed && prev.virtual === next.virtual && prev.offsets.size === next.offsets.size
           && Array.from(next.offsets).every(([id, offset]) => prev.offsets.get(id) === offset)) {
         return prev;
       }
@@ -2886,7 +3015,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   };
   // A live-sync poll or a tempo change under a still pointer: place again.
   useEffect(() => {
-    if (clipDragRef.current) updateClipDragPreview();
+    if (clipDragRef.current || fileDropRef.current) updateClipDragPreview();
   }, [trackState, layout, snap, bpm, timeSignature]);
 
   // Drop: applies the placement at once (no packing) and saves the clips that moved in
@@ -3041,7 +3170,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   recomputeDragIndicatorsRef.current = () => {
     updateHeaderDrop();
     updateNewSectionLine();
-    if (clipDragRef.current) updateClipDragPreview();
+    if (clipDragRef.current || fileDropRef.current) updateClipDragPreview();
     if (draggedSectionRef.current !== null) {
       positionSectionDragTag();
       positionSectionDragGhost();
@@ -3191,6 +3320,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const clipPlacement = clipDragRef.current ? computeClipDragPlacement() : null;
     const releaseClipDragHold = takeClipDragHold();
     stopClipDrag();
+    stopFileDropPreview();
     stopFileEdgeScroll();
     stopDragPointer();
 
@@ -3213,7 +3343,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       else releaseClipDragHold();
       return;
     }
-    releaseClipDragHold(); // a no-op: only timeline clip drags take the hold
+    // A version drag's hold ends at the drop (4f4 keeps it through the save); no other
+    // drag takes one.
+    releaseClipDragHold();
 
     if (!over) { setInsertionPoint(null); return; }
     const clip = (active.data.current?.clip ?? dragData?.clip) as Clip;
@@ -3350,6 +3482,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     clearNewSectionLine();
     takeClipDragHold()();
     stopClipDrag();
+    stopFileDropPreview();
     stopFileEdgeScroll();
     stopDragPointer();
     setInsertionPoint(null);
@@ -3758,12 +3891,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // recomputed only when the placement changes (clipDragPreview is replaced only then).
   // null = the stored layout: no drag, the pointer off the clip's row (a release there
   // changes nothing), or a placement that changes nothing.
+  // A Media Bucket version drag uses the same preview: its virtual clip is added to its
+  // track at its landing offset, so its section grows live too (computeFileDragPlacement).
   const clipDragLayout = React.useMemo(() => {
     const preview = clipDragPreview;
     if (!preview || !preview.changed) return null;
-    const previewTracks = trackState.map((t) => t.id !== preview.trackId ? t : {
-      ...t,
-      clips: t.clips.map((c) => preview.offsets.has(c.id) ? { ...c, sectionOffset: preview.offsets.get(c.id)! } : c),
+    const previewTracks = trackState.map((t) => {
+      if (t.id !== preview.trackId) return t;
+      const clips = t.clips.map((c) => preview.offsets.has(c.id) ? { ...c, sectionOffset: preview.offsets.get(c.id)! } : c);
+      if (preview.virtual) clips.push({ ...preview.virtual, sectionOffset: preview.offsets.get(preview.virtual.id) ?? 0 });
+      return { ...t, clips };
     });
     return deriveLayout(previewTracks, sections, bpm, timeSignature);
   }, [clipDragPreview, trackState, sections, bpm, timeSignature]);
@@ -3800,12 +3937,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   }, [clipDragLayout, sectionLayout]);
   displaySectionsRef.current = displaySectionLayout;
   // The content's right end (seconds) for the scrollable width, the ruler and the
-  // edge-scroll cap. During a timeline clip drag it follows the preview layout but
-  // never shrinks (the widest seen since the drag started), so the browser never
-  // clamps scrollLeft and nothing jumps under the pointer; after the drag it is the
-  // stored layout's end again.
+  // edge-scroll cap. During a timeline clip drag or a previewed version drag it follows
+  // the preview layout but never shrinks (the widest seen since the drag started), so
+  // the browser never clamps scrollLeft and nothing jumps under the pointer; after the
+  // drag it is the stored layout's end again.
   let contentEnd = endOfTimeline;
-  if (draggedClipId) {
+  if (draggedClipId || fileDrop) {
     clipDragMaxEndRef.current = Math.max(clipDragMaxEndRef.current, displayLayout.timelineEnd, endOfTimeline);
     contentEnd = clipDragMaxEndRef.current;
   }
@@ -3813,7 +3950,20 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // The dashed landing outline: where the dragged clip lands if released now, or its
   // own spot when nothing would change; trimmed length wide. Hidden while the pointer
   // is off the timeline (clipDragOffTimeline).
+  // For a version drag: the virtual clip's spot in the preview layout, on its own track,
+  // only while the pointer is over the timeline (there is no preview otherwise).
   const clipDragLanding = React.useMemo(() => {
+    if (fileDrop) {
+      const virtual = clipDragPreview?.virtual;
+      if (!virtual || !clipDragLayout) return null;
+      const start = clipDragLayout.clipStarts.get(virtual.id);
+      if (start === undefined) return null;
+      return {
+        trackId: fileDrop.trackId,
+        clipId: null,
+        rect: { left: start * zoom, width: clipLength(virtual) * zoom },
+      };
+    }
     if (!draggedClipId) return null;
     const track = tracks.find((t) => t.clips.some((c) => c.id === draggedClipId));
     const clip = track?.clips.find((c) => c.id === draggedClipId);
@@ -3825,19 +3975,27 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       clipId: clip.id,
       rect: { left: landed.start * zoom, width: playedSpan(landed).length * zoom },
     };
-  }, [draggedClipId, tracks, clipDragLayout, zoom]);
+  }, [fileDrop, clipDragPreview, draggedClipId, tracks, clipDragLayout, zoom]);
   // Focus during a timeline clip drag: the home section (at its live length) and the
   // one bar before it (pickup reach) stay bright; everything else in the track rows and
   // the section header row is dimmed by a veil (ClipDragFocusVeil). Song seconds.
+  // The same for a previewed version drag, only while the pointer is over the timeline.
   const clipDragFocus = React.useMemo(() => {
-    if (!draggedClipId) return null;
-    const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === draggedClipId);
-    if (!clip || clip.isFullTake || !clip.sectionName) return null;
-    const home = displayLayout.sections.find((sec) => sec.name === clip.sectionName);
+    let homeName: string | undefined;
+    if (fileDrop) {
+      if (!clipDragPreview) return null;
+      homeName = fileDrop.sectionName;
+    } else {
+      if (!draggedClipId) return null;
+      const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === draggedClipId);
+      if (!clip || clip.isFullTake || !clip.sectionName) return null;
+      homeName = clip.sectionName;
+    }
+    const home = displayLayout.sections.find((sec) => sec.name === homeName);
     if (!home) return null;
     const bar = snapGridSeconds('bar', bpm, timeSignature);
     return { litStart: Math.max(0, home.start - bar), litEnd: home.end };
-  }, [draggedClipId, tracks, displayLayout, bpm, timeSignature]);
+  }, [fileDrop, clipDragPreview, draggedClipId, tracks, displayLayout, bpm, timeSignature]);
   // Sections a drag's clip can't land in — the same for every row, so one shared set.
   const draggedSectionName = activeDragData?.clip?.sectionName;
   // Keyed on the names only, so a drag that just changes section lengths keeps the set.
@@ -3850,14 +4008,18 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     return set;
   }, [draggedSectionName, sectionNamesKey]);
 
-  // The Media Bucket doesn't take part in a timeline clip drag, so during one it keeps
+  // During a timeline clip drag or a Media Bucket version drag, the Media Bucket keeps
   // the element from the drag's start: React skips a subtree whose element is the
   // same object, so the bucket isn't re-rendered by each drag-preview change. Its own
-  // state, queries and dnd-kit hooks still update it. Its callbacks (Add to Timeline,
-  // Place on Timeline) can't be used mid-drag, and the element is rebuilt on the first
-  // render after the drag.
+  // state, queries and dnd-kit hooks still update it — everything a version drag needs
+  // mid-drag lives there: spring-loaded tracks and sections, drop highlights
+  // (useActiveOrganizeDrag), the dimmed source card (its own useDraggable), column edge
+  // scroll and the landing flash. Its callbacks (Add to Timeline, Place on Timeline,
+  // Remove from Section) can't be used mid-drag, and the element is rebuilt on the
+  // first render after the drag.
   const mediaBucketElementRef = useRef<React.ReactNode>(null);
-  if (activeDragData?.type !== 'clip' || mediaBucketElementRef.current === null) {
+  const bucketFrozen = activeDragData?.type === 'clip' || activeDragData?.type === BUCKET_CLIP_DRAG_TYPE;
+  if (!bucketFrozen || mediaBucketElementRef.current === null) {
     mediaBucketElementRef.current = (
     <LooseFilePlacementProvider value={openLooseFilePlacement}>
     <VersionMoveOutContext.Provider value={songInfo?.type === 'song' ? versionMoveDnd.moveOutOfSection : null}>
@@ -4230,8 +4392,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     invalidSections={invalidSectionsDuringDrag}
                     isInvalidDrop={isInvalidDrop}
                     // The valid-track border and wrong-track veil are for Media Bucket
-                    // drags only.
-                    isDragging={activeDragData !== null && activeDragData.type !== 'clip'}
+                    // drags only — not a previewed version drag, which has the focus
+                    // veil instead (the other rows stay disabled for the drop).
+                    isDragging={activeDragData !== null && activeDragData.type !== 'clip' && !fileDrop}
                     zoom={zoom}
                     insertionPoint={
                       insertionPoint?.trackId === track.id

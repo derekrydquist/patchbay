@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, snapDragStart, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 import { snapTime } from './musicalTime';
 
@@ -1232,5 +1232,104 @@ describe('snapDragStart — snap to beats and to clips', () => {
       // Nothing is nearer than the chosen one.
       for (const c of candidates) expect(Math.abs(wanted - free), `free = ${free}`).toBeLessThanOrEqual(Math.abs(c - free) + 1e-9);
     }
+  });
+});
+
+describe('placeDraggedClip — the core both drag kinds share', () => {
+  // A timeline clip drag (computeClipDragPlacement) used to call snapDragStart then
+  // placeInGap itself; placeDraggedClip must give exactly that, for any input.
+  const before = (i: DragPlacementInput) => placeInGap(
+    i.others,
+    i.length,
+    snapDragStart({ freeOffset: i.freeOffset, grid: i.grid, others: i.drawnOthers, draggedLength: i.drawnLength, minOffset: i.minOffset, currentOffset: i.currentOffset }),
+    i.minOffset,
+  );
+  // A small deterministic generator (no Math.random), so a failure always reproduces.
+  let seed = 12345;
+  const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+
+  it('matches snapDragStart + placeInGap on 2,000 random drags (snap on/off, pickups, current spot)', () => {
+    for (let n = 0; n < 2000; n++) {
+      // Non-overlapping others, some starting before the downbeat (pickups).
+      const others: PlacementClip[] = [];
+      let at = rand() < 0.3 ? -1 - rand() : rand() * 2;
+      const count = Math.floor(rand() * 5);
+      for (let k = 0; k < count; k++) {
+        const length = 0.5 + rand() * 4;
+        others.push(clip(`c${k}`, at, length));
+        at += length + (rand() < 0.4 ? 0 : rand() * 3);
+      }
+      const input: DragPlacementInput = {
+        freeOffset: -3 + rand() * 20,
+        grid: rand() < 0.5 ? null : { step: [0.25, 0.5, 2][Math.floor(rand() * 3)], sectionStart: rand() * 10 },
+        others,
+        drawnOthers: others.map((c) => ({ start: Math.max(c.offset, -0.5), end: c.offset + c.length })),
+        length: 0.5 + rand() * 5,
+        drawnLength: 0.5 + rand() * 5,
+        minOffset: rand() < 0.3 ? -rand() * 2 : 0,
+        currentOffset: rand() < 0.5 ? rand() * 8 : undefined,
+      };
+      expect(placeDraggedClip(input), `case ${n}`).toEqual(before(input));
+    }
+  });
+});
+
+describe('computeFileDropPlacement — a Media Bucket version drag', () => {
+  // 120 bpm, 4/4: a beat is 0.5 s. Section starting mid-bar at 6.5 s.
+  const grid = { step: 0.5, sectionStart: 6.5 };
+  const drawn = (cs: PlacementClip[]) => cs.map((c) => ({ start: c.offset, end: c.offset + c.length }));
+  const drop = (others: PlacementClip[], length: number, freeOffset: number, snapped = false) =>
+    computeFileDropPlacement({ freeOffset, grid: snapped ? grid : null, others, drawnOthers: drawn(others), length });
+
+  it("aimed before the section's start: lands at its start", () => {
+    expect(drop([clip('a', 4, 2)], 2, -3)).toEqual({ offset: 0, moved: [] });
+    expect(drop([clip('a', 4, 2)], 2, -3, true)).toEqual({ offset: 0, moved: [] });
+  });
+
+  it("aimed before the section's start with a pickup there: lands just after the pickup, never a pickup", () => {
+    const pickup = clip('p', -1.5, 2); // ends at 0.5
+    expect(drop([pickup, clip('a', 4, 2)], 2, -2)).toEqual({ offset: 0.5, moved: [] });
+    expect(drop([pickup], 1, -0.4, true).offset).toBeCloseTo(0.5, 9);
+  });
+
+  it('fits in a gap: lands where aimed, nothing pushed', () => {
+    expect(drop([clip('a', 0, 2), clip('b', 8, 2)], 3, 3.2)).toEqual({ offset: 3.2, moved: [] });
+  });
+
+  it("too-small gap: lands at the gap's start and pushes the later clips by its length", () => {
+    // Gap 2–3 (1 s) between a and b; a 2.5 s file aimed into it.
+    expect(drop([clip('a', 0, 2), clip('b', 3, 2), clip('c', 6, 1)], 2.5, 2.4)).toEqual({
+      offset: 2,
+      moved: [{ id: 'b', offset: 5.5 }, { id: 'c', offset: 8.5 }],
+    });
+  });
+
+  it('snaps flush against a neighbour', () => {
+    // a ends at 2.3; aimed at 2.38 (beat 2.5 from song time 8.88 → 9.0 is 0.12 away; flush 0.08).
+    expect(drop([clip('a', 0, 2.3)], 1, 2.38, true).offset).toBeCloseTo(2.3, 9);
+    // Ending flush against b's start: b at 6, file 1.7 → 4.3.
+    expect(drop([clip('b', 6, 2)], 1.7, 4.35, true).offset).toBeCloseTo(4.3, 9);
+  });
+
+  it('snaps to the grid (song-time beats, so offsets from a mid-bar section start)', () => {
+    // Free 1.3 → song time 7.8 → nearest beat 8.0 → offset 1.5.
+    expect(drop([], 1, 1.3, true).offset).toBeCloseTo(1.5, 9);
+  });
+
+  it('snap off or Shift (grid null): placed freely', () => {
+    expect(drop([], 1, 1.3).offset).toBeCloseTo(1.3, 9);
+    expect(drop([clip('a', 0, 2.3)], 1, 2.38).offset).toBeCloseTo(2.38, 9);
+  });
+
+  it('never negative', () => {
+    for (const free of [-10, -0.01, -0.3]) {
+      expect(drop([], 1, free).offset).toBeGreaterThanOrEqual(0);
+      expect(drop([], 1, free, true).offset).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('empty section on its track: lands where aimed (or snapped), nothing pushed', () => {
+    expect(drop([], 4, 2.2)).toEqual({ offset: 2.2, moved: [] });
+    expect(drop([], 4, 0)).toEqual({ offset: 0, moved: [] });
   });
 });
