@@ -368,7 +368,7 @@ export const SPRING_LOAD_DELAY_MS = 800;
 // a later drag. No report = the file did not move (a cancel, a non-target, or a
 // drop handler that bailed).
 //   'moved'    — a mutation fired (organize, assign-track, un-assign).
-//   'deferred' — Workspace's Place on Timeline dialog opened; the move waits on it.
+//   'deferred' — Workspace's timeline confirm dialog ("Place … here?") opened; the move waits on it.
 export type LooseFileDropReport = 'moved' | 'deferred';
 let lastDropReport: { activeId: UniqueIdentifier; report: LooseFileDropReport } | null = null;
 
@@ -386,11 +386,10 @@ function takeLooseFileDropReport(activeId: UniqueIdentifier): LooseFileDropRepor
   return r;
 }
 
-// Fired by Timeline when the Place on Timeline dialog that a drop opened ('deferred')
-// is closed: placed = true for Place Clip, false for Cancel / Escape / outside click.
+// Fired by Timeline when the confirm dialog that a timeline drop opened ('deferred')
+// is closed: placed = true for Place, false for Cancel / Escape / outside click.
 // A window event, same idiom as find-in-bucket, since MediaBucket (which owns the
-// selection) and Timeline (which owns the dialog) don't share props. A dialog opened
-// from a context menu has no deferred drop behind it, so its event is a no-op.
+// selection) and Timeline (which owns the dialog) don't share props.
 const LOOSE_PLACEMENT_RESOLVED_EVENT = 'loose-placement-resolved';
 
 export function resolveDeferredLooseFileDrop(placed: boolean): void {
@@ -482,7 +481,7 @@ function eventPoint(e: Event | null | undefined): { x: number; y: number } | nul
 // cancels), the Track + Section captured at drag start come back — for a shelf file
 // that is its origin Track, so its shelf is visible again. A drag that moved the
 // file leaves the selection to the existing "view follows the file" handling. A
-// 'deferred' drop (version move, Place on Timeline dialog) waits for its outcome. A
+// 'deferred' drop (version move, timeline confirm dialog) waits for its outcome. A
 // drag that never sprung never touches the selection.
 //
 // Scroll guard: when the timer fires, the pointer (tracked here from window

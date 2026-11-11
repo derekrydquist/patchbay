@@ -183,3 +183,13 @@
   scrollbar-width: thin;
   scrollbar-color: rgba(212, 175, 55, 0.25) transparent;
 }
+
+/* Lighter dialog backdrop, opt-in per dialog: put data-light-backdrop on a
+   DialogContent and the overlay rendered just before it dims at 25% instead of the
+   standard 80%. Used only by the Timeline's loose-file "Place … here?" confirm, so
+   the frozen landing outline and the pushed clips stay visible behind it. Every other
+   dialog keeps the standard backdrop. (DialogContent renders its own overlay, which
+   takes no props, and components/ui is never edited.) */
+[data-state]:has(+ [data-light-backdrop]) {
+  background-color: rgb(0 0 0 / 0.25);
+}

@@ -25,11 +25,12 @@ import {
   PointerSensor,
   TouchSensor,
   MouseSensor,
+  type UniqueIdentifier,
 } from '@dnd-kit/core';
 import { getEventCoordinates } from '@dnd-kit/utilities';
 import { cn, trapDialogTab } from '@/lib/utils';
 import { Track, Clip, MOCK_SONG } from '@/lib/daw-data';
-import { bucketKeys, fetchBucket, fetchSongSections, songSectionsKey, type SongSectionRow, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
+import { bucketKeys, looseFileKeys, fetchBucket, fetchSongSections, songSectionsKey, type SongSectionRow, type ApiTrack as ApiBucketTrack, type ApiLooseFile } from '@/lib/bucket-api';
 import { LooseFilePlacementProvider } from './LooseFileRow';
 import { useLiveClipCommentSummary } from './Clip';
 import { usePlaceLooseFileOnTimeline } from '@/hooks/use-bucket-mutations';
@@ -40,10 +41,13 @@ import {
   reportLooseFileDrop,
   resolveDeferredLooseFileDrop,
   BUCKET_CLIP_DRAG_TYPE,
+  bucketSectionDropId,
+  bucketTrackDropId,
   useVersionMoveDnd,
   VersionMoveOutContext,
 } from '@/hooks/use-loose-file-organize-dnd';
 import { apiRequest } from '@/lib/queryClient';
+import { requestLandingFlash, clipLandingZone, flashGold, isVisibleInOwnScroller, LANDING_FLASH_PEAK_ALPHA } from '@/hooks/use-landing-flash';
 import { trackDisplayColor } from '@/lib/track-color';
 import { VersionMoveInUseDialog } from './ClipInUseDialog';
 import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
@@ -64,8 +68,9 @@ import { createEdgeScroller, type EdgeScroller, SCROLL_SPEED_PX, EDGE_ZONE_PX, E
 import { MediaBucket } from './MediaBucket';
 import { CheckCircle2 } from 'lucide-react';
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from '@/components/ui/dialog';
+import { confirmDialogTop } from '@/lib/confirm-dialog-position';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select';
@@ -469,27 +474,64 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     queryKey: ['song', songId],
     queryFn: () => apiRequest('GET', `/api/songs/${songId}`).then(r => r.json()),
   });
+  // A placed loose file: the clip gets the gold landing glow, like a version's
+  // context-menu Add to Timeline, and the Media Bucket shows where the file went
+  // (flashBucketDestination) without changing its selection or scroll. Shared by the
+  // Place on Timeline picker (the loose-file "Add to Timeline" menu item) and a
+  // confirmed timeline drop; called only when the save succeeded. The picker's clip
+  // mounts with isFlash already set once live sync merges it (the timeline query is
+  // invalidated on success); a confirmed drop's clip is already on screen under the
+  // same id.
+  const onLooseFilePlaced = ({ clip, timelineClip }: { clip: { id: string; ideaId: string }; timelineClip: { id: string; trackId: string; sectionName: string | null } }) => {
+    flashBucketDestination(timelineClip.trackId, clip.ideaId, clip.id);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    setFlashClipId(timelineClip.id);
+    flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
+  };
+  // Where a placed loose file went, shown in the Media Bucket with the landing flash's
+  // gold (flashGold at LANDING_FLASH_PEAK_ALPHA, the look every landed file row and
+  // card uses), never changing its selection:
+  //  - the destination section is the one the Files column shows (its Section row
+  //    carries data-open-section): the new version's card. It may only render after the
+  //    refetch, so this is a landing-flash request (the card's own useLandingFlash takes
+  //    it on mount, or at once if it's already there) with a 3 s wait; a card that never
+  //    appears (a search hides it) just doesn't flash. The new card is added at the
+  //    bottom of the list, usually just out of view, so this one case keeps the landing
+  //    flash's scroll: only the card's own scroller (the Files column), the minimum to
+  //    show it, smooth (instant under reduced motion), nothing if it's already in view
+  //    — never the page, the timeline, or the Tracks and Sections columns.
+  //  - otherwise, with no scrolling: the destination Track row if it's visible in the Tracks column, and
+  //    the destination Section row too when that track is the open one (only the open
+  //    track's Section rows are rendered) and it's visible. Nothing visible: no flash.
+  // Rows are found by their drop ids (springRowAttrs). Called after the save, long after
+  // the drag ended, so the Media Bucket isn't frozen (mediaBucketElementRef) any more.
+  const flashBucketDestination = (trackId: string, ideaId: string, clipId: string) => {
+    const bucket = document.querySelector<HTMLElement>('[data-media-bucket]');
+    if (!bucket) return;
+    const row = (dropId: string) => bucket.querySelector<HTMLElement>(`[data-spring-row="${CSS.escape(dropId)}"]`);
+    const sectionRow = row(bucketSectionDropId(ideaId));
+    if (sectionRow?.hasAttribute('data-open-section')) {
+      requestLandingFlash([{ id: clipId, zone: clipLandingZone(ideaId) }], { ttlMs: 3000 });
+      return;
+    }
+    for (const el of [row(bucketTrackDropId(trackId)), sectionRow]) {
+      if (el && isVisibleInOwnScroller(el)) flashGold(el, { peakAlpha: LANDING_FLASH_PEAK_ALPHA, reducedMotion: 'ring' });
+    }
+  };
   const placeLooseFileOnTimelineMutation = usePlaceLooseFileOnTimeline(songId, {
-    // The view follows the file, same find-in-bucket event organize fires above.
-    // Only reached from the Place on Timeline dialog (opened by a drop or by the
-    // loose-file "Add to Timeline" menu item), so the placed clip gets the same white
-    // halo as a version's context-menu Add to Timeline. It mounts with isFlash already
-    // set once live sync merges it (the timeline query is invalidated on success).
-    // Bucket → timeline DRAG placement doesn't come through here and stays silent.
-    onSuccess: ({ timelineClip }) => {
-      window.dispatchEvent(new CustomEvent('find-in-bucket', {
-        detail: { trackId: timelineClip.trackId, sectionName: timelineClip.sectionName ?? undefined },
-      }));
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      setFlashClipId(timelineClip.id);
-      flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
-    },
+    onSuccess: onLooseFilePlaced,
     // The dialog closes on confirm, before the server answers — without a toast a
     // failed placement looks like nothing happened.
     onError: (msg) => {
       console.error('[placeLooseFileOnTimeline] error:', msg);
       toast({ title: 'Failed to place file on the timeline', description: msg, variant: 'destructive' });
     },
+  });
+  // A confirmed loose-file timeline drop (commitLoosePlacement): its rollback and toast
+  // are per call, so the hook-level toast above isn't used.
+  const placeLooseFileAtPositionMutation = usePlaceLooseFileOnTimeline(songId, {
+    onSuccess: onLooseFilePlaced,
+    onError: (msg) => console.error('[placeLooseFileAtPosition] error:', msg),
   });
 
   // Backs the Place-on-Timeline modal's Track/Section dropdowns. Same query key
@@ -679,33 +721,39 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   }, [apiTracks]);
 
   const [activeDragData, setActiveDragData] = useState<{ clip: Clip; type: string; trackId?: string; sectionName?: string; songId?: string } | null>(null);
-  // Place-on-Timeline modal state. trackId/sectionName are '' when unresolved —
-  // pre-filled from the drop point where possible, otherwise picked manually via
-  // the modal's own Track/Section dropdowns (see the cascading-picker rework).
+  // Place-on-Timeline modal state (the loose-file right-click Add to Timeline).
+  // trackId/sectionName are '' when unresolved — picked via the modal's own
+  // Track/Section dropdowns (see the cascading-picker rework).
   const [loosePlacementModal, setLoosePlacementModal] = useState<{
     looseFileId: string; trackId: string; sectionName: string;
   } | null>(null);
   // Place-on-Timeline's Section options: only the chosen track's own active,
   // non-Full-Take sections — the server needs that exact idea row to exist, and
-  // Full Take isn't a section column. A selection that isn't in this list (a drop
-  // position on a section this track lacks, or a track switch) reads as empty.
-  const placementSectionNames = React.useMemo(() => {
-    const track = bucketTracksForPlacement.find((t) => t.id === loosePlacementModal?.trackId);
+  // Full Take isn't a section column. A selection that isn't in this list (after a
+  // track switch) reads as empty.
+  // Also the base of the new-section dialog's list (offTimelineSectionNames). In filing
+  // order (the bucket's ideas order).
+  const placeableSectionNames = (trackId: string | undefined): string[] => {
+    const track = bucketTracksForPlacement.find((t) => t.id === trackId);
     return track ? track.ideas.filter((i) => i.active && !i.isFullTake).map((i) => i.sectionName) : [];
-  }, [bucketTracksForPlacement, loosePlacementModal?.trackId]);
+  };
+  const placementSectionNames = React.useMemo(
+    () => placeableSectionNames(loosePlacementModal?.trackId),
+    [bucketTracksForPlacement, loosePlacementModal?.trackId],
+  );
   const placementSectionName = loosePlacementModal && placementSectionNames.includes(loosePlacementModal.sectionName)
     ? loosePlacementModal.sectionName
     : '';
-  // Shared by the timeline drop and the loose-file "Add to Timeline" menu item:
-  // the song has no sections at all, so the placement picker has nothing to offer.
+  // The loose-file "Add to Timeline" menu item: the song has no sections at all, so
+  // the placement picker has nothing to offer.
   const showNoSectionsToast = () => toast({
     title: 'No sections yet',
     description: 'This song has no sections yet — add one first, then place the file on the timeline.',
     variant: 'destructive',
   });
   // Loose-file right-click "Add to Timeline" (LooseFilePlacementProvider, MediaBucket's
-  // rows): the same placement picker a timeline drop opens, but with no drop point —
-  // the track is pre-selected only for a file on a track's shelf, the section never.
+  // rows): the placement picker — the track is pre-selected only for a file on a
+  // track's shelf, the section never.
   const openLooseFilePlacement = (looseFile: ApiLooseFile) => {
     if (songSectionNames.length === 0) {
       showNoSectionsToast();
@@ -2214,9 +2262,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         onScroll: nudgeDndCollision,
       });
     } else if (dragType === 'loose-file') {
+      // A loose file: the same live placement preview, on whichever track and section
+      // the pointer is over (startLooseDropPreview).
       startFileEdgeScroll({ vertical: true });
       startFileDragBlurCancel();
-      startDragPointer(startCoords, { onMove: fileEdgeScrollMove, onScroll: nudgeDndCollision });
+      const data = event.active.data.current;
+      if (data?.clip) startLooseDropPreview(data.clip as Clip, (data.trackId as string | null | undefined) ?? null);
+      startDragPointer(startCoords, {
+        onMove: (e) => { readClipDragKeys(e); fileEdgeScrollMove(e); },
+        onScroll: nudgeDndCollision,
+      });
     } else if (dragType === 'clip' && event.active.data.current?.clip && event.active.data.current?.trackId) {
       const dragClip = event.active.data.current.clip as Clip;
       const dragClipTrackId = event.active.data.current.trackId as string;
@@ -2688,6 +2743,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   };
   interface ClipDragPlacement {
     trackId: string;
+    sectionName: string;             // the home section (a loose file's: under the pointer)
     sectionStart: number;            // the home section's layout start, song seconds
     draggedId: string;
     offsets: Map<string, number>;    // the dragged clip and every clip it pushes → new sectionOffset
@@ -2765,27 +2821,35 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // Released on its own drawn spot with nothing pushed: no change, nothing saved, the
     // stored offset kept.
     const changed = placementChanged(result, drawnOffset);
-    return { trackId: track.id, sectionStart: section.start, draggedId: clip.id, offsets, changed, virtual: null };
+    return { trackId: track.id, sectionName: clip.sectionName, sectionStart: section.start, draggedId: clip.id, offsets, changed, virtual: null };
   };
 
-  // ── Media Bucket version drag: live placement preview and drop ─────────────
-  // A version dragged from the Media Bucket over the timeline is placed like a
-  // timeline clip drag: a "virtual clip" (a new id made at drag start — the drop POSTs
-  // it under that id — the file's full length, no trim, never a pickup) on the
-  // version's own track in its own section. Its wanted start is the drag chip's left
-  // edge (firstClipDropTime — there is no grab offset), then the same snap and gaps
-  // model as a clip drag (shared computeFileDropPlacement): the section grows live and
-  // later sections slide. A clip never changes track, so only the pointer's horizontal
-  // position counts: anywhere over the timeline places it the same way, and the drop
-  // (handleDragEnd → commitVersionDrop) lands it where the preview shows it.
-  // A section's first clip (firstClip: its section isn't on the timeline yet) has no
-  // preview: the new-section line shows where the section will join, and the clip
-  // lands at the section's start. A legacy full take is unchanged (no FileDropDrag).
-  // Set at drag start, cleared on drop, cancel and unmount.
-  interface FileDropDrag { virtual: Clip; trackId: string; sectionName: string; firstClip: boolean }
+  // ── Media Bucket file drag (a version or a loose file): live placement preview ──
+  // A file dragged from the Media Bucket over the timeline is placed like a timeline
+  // clip drag: a "virtual clip" (a new id made at drag start — the drop POSTs it under
+  // that id — the file's full length, no trim, never a pickup). Its wanted start is the
+  // drag chip's left edge (firstClipDropTime — there is no grab offset), then the same
+  // snap and gaps model as a clip drag (shared computeFileDropPlacement): the section
+  // grows live and later sections slide. Set at drag start, cleared on drop, cancel and
+  // unmount. Two kinds:
+  //  - 'version': on the version's own track in its own section. A clip never changes
+  //    track, so only the pointer's horizontal position counts: anywhere over the
+  //    timeline places it the same way, and the drop (handleDragEnd →
+  //    commitVersionDrop) lands it where the preview shows it. A section's first clip
+  //    (firstClip: its section isn't on the timeline yet) has no preview: the
+  //    new-section line shows where the section will join, and the clip lands at the
+  //    section's start. A legacy full take is unchanged (no FileDropDrag).
+  //  - 'loose': a loose file has no track or section yet, so the track row and the
+  //    section under the pointer are its destination (looseDropDestination); with none
+  //    there is no preview, and a release does nothing. A release with a preview
+  //    freezes it and asks to confirm (looseConfirm).
+  type VersionFileDrop = { kind: 'version'; virtual: Clip; trackId: string; sectionName: string; firstClip: boolean };
+  type LooseFileDrop = { kind: 'loose'; virtual: Clip; looseFileId: string; originTrackId: string | null };
+  type FileDropDrag = VersionFileDrop | LooseFileDrop;
   const fileDropRef = useRef<FileDropDrag | null>(null);
-  // Version drags drop by the pointer, so the collision only ever matches the
-  // Media Bucket's own targets for them (makeTrackFirstCollision).
+  // File drags drop by the pointer, so the collision only ever matches the Media
+  // Bucket's own targets for them, and only while the pointer is over the bucket
+  // (makeTrackFirstCollision).
   const trackFirstCollision = React.useMemo(() => makeTrackFirstCollision(() => fileDropRef.current !== null), []);
   // The same, as state, for the render (contentEnd, the veils and the landing outline).
   const [fileDrop, setFileDropState] = useState<FileDropDrag | null>(null);
@@ -2794,36 +2858,17 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     setFileDropState(next);
   };
   const fileDropKeyCleanupRef = useRef<(() => void) | null>(null);
-  const startFileDropPreview = (clip: Clip, trackId: string | undefined) => {
-    stopFileDropPreview();
-    const sectionName = clip.sectionName;
-    if (clip.isFullTake || !sectionName || !trackId) return;
-    if (!trackState.some((t) => t.id === trackId)) return;
+  // Shared start for both kinds: the poll hold, the content-width floor, and Shift.
+  const beginFileDrop = (next: FileDropDrag) => {
     // Both polls pause for the whole drag, so the preview never jumps mid-drag (also
     // for a first-clip drag, whose section must stay off the timeline until the drop).
     takeClipDragHold()();
     holdPollsForClipDrag();
     clipDragMaxEndRef.current = layout.timelineEnd;
     clipDragKeysRef.current = { shift: false, option: false };
-    setFileDrop({
-      virtual: {
-        ...clip,
-        id: nanoid(),
-        sectionName,
-        sectionOffset: 0,
-        trimStart: 0,
-        trimEnd: null,
-        headCut: 0,
-        isFullTake: false,
-        isFinal: false,
-        bucketClipId: clip.id,
-      },
-      trackId,
-      sectionName,
-      firstClip: !layout.sections.some((s) => s.name === sectionName),
-    });
+    setFileDrop(next);
     // Shift pressed or released under a still pointer: place again at once. Option is
-    // ignored (a version is never a pickup). Shift key events stop here (capture phase)
+    // ignored (a file is never a pickup). Shift key events stop here (capture phase)
     // so the arrow-key selection handler never sees them mid-drag.
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Shift') return;
@@ -2841,6 +2886,44 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       window.removeEventListener('keyup', onKey, { capture: true });
     };
   };
+  // The new clip a file drag would make (its id is the one the drop POSTs).
+  const virtualFileClip = (clip: Clip, sectionName: string | undefined, bucketClipId: string): Clip => ({
+    ...clip,
+    id: nanoid(),
+    sectionName,
+    sectionOffset: 0,
+    trimStart: 0,
+    trimEnd: null,
+    headCut: 0,
+    isFullTake: false,
+    isFinal: false,
+    bucketClipId,
+  });
+  const startFileDropPreview = (clip: Clip, trackId: string | undefined) => {
+    stopFileDropPreview();
+    const sectionName = clip.sectionName;
+    if (clip.isFullTake || !sectionName || !trackId) return;
+    if (!trackState.some((t) => t.id === trackId)) return;
+    beginFileDrop({
+      kind: 'version',
+      virtual: virtualFileClip(clip, sectionName, clip.id),
+      trackId,
+      sectionName,
+      firstClip: !layout.sections.some((s) => s.name === sectionName),
+    });
+  };
+  // A loose file's clip (looseFileToClip) carries the loose file's id; the bucket
+  // clip it becomes keeps that id (bucketClipId). originTrackId: its track shelf, if
+  // it's Track-scoped (any track is still a valid destination).
+  const startLooseDropPreview = (clip: Clip, originTrackId: string | null) => {
+    stopFileDropPreview();
+    beginFileDrop({
+      kind: 'loose',
+      virtual: virtualFileClip(clip, undefined, clip.id),
+      looseFileId: clip.id,
+      originTrackId,
+    });
+  };
   const stopFileDropPreview = () => {
     fileDropKeyCleanupRef.current?.();
     fileDropKeyCleanupRef.current = null;
@@ -2851,26 +2934,106 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     setClipDragOffTimeline(false);
   };
   useEffect(() => () => fileDropKeyCleanupRef.current?.(), []);
+  // The track row under the pointer, from the pointer's Y alone: only over the track
+  // rows' visible area (not the ruler or the section header row above them, which the
+  // rows scroll under, and not the space below the last row). Row heights are fixed and
+  // a drag preview never changes them, so a row boundary can't flicker.
+  const trackRowAt = (x: number, y: number): Track | null => {
+    const el = timelineRef.current;
+    if (!el || !isPointerOverTimeline(x, y)) return null;
+    const rect = el.getBoundingClientRect();
+    if (y < rect.top + TRACK_ROWS_TOP_PX) return null;
+    const row = Math.floor((y - rect.top + el.scrollTop - TRACK_ROWS_TOP_PX) / TRACK_ROW_HEIGHT_PX);
+    return trackState[row] ?? null;
+  };
+  // Whether a track has a section: an active, non-Full-Take section folder (ideas row)
+  // with that name on it — the row the server needs to make the file a version there.
+  const trackHasSection = (trackId: string, sectionName: string) =>
+    bucketTracksForPlacement.some((t) => t.id === trackId
+      && t.ideas.some((i) => i.active && !i.isFullTake && i.sectionName === sectionName));
+  // Where a loose file would land: the track row under the pointer, and the section
+  // under the pointer in the stored layout — where the sections sit before the drag,
+  // without the dragged file's preview. The preview still grows that section when the
+  // clip sticks out past its end or pushes later clips, and later sections slide live;
+  // only the choice of section ignores that growth. Past a section's stored end the
+  // next section is the destination, so a clip aimed near a section's end stays in it
+  // only while the pointer is before that stored end (it may still stick out and grow
+  // the section), and the last bar of a section is that section, never a pickup of the
+  // next one.
+  // No flicker at a boundary: the destination is a function of the pointer's song time
+  // and the stored layout only. The stored layout can't change mid-drag (both polls are
+  // held), and the preview never feeds back into it, so each pointer position has
+  // exactly one destination and a boundary is crossed exactly once.
+  // null = nowhere to land: off the track rows (track names, ruler, header row, below
+  // the tracks, off the timeline), past the stored end of the last section on the
+  // timeline, or over a section this track doesn't have (trackHasSection).
+  const looseDropDestination = (x: number, y: number): { track: Track; sectionName: string } | null => {
+    const el = timelineRef.current;
+    if (!el || x < el.getBoundingClientRect().left + TRACK_PANEL_WIDTH) return null;
+    const track = trackRowAt(x, y);
+    if (!track) return null;
+    const section = sectionAt(dragPointerTime(x), layout.sections);
+    if (!section) return null;
+    if (!trackHasSection(track.id, section.name)) return null;
+    return { track, sectionName: section.name };
+  };
+  // A loose file past the end: the track row under the pointer, the pointer at or past
+  // the stored end of the last section on the timeline (exactly where
+  // looseDropDestination finds no section — sectionAt's end is exclusive — or anywhere
+  // past the track panel when nothing is on the timeline), and that track has a section
+  // folder not on the timeline yet (offTimelineSectionNames). Then the gold new-section
+  // line shows at the end (updateNewSectionLine), and a release asks which of those
+  // sections to start (looseNewSection). null = nothing shows and a release does nothing.
+  const looseNewSectionAt = (x: number, y: number): { track: Track; sectionNames: string[] } | null => {
+    const el = timelineRef.current;
+    if (!el || x < el.getBoundingClientRect().left + TRACK_PANEL_WIDTH) return null;
+    const track = trackRowAt(x, y);
+    if (!track) return null;
+    const last = layout.sections[layout.sections.length - 1];
+    if (dragPointerTime(x) < (last ? last.end : 0)) return null;
+    const sectionNames = offTimelineSectionNames(track.id);
+    return sectionNames.length ? { track, sectionNames } : null;
+  };
+  // A track's section folders whose section isn't on the timeline (no non-full-take
+  // clip on any track), in filing order.
+  const offTimelineSectionNames = (trackId: string): string[] => {
+    const onTimeline = new Set(layout.sections.map((s) => s.name));
+    return placeableSectionNames(trackId).filter((name) => !onTimeline.has(name));
+  };
   const computeFileDragPlacement = (): ClipDragPlacement | null => {
     const drag = fileDropRef.current;
     const x = dragClientXRef.current;
     const y = dragClientYRef.current;
-    if (!drag || drag.firstClip || x === null || y === null) return null;
+    if (!drag || x === null || y === null) return null;
     if (!isPointerOverTimeline(x, y)) return null;
-    const track = trackState.find((t) => t.id === drag.trackId);
-    const section = layout.sections.find((s) => s.name === drag.sectionName);
+    let track: Track | undefined;
+    let sectionName: string;
+    if (drag.kind === 'version') {
+      if (drag.firstClip) return null;
+      track = trackState.find((t) => t.id === drag.trackId);
+      sectionName = drag.sectionName;
+    } else {
+      const dest = looseDropDestination(x, y);
+      if (!dest) return null;
+      track = dest.track;
+      sectionName = dest.sectionName;
+    }
+    // The destination section's start in the stored layout — where it's drawn when
+    // this placement is the preview.
+    const section = layout.sections.find((s) => s.name === sectionName);
     if (!track || !section) return null;
     const free = !snap.on || clipDragModifiers().shift;
     const result = computeFileDropPlacement({
       freeOffset: firstClipDropTime(x) - section.start,
       grid: free ? null : { step: snapGridSeconds(snap.unit, bpm, timeSignature), sectionStart: section.start },
-      others: storedClipsInSection(track, drag.sectionName, null),
-      drawnOthers: drawnSpansInSection(track.id, drag.sectionName, section.start, null),
+      others: storedClipsInSection(track, sectionName, null),
+      drawnOthers: drawnSpansInSection(track.id, sectionName, section.start, null),
       length: clipLength(drag.virtual),
     });
     const offsets = new Map<string, number>([[drag.virtual.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
-    return { trackId: track.id, sectionStart: section.start, draggedId: drag.virtual.id, offsets, changed: true, virtual: drag.virtual };
+    const virtual = drag.virtual.sectionName === sectionName ? drag.virtual : { ...drag.virtual, sectionName };
+    return { trackId: track.id, sectionName, sectionStart: section.start, draggedId: drag.virtual.id, offsets, changed: true, virtual };
   };
   // The drag preview: the placement a release would apply now — it drives the landing
   // outline, the pushed clips' live positions (no other clip is drawn moved during the
@@ -2880,7 +3043,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // The pointer is outside the timeline mid-drag: the stored layout shows and the
   // landing outline is hidden, since a release there cancels.
   const [clipDragOffTimeline, setClipDragOffTimeline] = useState(false);
-  // Shared by both drag kinds (a timeline clip, or a Media Bucket version — see
+  // Shared by both drag kinds (a timeline clip, or a Media Bucket file — see
   // computeFileDragPlacement): only one runs at a time.
   const updateClipDragPreview = () => {
     const dragging = !!clipDragRef.current || !!fileDropRef.current;
@@ -2892,8 +3055,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     setClipDragOffTimeline(dragging && x !== null && y !== null && !isPointerOverTimeline(x, y));
     setClipDragPreview((prev) => {
       if (prev === next) return prev;
-      if (prev && next && prev.trackId === next.trackId && prev.sectionStart === next.sectionStart
-          && prev.changed === next.changed && prev.virtual === next.virtual && prev.offsets.size === next.offsets.size
+      if (prev && next && prev.trackId === next.trackId && prev.sectionName === next.sectionName
+          && prev.sectionStart === next.sectionStart && prev.changed === next.changed
+          && prev.virtual?.id === next.virtual?.id && prev.offsets.size === next.offsets.size
           && Array.from(next.offsets).every(([id, offset]) => prev.offsets.get(id) === offset)) {
         return prev;
       }
@@ -2958,15 +3122,21 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // line marks the boundary its section will join at (firstClipBoundaryAt — the drop's
   // own rule), measured from the drag chip's left edge (pointer + CURSOR_GAP_PX, as
   // anchorBelowRightOfCursor draws it). Only the pointer's horizontal position counts.
+  // A loose file past the end of the last section (looseNewSectionAt) shows the same
+  // line at the end of the timeline — where the end rule puts a new section.
   const [newSectionLineX, setNewSectionLineX] = useState<number | null>(null);
   // The first-clip drop's time: the chip's left edge. Shared by the line and the drop.
   const firstClipDropTime = (pointerClientX: number) => dragPointerTime(pointerClientX + CURSOR_GAP_PX);
   const updateNewSectionLine = () => {
     const clientX = dragClientXRef.current;
     const clientY = dragClientYRef.current;
-    const x = fileDropRef.current?.firstClip && clientX !== null && clientY !== null && isPointerOverTimeline(clientX, clientY)
+    const drag = fileDropRef.current;
+    const pointerSet = clientX !== null && clientY !== null;
+    const x = drag?.kind === 'version' && drag.firstClip && pointerSet && isPointerOverTimeline(clientX, clientY)
       ? TRACK_PANEL_WIDTH + firstClipBoundaryAt(firstClipDropTime(clientX)) * zoom
-      : null;
+      : drag?.kind === 'loose' && pointerSet && looseNewSectionAt(clientX, clientY)
+        ? TRACK_PANEL_WIDTH + firstClipBoundaryAt(Infinity) * zoom
+        : null;
     setNewSectionLineX((prev) => (prev === x ? prev : x));
   };
   const clearNewSectionLine = () => setNewSectionLineX(null);
@@ -3158,7 +3328,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // the timeline (null = the end). null = the pointer isn't over the timeline: a
   // release there changes nothing.
   interface VersionDrop { offset: number; pushed: { id: string; sectionOffset: number }[]; hint: SectionPlacementHint | null }
-  const computeVersionDrop = (drag: FileDropDrag): VersionDrop | null => {
+  const computeVersionDrop = (drag: VersionFileDrop): VersionDrop | null => {
     const x = dragClientXRef.current;
     const y = dragClientYRef.current;
     if (x === null || y === null || !isPointerOverTimeline(x, y)) return null;
@@ -3167,11 +3337,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const offset = placement?.offsets.get(drag.virtual.id);
     const track = trackState.find((t) => t.id === drag.trackId);
     if (!placement || offset === undefined || !track) return null;
-    const stored = new Map(track.clips.map((c) => [c.id, c.sectionOffset ?? 0] as const));
-    const pushed = Array.from(placement.offsets)
-      .filter(([id, o]) => id !== drag.virtual.id && stored.has(id) && Math.abs(o - stored.get(id)!) > PLACEMENT_EPSILON)
-      .map(([id, sectionOffset]) => ({ id, sectionOffset }));
-    return { offset, pushed, hint: null };
+    return { offset, pushed: pushedByPlacement(track, placement), hint: null };
   };
 
   // Lands a version drop: the virtual clip at its offset and the clips it pushes at
@@ -3182,23 +3348,39 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // 409) the clip comes off, the pushed clips and the section order go back, and a
   // toast says nothing was changed. `releaseHold` (the drag's poll hold) runs once the
   // save and the refetch after it are done, after any rollback.
-  const commitVersionDrop = (drag: FileDropDrag, drop: VersionDrop, releaseHold: () => void) => {
-    const { virtual, trackId, sectionName, firstClip } = drag;
-    const track = trackState.find((t) => t.id === trackId);
-    if (!track) { releaseHold(); return; }
-    const added: Clip = { ...virtual, sectionOffset: drop.offset };
-    const pushedTo = new Map(drop.pushed.map((p) => [p.id, p.sectionOffset] as const));
+  // A file drop on one track as track-state updaters (version and loose-file drops):
+  // `landed` adds the new clip and moves the pushed clips to their pushed spots;
+  // `rolledBack` takes the clip off and puts the pushed clips back.
+  const fileLandingUpdaters = (track: Track, added: Clip, pushed: { id: string; sectionOffset: number }[]) => {
+    const pushedTo = new Map(pushed.map((p) => [p.id, p.sectionOffset] as const));
     const pushedFrom = new Map(track.clips.filter((c) => pushedTo.has(c.id)).map((c) => [c.id, c.sectionOffset ?? 0] as const));
-    const landed = (t: Track): Track => t.id !== trackId ? t : {
+    const landed = (t: Track): Track => t.id !== track.id ? t : {
       ...t,
       clips: sortClipsByOffset([...t.clips.map((c) => pushedTo.has(c.id) ? { ...c, sectionOffset: pushedTo.get(c.id)! } : c), added]),
     };
-    const rolledBack = (t: Track): Track => t.id !== trackId ? t : {
+    const rolledBack = (t: Track): Track => t.id !== track.id ? t : {
       ...t,
       clips: sortClipsByOffset(t.clips
         .filter((c) => c.id !== added.id)
         .map((c) => pushedFrom.has(c.id) ? { ...c, sectionOffset: pushedFrom.get(c.id)! } : c)),
     };
+    return { landed, rolledBack };
+  };
+  // The clips a placement pushes, only those whose offset actually changes from what's
+  // stored.
+  const pushedByPlacement = (track: Track, placement: ClipDragPlacement) => {
+    const stored = new Map(track.clips.map((c) => [c.id, c.sectionOffset ?? 0] as const));
+    return Array.from(placement.offsets)
+      .filter(([id, o]) => id !== placement.draggedId && stored.has(id) && Math.abs(o - stored.get(id)!) > PLACEMENT_EPSILON)
+      .map(([id, sectionOffset]) => ({ id, sectionOffset }));
+  };
+
+  const commitVersionDrop = (drag: VersionFileDrop, drop: VersionDrop, releaseHold: () => void) => {
+    const { virtual, trackId, sectionName, firstClip } = drag;
+    const track = trackState.find((t) => t.id === trackId);
+    if (!track) { releaseHold(); return; }
+    const added: Clip = { ...virtual, sectionOffset: drop.offset };
+    const { landed, rolledBack } = fileLandingUpdaters(track, added, drop.pushed);
 
     let layoutSections = sections;
     const sectionsBefore = firstClip ? queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId)) : undefined;
@@ -3261,6 +3443,222 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       });
   };
 
+  // ── Loose-file timeline drop: confirm, then save ──────────────────────────
+  // A loose file released with a landing spot doesn't land yet: the preview is frozen
+  // exactly as drawn (the layout, the outline, the pushed clips — the render reads
+  // looseConfirm.placement as the preview), the drag itself ends, and a dialog asks to
+  // confirm. The polls stay held (releaseHold) until Cancel, or until the save and the
+  // refetch after it. While it's open the dialog is modal, so nothing else on the
+  // timeline can be dragged.
+  interface LooseConfirm {
+    drag: LooseFileDrop;
+    placement: ClipDragPlacement;
+    trackName: string;
+    releaseHold: () => void;
+  }
+  const looseConfirmRef = useRef<LooseConfirm | null>(null);
+  const looseConfirmButtonRef = useRef<HTMLButtonElement>(null);
+  const [looseConfirm, setLooseConfirmState] = useState<LooseConfirm | null>(null);
+  const setLooseConfirm = (next: LooseConfirm | null) => {
+    looseConfirmRef.current = next;
+    setLooseConfirmState(next);
+  };
+  const freezeLoosePlacement = (drag: LooseFileDrop, placement: ClipDragPlacement, releaseHold: () => void, activeId: UniqueIdentifier) => {
+    const row = trackState.findIndex((t) => t.id === placement.trackId);
+    // The file doesn't move until the dialog confirms — a spring-opened Track stays
+    // selected while it's open (resolveDeferredLooseFileDrop below).
+    reportLooseFileDrop(activeId, 'deferred');
+    setLooseConfirm({
+      drag,
+      placement,
+      trackName: trackState[row]?.name ?? '',
+      releaseHold,
+    });
+  };
+  // Cancel or Esc: the frozen preview goes (the pushed clips back, the section back to
+  // its size), nothing is saved, the polls resume.
+  const cancelLoosePlacement = () => {
+    const confirm = looseConfirmRef.current;
+    if (!confirm) return;
+    setLooseConfirm(null);
+    confirm.releaseHold();
+    resolveDeferredLooseFileDrop(false);
+  };
+  const confirmLoosePlacement = () => {
+    const confirm = looseConfirmRef.current;
+    if (!confirm) return;
+    setLooseConfirm(null);
+    resolveDeferredLooseFileDrop(true);
+    commitLoosePlacement(confirm);
+  };
+  useEffect(() => () => { looseConfirmRef.current?.releaseHold(); }, []);
+
+  // On screen at once, the loose file leaves the loose-file lists and joins its track
+  // and section as a version (named as the server will name it only after the
+  // refetch). Set again once any list fetch in flight has been cancelled (a cancel
+  // puts back the data from before that fetch). Returns the undo.
+  const moveLooseFileIntoBucketCache = (drag: LooseFileDrop, trackId: string, sectionName: string): (() => void) => {
+    const listKey = looseFileKeys.list(songId);
+    const trackKey = drag.originTrackId ? looseFileKeys.byTrack(drag.originTrackId) : null;
+    const bucketKey = bucketKeys.bucket(songId);
+    const before = {
+      list: queryClient.getQueryData<ApiLooseFile[]>(listKey),
+      track: trackKey ? queryClient.getQueryData<ApiLooseFile[]>(trackKey) : undefined,
+      bucket: queryClient.getQueryData<ApiBucketTrack[]>(bucketKey),
+    };
+    const file = before.list?.find((f) => f.id === drag.looseFileId) ?? before.track?.find((f) => f.id === drag.looseFileId);
+    let undone = false;
+    const apply = () => {
+      if (undone) return;
+      const without = (files: ApiLooseFile[] | undefined) => files?.filter((f) => f.id !== drag.looseFileId);
+      queryClient.setQueryData<ApiLooseFile[]>(listKey, without);
+      if (trackKey) queryClient.setQueryData<ApiLooseFile[]>(trackKey, without);
+      if (!file) return;
+      queryClient.setQueryData<ApiBucketTrack[]>(bucketKey, (tracks) => tracks?.map((t) => t.id !== trackId ? t : {
+        ...t,
+        ideas: t.ideas.map((i) => !i.active || i.isFullTake || i.sectionName !== sectionName || i.clips.some((c) => c.id === file.id) ? i : {
+          ...i,
+          clips: [...i.clips, {
+            id: file.id, ideaId: i.id, name: file.name, type: file.type, color: file.color, start: 0,
+            duration: file.duration, src: file.src, isFinal: false, isFullTake: false, sectionName,
+            metadata: file.metadata, createdAt: file.createdAt, addedToSongs: file.addedToSongs ?? null,
+          }],
+        }),
+      }));
+    };
+    apply();
+    Promise.all([listKey, trackKey, bucketKey].filter((k) => k !== null).map((queryKey) => queryClient.cancelQueries({ queryKey })))
+      .then(apply);
+    return () => {
+      undone = true;
+      if (before.list) queryClient.setQueryData(listKey, before.list);
+      if (trackKey && before.track) queryClient.setQueryData(trackKey, before.track);
+      if (before.bucket) queryClient.setQueryData(bucketKey, before.bucket);
+    };
+  };
+
+  // Lands a confirmed loose-file drop where the frozen preview showed it: the new clip
+  // at the outline and the clips it pushes at their pushed spots, at once (the same
+  // commit as the frozen preview's removal, so nothing jumps), and the file shown as a
+  // version in the Media Bucket. Then one POST place-on-timeline with the clip's id,
+  // sectionOffset and `pushed` (only clips whose offset changes) saves it all in one
+  // transaction. Success: the gold landing glow (onLooseFilePlaced). Any failure
+  // (network, 400, 404, 409): everything on screen goes back — the clip, the pushes,
+  // the file in the loose-file lists — and a toast says nothing was changed. The polls
+  // resume once the save and the refetch after it are done, after any rollback.
+  const commitLoosePlacement = ({ drag, placement, releaseHold }: LooseConfirm) => {
+    const track = trackState.find((t) => t.id === placement.trackId);
+    const offset = placement.offsets.get(drag.virtual.id);
+    if (!track || offset === undefined) { releaseHold(); return; }
+    commitLooseLanding(drag, track, placement.sectionName, { offset, pushed: pushedByPlacement(track, placement) }, releaseHold);
+  };
+  // Shared by a confirmed drop (position: its offset and the clips it pushes) and a new
+  // section (position null: the place-on-timeline append path, so the section joins at
+  // the end of the timeline by the server's end rule and the clip lands at its start).
+  // A new section also takes its place in the song-sections cache at once (the same
+  // end rule, firstClipSectionRows), and goes back on failure.
+  const commitLooseLanding = (
+    drag: LooseFileDrop,
+    track: Track,
+    sectionName: string,
+    position: { offset: number; pushed: { id: string; sectionOffset: number }[] } | null,
+    releaseHold: () => void,
+  ) => {
+    const added: Clip = { ...drag.virtual, sectionName, sectionOffset: position?.offset ?? 0 };
+    const { landed, rolledBack } = fileLandingUpdaters(track, added, position?.pushed ?? []);
+    const sectionsBefore = position ? undefined : queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
+    if (!position) setSectionRowsCache(firstClipSectionRows(sectionName, null));
+    setTracks((prev) => prev.map(landed));
+    const undoBucket = moveLooseFileIntoBucketCache(drag, track.id, sectionName);
+    const timelineKey = [`/api/songs/${songId}/timeline`];
+    queryClient.cancelQueries({ queryKey: timelineKey });
+    placeLooseFileAtPositionMutation.mutate({
+      looseFileId: drag.looseFileId,
+      trackId: track.id,
+      sectionName,
+      id: added.id,
+      ...(position ? { sectionOffset: position.offset, pushed: position.pushed } : {}),
+    }, {
+      onError: (err: Error & { status?: number }) => {
+        setTracks((prev) => prev.map(rolledBack));
+        if (sectionsBefore) queryClient.setQueryData(songSectionsKey(songId), sectionsBefore);
+        undoBucket();
+        toast({
+          title: `Couldn't place ${drag.virtual.name}.`,
+          description: err.status === 409
+            ? 'Someone changed this section meanwhile. Nothing was changed — try again.'
+            : 'Nothing was changed.',
+          variant: 'destructive',
+        });
+      },
+      onSettled: () => {
+        Promise.all([
+          queryClient.invalidateQueries({ queryKey: timelineKey }),
+          queryClient.invalidateQueries({ queryKey: looseFileKeys.all() }),
+          queryClient.invalidateQueries({ queryKey: bucketKeys.bucket(songId) }),
+          !position && queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) }),
+        ]).catch(() => {}).finally(releaseHold);
+      },
+    });
+  };
+
+  // ── Loose-file drop past the end: start a new section ─────────────────────
+  // A release where the gold new-section line showed (looseNewSectionAt) asks which of
+  // the track's sections not on the timeline yet to start: the track is the row the
+  // pointer was on (not editable), the section one Select, the first one preselected.
+  // The polls stay held (releaseHold) until Cancel, or until the save and the refetch
+  // after it. Place: commitLooseLanding with no position. Cancel / Esc / outside click:
+  // nothing changes.
+  interface LooseNewSection {
+    drag: LooseFileDrop;
+    trackId: string;
+    trackName: string;
+    sectionNames: string[];
+    sectionName: string;
+    releaseHold: () => void;
+  }
+  const looseNewSectionRef = useRef<LooseNewSection | null>(null);
+  const looseNewSectionButtonRef = useRef<HTMLButtonElement>(null);
+  const [looseNewSection, setLooseNewSectionState] = useState<LooseNewSection | null>(null);
+  const setLooseNewSection = (next: LooseNewSection | null) => {
+    looseNewSectionRef.current = next;
+    setLooseNewSectionState(next);
+  };
+  const openLooseNewSection = (
+    drag: LooseFileDrop,
+    target: { track: Track; sectionNames: string[] },
+    releaseHold: () => void,
+    activeId: UniqueIdentifier,
+  ) => {
+    // The file doesn't move until the dialog places it (resolveDeferredLooseFileDrop).
+    reportLooseFileDrop(activeId, 'deferred');
+    setLooseNewSection({
+      drag,
+      trackId: target.track.id,
+      trackName: target.track.name,
+      sectionNames: target.sectionNames,
+      sectionName: target.sectionNames[0],
+      releaseHold,
+    });
+  };
+  const cancelLooseNewSection = () => {
+    const pending = looseNewSectionRef.current;
+    if (!pending) return;
+    setLooseNewSection(null);
+    pending.releaseHold();
+    resolveDeferredLooseFileDrop(false);
+  };
+  const placeLooseNewSection = () => {
+    const pending = looseNewSectionRef.current;
+    if (!pending) return;
+    setLooseNewSection(null);
+    resolveDeferredLooseFileDrop(true);
+    const track = trackState.find((t) => t.id === pending.trackId);
+    if (!track) { pending.releaseHold(); return; }
+    commitLooseLanding(pending.drag, track, pending.sectionName, null, pending.releaseHold);
+  };
+  useEffect(() => () => { looseNewSectionRef.current?.releaseHold(); }, []);
+
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     // Capture before clearing — activeDragData holds the enriched clip (with sectionName derived at drag-start)
@@ -3278,8 +3676,17 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // A Media Bucket version drag likewise (computeVersionDrop), read before the drag
     // state, the pointer source and the live Shift state clear. null = released off the
     // timeline.
-    const versionDrag = fileDropRef.current;
+    const fileDrag = fileDropRef.current;
+    const versionDrag = fileDrag?.kind === 'version' ? fileDrag : null;
     const versionDrop = versionDrag ? computeVersionDrop(versionDrag) : null;
+    // A loose file likewise: its placement at release (null = nowhere to land), or with
+    // none, a new section past the end (looseNewSectionAt).
+    const looseDrag = fileDrag?.kind === 'loose' ? fileDrag : null;
+    const loosePlacement = looseDrag ? computeFileDragPlacement() : null;
+    const releaseY = dragClientYRef.current;
+    const looseNewSectionTarget = looseDrag && !loosePlacement && releaseY !== null
+      ? looseNewSectionAt(pointerClientX, releaseY)
+      : null;
     const releaseClipDragHold = takeClipDragHold();
     stopClipDrag();
     stopFileDropPreview();
@@ -3317,6 +3724,29 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       }
       releaseClipDragHold();
       if (over && isBucketOrganizeDropId(String(over.id))) versionMoveDnd.handleDragEnd(event, organizeDrag);
+      return;
+    }
+
+    // ── Loose file: decided by the pointer, not by `over` (which only ever matches
+    // Media Bucket targets for it, and only over the bucket). With a landing spot the
+    // preview freezes and a dialog asks to confirm (the poll hold goes with it). Over a
+    // Media Bucket target: that target's organize (the shared hook, above). Anywhere
+    // else — no outline: the header row, the ruler, the track names, below the tracks,
+    // past the last section, a section the track doesn't have, off the timeline —
+    // nothing happens, the same as Esc: the preview is already cleared above, the polls
+    // resume, nothing is reported (so a spring-opened selection is restored). One
+    // exception: past the last section on a track with a section not on the timeline yet
+    // (the gold new-section line showed), a dialog asks which section to start.
+    if (looseDrag) {
+      if (loosePlacement) {
+        freezeLoosePlacement(looseDrag, loosePlacement, releaseClipDragHold, active.id);
+        return;
+      }
+      if (looseNewSectionTarget) {
+        openLooseNewSection(looseDrag, looseNewSectionTarget, releaseClipDragHold, active.id);
+        return;
+      }
+      releaseClipDragHold();
       return;
     }
     // No other drag takes a poll hold.
@@ -3365,37 +3795,6 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
       setFlashClipId(newClipId);
       flashTimerRef.current = setTimeout(() => setFlashClipId(null), 1800);
-      return;
-
-    } else if (activeType === 'loose-file') {
-      // Loose files carry no sectionName of their own (they aren't instrument-locked
-      // yet — see isInvalidDrop below). The drop point's Y resolves targetTrack (already
-      // guaranteed above); its X is tried against the current section layout as a
-      // pre-fill suggestion only — if it doesn't land in any section (empty timeline,
-      // or dropped past/before the rendered sections), the modal still opens with
-      // Section left for the user to pick, rather than dead-ending silently.
-      const looseFileId = dragData?.clip?.id ?? clip?.id;
-      if (!looseFileId) return;
-
-      // Genuinely unrecoverable case (distinct from the two above): the song has no
-      // sections at all to choose from anywhere. Narrow toast, no modal — there is
-      // nothing for the picker to offer.
-      if (songSectionNames.length === 0) {
-        showNoSectionsToast();
-        return;
-      }
-
-      const dropTimeSec = dragPointerTime(pointerClientX);
-      const targetSection = sectionAt(dropTimeSec, layout.sections);
-
-      // The file doesn't move until the dialog confirms — a spring-opened Track
-      // stays selected while it's open (see resolveDeferredLooseFileDrop below).
-      reportLooseFileDrop(active.id, 'deferred');
-      setLoosePlacementModal({
-        looseFileId,
-        trackId: targetTrack.id,
-        sectionName: targetSection?.name ?? '',
-      });
     }
   };
 
@@ -3815,10 +4214,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // recomputed only when the placement changes (clipDragPreview is replaced only then).
   // null = the stored layout: no drag, the pointer off the clip's row (a release there
   // changes nothing), or a placement that changes nothing.
-  // A Media Bucket version drag uses the same preview: its virtual clip is added to its
+  // A Media Bucket file drag uses the same preview: its virtual clip is added to its
   // track at its landing offset, so its section grows live too (computeFileDragPlacement).
+  // A loose file's frozen preview (looseConfirm, while its confirm dialog is open) is
+  // drawn the same way.
+  const activeDragPreview = looseConfirm?.placement ?? clipDragPreview;
   const clipDragLayout = React.useMemo(() => {
-    const preview = clipDragPreview;
+    const preview = activeDragPreview;
     if (!preview || !preview.changed) return null;
     const previewTracks = trackState.map((t) => {
       if (t.id !== preview.trackId) return t;
@@ -3827,7 +4229,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       return { ...t, clips };
     });
     return deriveLayout(previewTracks, sections, bpm, timeSignature);
-  }, [clipDragPreview, trackState, sections, bpm, timeSignature]);
+  }, [activeDragPreview, trackState, sections, bpm, timeSignature]);
   const displayLayout = clipDragLayout ?? layout;
   // The tracks as drawn: every clip at its preview-layout start and head cut (a push can
   // take a later pickup's room away, or give it back), except the dragged
@@ -3866,7 +4268,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // the browser never clamps scrollLeft and nothing jumps under the pointer; after the
   // drag it is the stored layout's end again.
   let contentEnd = endOfTimeline;
-  if (draggedClipId || fileDrop) {
+  if (draggedClipId || fileDrop || looseConfirm) {
     clipDragMaxEndRef.current = Math.max(clipDragMaxEndRef.current, displayLayout.timelineEnd, endOfTimeline);
     contentEnd = clipDragMaxEndRef.current;
   }
@@ -3874,16 +4276,18 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // The dashed landing outline: where the dragged clip lands if released now, or its
   // own spot when nothing would change; trimmed length wide. Hidden while the pointer
   // is off the timeline (clipDragOffTimeline).
-  // For a version drag: the virtual clip's spot in the preview layout, on its own track,
-  // only while the pointer is over the timeline (there is no preview otherwise).
+  // For a file drag: the virtual clip's spot in the preview layout, on its destination
+  // track, only while there is a preview (the pointer over the timeline, and for a loose
+  // file somewhere it can land) or while a loose file's preview is frozen.
   const clipDragLanding = React.useMemo(() => {
-    if (fileDrop) {
-      const virtual = clipDragPreview?.virtual;
-      if (!virtual || !clipDragLayout) return null;
+    if (fileDrop || looseConfirm) {
+      const preview = activeDragPreview;
+      const virtual = preview?.virtual;
+      if (!preview || !virtual || !clipDragLayout) return null;
       const start = clipDragLayout.clipStarts.get(virtual.id);
       if (start === undefined) return null;
       return {
-        trackId: fileDrop.trackId,
+        trackId: preview.trackId,
         clipId: null,
         rect: { left: start * zoom, width: clipLength(virtual) * zoom },
       };
@@ -3899,16 +4303,51 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       clipId: clip.id,
       rect: { left: landed.start * zoom, width: playedSpan(landed).length * zoom },
     };
-  }, [fileDrop, clipDragPreview, draggedClipId, tracks, clipDragLayout, zoom]);
+  }, [fileDrop, looseConfirm, activeDragPreview, draggedClipId, tracks, clipDragLayout, zoom]);
+  // Where the loose-file confirm dialog sits (confirmDialogTop): centred over the Media
+  // Bucket, between the bottom of the app header and the top of the timeline, and never
+  // over the frozen landing outline. Measured once the dialog's element mounts (it's
+  // portaled, so it mounts a render after looseConfirm is set) and again on window
+  // resize.
+  const [looseConfirmEl, setLooseConfirmEl] = useState<HTMLDivElement | null>(null);
+  const [looseConfirmTop, setLooseConfirmTop] = useState<number | null>(null);
+  const looseConfirmOutline = looseConfirm ? clipDragLanding : null;
+  useLayoutEffect(() => {
+    if (!looseConfirm || !looseConfirmEl) { setLooseConfirmTop(null); return; }
+    const place = () => {
+      const el = timelineRef.current;
+      if (!el) return;
+      const timelineRect = el.getBoundingClientRect();
+      const header = document.querySelector('header');
+      const row = trackState.findIndex((t) => t.id === looseConfirm.placement.trackId);
+      const rowTop = timelineRect.top + TRACK_ROWS_TOP_PX + row * TRACK_ROW_HEIGHT_PX - el.scrollTop;
+      const outlineLeft = timelineRect.left + TRACK_PANEL_WIDTH - el.scrollLeft + (looseConfirmOutline?.rect.left ?? 0);
+      setLooseConfirmTop(confirmDialogTop({
+        dialogWidth: looseConfirmEl.offsetWidth,
+        dialogHeight: looseConfirmEl.offsetHeight,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        gapTop: header?.getBoundingClientRect().bottom ?? 0,
+        gapBottom: timelineRect.top,
+        outline: row >= 0 && looseConfirmOutline
+          ? { top: rowTop, bottom: rowTop + TRACK_ROW_HEIGHT_PX, left: outlineLeft, right: outlineLeft + looseConfirmOutline.rect.width }
+          : null,
+      }));
+    };
+    place();
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [looseConfirm, looseConfirmEl, looseConfirmOutline, trackState]);
   // Focus during a timeline clip drag: the home section (at its live length) and the
   // one bar before it (pickup reach) stay bright; everything else in the track rows and
   // the section header row is dimmed by a veil (ClipDragFocusVeil). Song seconds.
-  // The same for a previewed version drag, only while the pointer is over the timeline.
+  // The same for a previewed file drag (its destination section), only while there is a
+  // preview, and for a loose file's frozen preview.
   const clipDragFocus = React.useMemo(() => {
     let homeName: string | undefined;
-    if (fileDrop) {
-      if (!clipDragPreview) return null;
-      homeName = fileDrop.sectionName;
+    if (fileDrop || looseConfirm) {
+      if (!activeDragPreview) return null;
+      homeName = activeDragPreview.sectionName;
     } else {
       if (!draggedClipId) return null;
       const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === draggedClipId);
@@ -3919,7 +4358,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     if (!home) return null;
     const bar = snapGridSeconds('bar', bpm, timeSignature);
     return { litStart: Math.max(0, home.start - bar), litEnd: home.end };
-  }, [fileDrop, clipDragPreview, draggedClipId, tracks, displayLayout, bpm, timeSignature]);
+  }, [fileDrop, looseConfirm, activeDragPreview, draggedClipId, tracks, displayLayout, bpm, timeSignature]);
   // Sections a drag's clip can't land in — the same for every row, so one shared set.
   const draggedSectionName = activeDragData?.clip?.sectionName;
   // Keyed on the names only, so a drag that just changes section lengths keeps the set.
@@ -3932,17 +4371,19 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     return set;
   }, [draggedSectionName, sectionNamesKey]);
 
-  // During a timeline clip drag or a Media Bucket version drag, the Media Bucket keeps
+  // During a timeline clip drag or a Media Bucket file drag (a version or a loose file), the Media Bucket keeps
   // the element from the drag's start: React skips a subtree whose element is the
   // same object, so the bucket isn't re-rendered by each drag-preview change. Its own
   // state, queries and dnd-kit hooks still update it — everything a version drag needs
   // mid-drag lives there: spring-loaded tracks and sections, drop highlights
-  // (useActiveOrganizeDrag), the dimmed source card (its own useDraggable), column edge
-  // scroll and the landing flash. Its callbacks (Add to Timeline, Place on Timeline,
+  // (useActiveOrganizeDrag), the dimmed source card or row (its own useDraggable),
+  // column edge scroll and the landing flash; a loose file's drop onto a bucket folder
+  // is handled here in handleDragEnd (the shared organize hook), not by the element. Its callbacks (Add to Timeline, Place on Timeline,
   // Remove from Section) can't be used mid-drag, and the element is rebuilt on the
   // first render after the drag.
   const mediaBucketElementRef = useRef<React.ReactNode>(null);
-  const bucketFrozen = activeDragData?.type === 'clip' || activeDragData?.type === BUCKET_CLIP_DRAG_TYPE;
+  const bucketFrozen = activeDragData?.type === 'clip' || activeDragData?.type === BUCKET_CLIP_DRAG_TYPE
+    || activeDragData?.type === 'loose-file';
   if (!bucketFrozen || mediaBucketElementRef.current === null) {
     mediaBucketElementRef.current = (
     <LooseFilePlacementProvider value={openLooseFilePlacement}>
@@ -4286,11 +4727,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     }
                   }
                   // A timeline clip drag has no wrong track: the clip always stays on its
-                  // own (computeClipDragPlacement), so no row is disabled or veiled.
-                  if (type === 'loose-file') {
-                    // Loose files aren't instrument-locked yet — every track is a
-                    // valid target. No instrument-identity check applies.
-                  }
+                  // own (computeClipDragPlacement), so no row is disabled or veiled. A
+                  // loose file may land on any track (looseDropDestination).
                 }
 
                 // TimelineTrack is memoized: every prop below is stable from render to
@@ -4311,9 +4749,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     invalidSections={invalidSectionsDuringDrag}
                     isInvalidDrop={isInvalidDrop}
                     // The valid-track border and wrong-track veil are for Media Bucket
-                    // drags that drop on a track row (loose files, legacy full takes) —
-                    // not a sectioned version drag, which lands wherever the pointer is
-                    // over the timeline (the focus veil and landing outline instead).
+                    // drags that drop on a track row (legacy full takes) — not a
+                    // sectioned version or a loose file (fileDrop), which land by the
+                    // pointer (the focus veil and landing outline instead).
                     isDragging={activeDragData !== null && activeDragData.type !== 'clip' && !fileDrop}
                     zoom={zoom}
                     onDeleteTrack={handleDeleteTrack}
@@ -4466,13 +4904,151 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Loose-file timeline drop: confirm (looseConfirm). The app's standard Dialog,
+          styled exactly like the Place on Timeline picker below (panel, title, buttons,
+          spacing). Two differences, this dialog only: a lighter backdrop
+          (data-light-backdrop, see index.css) so the timeline, the frozen outline and
+          the pushed clips stay visible — it still blocks the page, so nothing else can
+          be dragged meanwhile — and its position (confirmDialogTop: centred over the
+          Media Bucket, never over the outline). Enter places (focus starts on Place);
+          Esc, Cancel, the X and a click outside cancel. */}
+      <Dialog
+        open={looseConfirm !== null}
+        onOpenChange={(open) => { if (!open) cancelLoosePlacement(); }}
+      >
+        <DialogContent
+          ref={setLooseConfirmEl}
+          data-light-backdrop=""
+          className="bg-[#0c0c0e] border-primary/20 max-w-sm"
+          // Never hidden while unmeasured: focus can't land on Place inside a hidden
+          // element (dnd-kit then puts it back on the dragged row). The measure runs in
+          // the same commit, before paint, so the default spot never shows.
+          style={looseConfirmTop !== null ? { top: looseConfirmTop, translate: '-50% 0' } : undefined}
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            looseConfirmButtonRef.current?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white break-words">
+              Place {looseConfirm?.drag.virtual.name} here?
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <DialogDescription>
+              It will be moved into{' '}
+              <span className="text-white font-semibold">{looseConfirm?.trackName}</span>
+              <span className="text-white/40"> › </span>
+              <span className="text-white font-semibold">{looseConfirm?.placement.sectionName}</span>
+              {' '}in the Media Bucket.
+            </DialogDescription>
+          </div>
+          <DialogFooter className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={cancelLoosePlacement}
+            >
+              Cancel
+            </Button>
+            <Button
+              ref={looseConfirmButtonRef}
+              type="button"
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+              onClick={confirmLoosePlacement}
+            >
+              Place
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Loose-file drop past the end: start a new section — the confirm dialog's and
+          picker's panel, title and buttons. Focus starts on Place; Enter places from
+          anywhere in the dialog except a button (which acts itself) or the Section
+          select (Enter picks an option there); Esc / outside click cancel. */}
+      <Dialog
+        open={looseNewSection !== null}
+        onOpenChange={(open) => { if (!open) cancelLooseNewSection(); }}
+      >
+        <DialogContent
+          className="bg-[#0c0c0e] border-primary/20 max-w-sm"
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            looseNewSectionButtonRef.current?.focus();
+          }}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter' || e.defaultPrevented) return;
+            const target = e.target as HTMLElement;
+            if (target.closest('button, [role="combobox"], [role="listbox"], [role="option"]')) return;
+            e.preventDefault();
+            placeLooseNewSection();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-sm uppercase tracking-[0.2em] font-heading font-bold text-white break-words">
+              Start a new section with {looseNewSection?.drag.virtual.name}?
+            </DialogTitle>
+            <DialogDescription>
+              The section is added at the end of the timeline and the file lands at its start.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Track</Label>
+              <p className="text-xs text-white font-semibold h-9 flex items-center">{looseNewSection?.trackName}</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Section</Label>
+              <Select
+                value={looseNewSection?.sectionName ?? ''}
+                onValueChange={(v) => {
+                  const pending = looseNewSectionRef.current;
+                  if (pending) setLooseNewSection({ ...pending, sectionName: v });
+                }}
+              >
+                <SelectTrigger className="bg-black/40 border-white/10 text-xs h-9 focus:ring-primary/50">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-[#0c0c0e] border-white/10">
+                  {(looseNewSection?.sectionNames ?? []).map((name) => (
+                    <SelectItem key={name} value={name} className="text-xs focus:bg-white/8 focus:text-white">
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter className="pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 hover:bg-white/5 text-xs"
+              onClick={cancelLooseNewSection}
+            >
+              Cancel
+            </Button>
+            <Button
+              ref={looseNewSectionButtonRef}
+              type="button"
+              className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"
+              onClick={placeLooseNewSection}
+            >
+              Place
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Loose-file → timeline placement picker — cascading Track → Section, same
           interaction shape as Dashboard's "Add to Song" modal (own component, own
           data sourcing: this targets place-on-timeline, not the ideas/clips copy flow). */}
       <Dialog
         open={loosePlacementModal !== null}
         onOpenChange={(open) => {
-          if (!open) { setLoosePlacementModal(null); resolveDeferredLooseFileDrop(false); }
+          if (!open) setLoosePlacementModal(null);
         }}
       >
         <DialogContent className="bg-[#0c0c0e] border-primary/20 max-w-sm">
@@ -4531,7 +5107,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
               type="button"
               variant="outline"
               className="border-white/10 hover:bg-white/5 text-xs"
-              onClick={() => { setLoosePlacementModal(null); resolveDeferredLooseFileDrop(false); }}
+              onClick={() => setLoosePlacementModal(null)}
             >
               Cancel
             </Button>
@@ -4542,9 +5118,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                   looseFileId: loosePlacementModal.looseFileId,
                   trackId: loosePlacementModal.trackId,
                   sectionName: placementSectionName,
+                  id: nanoid(),
                 });
                 setLoosePlacementModal(null);
-                resolveDeferredLooseFileDrop(true);
               }}
               disabled={!loosePlacementModal?.trackId || !placementSectionName || placeLooseFileOnTimelineMutation.isPending}
               className="bg-primary text-black hover:bg-primary/90 font-bold text-xs"

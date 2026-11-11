@@ -457,15 +457,25 @@ export function usePlaceLooseFileOnTimeline(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { looseFileId: string; trackId: string; sectionName: string }) => {
+    // id: the new timeline clip's id (the client's). sectionOffset + pushed: a drop
+    // position (timeline drag + confirm); without them the server appends.
+    mutationFn: async (vars: {
+      looseFileId: string; trackId: string; sectionName: string; id?: string;
+      sectionOffset?: number; pushed?: { id: string; sectionOffset: number }[];
+    }) => {
       const res = await fetch(`/api/loose-files/${vars.looseFileId}/place-on-timeline`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trackId: vars.trackId, sectionName: vars.sectionName }),
+        body: JSON.stringify({
+          trackId: vars.trackId,
+          sectionName: vars.sectionName,
+          ...(vars.id ? { id: vars.id } : {}),
+          ...(vars.sectionOffset !== undefined ? { sectionOffset: vars.sectionOffset, pushed: vars.pushed ?? [] } : {}),
+        }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: 'Failed to place file on the timeline' }));
-        throw new Error(err.message ?? 'Failed to place file on the timeline');
+        throw Object.assign(new Error(err.message ?? 'Failed to place file on the timeline'), { status: res.status });
       }
       return res.json() as Promise<{ clip: ApiClip; timelineClip: ApiTimelineClip }>;
     },

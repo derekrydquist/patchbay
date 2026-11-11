@@ -101,6 +101,9 @@ function SectionFolderRow({ idea, isSelected, onSelect, onFileDrop, onRemove, bu
           onClick={onSelect}
           {...nativeDrop.handlers}
           {...springRowAttrs(dropId)}
+          // The section the Files column shows (Timeline reads it to flash a placed
+          // loose file's card or folders: flashBucketDestination).
+          data-open-section={isSelected ? '' : undefined}
           className={cn(
             "w-full flex items-center justify-between p-2 rounded text-xs transition-all border border-transparent",
             isSelected

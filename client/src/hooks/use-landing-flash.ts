@@ -59,6 +59,8 @@ export interface LandingFlashOptions {
    *  because it grows with the page (SongHome's Song Files), scroll the page
    *  instead. Every other landing path leaves this off and never moves the page. */
   scrollPage?: boolean;
+  /** How long an unmatched request waits for its element. Default LANDING_REQUEST_TTL_MS. */
+  ttlMs?: number;
 }
 
 const pending = new Map<string, LandingBatch>(); // `${zone}|${id}` → batch
@@ -84,7 +86,7 @@ export function requestLandingFlash(items: LandingFlashItem[], options: LandingF
       if (pending.get(key) === batch) { pending.delete(key); changed = true; }
     }
     if (changed) notify();
-  }, LANDING_REQUEST_TTL_MS);
+  }, options.ttlMs ?? LANDING_REQUEST_TTL_MS);
 }
 
 function subscribe(listener: () => void): () => void {
@@ -152,6 +154,18 @@ function findOwnScroller(el: HTMLElement): HTMLElement | null {
     node = node.parentElement;
   }
   return null;
+}
+
+/** Whether an element is on screen inside its own scroll container (the Radix
+ *  viewport or overflow-y auto/scroll ancestor findOwnScroller picks) and the window:
+ *  at least partly inside both, and not display:none. Nothing is scrolled. */
+export function isVisibleInOwnScroller(el: HTMLElement): boolean {
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 && r.height === 0) return false;
+  const view = findOwnScroller(el)?.getBoundingClientRect()
+    ?? { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth };
+  return r.bottom > Math.max(view.top, 0) && r.top < Math.min(view.bottom, window.innerHeight)
+    && r.right > Math.max(view.left, 0) && r.left < Math.min(view.right, window.innerWidth);
 }
 
 // Scroll a batch's column the minimum amount that shows ALL of its matched
