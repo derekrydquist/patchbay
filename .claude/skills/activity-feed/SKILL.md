@@ -20,7 +20,7 @@ export interface ActivityEvent {
       // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
       // last audited 2026-08-12:
       | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
-      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'section-length-changed' | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
       | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
@@ -107,7 +107,8 @@ All tier-2 events resolve the actor from `req.session.userId → storage.getUser
 | `clip-final-set` / `clip-final-cleared` | Yes | "X marked/unmarked {clip} as Final", from `PATCH /api/clips` and `PATCH /api/timeline-clips` when the value changes (not Replace). |
 | `task-auto-completed` / `task-auto-reverted` | No — sort-only | Task outcome whose cause has its own row: a clip-level Final change, Remove, or a restore (`applyTaskAfterRestore`). |
 | `clip-replaced` | Yes | |
-| `timeline-reordered` | No — sort-only | A single drag reorder PATCHes every sibling clip whose `start` shifted. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (reorders are section-locked, so this is a correct proxy key) so one drag produces one row, not one per shifted clip. |
+| `timeline-reordered` | No — sort-only | A clip drag's batch save (`PUT /api/songs/:songId/timeline-clips/offsets`) logs one row per request; a single `PATCH /api/timeline-clips/:id` with `sectionOffset` logs one too, deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName`; a section header reorder logs one. |
+| `section-length-changed` | No — sort-only | `PUT /api/songs/:songId/sections/base-length` (the section-end handle). Arrangement only; bumps the song in Your Songs. |
 | `clip-removed-from-timeline` | Yes | |
 | `clip-trim-adjusted` | No — sort-only | Single-clip drag trim. Split from the old shared `clip-trimmed` type this session. |
 | `clip-trim-applied-to-instances` | Yes | Explicit bulk "Apply Trim to All Instances" action. Split from `clip-trimmed`; distinct from the drag-trim case above — was previously indistinguishable in the log. |
@@ -177,7 +178,8 @@ This grouping predates the read-path filter and originally assumed every item he
 36b. **`pan-changed`** — logged from the same `PATCH /api/tracks/:trackId` route when `pan` changes (L/C/R button click, discrete). New type as of 2026-08-12; previously indistinguishable from `volume-changed` in the log.
 37. **`clip-trim-adjusted`** — logged from `PATCH /api/timeline-clips/:id/trim` (single-clip drag trim). **Split from the old shared `clip-trimmed` type on 2026-08-12** into this (sort-only) and item 37b (feed-visible) — they were previously the same type and indistinguishable in the log.
 37b. **`clip-trim-applied-to-instances`** — logged from `POST /api/timeline-clips/apply-trim-to-instances`, covering both the "Apply Trim to All Instances" and "Reset Trim on All Instances" actions. Feed-visible — an explicit bulk action, unlike the single-clip drag trim above.
-38. **`timeline-reordered`** — logged from `PATCH /api/timeline-clips/:id` when `start` changes without a name/src change. Deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName` (see "Known dedup tradeoffs" above) so one drag reorder (which PATCHes every shifted sibling clip) produces one row.
+38. **`timeline-reordered`** — logged once per request by `PUT /api/songs/:songId/timeline-clips/offsets` (a clip drag and the clips it pushes), by `PUT /api/songs/:songId/sections/order`, and by `PATCH /api/timeline-clips/:id` when `sectionOffset` is sent (that one deduped via a 5-second lookback scoped to `songId + type + instrument + sectionName`; see "Known dedup tradeoffs" above).
+38b. **`section-length-changed`** — logged from `PUT /api/songs/:songId/sections/base-length`. Sort-only.
 39. **`timeline-cleared`** — logged from `DELETE /api/songs/:songId/timeline-clips/non-final`.
 40. **`song-added-to-album`** — logged from `POST /api/albums/:id/songs`. Deduped on `bandId + type` within a 5-second window (looser than other dedup keys here — `activity_log` has no `albumId` column to scope tighter) so the album song picker's sequential per-song POSTs collapse to one row.
 41. **`song-removed-from-album`** — logged from `DELETE /api/albums/:id/songs/:songId`. No dedup (not a batch-prone action).

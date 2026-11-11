@@ -12,127 +12,92 @@ first if you haven't already; it isn't repeated here.
 
 These are intentional product decisions, not implementation details:
 
-- **Clips are always contiguous** — no gaps, no overlaps within a track
-- **Section-locking is enforced** — a clip can only live in its matching section column
-- **Position is always derived from the layout** — a clip's start is its section's start + `sectionOffset`, from the shared `layoutTimeline` (see "Timeline layout and arrangement order" in root `CLAUDE.md`); never set from a cursor pixel offset, and the stored `start` is never read for a sectioned clip
+- **Clips never overlap; gaps are fine** — within a track's section a clip sits wherever it was placed. Nothing re-packs a section (see "Timeline layout and arrangement order" and "Timeline placement rules" in root `CLAUDE.md`)
+- **Section-locking is enforced** — a clip belongs to its home section (`sectionName`); a drag never changes its section or its track. A pickup still belongs to its section while it hangs before the downbeat
+- **Position is always derived from the layout** — a clip's start is its section's start + `sectionOffset` (+ a pickup's head cut), from the shared `layoutTimeline`; never set from a cursor pixel offset, and the stored `start` is never read for a sectioned clip
 - **The timeline is plug-and-play by design** — complexity that belongs in a freeform DAW does not belong in PatchBay
-- **Mute, solo, zoom, scroll, and selection are client-only, per-browser** — they are never sent to the server. Volume is the only per-track mix value that is shared (stored in `instrument_tracks.volume`). The client-only values follow the same localStorage pattern as MediaBucket (one-shot restore on mount guarded by a `uiRestored` ref, keys scoped `patchbay-*-${songId}`). Do not add mute/solo/zoom/scroll to the DB schema — band members intentionally have independent views of the same arrangement.
+- **Mute, solo, zoom, scroll, snap and selection are client-only, per-browser** — they are never sent to the server. Volume and pan are the only per-track mix values that are shared (`instrument_tracks`). The client-only values follow the same localStorage pattern as MediaBucket (one-shot restore on mount guarded by a `uiRestored` ref, keys scoped `patchbay-*-${songId}`; snap is one global `patchbay-snap` key). Do not add mute/solo/zoom/scroll/snap to the DB schema — band members intentionally have independent views of the same arrangement.
 
 ### Mental model
 
-The timeline is a **grid**: rows are instrument tracks, columns are song sections (Intro, Verse 1, Chorus 1, …). Each cell in the grid can hold an ordered array of clips. A clip belongs to exactly one section and can only be placed in that section's column — a Verse 1 clip can never land in the Chorus 1 column. PatchBay enforces this in the UI before the user releases the mouse.
+The timeline is a **grid**: rows are instrument tracks, columns are song sections (Intro, Verse 1, Chorus 1, …). A clip belongs to exactly one section and is placed by its offset from that section's start. Clips are drawn at the track-row level (`TimelineTrack`), not inside section cells, so a pickup can hang into the previous section and a section's last clip can stick out until the section grows on save. Legacy full takes sit on the same row at their stored start. `TimelineTrack`, its `TrackHeader` and `TimelineClip` are memoized: Timeline keeps every prop stable unless what it describes changed (shared `displaySectionLayout`, `trimLimitsByTrack` objects kept while their values are equal, `useCallback` handlers), so a drag preview change re-renders only the rows it moves.
 
 ### Section columns
 
-- **Which sections show** — only sections with at least one non-full-take clip get a column; the column disappears with its last clip. Rules (lengths, beats, orphans, full takes): see "Timeline layout and arrangement order" in root `CLAUDE.md`.
+- **Which sections show** — only sections with at least one non-full-take clip get a column; the column disappears with its last clip. Rules (lengths in beats, base length, orphans, pickups, full takes): see "Timeline layout and arrangement order" in root `CLAUDE.md`.
 - **Order** — `song_sections.sort_order` via the `['song-sections', songId]` query (`sections` in `Timeline`), never clip data or `ideas.sortOrder`. There is no `sectionOrder` state or ref.
-- **Geometry** — `deriveLayout(trackState, sections, bpm, timeSignature)` (a thin wrapper over `layoutTimeline`) is memoized as `layout`. `tracks` = `trackState` with every clip's in-memory `start` taken from the layout (`positionTracks`), so playback, keyboard nav, skip and `Track.tsx` read layout positions. `sectionLayout` = `layout.sections` as `{ name, start, duration }[]` (the shape `Track.tsx` takes: section headers, `SectionCell` widths, invalid-section grayout); `endOfTimeline` = `layout.timelineEnd`.
-- **Write paths** that need a new clip's start call `deriveLayout` on the tracks they're about to save.
+- **Geometry** — `deriveLayout(trackState, sections, bpm, timeSignature)` (a thin wrapper over `layoutTimeline`) is memoized as `layout`. `tracks` = `trackState` with every clip's in-memory `start` and `headCut` taken from the layout (`positionTracks`), so playback, keyboard nav, skip and `Track.tsx` read layout positions; in-points and lengths come from `playedSpan` (`client/src/lib/clip-span.ts`). `sectionLayout` = `layout.sections` as `{ name, start, duration }[]` (the shape `Track.tsx` takes); `endOfTimeline` = `layout.timelineEnd`.
+- **During a drag** — `displayLayout` / `displayTracks` / `displaySectionLayout` come from the drag preview's layout (`clipDragLayout`) when there is one, else the stored layout. `contentEnd` (scroll width, ruler, edge-scroll cap) never shrinks during a drag (`clipDragMaxEndRef`).
+- **`SectionCell`** is only a section's background and divider on a row (width + inset-shadow divider); it holds no clips and no drag state.
 
-### Droppable zones
+### Drop targets and collisions
 
-There are two kinds of droppable zones in the clip-drag `DndContext`:
+- **Track rows** — one `useDroppable` per row (bare track id), the lane div in `TimelineTrack`. Only a legacy full-take version from the Media Bucket drops on a row (freeform start at the pointer, `insertFreeformClip`); for that drag the row gets `isInvalidDrop` (wrong track: disabled + dark veil `rgba(0,0,0,0.5)` at z 20) or a valid-track gold border. `isDragging` is `activeDragData !== null && type !== 'clip' && !fileDrop`, so timeline clip, version and loose-file drags never show these.
+- **Pointer drops** — timeline clip, version and loose-file drags are decided in `handleDragEnd` from the pointer (`computeClipDragPlacement`, `computeVersionDrop`, `computeFileDragPlacement` / `looseNewSectionAt`), never from dnd-kit's `over`, so the drop always matches the preview. There are no gap zones, no `insertionPoint`, no `handleDragMove` and no track-row reorder.
+- **Collision detection** — `makeTrackFirstCollision(isVersionDrop)` (memoized as `trackFirstCollision`). While the pointer is inside `[data-media-bucket]`, only Media Bucket targets can match (`matchOrganizeDropTarget`). For file drags (`fileDropRef` set), only bucket targets ever match, and only inside the bucket — a bucket row scrolled out of its column still has a rect that can sit under the timeline. Otherwise bucket targets first (precise X+Y), then track rows by vertical band only.
+- **Section column reordering** is a **separate inner `DndContext`** around the section header row (`autoScroll={false}`), independent of the clip drag. `handleSectionDragStart` starts the drag pointer source and a `createEdgeScroller`; the target is `headerDropTarget(…)` (`client/src/lib/section-drag.ts`: the pointer against the midpoints of the other sections on the timeline; null over the section's own spot), held in `headerDrop` state / `headerDropRef`; `handleSectionDragEnd` sends it as `PUT /api/songs/:songId/sections/order` only when non-null; `handleSectionDragCancel` (Esc) sends nothing. `sectionOrderMutation` applies the move to the `['song-sections']` cache at once (`applySectionMove`, the server's own rule) and rolls back on failure; the section poll pauses while it's in flight (`sectionOrderSaving`). There is no header `DragOverlay` — the preview is `SectionDragTag` (a gold name tag in the ruler strip) plus a see-through ghost of the section's clips in the track rows (pickups at their stored offset), positioned imperatively through refs; the dragged section stays in place under a dark veil.
 
-**1. Track rows** — bare track ID (e.g. `"track-drums"`). One per track. The droppable element is the sections container div inside `TimelineTrack` — it spans the full row from after the 256px header to the right edge. `disabled: isInvalidDrop` when the dragged clip belongs to a different instrument.
+### Drag pointer source, insertion lines and edge scroll
 
-**2. Gap zones** — `gap||${gapIndex}` — **clip-boundary** zones within the active drag's section. `gapIndex = 0` is before the first clip; `gapIndex = N` is after clip N−1 (i.e. between clips N−1 and N). Dropping here **reorders clips within the section** — it is not a section column operation. These are rendered as `GapZone` components (defined in `Timeline.tsx`) via a `gapZones` `useMemo` that runs whenever `activeDragData` changes. They are always rendered (not gated on `isDragging`) so their DOM nodes exist for the live rect check. Each zone is 20px wide, centered on the boundary, spanning the full track-area height.
+- **Pointer source** — while a header, timeline clip or file drag runs, the pointer comes from a window `pointermove` listener (capture phase) plus the timeline's `scroll` event (`startDragPointer` / `stopDragPointer`, `dragClientXRef` / `dragClientYRef`), never from dnd-kit's `activatorEvent.clientX + delta.x`. Song time under the pointer = `dragPointerTime(clientX)` = (clientX − timeline left + scrollLeft − 256) ÷ zoom. Every move and every timeline scroll runs `recomputeDragIndicatorsRef` (header target, new-section line, drag preview, tag and ghost positions).
+- **`nudgeDndCollision`** — during a file drag, each timeline scroll dispatches a synthetic `pointermove` at the last pointer position (carrying the live Shift/Option state), so dnd-kit re-runs collisions against re-measured rects and modifier tracking never sees a release.
+- **`SplitInsertionLine`** — every gold insertion line (header drag, new-section line `newSectionLineX`) is drawn in two identical parts at the same content X, each portalled into its own layer: one inside the sticky header row (running 1px past it to cover its `border-b`), one over the track rows. From the top of the header row to the bottom of the tracks, never in the ruler.
+- **Edge scroll** — `createEdgeScroller` (`client/src/lib/edge-scroller.ts`; options `getEl`, `axis`, `startInset`, `endScrollCap`, `onScrolled`; the playhead's constants `EDGE_ZONE_PX` 150 / `EDGE_ZONE_RELEASE_PX` 210 / `MIN_DRAG_DISTANCE_PX` 72 / `SCROLL_SPEED_PX`). Header and clip drags scroll horizontally from the track panel's edge. File drags (`startFileEdgeScroll`, `fileEdgeScrollMove`) run a horizontal scroller only while the pointer is over the track area, restarted on each entry so the 72 px gate counts from there, plus a vertical scroller (`axis: 'y'`) whose area is the whole timeline element (ruler and header included) with its zone measured from below the header. `endScrollCap` reads `contentEndRef` live, since a drag preview can grow the content. `dndAutoScroll.canScroll` keeps dnd-kit off the timeline and the bucket columns (off entirely for clip drags); the columns scroll with `useColumnEdgeScroll` (`client/src/hooks/use-column-edge-scroll.ts`).
 
-**`GapZone` implementation:** Uses a `refCallback` that writes to both `setNodeRef` (dnd-kit) and a local `nodeRef.current` (for live rect), so the collision function can call `container.node.current?.getBoundingClientRect()` to bypass the stale `droppableRects` cache. `isOver` alone drives the gold insertion line (drawn through `SplitInsertionLine`, the `lineLayers` prop) — no state threaded from the parent.
+### Snap controls
 
-**`gapZones` useMemo:** Reads `activeDragData.trackId` and `activeDragData.clip.sectionName` to find the track and section, then takes the boundaries from the layout: the section's start, then each clip's end (layout `start` + trimmed length), as `256 + posSec * zoom`. Returns `[]` when no drag is active.
+`SnapControls` (`SnapControls.tsx`) sits in the ruler spacer, the corner above the track names. `SnapSetting = { on, unit }` with units Bar / 1/4 / 1/8 / 1/16 (`SNAP_UNITS`), stored per browser under one `patchbay-snap` localStorage key (`readSnapSetting` / `writeSnapSetting`; missing or invalid → on, 1/4). The grid step is `snapGridSeconds(unit, bpm, timeSignature)`; Shift is read from each pointer and key event. Snap is used by clip and file drags, never by trims.
 
-**Section column reordering** is a **separate inner `DndContext`** around the section header row (`autoScroll={false}`), independent of the clip drag (no shared drop targets). `handleSectionDragStart` starts the drag pointer source and a `createEdgeScroller`; the target is `headerDropTarget(…)` from the pointer (`headerDrop` state, `headerDropRef`); `handleSectionDragEnd` sends it as `PUT /api/songs/:songId/sections/order` only when non-null; `handleSectionDragCancel` sends nothing. There is no header `DragOverlay` — the preview is `SectionDragTag` + a clip ghost, positioned imperatively through refs. Target rule, preview and edge scroll: see "Timeline layout and arrangement order" in root `CLAUDE.md`.
+### Timeline clip drags
 
-**There are no per-section-cell droppables.** The old `${trackId}||${sectionName}` format was replaced. `SectionCell` is a pure visual component with no dnd-kit involvement.
+- **Start** (`startClipDrag`): takes the poll hold, records the grab offset (pointer song time − clip layout start), reads Shift/Option from every pointer and key event (Shift/Alt key events stop in the capture phase so arrow-key navigation never sees them), sets a page-wide grabbing cursor, and starts a rAF loop for the floating clip. Window `blur` clears the modifiers and dispatches `visibilitychange`, which makes dnd-kit's pointer sensor cancel the drag (→ `handleDragCancel`).
+- **Floating clip** — `positionFloatingClip` writes `translateX` on the clip and its `data-clip-drag-lift` shadow layer every frame (never through React), so following the pointer never re-renders. `stopClipDrag` clears it in the same synchronous update as the drop's state, so the clip never flashes at its old spot.
+- **Placement** — `computeClipDragPlacement`: horizontal position only, anywhere over the timeline (`isPointerOverTimeline`, not over the Media Bucket); `placeDraggedClip` with the stored clips (`storedClipsInSection`) for the gaps and the drawn spans (`drawnSpansInSection`, cut pickups at their cut start) for flush snapping; `minOffset` from `clipDragMinOffset` + `pickupLeftLimit`. The result is `clipDragPreview` state (never written into the tracks); `updateClipDragPreview` keeps the same object when nothing changed.
+- **Drop** — `commitClipDragPlacement` applies the offsets at once and saves only the changed ones through `saveClipOffsets` (`PUT /api/songs/:songId/timeline-clips/offsets`); failure restores every offset and toasts. `placementChanged` false → nothing saved.
+- **Focus veil** — `ClipDragFocusVeil` dims the track rows and section header row outside [home section start − one bar, home section end].
 
-**Collision detection** — the outer `DndContext` uses the custom `trackFirstCollision` function (defined module-level in `Timeline.tsx`). The outer `DndContext` also sets `measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}` to force dnd-kit to remeasure droppables on every render — necessary because gap zones mount and reposition mid-drag.
+### Media Bucket file drags (versions and loose files)
 
-While the pointer is inside MediaBucket's on-screen bounds (`[data-media-bucket]`), only MediaBucket's own targets can match (`matchOrganizeDropTarget`); gap zones and track rows are skipped. Otherwise gap zones are checked **first** using a live `container.node.current?.getBoundingClientRect()` call (falls back to cached rect if the ref is null). This bypasses the stale `droppableRects` cache for freshly-mounted or repositioned zones. MediaBucket's targets are checked **second** (precise X+Y). Track rows are checked **third** by vertical band only — any X position on the row matches, preventing `overId: null` in empty horizontal track space. The bounds guard exists because a track row scrolled out of view keeps its measured rect, so a release on bucket blank space could match it and place the clip.
+- **Start** — `handleDragStart` → `startFileEdgeScroll({ vertical: true })`, `startFileDragBlurCancel`, then `startFileDropPreview` (version) or `startLooseDropPreview` (loose file); both call `beginFileDrop`, which takes the poll hold, sets the content-width floor and listens for Shift. The virtual clip (`virtualFileClip`) gets a new `nanoid()` that the drop POSTs.
+- **Version** — `{ kind: 'version', trackId, sectionName, firstClip }`; placement on its own track and section by horizontal position (`computeFileDragPlacement` → shared `computeFileDropPlacement`). `firstClip` (section not on the timeline): no preview, the new-section line (`firstClipBoundaryAt` / `firstClipHintAt`); drop at offset 0 with the hint. `commitVersionDrop` shows the clip and pushes at once, POSTs with `pushed` (and `placement` for a first clip), glows on success, rolls back (clip, pushes, section order) with a destructive toast on failure.
+- **Loose file** — `{ kind: 'loose', looseFileId, originTrackId }`; destination from `looseDropDestination` (track row by Y via `trackRowAt`, section via `sectionAt` on the stored layout, and the track must have that section folder: `trackHasSection`). Release with a placement → `freezeLoosePlacement` (reports `'deferred'` to the organize hook; the frozen preview is `looseConfirm.placement`) → confirm dialog (the standard `Dialog` with `data-light-backdrop` — a 25% backdrop from `index.css` so the frozen outline and pushed clips stay visible; positioned by `confirmDialogTop` in `client/src/lib/confirm-dialog-position.ts`: centred over the Media Bucket between the app header and the timeline, never over the outline; focus starts on Place, so Enter places; Esc / Cancel / X / outside click cancel) → `commitLoosePlacement` → `commitLooseLanding` (moves the file into the bucket cache at once with `moveLooseFileIntoBucketCache`, then `placeLooseFileAtPositionMutation`). Past the last section with off-timeline folders (`looseNewSectionAt`, `offTimelineSectionNames`) → the new-section dialog → `commitLooseLanding` with no position (append, new section at the end). Nothing else → nothing happens. Cancel resolves the deferred drop as not moved, so a spring-opened selection is restored.
+- **Media Bucket element** — frozen for the drag (`mediaBucketElementRef`, `bucketFrozen`): React skips the subtree, while its own state, queries and dnd-kit hooks still update it.
 
-`handleDragMove` checks `overId.startsWith('gap||')` first. When over a gap, it sets `isOverGap = true` and clears `insertionPoint`. Otherwise it sets `isOverGap = false` and clears `insertionPoint`.
+### Positions — offsets, no packing
 
-**`handleDragEnd` gap drop — clip reorder:**
-- **Bucket clip**: calls `insertClipInSection(targetTrack.id, clipSectionName, clip, gapIndex)`. No index adjustment needed — inserting a new clip, not removing an existing one.
-- **Timeline clip**: removes the clip from `sectionClips`, computes `adjustedGapIndex = oldIndex < gapIndex ? gapIndex - 1 : gapIndex` (removal shifts subsequent indices down by 1), splices the clip back at `Math.min(adjustedGapIndex, withoutClip.length)`, re-packs the section with `packSectionOffsets`, and saves with `patchChangedOffsets`. Uses `clipFromState` (the clip from current `tracks` state, not the stale drag-data closure) to get current `trimStart`/`trimEnd`.
-
-On a track-row drop, `overId` is the trackId directly — see clip reorder section below.
-
-### Positions — packing and offsets
-
-- **Packing** — `packSectionOffsets(tracks, trackId, sectionName)` sets each clip's `sectionOffset` in one track's section to the sum of the trimmed lengths before it, in array order. Run it after an insert, remove, reorder or trim inside that section; never on a sync or a section reorder. It touches only `sectionOffset`; positions follow from the layout. Pure, so safe inside `setTracks(prev => ...)`.
-- **Effective duration** — everywhere clip length is used for layout (section width, gap zones, mute-state range check, drag overlay width), use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` rather than raw `clip.duration`. (The drag overlay width applies to timeline-clip drags only; loose-file and version drags use the small `LooseFileDragOverlay` chip.) `clip.duration` is the full file length and is never modified.
-- **`insertClipInSection(trackId, sectionName, clip, index?, dropHint?)`** — `index` is the position within the section (omit to append). For a section's first clip it applies `placeFirstClipSection` to the `['song-sections']` cache and POSTs `placement` (`dropHint`, from `firstClipHintAt`); see "Timeline layout and arrangement order" in root `CLAUDE.md`.
-- **`recalcAllStarts`, `computeSectionLayout`, `getActiveSections`, `MIN_SECTION_WIDTH` and the `sectionOrder` state are gone.** Never derive `clip.start` from a pixel value or cursor position, and never add a layout outside `layoutTimeline`.
-
-### Insertion indicators
-
-There is one active insertion indicator per clip drag:
-
-**Column-level** — each `GapZone` component renders its own gold vertical line via dnd-kit's `isOver` state when the drag pointer is over it. No separate state is needed; the indicator is owned entirely by the `GapZone`. Two more gold lines use the same `SplitInsertionLine`: the new-section line (`newSectionLineX`, a section's first clip) and the header-drag line (`headerDrop.lineAt`).
-
-**`insertionPoint` is always `null` during drag.** `handleDragMove` unconditionally calls `setInsertionPoint(null)`. As a result, all track-row drops append to the end of the section (`idx = undefined` in `insertClipInSection`). The `SectionCell` gold vertical line never renders during live drag. Do not reintroduce cursor-position–based insertion indicator logic — it caused a "stuck at position zero" visual bug and is incompatible with the full-track droppable model.
-
-### Drop validation (what is rejected)
-
-| Condition | Result |
-|---|---|
-| Bucket clip's instrument ≠ track name | Reject — `isInvalidDrop` disables the droppable |
-| Timeline clip dropped onto different track | Reject — `isInvalidDrop` disables the droppable |
-| `over` is null on drag end | Reject — no droppable was hit |
-
-**During drag — visual feedback:**
-- **Invalid tracks** get a semi-transparent dark overlay (`rgba(0,0,0,0.5)`) rendered as an absolutely positioned child div with explicit inline styles (`position: absolute`, `left/top/bottom/right: 0`, `zIndex: 20`). The track row's own opacity does not change.
-- **Valid track** gets a gold border rendered as an absolutely positioned child div with explicit inline styles (`border: 1px solid rgba(212,175,55,0.6)`). No opacity change, no dimming inside the track.
-- `isDragging` is passed as a prop from `Timeline` (`activeDragData !== null`) to each `TimelineTrack` — not from `useDndMonitor` or any hook inside Track.tsx. This ensures all tracks receive the same drag state in the same render pass.
-- All overlay positioning uses explicit inline styles, not Tailwind `inset-0`, to avoid paint-clipping issues on wide scrollable containers.
-- **The track-level overlay is the single source of truth for all drag visual feedback.** `SectionCell` must never have drag-aware styling of any kind — no opacity, no grayscale, no filter, no className conditions that reference drag state. Clips and cells always render at full brightness regardless of drag state. (A previous `isInvalid && 'opacity-25 grayscale'` on `SectionCell` caused hard-to-trace clip dimming and was removed — do not reintroduce it.)
-- **`TimelineClip` must have zero drag-aware styling.** No `isDragging &&` conditional classes on it. The `DragOverlay` renders the floating ghost separately; the original clip element in the track must not change appearance during drag. (`BucketClip` is a file-browser card, not a track clip: it never moves and dims to `opacity-40` while dragged, like every other file-browser drag source.)
-- **The timeline itself does not change during drag.** No ghost section columns are injected speculatively. `sectionLayout` is used directly for all rendering; the old `effectiveSectionLayout` speculative-injection memo has been removed.
-
-### Clip reorder via track-row drop
-
-Dropping a timeline clip onto its own track row (not a gap zone) reorders it within its section using `delta.x` as a proxy for intent:
-
-- `delta.x < 0` (dragged leftward) → move clip to **index 0** (beginning of section)
-- `delta.x >= 0` (dragged rightward or no horizontal movement) → move clip to **end of section** (`withoutClip.length`)
-
-**Left-boundary guard:** Before processing a leftward drop, the handler checks whether the pointer released inside the 256px instrument panel. It reads `activatorEvent.clientX + delta.x` and compares to `timelineRef.current.getBoundingClientRect().left`. If the cursor is left of the track area, the drop is cancelled. This prevents accidental reorders when the user drags a clip toward the panel and releases. Known issue: `delta.x` already includes timeline scroll, so this counts scroll twice; left with a comment for the drag rebuild (header and file drags use the drag pointer source instead).
-
-**Trim-safe splicing (`clipFromPrev`):** Inside `setTracks(prev => ...)`, the clip must be read from `prev` state rather than from the stale drag-data closure. The closure captures `clip` at drag-start, which may have stale `trimStart`/`trimEnd` if the clip was trimmed after the drag began. `clipFromPrev = sectionClips.find(c => c.id === clip.id) ?? clip` ensures `packSectionOffsets` sees current trim values and computes correct effective durations.
-
-**Index adjustment for capturedPoint (unused path):** If `insertionPoint` ever resumes (currently always null during drag), `oldIndex < newIndex → newIndex -= 1` corrects for the removal shift — same logic as the gap zone `adjustedGapIndex`.
-
-After splicing, `packSectionOffsets` runs inside `setTracks`, and `patchChangedOffsets` PATCHes the clips whose `sectionOffset` changed.
+- **Nothing packs.** `packSectionOffsets`, `patchChangedOffsets`, `recalcAllStarts`, `computeSectionLayout`, `getActiveSections`, `MIN_SECTION_WIDTH` and the `sectionOrder` state are all gone. A clip's offset changes only when it is dragged, pushed later by a placement, or its own left edge is trimmed.
+- **Effective duration** — layout and placement use the trimmed length, `(trimEnd ?? duration) - (trimStart ?? 0)` (`effectiveLength`, `clipLength`); drawing and playback use `playedSpan` (trimmed length − head cut). `clip.duration` is the full file length and is never modified.
+- **`insertClipInSection(trackId, sectionName, clip)`** — Media Bucket menu "Add to Timeline" only: appends after the furthest clip end (`appendOffset`) on screen and POSTs with no `sectionOffset`, keeping the offset the server answers with. For a section's first clip it applies `placeFirstClipSection` to the `['song-sections']` cache (end rule) and pauses the section poll until the POST settles.
+- Never derive `clip.start` from a pixel value or cursor position, and never add a layout outside `layoutTimeline`.
 
 ### Drag data — `trackId` requirements
 
-**`BucketClip`** embeds `trackId` in its dnd-kit drag data: `{ clip, type: 'bucket-clip', trackId, ideaId, songId, isFullTake, trackName }` (`BucketClipDragData`). `clip` comes from `apiClipToClip` (`bucket-api.ts`), which carries `ideaId`; the other fields are for the bucket drop targets (see "Moving real-song versions" in root `CLAUDE.md`). The Songs quick-browser's cards use the same payload with drag id `songs-clip-{id}`. `Timeline.handleDragStart` stores it in `activeDragData`. All drop validation (wrong-track rejection, `isInvalidDrop` render, `gapZones` useMemo) uses this `trackId`. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
+**`BucketClip`** embeds `trackId` in its dnd-kit drag data: `{ clip, type: 'bucket-clip', trackId, ideaId, songId, isFullTake, trackName }` (`BucketClipDragData`). `clip` comes from `apiClipToClip` (`bucket-api.ts`), which carries `ideaId`; the other fields are for the bucket drop targets (see "Moving real-song versions" in root `CLAUDE.md`). The Songs quick-browser's cards use the same payload with drag id `songs-clip-{id}`. `Timeline.handleDragStart` stores it in `activeDragData` and starts the version preview from it; the full-take row validation uses the same `trackId`. The MOCK_SONG instrument-name lookup is a fallback for legacy mock clips only — real API clips always have `trackId` set.
 
-**`TimelineClip`** must also embed `trackId` in its drag data: `{ clip: {...}, type: 'clip', trackId }`. Without it, gap drops and track-row reorders fail silently because `dragData?.trackId` is undefined and the handlers bail early. `trackId` is threaded as a prop: `Timeline` → `TimelineTrack` (passes `trackId={track.id}`) → `SectionCell` (prop `trackId: string`) → `TimelineClip` (prop `trackId?: string`).
+**`TimelineClip`** embeds `trackId` in its drag data: `{ clip: {...}, type: 'clip', trackId }`; `startClipDrag` needs it. `trackId` is a prop: `Timeline` → `TimelineTrack` → `TimelineClip`.
 
-`clipSectionName` in `handleDragEnd` is read as `dragData?.clip?.sectionName ?? dragData?.sectionName` — the double path handles real API clips (sectionName at top level of dragData) vs. mock clips (on dragData.clip).
-
-**`onAddToTimeline` (right-click "Add to Timeline")** follows the same contract as drag-drop. `BucketClip` passes `trackId` explicitly and `clip.sectionName` is read directly on the clip object — no name-parsing or substring heuristics. `Timeline`'s handler (`handleAddToTimeline`) bails with `console.warn('[AddToTimeline] missing', ...)` when either value is absent. **Known landmine:** a clip whose `section_name` is `null` in the DB (can happen with idea-sourced clips that were never associated to a section) will silently no-op on both drag-drop and right-click add — the warn fires but no placement occurs. Do not add silent fallbacks (e.g. using `tracks[0]` or deriving sectionName from the clip name string) — they silently place clips on the wrong track.
+**`onAddToTimeline` (right-click "Add to Timeline")** follows the same contract as drag-drop. `BucketClip` passes `trackId` explicitly and `clip.sectionName` is read directly on the clip object — no name-parsing or substring heuristics. `Timeline`'s handler bails with `console.warn('[AddToTimeline] missing', ...)` when either value is absent. **Known landmine:** a clip whose `section_name` is `null` in the DB (can happen with idea-sourced clips that were never associated to a section) will silently no-op — the warn fires but no placement occurs. Do not add silent fallbacks (e.g. using `tracks[0]` or deriving sectionName from the clip name string) — they silently place clips on the wrong track.
 
 ### Stale closure rule
 
-All event handlers registered inside `useEffect(fn, [])` (e.g. `handleRemoveClip`, `handleToggleMute`) must use `setTracks(prev => ...)` and read current state from `prev`, not from the `tracks` variable in the outer closure (which is permanently `[]` in those handlers).
-
-Packing (`packSectionOffsets`) needs no section order, so zero-dep handlers such as `trim-preview` need no section ref. `insertClipInSection` is recreated on every render, so it reads `sections` and `layout` directly from the closure.
+All event handlers registered inside `useEffect(fn, [])` (e.g. `handleRemoveClip`, `handleToggleMute`, `handleTrimPreview`) must use `setTracks(prev => ...)` and read current state from `prev`, not from the `tracks` variable in the outer closure (which is permanently `[]` in those handlers). Drag code that runs from window listeners reads refs (`clipDragRef`, `fileDropRef`, `dragClientXRef`, `clipDragKeysRef`, `recomputeDragIndicatorsRef`, `positionFloatingClipRef`), refreshed every render.
 
 ### API calls after mutations
 
-Every insert fires a `POST /api/tracks/:trackId/clips` for the new clip (with `placement` for a section's first clip; checks `res.ok`), then `patchChangedOffsets` for existing clips whose `sectionOffset` changed. Every remove fires `DELETE`, then the same. Offset PATCHes send only `sectionOffset` — never `start` — and are fire-and-forget (`.catch(console.error)`).
+- Drag saves, version drops and loose-file drops: see "Saving" in root `CLAUDE.md`. Each holds the polls until its save and the refetch after it are done, rolls back on failure and toasts.
+- Remove: `DELETE /api/timeline-clips/:id`; the clips after it keep their offsets, nothing else is sent.
+- Menu Add to Timeline: `POST /api/tracks/:trackId/clips` with no `sectionOffset` (checks `res.ok`), plus `placement` for a section's first clip.
+- Offsets are never sent through `start`; the server writes the `start` cache from the layout.
 
 ### Timeline polling and live track sync
 
-The timeline `useQuery` has `refetchInterval: 3000` and an explicit `queryFn` that fetches `/api/songs/${SONG_ID}/timeline`. This means the timeline is always at most 3 seconds out of date when instruments are added or removed from outside the timeline view.
+The timeline `useQuery` (`/api/songs/${songId}/timeline`) and the `['song-sections', songId]` query both have `refetchInterval: 3000`, set to `false` while `timelineEditBusy` (clip/file drag holds via `clipDragsBusy`, trim drags and saves via `trimsBusy` from `trim-busy` events). The section query also pauses for this browser's own reorder (`sectionOrderSaving`) and first-clip POSTs (`firstClipPostsInFlight`). Taking a hold calls `dropPollsInFlight` (cancels both queries) so a response already on its way can't bring back the old state. A drag's hold is taken by `holdPollsForClipDrag` (clip drags in `startClipDrag`, file drags in `beginFileDrop`) and released exactly once through the function `takeClipDragHold` returns: at once when the drag ends with nothing to save (Esc, blur, a no-change release), otherwise after the save and the refetch after it, whether the save worked or not. A loose file's hold passes to its confirm or new-section dialog and is released on Cancel or after its save. Trims use `trim-busy` events (+1 on start, −1 when the trim's save and refetch finish).
 
 There are two `useEffect`s that sync `apiTracks` into the local `tracks` state:
 
 1. **Initial load** (guarded by `tracksInitialized.current`): runs once when `apiTracks`, the song's `song_sections` and the song (tempo) have all loaded, so the first paint has the right order and widths; converts and sets the full tracks array. After this, `tracksInitialized.current = true` and this branch never runs again.
 
-2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, syncs clips for existing tracks from the API response, and appends any new tracks. Preserves local `muted`/`solo`/`volume` state. New tracks start with empty clips. Clips and `sectionOffset` are taken from the server as they are (`serverClipsToClips` orders each section by offset); it never re-packs or writes. Clip sync is needed so that when a section is hidden (which deletes its timeline clips on the server), the timeline removes those clips within 3 seconds without a manual refresh.
+2. **Live sync** (runs on every `apiTracks` poll): removes any tracks missing from `apiTracks`, syncs clips for existing tracks from the API response, and appends any new tracks. Preserves local `muted`/`solo` state. New tracks start with empty clips. Clips and `sectionOffset` are taken from the server as they are (`serverClipsToClips` orders each section by offset); it never re-packs or writes. Clip sync is needed so that when a section is hidden (which deletes its timeline clips on the server), the timeline removes those clips within 3 seconds without a manual refresh.
 
 **Do not merge the two effects.** The initial-load guard exists to prevent the API response from clobbering clip state that the user has added to the timeline mid-session (before the refetch fires).
 
@@ -160,7 +125,7 @@ See **Timeline playhead & occlusion** section below for the full z-map and WebKi
 The `requestAnimationFrame` loop runs while `isPlaying === true`. Each frame:
 1. Advances the playhead by `timeDelta` seconds (frame delta / 1000) — the playhead is time, so zoom plays no part in advancing it.
 2. Uses that time directly as `playheadTime` (no pixel conversion).
-3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + effectiveDuration)` (where `effectiveDuration = (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)`), calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume` and `muted` every frame. `playbackRate` is never written — see "Tempo source" below. When playback starts, `audio.currentTime` is set to `clip.trimStart ?? 0` so the audio begins at the trimmed in-point.
+3. For each clip in `tracks`: if `playheadTime ∈ [clip.start, clip.start + playedSpan(clip).length)` (`clip.start` is the layout's cut start; `playedSpan` counts trim and a pickup's head cut), calls `audio.play()` guarded by `pendingPlayRef`, and sets `volume` and `muted` every frame. `playbackRate` is never written — see "Tempo source" below. When playback starts, `audio.currentTime` is set to the played in-point (`playedSpan(clip).inPoint` + time already past the clip's start).
 4. If the clip is out of range and not paused, calls `audio.pause()`.
 
 **Safari AudioContext unlock:**
@@ -208,7 +173,7 @@ If `playheadRef.current + timeDelta` reaches or passes `frameTimelineEnd` on a g
 - **`BeatGrid`** (`BeatGrid.tsx`) — an SVG with a `<pattern patternUnits="userSpaceOnUse">`, one tile per bar (or per N bars when thinned), starting at x = 0 = song time 0, rendered as the first child of each track lane's droppable div in `Track.tsx`: `pointer-events-none`, `absolute inset-0`, no z-index, so SectionCells and clips paint above it and dnd-kit measuring is unaffected. Pattern ids come from `useId`. Line colors are constants (bar 0.10, beat 0.045, subdivision 0.04 white alpha). It replaced the old quarter-second `linear-gradient` lane background. `React.memo` on primitive props so it doesn't redraw every playback frame.
 - **Ruler** (`Ruler.tsx`) — the outer shell is unchanged (`h-8`, sticky, z-30, opaque `bg-card`, `w-64` placeholder, `onSeek` contract); only its marks changed. 1-based bar numbers thinned by `gridDensity`; bar/beat/subdivision ticks as an SVG pattern in a 16px bottom band (bar 12px, beat 7px, subdivision 4px; tick opacities 0.5 / 0.35 / 0.32 of `text-muted-foreground`). It draws across `contentSeconds = max(endOfTimeline + 15, 100)` — the full content width; the old 100-label cap is gone. Positions are `t * zoom` with no +256 offset (the ruler's inner div already starts past the panel). Marks live in a memoized `RulerMarks` (Timeline re-renders every frame during playback).
 - **Transport** shows a BAR readout (`formatBarsBeats`) next to the timecode, fed by the same `time-update` events.
-- **Sections vs bars** — section lines usually don't land on bar lines, because sections are still sized from clip lengths. Expected until the timeline placement work.
+- **Sections vs bars** — every section starts on a beat, but not necessarily on a bar: section lengths are whole beats (content rounded up, or `base_length`).
 
 ### Transport row layout
 
@@ -353,29 +318,31 @@ If the playhead is not currently visible, a one-time snap centers it at 50% of t
 Timeline clips have left and right trim handles that physically resize the clip container without modifying `clip.duration`. `clip.duration` always stores the full file length; trim state is held in `trimStart` (seconds to skip from the start, default 0) and `trimEnd` (cutoff point in seconds, `null` = play to end), both stored in the `timeline_clips` DB table.
 
 **UI — `TimelineClip` in `Clip.tsx`:**
-- Gold 8px-wide handles render at `left: 0` and `right: 0` on hover (`isHovered` state, driven by `onMouseEnter`/`onMouseLeave` on the clip container)
-- `displayWidth = ((trimEnd ?? clip.duration) - trimStart) * zoom` — the clip container's `width` is set to this value; the `left` position stays fixed at `(clip.start - sectionStart) * zoom` so the clip never shifts horizontally during a left-handle drag
+- Trim starts within 8px of an edge (see "Clip trim visual redesign" below); there are no visible handles
+- `displayWidth` = played length (`playedSpan`) × zoom; `left = clip.start * zoom` on the track row. A left trim moves the clip's start with the audio (its offset changes by the same amount as `trimStart`), so the right edge stays put
+- Free movement, no snap. Limits come from props computed in `TimelineTrack` (`trimPrevEnd`, `trimPickupPrevEnd`, `trimNextStart`: `trimNeighbours` with the track's pickup limit and `nextPickupStop`), applied by the shared `clampTrim`; minimum length `minTrimLength` (0.5 s or the whole file). Option, read live, lets a left trim make a pickup (same `startPickupDrag` / `pickupAllowed` / `afterPickupPlacement` state as drags). Esc and window blur cancel
+- Each trim drag and save signals `trim-busy` (+1/−1) so Timeline holds both polls
 - Drag is captured with `window.addEventListener('pointermove'/'pointerup')` (no `setPointerCapture`) to avoid conflicts with dnd-kit sensors. `e.nativeEvent.stopImmediatePropagation()` on `pointerdown` prevents dnd-kit from starting a drag
 - `isTrimDragging` ref gates the `positionStyle` so dnd-kit's `style` prop (transform) is suppressed during trim drag
 - Local `trimStart`/`trimEnd` state is updated on every `pointermove` frame; `patchTrim` fires on `pointerup`
-- On every `pointermove` frame, `Clip.tsx` also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd }`. `Timeline.tsx` listens in a zero-dep `useEffect` and updates the clip's trim and re-packs its section with `packSectionOffsets` inside `setTracks(prev => ...)` — so neighboring clips reflow in real time during drag. Nothing is PATCHed from here; the trim route re-packs the same offsets on the server
+- On every `pointermove` frame, `Clip.tsx` (`showTrim`) also dispatches a `trim-preview` CustomEvent: `{ clipId, trimStart, trimEnd, sectionOffset? }`. `Timeline.tsx`'s zero-dep `handleTrimPreview` updates only that clip's trim (and, for a sectioned clip, its offset) inside `setTracks(prev => ...)`. Neighbours never move and nothing is re-packed; nothing is saved from here
 - A `useEffect` syncs `trimStart`/`trimEnd` from the prop whenever the API refetches (so a live-sync poll doesn't clobber active drag state — the effect only runs when the clip is not being dragged)
 - All trim actions live inside a **▶ Trim submenu** (`ContextMenuSub`) in the `TimelineClip` right-click menu. Menu order: Detect Trim Points → Apply Trim to All Instances (conditional) → Reset Trim on All Instances (conditional) → Reset Trim (conditional). The submenu is always visible; individual items appear conditionally.
 
 **API — `PATCH /api/timeline-clips/:id/trim`:**
-Accepts `{ trimStart: number, trimEnd: number | null }`. Validates both fields. Calls `storage.updateTimelineClip`. Does not touch `isFinal` or `start`. On success, `patchTrim` in `TimelineClip` calls `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` to push the new trim values into the tracks state so the rAF loop and live-sync effect see them immediately.
+Accepts `{ trimStart: number, trimEnd: number | null }`. Goes through `writeTimelineClipTrim` (`storage.ts`), the one write for trim values: 400 unless 0 ≤ trimStart < trimEnd ≤ duration, the clip stays at least `minTrimLength`, and the new offset respects the pickup limits; moves `section_offset` with `trimStart`. Does not touch `isFinal`; nothing else moves. On success, `patchTrim` in `TimelineClip` calls `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` to push the new trim values into the tracks state so the rAF loop and live-sync effect see them immediately.
 
 **Layout — effective duration everywhere:**
-`layoutTimeline`, `packSectionOffsets`, the mute-state range check, and the `DragOverlay` width all use `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)` instead of raw `clip.duration`. This ensures section columns expand/contract to match the audible content, not the raw file length.
+`layoutTimeline` and the placement helpers use the trimmed length `(clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0)`; drawing, playback, seek, skip, mute and arrow keys use `playedSpan` (trimmed length − head cut). Section columns match the audible content, not the raw file length.
 
 **After a trim:**
-Positions are never read from stored `start`: the layout recomputes from the trim values and offsets the poll brings back, so siblings land correctly after a trim PATCH without any client-side re-pack in live sync.
+Positions are never read from stored `start`: the layout recomputes from the trim values and offsets the refetch brings back. The polls stay held until that refetch, so the clip never snaps back.
 
 **New and replaced clips always start untrimmed:**
-`insertClipInSection` explicitly sets `trimStart: 0, trimEnd: null` on every new clip it creates and in the `POST /api/tracks/:trackId/clips` body. Spreading from the bucket clip drag data is not sufficient because bucket clips don't carry these fields. `performReplace` in `TimelineClip` also explicitly sends `trimStart: 0, trimEnd: null` in its `PATCH /api/timeline-clips/:id` body — the general PATCH route is a partial update and would otherwise preserve the original clip's trim values on the replacement.
+Every new-clip path (`insertClipInSection`, version and loose-file drops via `virtualFileClip`) sets `trimStart: 0, trimEnd: null` and sends them in the POST body. Spreading from the bucket clip drag data is not sufficient because bucket clips don't carry these fields. `performReplace` in `TimelineClip` also sends `trimStart: 0, trimEnd: null` in its `PATCH /api/timeline-clips/:id` body; the server (`updateTimelineClipKeepingSpot` → `writeTimelineClipTrim` with `keepOffset`) keeps the clip's offset and cuts `trimEnd` short where the next clip starts (`trimEndBeforeNext`; not for the last clip in a section). Replace refuses with 409 when the new file is shorter than the minimum length, or a pickup's new file can't reach the downbeat; the client toasts.
 
 **Export:**
-`ExportDialog.tsx` passes trim to the `OfflineAudioContext` via `source.start(when, trimStartSecs, trimDuration)` where `trimDuration = (clip.trimEnd ?? decoded.duration) - trimStartSecs`. The total export duration also uses effective trimmed durations so silence is not rendered past the trim out-point.
+`ExportDialog.tsx` passes trim to the `OfflineAudioContext` via `source.start(when, inPoint, length)`, where the in-point is `trimStart` + the layout's head cut (`exportClipsFor`, shared by mix and stems); zero-length clips are skipped. The total export duration also uses effective trimmed durations so silence is not rendered past the trim out-point.
 
 ### AI trim detection (client-side) — ✅ Built
 
@@ -400,11 +367,11 @@ Positions are never read from stored `start`: the layout recomputes from the tri
 The same clip name placed multiple times on the same track (same `trackId + name`) represents the same recording in different sections. "Apply Trim to All Instances" stamps the selected clip's current `trimStart`/`trimEnd` onto all of them. "Reset Trim on All Instances" sets `trimStart: 0, trimEnd: null` on all of them. Both reuse `POST /api/timeline-clips/apply-trim-to-instances`.
 
 **`instanceCount` prop threading:**
-`TimelineClip` receives an `instanceCount?: number` prop (default 1). The count is computed in `SectionCell` (`Track.tsx`) per clip using the full track clip array — not just the section slice, because the same name may appear in a different section:
+`TimelineClip` receives an `instanceCount?: number` prop (default 1). `TimelineTrack` (`Track.tsx`) computes it per clip from the full track clip array — not just the section, because the same name may appear in a different section:
 ```ts
-const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
+instanceCount={track.clips.filter((c) => c.name === clip.name).length}
 ```
-`allTrackClips` is passed from `TimelineTrack` as `track.clips` (all clips across all sections of the track). The `SectionCellProps` interface includes `allTrackClips: Clip[]`. Do not compute the instance count from query cache data — the prop is always fresh because `SectionCell` re-renders whenever `track.clips` changes.
+Do not compute the instance count from query cache data — the prop is always fresh because the row re-renders whenever `track.clips` changes.
 
 **Both instance actions are only shown when `instanceCount > 1 && (trimStart > 0 || trimEnd !== null)`.** When N = 1 (only this clip), the items are absent entirely — no toast, no confirmation.
 
@@ -412,7 +379,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 
 **After success:** `queryClient.invalidateQueries({ queryKey: ['/api/songs/${songId}/timeline'] })` is called so the live-sync effect picks up the new trim values for all affected clips within the next poll cycle.
 
-**`POST /api/timeline-clips/apply-trim-to-instances` route** is registered before `PATCH /api/timeline-clips/:id` in `routes.ts`. Although Express won't confuse a POST with a PATCH, keeping static paths before parameterized ones is the convention. The route runs a single `db.update(timelineClips).set({ trimStart, trimEnd }).where(and(eq(trackId), eq(name))).run()` — one DB round-trip regardless of instance count.
+**`POST /api/timeline-clips/apply-trim-to-instances` route** is registered before `PATCH /api/timeline-clips/:id` in `routes.ts`. Although Express won't confuse a POST with a PATCH, keeping static paths before parameterized ones is the convention. The route (`applyTrimToInstances`) writes each instance through `writeTimelineClipTrim`, clamping it at its own neighbours and limits (or skipping it when no allowed trim exists); it never creates a pickup.
 
 ### Bucket clip cards — WaveformPlayerCard — ✅ Built
 
@@ -461,7 +428,7 @@ const instanceCount = allTrackClips.filter((c) => c.name === clip.name).length;
 - `corner` positions the badge absolutely within its parent: `top-right` → `absolute top-0 right-0 p-0.5`; `bottom-right` → `absolute bottom-0 right-0 p-0.5`. The parent must be `relative` (both `TimelineClip`'s container and `WaveformPlayerCard`'s outer card are).
 
 **Used by:**
-- **`TimelineClip`** (`Clip.tsx`) — final badge `top-right` (only clip-level indicator; the `isFinal` ring on the clip container was removed separately — see "Recently fixed bugs" in root `CLAUDE.md`, "Timeline/Media Bucket final and comment badge inconsistency" — it rendered as an unwanted gold line at clip seams and added no information the badge doesn't already convey), comment badge `bottom-right` with `tcHasUnread`/`tcCommentInfo`-driven `onClick` opening `ClipInfoWindow` with `focusComments: true`.
+- **`TimelineClip`** (`Clip.tsx`) — final badge `top-right` (only clip-level indicator; the `isFinal` ring on the clip container was removed — it rendered as an unwanted gold line at clip seams and added no information the badge doesn't already convey), comment badge `bottom-right` with `tcHasUnread`/`tcCommentInfo`-driven `onClick` opening `ClipInfoWindow` with `focusComments: true`.
 - **`WaveformPlayerCard`** — final badge `top-right`, rendered directly on the outer card whenever `isFinal` is true. **`BucketClip`** passes the comment badge in as `children` (`bottom-right`, `hasUnread`-driven, `onClick` opens `ClipInfoWindow` with `focusComments: true`) — both badges share the same `relative overflow-hidden` card container, so they never need coordination beyond their fixed corners.
 
 - **Dashboard** — organized file cards on the Ideas shelf and Songs quick-browser (`clipNotesBadge` → `SongsClipContextMenuCard`'s `notesBadge` prop), and the Ideas-shelf loose-file preview card. All open More Info with `focusComments` and mark read on open.
@@ -612,8 +579,8 @@ Set `true` on `pointerdown` for any Mute/Solo/volume-slider control in the track
 `timeline_clips` has a `bucketClipId` column (nullable text, references `clips.id`) that stores a direct link to the source bucket clip. This replaced an earlier soft-matching scheme that resolved the link at read-time by walking the bucket cache and matching on `trackId + sectionName + name` — a guessable link that silently broke on rename, Replace, or duplicate-name collisions within a section.
 
 `bucketClipId` is set at write time by every path that creates or repoints a timeline clip's source:
-- **Drag-to-timeline** and **right-click "Add to Timeline"** (both go through `insertClipInSection` in `Timeline.tsx`) — set `bucketClipId: clip.id` directly, since `clip` at these call sites is always the source bucket clip.
-- **Timeline-clip reorder** (gap drop, track-row drop with `activeType === 'clip'`) — does not call `insertClipInSection` and never touches `bucketClipId`; only `start` is patched. The existing value is preserved automatically.
+- **Version drops, right-click "Add to Timeline" and full-take drops** (`commitVersionDrop` via `virtualFileClip`, `insertClipInSection`, `insertFreeformClip` in `Timeline.tsx`) — set `bucketClipId: clip.id` directly, since `clip` at these call sites is always the source bucket clip. A placed loose file's clip keeps the loose file's id, so `bucketClipId` is that id.
+- **Timeline clip drags** — only `sectionOffset` is saved (`PUT …/timeline-clips/offsets`); `bucketClipId` is never touched.
 - **Replace** (`PATCH /api/timeline-clips/:id` from the Replace submenu) — sets `bucketClipId` to the selected replacement's `id`, so the source link correctly repoints to the new version rather than staying attached to the old one.
 
 `ClipInfoWindow` reads `effectiveId = clip.bucketClipId ?? clip.id` for all comment API calls (unless a `target` is passed — see "Comment targets" below), and resolves `effectiveMetadata` via a direct `bucketClipId` lookup against the bucket cache (an O(1) find, not a nested walk). The old name-matching code is left in place, commented out, as a deprecated fallback — not deleted, in case a row is ever found with a null `bucketClipId` (should not happen given the backfill, but defensive).
@@ -705,7 +672,7 @@ Each `TimelineClip` in `Clip.tsx` renders a `<canvas>` waveform over its clip ba
 **Draw function (`drawRef.current`):**
 - Reads `canvas.offsetWidth` / `canvas.offsetHeight` for current CSS pixel dimensions.
 - Applies device pixel ratio: `canvas.width = w * dpr; canvas.height = h * dpr; ctx.scale(dpr, dpr)` — renders at physical pixel resolution, displays at CSS size.
-- Slices `buffer.getChannelData(0)` to the trimmed region: `[trimStart * sampleRate, (trimEnd ?? duration) * sampleRate)`.
+- Slices `buffer.getChannelData(0)` to the played region from `playedSpan` (trim plus a pickup's head cut): `[inPoint * sampleRate, outPoint * sampleRate)`.
 - Iterates one column per CSS pixel, finds min/max sample in each slice, draws a vertical `fillRect` centered at `midY`. Minimum bar height: 1px (for silence).
 - Color: the track color, read back resolved via `getComputedStyle(canvas).color` (the canvas element's CSS `color` is `trackColor`; canvas `fillStyle` can't resolve `var()`), at canvas CSS opacity 0.5. See "Timeline clip look" in root `CLAUDE.md`.
 
@@ -732,7 +699,7 @@ Clicking "Clear Timeline" in the background context menu triggers a `GET /api/so
   - **Leave Final Clips** — fires `DELETE /api/songs/:songId/timeline-clips/non-final` (fire-and-forget), closes the dialog immediately, then calls `queryClient.invalidateQueries` for the timeline key. No manual local state update — the live sync picks up the server result when the query refetches.
 
 **`deleteNonFinalTimelineClips` (server):**
-One transaction: deletes the non-final clips on the song's active tracks, re-packs each remaining track + section with trimmed lengths (`recomputeSectionOffsets`), and writes each remaining sectioned clip's `start` cache from `computeSongLayout`. A final full take is never moved; `song_sections` is never touched. see "Timeline layout and arrangement order" in root `CLAUDE.md`.
+One transaction: deletes the non-final clips on the song's active tracks (they leave gaps; the finals keep their offsets, nothing is re-packed), and writes each remaining sectioned clip's `start` cache from `computeSongLayout`. A final full take is never moved; `song_sections` is never touched. See "Timeline layout and arrangement order" in root `CLAUDE.md`.
 
 `clearDialogState` in `Timeline.tsx` is a string union `'none' | 'checking' | 'simple' | 'enhanced'` (replaced the old `showClearConfirm: boolean`). The `'checking'` state covers the async server round-trip before the dialog appears.
 
@@ -741,7 +708,7 @@ One transaction: deletes the non-final clips on the song's active tracks, re-pac
 Right-clicking a timeline clip shows a "Show in File Browser" menu item (icon: `FolderSearch`). Clicking it dispatches a `find-in-bucket` CustomEvent with `{ trackId, sectionName, clipName }`, which causes `MediaBucket` to navigate its three-column browser to the matching instrument → section → versions view.
 
 **`trackId` prop threading:**
-`TimelineClip` receives `trackId` as an optional prop (`ClipProps.trackId?: string`). It is threaded down from `TimelineTrack` → `SectionCell` → `TimelineClip` — both `SectionCellProps.trackId: string` (required) and `ClipProps.trackId?: string` (optional). `TimelineTrack` passes `trackId={track.id}` to each `SectionCell` in the sections map.
+`TimelineClip` receives `trackId` as an optional prop (`ClipProps.trackId?: string`). `TimelineTrack` passes `trackId={track.id}` straight to each `TimelineClip` (clips are drawn at row level; `SectionCell` takes no clip props).
 
 **`find-in-bucket` CustomEvent:**
 Dispatched by `TimelineClip` (`Clip.tsx`) on menu click:
@@ -764,17 +731,19 @@ A `useEffect(fn, [])` registers the handler. To avoid stale closures (the handle
 
 ### Placement feedback (Add to Timeline) — ✅ Built
 
-**Place on Timeline dialog (loose files, drop or menu):** the Section list shows only the chosen track's active, non-Full-Take sections; a track switch clears an invalid section. Failures show a destructive toast (the dialog closes before the server answers).
+**Place on Timeline picker (a loose file's "Add to Timeline" menu item):** the Section list shows only the chosen track's active, non-Full-Take sections; a track switch clears an invalid section. Failures show a destructive toast (the dialog closes before the server answers). A loose-file **drop** never opens this picker; it uses the confirm dialog or the new-section dialog (see "Media Bucket file drags").
 
-Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a gold landing flash. Place on Timeline (the loose-file dialog, opened by a drop or by the menu) flashes the placed clip the same way, no toast. Bucket → timeline drag placement is **deliberately silent** — do not add toasts or flashes to the drag path (`handleDragEnd`).
+**Placed loose file in the Media Bucket (`flashBucketDestination` in `Timeline.tsx`):** after a successful placement (drop or picker) the bucket shows where the file went with the landing flash's gold, never changing its selection: the new version card when its section is the one open in the Files column (a `requestLandingFlash` with a 3 s wait; that column scrolls the minimum to show it, smooth, instant under reduced motion), otherwise the destination Track row and, for the open track, its Section row, only if visible, with no scrolling. Rows are found by their drop ids (`springRowAttrs`). It no longer jumps to the file.
+
+Context-menu "Add to Timeline" fires a styled toast and scrolls the newly placed clip into view with a gold landing flash. Place on Timeline (the loose-file picker from the menu) flashes the placed clip the same way, no toast. Version and loose-file drops onto the timeline glow too once their save succeeds, no toast; a placed loose file is also shown in the Media Bucket (`flashBucketDestination`, see "Landing flash" in root `CLAUDE.md`). Timeline clip drags (moving a clip already on the timeline) don't flash.
 
 **Gold outer glow (`TimelineClip` in `Clip.tsx`):**
-The shared landing flash (see "Landing flash" in root `CLAUDE.md`): `flashGold(clipContainerRef.current, { look: 'outerGlow', peakAlpha: TIMELINE_LANDING_GLOW_ALPHA, reducedMotion: 'ring' })` — a 2px gold ring plus soft glow OUTSIDE the clip's edge, animated as `box-shadow` on the container. Never a tint: Drums clips are gold. Under `prefers-reduced-motion`, a static gold outline just outside the edge for ~1.5s. While `isFlash` is set the clip's `zIndex` goes 1 → 2 (above neighbouring clips), and its `SectionCell` switches `overflow-hidden` → `overflow-visible` (it otherwise clips the glow, since the clip fills the cell). That cell change is tied to the flash, not to dragging, so the "`SectionCell` must never have drag-aware styling" rule still holds. **Do not use `ring-*` classes on timeline clips** — `overflow-hidden` on the clip container clips inline box-shadows (rings) to a sliver on one edge.
+The shared landing flash (see "Landing flash" in root `CLAUDE.md`): `flashGold(clipContainerRef.current, { look: 'outerGlow', peakAlpha: TIMELINE_LANDING_GLOW_ALPHA, reducedMotion: 'ring' })` — a 2px gold ring plus soft glow OUTSIDE the clip's edge, animated as `box-shadow` on the container. Never a tint: Drums clips are gold. Under `prefers-reduced-motion`, a static gold outline just outside the edge for ~1.5s. While `isFlash` is set the clip's `zIndex` goes 1 → 2 (above neighbouring clips). Clips are drawn at row level, so no section cell clips the glow. **Do not use `ring-*` classes on timeline clips** — `overflow-hidden` on the clip container clips inline box-shadows (rings) to a sliver on one edge.
 
 **Flash plumbing:**
-- `insertClipInSection` returns the new clip's `id` (`nanoid()` generated, same value POSTed to the server); Place on Timeline's `onSuccess` uses the server's `timelineClip.id`, which mounts with `isFlash` already set once live sync merges it
+- `insertClipInSection` and the drop paths use a client `nanoid()` id, the same value POSTed to the server (a confirmed drop's clip is already on screen under it); the Place on Timeline picker's `onSuccess` uses the server's `timelineClip.id`, which mounts with `isFlash` already set once live sync merges it
 - `flashClipId: string | null` state lives in `Timeline`; a `flashTimerRef` clears it after 1800ms
-- Threaded as props: `Timeline (flashClipId)` → `TimelineTrack (flashClipId?)` → `SectionCell (flashClipId?)` → `TimelineClip (isFlash = flashClipId === clip.id)`
+- Threaded as props: `Timeline (flashClipId)` → `TimelineTrack (flashClipId?)` → `TimelineClip (isFlash = flashClipId === clip.id)`
 - A `useEffect([isFlash])` in `TimelineClip` calls `clipContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })` and then `flashGold` when `isFlash` becomes true; `combinedRef` satisfies both dnd-kit's `setNodeRef` and the local `clipContainerRef`
 
 **Toast style convention for placement/creation toasts:**
@@ -843,11 +812,11 @@ Registered on `timelineRef.current` (the `overflow-x-auto overflow-y-auto` scrol
 **Zoom calculation (per rAF tick):**
 ```ts
 const factor = Math.exp(-accumulated * 0.0040);
-const newZoom = Math.max(10, Math.min(300, currentZoom * factor));
+const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, currentZoom * factor));
 ```
 - Multiplicative, not additive — `Math.exp` maps the signed accumulated `deltaY` to a ratio applied to the current zoom
 - Positive `deltaY` (pinch-close / Ctrl+scroll-down) → `factor < 1` → zoom out; negative → zoom in
-- Bounds `10–300` match `MIN_ZOOM`/`MAX_ZOOM` in `DawScrollbar.tsx` (the only other zoom control)
+- Bounds come from `MIN_ZOOM`/`MAX_ZOOM` (10–300) in `client/src/lib/timeline-zoom.ts`, shared with the `DawScrollbar.tsx` handles and both zoom restore paths (`parseSavedZoom` clamps a saved value into range; `DEFAULT_ZOOM` 80)
 - Sensitivity 0.0040 tuned so a moderate pinch gesture covers close to the full zoom range in 1–2 gestures
 
 **Cursor-anchored scroll write (same rAF tick as the zoom update):**
@@ -1022,6 +991,10 @@ All three depend on the card (not the wrapper) being their nearest overflow ance
 
 **Vertical scroll indicator is intentionally simpler than horizontal.** Vertical uses a native, lightly CSS-styled scrollbar (`::-webkit-scrollbar:vertical`, thin + gold, reusing the same `rgba` values as the horizontal JS thumb) rather than a custom JS-driven thumb. The `.scrollbar-hide-x` utility class hides only the native horizontal bar (`::-webkit-scrollbar:horizontal { display: none }`) while leaving the vertical bar visible and styled. This asymmetry — native/reveal-on-scroll/Safari-gray vs. horizontal's always-visible/JS-driven/gold-in-both-browsers — is a deliberate cost/effort trade-off, not a bug. Vertical scroll is a well-understood gesture that didn't need the same discoverability treatment as horizontal. Full parity, if ever wanted, would mean generalizing the horizontal JS thumb to handle both axes.
 
+### Production Tracker — row order
+
+Section rows sort by the lowest `ideas.sortOrder` any active track gives that section (stable sort, so ties keep first-appearance order), never by the first track's order — a section hidden on the first track must not drop to the bottom.
+
 ### Production Tracker — due-date field
 
 Native `<input type="date">` with `[color-scheme:dark]` so Chrome's calendar icon shows on the dark field. No click handler: `showPicker()` on click blocked typing in Chrome.
@@ -1042,14 +1015,8 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 
 ## Clip trim visual redesign (Clip.tsx)
 - Trim handles are no longer rendered as visible elements. Trim is triggered by cursor proximity: `onPointerDown` within 8px of a clip's left or right edge (checked via `getBoundingClientRect()` at press time) starts the existing `handleLeftTrimDrag`/`handleRightTrimDrag` flow unchanged; `onMouseMove` sets `trimEdge` state (`'left' | 'right' | null`) which drives `cursor: ew-resize` via `positionStyle` inline style (overrides Tailwind `cursor-grab`).
-- Hover shows a grey inset glow via a separate `pointer-events-none absolute inset-0 z-20` child div rendered after the waveform canvas — `boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)'` (grey, not gold — see the hover glow passage above). Never a `boxShadow` on the container itself: `flashGold` animates the root's box-shadow, and the root paints only its body background (see "Timeline clip look" in root `CLAUDE.md`). Absent on DragOverlay ghost (`isOverlay` condition).
+- Hover shows a grey inset glow via a separate `pointer-events-none absolute inset-0 z-20` child div rendered after the waveform canvas — `boxShadow: 'inset 0 0 0 2px rgba(180,180,180,0.7), inset 0 0 14px rgba(180,180,180,0.15)'` (grey, not gold — see the hover glow passage above). Never a `boxShadow` on the container itself: `flashGold` animates the root's box-shadow, and the root paints nothing itself (see "Timeline clip look" in root `CLAUDE.md`). Absent on DragOverlay ghost (`isOverlay` condition).
 - **Gotcha:** dnd-kit's `listeners.onPointerDown` must be extracted into a variable (`dndOnPointerDown`) and called explicitly in the non-trim branch — placing a custom `onPointerDown` after `{...listeners}` in JSX silently overrides dnd-kit's handler and breaks drag. `restListeners` (listeners minus `onPointerDown`) is spread instead.
-
-## Free-position (manualOffset) feature — attempted and reverted
-- A Shift+drag free-positioning feature was built and fully reverted via `git reset` (never committed; no trace in codebase or schema).
-- **Key architectural conflict (then `recalcAllStarts`; now `packSectionOffsets`, same behavior):** packing recomputes every clip's position in the section from scratch on every call. Trimming a clip triggers a re-pack that immediately re-closes any gap the trim created — there is never a moment where trimmed space persists long enough to drag another clip into it. Any future free-position attempt must resolve this first: decide whether trim should stop triggering a section-wide re-pack (leaving sibling `sectionOffset` values untouched). The drag rebuild (step 4) adds free positioning.
-- **Clamping gap:** the first wall-clamp implementation only checked section outer edges, not actual sibling clip positions, allowing real clip-to-clip overlap. Clamping must bound against per-drag sibling positions looked up from current track state.
-- **Investigation discipline:** this session required multiple compactions during a single "read and understand" prompt. Split future attempts into: (1) a no-changes trace prompt to confirm recalc behavior at specific file/line granularity, (2) a scoped implementation prompt referencing those findings. Avoid broad "read and understand the whole system" asks in one shot.
 
 ## Platform and browser gotchas
 
@@ -1059,8 +1026,8 @@ Restored in commit `9ed4001` (regression introduced in `2924252` during the mock
 - **`matchOrganizeDropTarget` (`client/src/hooks/use-loose-file-organize-dnd.ts`): column backgrounds are fallback-only.** Both the Tracks- and Sections-column backgrounds (`bucket-tracks-bg||`, `bucket-sections-bg||`) nest other targets (Track rows / Section rows); a background hit is remembered and returned only if nothing more specific matched. Any new nesting target must join `isBackgroundDropId`.
 - **Own-track loose-file drops cancel in `handleDragEnd`** (Track row or Sections background with `originTrackId === destTrackId`): no mutation, toast, or `onOrganized`. For a version the same drop is a real move (Move C/D: section → its track's shelf). The own Track row stays an ENABLED droppable — dnd-kit drops disabled droppables from collision detection, so disabling it lets the drop fall through to the Tracks background and un-assign. Highlights for both are gated off by `organizeDropRules` (`trackRow` / `sectionsBackground`).
 - **Drop targets get the active drag from `useActiveOrganizeDrag` (`useDndMonitor`), not `useDndContext`** — `useDndContext` changes on every pointer move; the monitor only fires on start/end/cancel, so rows re-render twice per drag. MediaBucket calls it once and passes it to every row.
-- **Workspace mounts one `DragOverlay` at a time** — `LooseFileDragOverlay` for loose-file and version drags, Timeline's clip ghost for timeline clips. dnd-kit draws an overlay's wrapper during any drag, even with no children, so two mounted overlays left an invisible box under the cursor. The drag type is known in the same batched update as the drag start, so the right overlay is in place on the first frame.
-- **Timeline's `DndContext` needs `onDragCancel`** — Escape cancels a pointer drag; without the handler `activeDragData` outlived the drag (track overlays stayed up, the Delete shortcut stayed blocked).
+- **Workspace mounts at most one `DragOverlay`** — `LooseFileDragOverlay` for loose-file and version drags; a timeline clip drag has none (the clip floats in its row). dnd-kit draws an overlay's wrapper during any drag, even with no children, so two mounted overlays left an invisible box under the cursor. The drag type is known in the same batched update as the drag start, so the overlay is in place on the first frame.
+- **Timeline's `DndContext` needs `onDragCancel`** — Escape (and window blur, via a dispatched `visibilitychange`) cancels a pointer drag; `handleDragCancel` clears `activeDragData`, the clip/file drag state, the edge scrollers and the drag pointer, and releases the poll hold.
 
 ---
 

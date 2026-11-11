@@ -84,14 +84,40 @@ POST   /api/tracks/:trackId/clips        — place a clip on the timeline; body:
                                            so a missing task never blocks clip creation; optional
                                            placement: { before, after }, used only for a section's
                                            first clip (placeSectionInArrangement); fills in the
-                                           append offset when a sectioned clip arrives without
-                                           sectionOffset
+                                           append offset (after the furthest clip end) when a
+                                           sectioned clip arrives without sectionOffset; a sent
+                                           sectionOffset must be finite and ≥ 0 (a new clip is
+                                           never a pickup). Optional pushed: [{ id, sectionOffset }]
+                                           (needs a section and a sectionOffset): saved with the
+                                           new clip in one transaction (insertTimelineClipWithPushes)
+                                           — same track and section only, no full takes, no
+                                           duplicates, pushes only move later, a pickup is never
+                                           pushed. Any new sectioned clip that would overlap → 409,
+                                           nothing saved. No extra feed row for pushes
 POST   /api/loose-files/:id/place-on-timeline — materialize a loose file as a clip + timeline clip;
                                            optional placement: { before, after }, used only for a
-                                           section's first clip
+                                           section's first clip. Optional id (the new clip's id),
+                                           sectionOffset and pushed (same rules as POST clips):
+                                           saved in one transaction (materializeLooseFileAtPosition);
+                                           the section must already be on the timeline (409
+                                           otherwise); overlap → 409 with full rollback, the file
+                                           stays loose. Without sectionOffset it appends as before
+PUT    /api/songs/:songId/timeline-clips/offsets — body { clips: [{ id, sectionOffset }] }; saves
+                                           many clips' offsets in one transaction (a clip drag and
+                                           the clips it pushes). Every id must be a sectioned clip
+                                           on this song (404 otherwise); offsets finite (400);
+                                           negative = pickup, checked against the pickup limits in
+                                           the layout after the whole batch (400); any overlap on a
+                                           touched track + section → 409; either rolls everything
+                                           back. One sort-only timeline-reordered row per request.
+                                           Returns the updated clips
 PATCH  /api/timeline-clips/:id           — update a placed clip; field whitelist: name, type, color,
                                            src, duration, trimStart, trimEnd, bucketClipId, isFinal,
-                                           sectionOffset (never start); logs sort-only
+                                           sectionOffset (never start); a new sectionOffset is
+                                           checked for pickup limits (400) and overlap (409); a
+                                           length change (Replace) keeps the clip's offset and is
+                                           cut short at the next clip (updateTimelineClipKeepingSpot;
+                                           409 if too short); logs sort-only
                                            timeline-reordered when sectionOffset is sent; also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
@@ -99,14 +125,20 @@ PATCH  /api/timeline-clips/:id           — update a placed clip; field whiteli
                                            clears them), clears sibling names in the same section,
                                            and updates the linked production task status
 PATCH  /api/timeline-clips/:id/trim      — update trim points only; body: { trimStart: number,
-                                           trimEnd: number | null }; does not touch isFinal or start;
+                                           trimEnd: number | null }; goes through
+                                           writeTimelineClipTrim: 400 unless the trim is in range,
+                                           at least 0.5 s (or the whole file), and within the pickup
+                                           limits; section_offset moves with trimStart; neighbours
+                                           never move; does not touch isFinal or start;
                                            client calls queryClient.invalidateQueries on success to
                                            push updated trimStart/trimEnd into the tracks state
 POST   /api/timeline-clips/apply-trim-to-instances — bulk-sets trimStart/trimEnd on all timeline clips
                                            where trackId AND name match; body: { trackId, name,
                                            trimStart, trimEnd }; used by both "Apply Trim to All
                                            Instances" (current values) and "Reset Trim on All
-                                           Instances" (trimStart: 0, trimEnd: null); single DB UPDATE
+                                           Instances" (trimStart: 0, trimEnd: null); each instance
+                                           through writeTimelineClipTrim, clamped at its own limits
+                                           or skipped; never creates a pickup
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 GET    /api/timeline-clips/:id/replacements — returns bucket clips that can replace this timeline clip:
                                               looks up the clip's trackId+sectionName → idea → all
@@ -117,8 +149,9 @@ GET    /api/timeline-clips/:id/replacements — returns bucket clips that can re
 GET    /api/songs/:songId/timeline-has-finals     — returns { hasFinals: boolean }; true if any
                                                     timeline clip with isFinal=true exists for this song
 DELETE /api/songs/:songId/timeline-clips/non-final — deletes all non-final timeline clips for the song,
-                                                      re-packs the remaining ones with trimmed lengths and
-                                                      writes their start cache from the layout → 204
+                                                      keeps the remaining ones at their offsets (no
+                                                      re-pack) and writes their start cache from the
+                                                      layout → 204
 GET    /api/songs/:songId/sections        — the song's song_sections rows as [{ name, sortOrder,
                                            baseLength }] in arrangement order; NULL sort orders go
                                            last by name. requireBand + song ownership
@@ -126,6 +159,13 @@ PUT    /api/songs/:songId/sections/order  — body { section, before, after }; m
                                            in the arrangement order; 400 for unknown names, a
                                            self-reference, or both neighbours null. Logs
                                            timeline-reordered
+PUT    /api/songs/:songId/sections/base-length — body { section, baseLength }; baseLength = whole
+                                           beats 1–4096 or null (fit to content); stored as NULL when
+                                           at or below the content need (setSongSectionBaseLength);
+                                           400 for a bad body or no song_sections row; 409 when the
+                                           section has no timeline clips. No clip is written. Logs
+                                           sort-only section-length-changed. Returns the song's
+                                           song_sections rows
 
 GET    /api/songs/:id/bucket             — full bucket tree: tracks → ideas → clips (active only)
 POST   /api/songs/:id/tracks             — create a new instrument track; body: { name }; server
