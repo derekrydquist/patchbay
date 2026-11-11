@@ -289,13 +289,14 @@ export const deletedSections = sqliteTable("deleted_sections", {
 // by the timeline, Export and the server layout (computeSongLayout); the timeline
 // header drag writes it. ideas.sortOrder is the separate FILING order, used by the
 // Media Bucket, Library browser, Production Tracker and every section picker — a
-// timeline reorder never changes it. baseLength feeds the timeline layout
-// (shared/timelineLayout.ts).
+// timeline reorder never changes it. baseLength (whole beats; NULL = fit to content)
+// feeds the timeline layout (shared/timelineLayout.ts); the section-end handle writes
+// it (setSongSectionBaseLength).
 export const songSections = sqliteTable("song_sections", {
   id: text("id").primaryKey(),
   songId: text("song_id").notNull().references(() => songs.id, { onDelete: "cascade" }),
   sectionName: text("section_name").notNull(),
-  baseLength: real("base_length"), // seconds; NULL = fit to content
+  baseLength: real("base_length"), // whole beats; NULL = fit to content
   sortOrder: integer("sort_order"),
   createdAt: text("created_at").notNull(),
 }, (table) => ({

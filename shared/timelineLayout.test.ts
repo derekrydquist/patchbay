@@ -1,7 +1,7 @@
 // Cases that already work, pinned so later parts of the placement rebuild can't
 // break them silently.
 import { describe, expect, it } from 'vitest';
-import { layoutTimeline, type LayoutClipInput } from './timelineLayout';
+import { layoutTimeline, sectionContentNeeds, contentNeedBeats, type LayoutClipInput } from './timelineLayout';
 
 const clip = (over: Partial<LayoutClipInput> & Pick<LayoutClipInput, 'id' | 'sectionName'>): LayoutClipInput => ({
   trackId: 't1',
@@ -302,5 +302,106 @@ describe('layoutTimeline — pickups', () => {
     expect(l.clipStarts.get('ft')).toBe(0);
     expect(l.clipHeadCuts.get('b1')).toBe(0);
     expect(l.clipStarts.get('b1')).toBe(3);
+  });
+});
+
+// song_sections.base_length is whole beats (step 4g1): the section-end handle adds empty
+// space at the end of a section, and every later section slides on every track.
+describe('layoutTimeline — base length in whole beats', () => {
+  const twoTracks = [
+    clip({ id: 'a-drums', trackId: 'drums', sectionName: 'A', duration: 1.6 }), // 4 beats at 150 bpm
+    clip({ id: 'a-bass', trackId: 'bass', sectionName: 'A', duration: 1 }),
+    clip({ id: 'b-drums', trackId: 'drums', sectionName: 'B', duration: 0.4 }),
+    clip({ id: 'b-bass', trackId: 'bass', sectionName: 'B', sectionOffset: 0.4, duration: 0.4 }),
+  ];
+  const at = (baseA: number | null, bpm = 150) => layoutTimeline({
+    sections: [
+      { name: 'A', sortOrder: 0, baseLength: baseA },
+      { name: 'B', sortOrder: 1, baseLength: null },
+    ],
+    clips: twoTracks,
+    bpm,
+    timeSignature: '4/4',
+  });
+
+  it('ends a section at start + base length beats, and the next section starts right after it on every track', () => {
+    // 150 bpm: a beat is 0.4 s. A needs 4 beats; a base length of 12 adds 8 empty beats.
+    const layout = at(12);
+    const [a, b] = layout.sections;
+    expect(a.lengthBeats).toBe(12);
+    expect(a.end).toBeCloseTo(12 * 0.4, 12);
+    expect(a.baseLength).toBe(12);
+    expect(b.startBeat).toBe(12);
+    expect(b.start).toBeCloseTo(4.8, 12);
+    expect(layout.clipStarts.get('b-drums')).toBeCloseTo(4.8, 12);
+    expect(layout.clipStarts.get('b-bass')).toBeCloseTo(5.2, 12);
+    // A's own clips don't move.
+    expect(layout.clipStarts.get('a-drums')).toBe(0);
+    expect(layout.clipStarts.get('a-bass')).toBe(0);
+  });
+
+  it('ignores a stored base length below what the content needs', () => {
+    const fit = at(null);
+    for (const tooSmall of [1, 3, 4]) {
+      const layout = at(tooSmall);
+      expect(layout.sections[0].lengthBeats).toBe(4);
+      expect(layout.sections[1].start).toBeCloseTo(fit.sections[1].start, 12);
+    }
+  });
+
+  it('keeps the same number of beats at a different tempo (different seconds)', () => {
+    const at120 = at(12, 120);
+    const at100 = at(12, 100);
+    expect(at120.sections[0].lengthBeats).toBe(12);
+    expect(at100.sections[0].lengthBeats).toBe(12);
+    expect(at120.sections[0].length).toBeCloseTo(6, 12);   // 12 × 0.5 s
+    expect(at100.sections[0].length).toBeCloseTo(7.2, 12); // 12 × 0.6 s
+    expect(at100.sections[1].startBeat).toBe(12);
+  });
+
+  it('rounds a stray fractional stored value up, so the next section still starts on a beat', () => {
+    expect(at(10.5).sections[1].startBeat).toBe(11);
+  });
+
+  it('a section with only pickups still gets one beat, and a base length can add to it', () => {
+    const layout = layoutTimeline({
+      sections: [
+        { name: 'A', sortOrder: 0, baseLength: null },
+        { name: 'B', sortOrder: 1, baseLength: 3 },
+      ],
+      clips: [
+        clip({ id: 'a', sectionName: 'A', duration: 2 }),
+        clip({ id: 'p', sectionName: 'B', sectionOffset: -0.5, duration: 0.5 }),
+      ],
+      bpm: 120,
+      timeSignature: '4/4',
+    });
+    expect(layout.sections[1].lengthBeats).toBe(3);
+    expect(contentNeedBeats(sectionContentNeeds([clip({ id: 'p', sectionName: 'B', sectionOffset: -0.5, duration: 0.5 })]).get('B')!, 120)).toBe(1);
+  });
+});
+
+describe('contentNeedBeats / sectionContentNeeds — the layout\'s own rule', () => {
+  const cases: { bpm: number | null; clips: LayoutClipInput[] }[] = [
+    { bpm: 120, clips: [clip({ id: 'x', sectionName: 'A', duration: 3 })] },                                   // exactly 6 beats
+    { bpm: 100, clips: [clip({ id: 'x', sectionName: 'A', duration: 1 })] },                                   // 1.67 → 2
+    { bpm: 140, clips: [clip({ id: 'x', sectionName: 'A', sectionOffset: 2, duration: 10, trimStart: 1, trimEnd: 4 })] },
+    { bpm: null, clips: [clip({ id: 'x', sectionName: 'A', sectionOffset: -1, duration: 0.5 })] },             // only a pickup → 1
+    { bpm: 90, clips: [
+      clip({ id: 'x', trackId: 't1', sectionName: 'A', duration: 2 }),
+      clip({ id: 'y', trackId: 't2', sectionName: 'A', sectionOffset: 1.5, duration: 2.2 }),
+      clip({ id: 'z', trackId: 't2', sectionName: 'A', isFullTake: true, start: 0, duration: 99 }),         // ignored
+    ] },
+  ];
+  it.each(cases)('matches the layout\'s section length (bpm $bpm)', ({ bpm, clips }) => {
+    const layout = layoutTimeline({ sections: [{ name: 'A', sortOrder: 0, baseLength: null }], clips, bpm, timeSignature: '4/4' });
+    const need = sectionContentNeeds(clips).get('A')!;
+    expect(need).toBeCloseTo(layout.sections[0].contentNeed, 12);
+    expect(contentNeedBeats(need, bpm)).toBe(layout.sections[0].lengthBeats);
+  });
+
+  it('has no entry for a section with only full takes or no clips (not on the timeline)', () => {
+    const needs = sectionContentNeeds([clip({ id: 'z', sectionName: 'A', isFullTake: true })]);
+    expect(needs.has('A')).toBe(false);
   });
 });

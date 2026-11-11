@@ -28,7 +28,8 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
+import { layoutTimeline, sectionContentNeeds, contentNeedBeats, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
+import { isValidBaseLength } from "@shared/sectionBaseLength";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
 import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
 
@@ -38,6 +39,26 @@ export class SectionNotOnTimelineError extends Error {
   constructor(public sectionName: string) {
     super(`${sectionName} isn't on the timeline any more.`);
     this.name = "SectionNotOnTimelineError";
+  }
+}
+
+// Thrown by setSongSectionBaseLength for a bad request: a section with no song_sections
+// row, or a base length that isn't null or a whole number of beats from 1 to 4096.
+// Routes answer 400. Nothing is written.
+export class SectionBaseLengthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SectionBaseLengthError";
+  }
+}
+
+// Thrown by setSongSectionBaseLength when the section has no timeline clips, so it
+// doesn't appear on the timeline (a bandmate removed its last clip mid-drag). Routes
+// answer 409. Nothing is written.
+export class SectionBaseLengthNotOnTimelineError extends Error {
+  constructor(public sectionName: string) {
+    super(`${sectionName} isn't on the timeline any more.`);
+    this.name = "SectionBaseLengthNotOnTimelineError";
   }
 }
 
@@ -254,7 +275,8 @@ export interface ActivityEvent {
       // "Tier 2 event types — full reference" table in .claude/skills/activity-feed/SKILL.md;
       // last audited 2026-08-12:
       | 'song-deleted' | 'idea-deleted' | 'track-restored' | 'volume-changed' | 'pan-changed'
-      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'clip-trim-adjusted'
+      | 'section-restored' | 'section-hidden' | 'timeline-reordered' | 'section-length-changed'
+      | 'clip-trim-adjusted'
       | 'clip-trim-applied-to-instances' | 'timeline-cleared' | 'idea-hidden'
       | 'idea-restored' | 'clip-metadata-edited' | 'clip-removed' | 'file-uploaded'
       | 'clip-comment-added' | 'clip-comment-reply' | 'clip-comment-edited'
@@ -817,6 +839,7 @@ export function ensureSongSection(songId: string, sectionName: string): void {
   ensureSongSectionStmt.run(randomUUID(), songId, sectionName, new Date().toISOString(), songId);
 }
 
+// baseLength: whole beats; null = fit to content.
 export interface SongSectionRow { name: string; sortOrder: number; baseLength: number | null }
 
 // A song's song_sections rows in timeline order. Rows with a NULL sort_order go last,
@@ -852,6 +875,33 @@ export function moveSongSection(songId: string, section: string, before: string 
   })();
 }
 
+// The section-end handle (PUT /api/songs/:songId/sections/base-length): sets a section's
+// base length in whole beats, or null for fit to content, in one transaction. The
+// section must have a song_sections row (SectionBaseLengthError otherwise) and be on the
+// timeline — at least one non-full-take timeline clip on an active track, the layout's
+// own rule (SectionBaseLengthNotOnTimelineError otherwise). A value at or below what
+// its content needs now (contentNeedBeats: rounded up to the next beat, at least one
+// beat) is stored as NULL instead of being refused — a bandmate may have added content
+// since the handle was dragged — so a stored base length always adds empty space when
+// it's written. Arrangement only: no clip moves, nothing else is written. Returns the
+// stored value.
+export function setSongSectionBaseLength(songId: string, sectionName: string, baseLength: number | null): number | null {
+  if (!isValidBaseLength(baseLength)) {
+    throw new SectionBaseLengthError("baseLength must be null or a whole number of beats from 1 to 4096");
+  }
+  return sqlite.transaction(() => {
+    const row = sqlite.prepare("SELECT 1 FROM song_sections WHERE song_id = ? AND section_name = ?").get(songId, sectionName);
+    if (!row) throw new SectionBaseLengthError(`${sectionName} isn't a section of this song`);
+    const input = songLayoutInput(songId);
+    const need = sectionContentNeeds(input.clips).get(sectionName);
+    if (need === undefined) throw new SectionBaseLengthNotOnTimelineError(sectionName);
+    const stored = baseLength !== null && baseLength > contentNeedBeats(need, input.bpm) ? baseLength : null;
+    sqlite.prepare("UPDATE song_sections SET base_length = ? WHERE song_id = ? AND section_name = ?")
+      .run(stored, songId, sectionName);
+    return stored;
+  })();
+}
+
 // Sections that are on the timeline: a song_sections row and at least one
 // non-full-take timeline clip on an active track.
 function sectionsOnTimeline(songId: string): Set<string> {
@@ -883,7 +933,8 @@ export function sectionHasTimelineClips(songId: string, sectionName: string): bo
 // timeline (first when nothing is on it). Creates the row there if it's missing, then
 // renumbers every row 0…n−1, in one transaction (shared/sectionOrder.ts
 // placeFirstClipSection). Call only for a section with no non-full-take timeline clips,
-// before its first clip is inserted. Never for Full Takes.
+// before its first clip is inserted. Never for Full Takes. The section comes back fresh:
+// its base length is reset to NULL (fit to content), as its position is set anew.
 export function placeSectionInArrangement(songId: string, sectionName: string, hint?: SectionPlacementHint | null): void {
   sqlite.transaction(() => placeSectionInArrangementRows(songId, sectionName, hint))();
 }
@@ -898,6 +949,8 @@ function placeSectionInArrangementRows(songId: string, sectionName: string, hint
   if (!names.includes(sectionName)) ensureSongSection(songId, sectionName);
   placeFirstClipSection(names, onTimeline, sectionName, hint)
     .forEach((name, i) => update.run(i, songId, name));
+  sqlite.prepare("UPDATE song_sections SET base_length = NULL WHERE song_id = ? AND section_name = ?")
+    .run(songId, sectionName);
 }
 
 // Inserts a timeline clip. A sectioned, non-full-take clip that is the first in its
@@ -2647,6 +2700,7 @@ export class SQLiteStorage implements IStorage {
       'pan-changed',
       'clip-trim-adjusted',
       'timeline-reordered',
+      'section-length-changed',
       'clip-metadata-edited',
       'clip-comment-edited',
       'clip-comment-deleted',

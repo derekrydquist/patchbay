@@ -315,7 +315,8 @@ if (!hasActivityLogClipId) {
 // ─── Timeline placement rebuild: section_offset + song_sections ──────────────────
 // song_sections.sort_order is the ARRANGEMENT order, read only by the timeline, Export
 // and the server layout (computeSongLayout); ideas.sort_order is the separate FILING
-// order every other surface uses. base_length feeds the timeline layout
+// order every other surface uses. base_length (whole beats; NULL = fit to content)
+// feeds the timeline layout
 // (shared/timelineLayout.ts). Hand-authored and idempotent (see the
 // deploy skill: drizzle-kit push is banned from production).
 
@@ -334,7 +335,7 @@ sqlite.exec(`
     id TEXT PRIMARY KEY,
     song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
     section_name TEXT NOT NULL,
-    base_length REAL,
+    base_length REAL, -- whole beats; NULL = fit to content
     sort_order INTEGER,
     created_at TEXT NOT NULL
   );

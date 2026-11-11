@@ -18,8 +18,9 @@ import { z } from "zod";
 import { parseBuffer } from "music-metadata";
 import { eq, and, ne, count, asc, desc, gte, max, min, inArray, isNull, not } from "drizzle-orm";
 import { db, sqlite } from "./db";
-import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, insertTimelineClipPlaced, insertTimelineClipWithPushes, PushedClipError, SectionNotOnTimelineError, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
+import { storage, DEFAULT_INSTRUMENTS, DEFAULT_SECTIONS, insertProductionTaskForSection, ensureSongSection, getSongSections, computeSongLayout, songPickupLeftLimit, sectionAppendOffset, writeTimelineClipTrim, applyTrimToInstances, updateTimelineClipKeepingSpot, moveSongSection, setSongSectionBaseLength, SectionBaseLengthError, SectionBaseLengthNotOnTimelineError, insertTimelineClipPlaced, insertTimelineClipWithPushes, PushedClipError, SectionNotOnTimelineError, setTimelineClipOffsets, sectionPlacementClips, TimelineOverlapError, PickupLimitError, TrimValidationError, ReplaceTooShortError, LooseFileNotFoundError, ClipNotLooseableError, ClipNotDeletableError, othersCommentTimestamp, taskSectionHiddenSql, DEMO_BAND_ID, DEMO_GUEST_ID } from "./storage";
 import { SectionMoveError, type SectionPlacementHint } from "@shared/sectionOrder";
+import { parseSectionBaseLengthBody } from "@shared/sectionBaseLength";
 import { findOverlap, toPlacementClip, pickupOffsetError } from "@shared/timelinePlacement";
 import { CLIP_IN_USE_CODE, hasClipDependents, taskStatusAfterVersionLeaves, taskStatusAfterRestore, type TaskStatus } from "@shared/clip-dependents";
 import {
@@ -1302,6 +1303,44 @@ export async function registerRoutes(
       description: `${sectionReorderActor} reordered sections on the timeline`,
       timestamp: Date.now(),
       author: sectionReorderActor,
+    }).catch(console.error);
+
+    res.json(getSongSections(songId));
+  });
+
+  // The section-end handle on the timeline. `baseLength` is the section's length in
+  // whole beats (1–4096), or null for fit to content; it adds empty space at the end of
+  // the section, and every later section slides on every track. A value at or below
+  // what the content needs now is stored as NULL rather than refused — a bandmate may
+  // have added content since the drag started (setSongSectionBaseLength). 400 for a bad
+  // body or a section with no row; 409 when the section has no timeline clips (it
+  // isn't on the timeline any more). Arrangement only: no clip is written. Returns the
+  // song's song_sections rows, like the order route.
+  app.put("/api/songs/:songId/sections/base-length", requireBand, async (req, res) => {
+    const songId = req.params.songId as string;
+    if (!assertSongOwned(req, res, songId)) return;
+    const parsed = parseSectionBaseLengthBody(req.body);
+    if (!parsed.ok) return res.status(400).json({ message: parsed.message });
+    const { section, baseLength } = parsed.value;
+    try {
+      setSongSectionBaseLength(songId, section, baseLength);
+    } catch (err) {
+      if (err instanceof SectionBaseLengthError) return res.status(400).json({ message: err.message });
+      if (err instanceof SectionBaseLengthNotOnTimelineError) return res.status(409).json({ message: err.message });
+      throw err;
+    }
+
+    // Sort-only, like timeline-reordered: bumps the song in "Your Songs", never a feed row.
+    const sectionLengthActor = req.session.userId
+      ? (await storage.getUser(req.session.userId))?.username ?? 'Someone'
+      : 'Someone';
+    storage.logActivity({
+      id: randomUUID(),
+      songId,
+      type: 'section-length-changed',
+      description: `${sectionLengthActor} changed the length of ${section} on the timeline`,
+      timestamp: Date.now(),
+      author: sectionLengthActor,
     }).catch(console.error);
 
     res.json(getSongSections(songId));

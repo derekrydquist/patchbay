@@ -186,6 +186,7 @@ export async function fetchUnassignedLooseFiles(): Promise<ApiLooseFile[]> {
 
 // One song_sections row as GET /api/songs/:songId/sections returns it (sortOrder is
 // never null there). The only source of section order for the timeline and Export.
+// baseLength: whole beats; null = fit to content (shared/timelineLayout.ts).
 export interface SongSectionRow { name: string; sortOrder: number; baseLength: number | null }
 
 export async function fetchSongSections(songId: string): Promise<SongSectionRow[]> {

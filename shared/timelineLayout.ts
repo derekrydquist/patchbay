@@ -7,8 +7,10 @@
 //   - Section order comes only from song_sections.sort_order. Sections with clips but
 //     no row ("orphans") follow all the rows, alphabetically by name.
 //   - Only sections holding at least one non-full-take clip take space.
-//   - Section length = max(baseLength ?? 0, content need), rounded up to a whole beat.
-//     Every section starts on a beat; bar 1 is song time 0.
+//   - Section length, in whole beats = max(baseLength ?? 0, content need rounded up to
+//     the next beat, 1). baseLength is stored in whole beats (song_sections.base_length),
+//     so a tempo change keeps a section's bars. Every section starts on a beat; bar 1 is
+//     song time 0.
 //   - A sectioned clip sits at its section's start + sectionOffset. Its stored start
 //     is ignored.
 //   - Pickups (a negative sectionOffset) hang back into the end of the previous
@@ -29,7 +31,7 @@ import { parseTimeSignature, secondsPerBeat } from './musicalTime';
 export interface LayoutSectionInput {
   name: string;
   sortOrder: number;
-  baseLength: number | null; // seconds; null = fit to content
+  baseLength: number | null; // whole beats; null = fit to content
 }
 
 export interface LayoutClipInput {
@@ -54,7 +56,7 @@ export interface LayoutSection {
   startBeat: number;   // integer, 0-based from song time 0
   startBar: number;    // 1-based bar the section starts in
   contentNeed: number; // seconds the section's clips need (before rounding)
-  baseLength: number | null;
+  baseLength: number | null; // whole beats, as stored; null = fit to content
 }
 
 export interface TimelineLayoutInput {
@@ -97,6 +99,40 @@ function beatsToHold(seconds: number, spb: number): number {
   return Math.max(0, Math.ceil(seconds / spb - BEAT_EPSILON));
 }
 
+// Seconds each section's clips need, by section name, across every track: the furthest
+// clip end (sectionOffset + trimmed length − tail) of its sectioned clips. A section is
+// on the timeline exactly when it has an entry here (at least one non-full-take clip
+// with a section name). A pickup's part before the section start (a negative
+// sectionOffset) counts toward no section's length: pickups never move a section; the
+// layout cuts them instead.
+export function sectionContentNeeds(
+  clips: Pick<LayoutClipInput, 'sectionName' | 'sectionOffset' | 'duration' | 'trimStart' | 'trimEnd' | 'isFullTake' | 'tailSeconds'>[],
+): Map<string, number> {
+  const needs = new Map<string, number>();
+  for (const clip of clips) {
+    if (clip.isFullTake || !clip.sectionName) continue;
+    const end = (clip.sectionOffset ?? 0) + effectiveLength(clip) - (clip.tailSeconds ?? 0);
+    needs.set(clip.sectionName, Math.max(needs.get(clip.sectionName) ?? 0, end));
+  }
+  return needs;
+}
+
+// The fewest whole beats a section on the timeline can be: its content need (seconds,
+// sectionContentNeeds) rounded up to the next beat, and at least one beat — even for a
+// section whose clips all end at or before its start (only pickups). The layout and the
+// server's base-length clamp both use this, so they can't disagree.
+export function contentNeedBeats(needSeconds: number, bpm: number | null): number {
+  return Math.max(1, beatsToHold(needSeconds, secondsPerBeat(bpm)));
+}
+
+// A stored base length (whole beats) as the layout reads it: 0 (fit to content) for
+// null or anything that isn't a positive finite number; a stray fraction is rounded up,
+// so every section still starts on a beat.
+function storedBaseBeats(baseLength: number | null): number {
+  if (baseLength === null || !Number.isFinite(baseLength) || baseLength <= 0) return 0;
+  return Math.ceil(baseLength - BEAT_EPSILON);
+}
+
 export function roundUpToBeat(seconds: number, spb: number): number {
   return beatsToHold(seconds, spb) * spb;
 }
@@ -124,14 +160,7 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   const { beatsPerBar } = parseTimeSignature(timeSignature);
 
   // Content need per section, across every track.
-  const contentNeed = new Map<string, number>();
-  for (const clip of clips) {
-    if (!isSectioned(clip)) continue;
-    // A pickup's part before the section start (a negative sectionOffset) counts toward
-    // no section's length: pickups never move a section; the layout cuts them instead.
-    const end = (clip.sectionOffset ?? 0) + effectiveLength(clip) - (clip.tailSeconds ?? 0);
-    contentNeed.set(clip.sectionName, Math.max(contentNeed.get(clip.sectionName) ?? 0, end));
-  }
+  const contentNeed = sectionContentNeeds(clips);
 
   // Display order: rows by sort_order (name breaks ties), then orphans by name.
   const rowsByName = new Map(sections.map((s) => [s.name, s]));
@@ -146,9 +175,9 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   let startBeat = 0;
   const place = (name: string, baseLength: number | null) => {
     const need = contentNeed.get(name) ?? 0;
-    // Every placed section has clips, and gets at least one beat — even one whose
-    // clips all end at or before its start (only pickups, which may end before it).
-    const lengthBeats = Math.max(1, beatsToHold(baseLength ?? 0, spb), beatsToHold(need, spb));
+    // At least the content need (rounded up to a beat, at least one beat); a base length
+    // (whole beats) adds empty space at the end, and one below the need is ignored.
+    const lengthBeats = Math.max(contentNeedBeats(need, bpm), storedBaseBeats(baseLength));
     layoutSections.push({
       name,
       start: startBeat * spb,
