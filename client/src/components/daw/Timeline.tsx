@@ -54,8 +54,9 @@ import { LooseFileDragOverlay, CURSOR_GAP_PX } from './LooseFileDragOverlay';
 import { TimelineTrack, SectionInfo, type TrackTrimLimits } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
-import { DEFAULT_BPM, snapGridSeconds } from '@/lib/musical-time';
-import { layoutTimeline, sectionAt, effectiveLength, type TimelineLayout } from '@shared/timelineLayout';
+import { DEFAULT_BPM, snapGridSeconds, parseTimeSignature, secondsPerBeat } from '@/lib/musical-time';
+import { layoutTimeline, sectionAt, effectiveLength, contentNeedBeats, type TimelineLayout } from '@shared/timelineLayout';
+import { sectionEndRange, nearestSectionEndStop, baseLengthForEnd, sectionEndReadout, sectionEndRelease, type SectionEndRange } from '@shared/sectionBaseLength';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
 import { placeDraggedClip, computeFileDropPlacement, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
@@ -425,6 +426,78 @@ function SectionDragTag({ name, tagRef }: { name: string; tagRef: (node: HTMLDiv
   );
 }
 
+// A section-end handle drag. Beats are whole beats from song time 0.
+interface SectionEndDrag {
+  name: string;
+  range: SectionEndRange;   // start, minimum end (content need) and maximum end
+  storedEndBeat: number;    // the end as stored (the drag's start)
+  storedBaseLength: number | null; // song_sections.base_length as stored
+  endBeat: number;          // the stop the pointer has picked
+  grabOffsetSec: number;    // pointer song time − the section's end, at pointerdown
+  originX: number;          // pointerdown clientX, for the 3px start threshold
+  moved: boolean;           // the pointer has passed the threshold
+}
+// A handle press moves nothing until the pointer has moved this far (px), so a click
+// or a shaky press never changes the length.
+const SECTION_END_DRAG_THRESHOLD_PX = 3;
+
+// One section's end on the header row, for the section-end handles (SectionEndHandles).
+interface SectionEndMark {
+  name: string;
+  endPx: number;       // content px (including the 256px track panel)
+  addsSpace: boolean;  // its stored base length adds empty space after its content
+}
+
+// The gold section-end handles: one per section on the timeline that has a
+// song_sections row, at its right boundary. Their own layer over the section header
+// row (a sibling of the headers, never inside one), so a handle can straddle the
+// boundary and sit above the next header and the looped header's gold border. The hit
+// area is 8px wide at every zoom; the gold bar and grip show while the pointer is over
+// the section's header (hoveredName) or the handle itself, and for the whole drag. A
+// section whose base length adds space always shows a faint gold mark there.
+// `interactive` false (another drag or trim running): no handles, only the marks.
+// Pointer handling is the Timeline's own (startSectionEndDrag), never dnd-kit.
+const SECTION_END_HIT_PX = 8;
+const SectionEndHandles = React.memo(function SectionEndHandles({ marks, hoveredName, draggingName, interactive, onPointerDown }: {
+  marks: SectionEndMark[];
+  hoveredName: string | null;
+  draggingName: string | null;
+  interactive: boolean;
+  onPointerDown: (e: React.PointerEvent, name: string) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-20 pointer-events-none">
+      {marks.map((m) => {
+        const dragging = draggingName === m.name;
+        const live = dragging || (interactive && draggingName === null);
+        if (!live && !m.addsSpace) return null;
+        const shown = dragging || (live && hoveredName === m.name);
+        return (
+          <div
+            key={m.name}
+            data-section-end={m.name}
+            className={cn('group/end absolute top-0 h-full', live && 'pointer-events-auto cursor-col-resize')}
+            style={{ left: m.endPx - SECTION_END_HIT_PX / 2, width: SECTION_END_HIT_PX }}
+            onPointerDown={live ? (e) => onPointerDown(e, m.name) : undefined}
+          >
+            {m.addsSpace && !shown && (
+              <div aria-hidden className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary/35" />
+            )}
+            {live && (
+              <div
+                aria-hidden
+                className={cn('absolute inset-0 transition-opacity duration-100', shown ? 'opacity-100' : 'opacity-0 group-hover/end:opacity-100')}
+              >
+                <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_6px_rgba(212,175,55,0.6)]" />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-3 rounded-[2px] bg-primary border border-[#09090b]/70" />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
 
 export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: React.ReactNode }) {
   const queryClient = useQueryClient();
@@ -604,11 +677,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // Also paused while a section's first-clip POST is in flight (insertClipInSection),
   // which sets the section's arrangement place in the cache before the server has it.
   const sectionOrderSaving = useIsMutating({ mutationKey: ['song-sections-order', songId] }) > 0;
+  // Same for this browser's own section-end handle save (sectionBaseLengthMutation).
+  const sectionBaseLengthSaving = useIsMutating({ mutationKey: ['song-sections-base-length', songId] }) > 0;
   const [firstClipPostsInFlight, setFirstClipPostsInFlight] = useState(0);
   const { data: songSections } = useQuery<SongSectionRow[]>({
     queryKey: songSectionsKey(songId),
     queryFn: () => fetchSongSections(songId),
-    refetchInterval: sectionOrderSaving || firstClipPostsInFlight > 0 || timelineEditBusy ? false : 3000,
+    refetchInterval: sectionOrderSaving || sectionBaseLengthSaving || firstClipPostsInFlight > 0 || timelineEditBusy ? false : 3000,
   });
   const sections = songSections ?? EMPTY_SECTIONS;
 
@@ -618,6 +693,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const tracksInitialized = useRef(false);
   // Section-reorder drag state — separate from clip drag state.
   const [activeSectionName, setActiveSectionName] = useState<string | null>(null);
+  // Section-end handle drag (startSectionEndDrag): the section, its range in whole
+  // beats, its end as stored and the end the pointer has picked. Replaced only when
+  // the picked stop changes, so the preview layout is recomputed only then.
+  const [sectionEndDrag, setSectionEndDrag] = useState<SectionEndDrag | null>(null);
+  // The section header under the pointer (its end handle shows), or null.
+  const [hoveredHeader, setHoveredHeader] = useState<string | null>(null);
 
   // Placeholder until the song query resolves — the seeding effect below replaces it with the
   // song's stored tempo. 120 is also the fallback for songs whose stored bpm is null.
@@ -3215,6 +3296,214 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     if (node) positionSectionDragGhostRef.current();
   }, []);
 
+  // ── Section-end handle (step 4g2) ──────────────────────────────────────────
+  // Dragging a section's gold end handle sets its base length (song_sections.base_length,
+  // whole beats). Own pointer handling like the trim handles (no dnd-kit): window
+  // pointermove (the shared drag pointer source) / pointerup, Esc and window blur cancel.
+  // The preview is the drag-preview layout (clipDragLayout), so later sections slide
+  // live; the polls are held from pointerdown until the save and the refetch after it.
+  const sectionEndDragRef = useRef<SectionEndDrag | null>(null);
+  const sectionEndCleanupRef = useRef<(() => void) | null>(null);
+  const sectionEndShiftRef = useRef(false);
+  useEffect(() => () => sectionEndCleanupRef.current?.(), []);
+  // Picks the stop nearest the pointer (shared nearestSectionEndStop): Bar steps while
+  // snap is on at Bar and Shift isn't held, otherwise whole beats. State changes only
+  // when the stop does.
+  const updateSectionEndDrag = () => {
+    const drag = sectionEndDragRef.current;
+    const clientX = dragClientXRef.current;
+    if (!drag || clientX === null) return;
+    if (!drag.moved && Math.abs(clientX - drag.originX) < SECTION_END_DRAG_THRESHOLD_PX) return;
+    const pointerBeat = (dragPointerTime(clientX) - drag.grabOffsetSec) / secondsPerBeat(bpm);
+    const barSteps = snap.on && snap.unit === 'bar' && !sectionEndShiftRef.current;
+    const endBeat = nearestSectionEndStop(drag.range, pointerBeat, barSteps, parseTimeSignature(timeSignature).beatsPerBar);
+    if (drag.moved && endBeat === drag.endBeat) return;
+    const next = { ...drag, endBeat, moved: true };
+    sectionEndDragRef.current = next;
+    if (endBeat !== drag.endBeat) setSectionEndDrag(next);
+  };
+  // The readout: in the ruler strip, centred on the handle, clamped to the visible
+  // track area. Positioned directly on the element, like the header drag's tag.
+  const sectionEndTagElRef = useRef<HTMLDivElement | null>(null);
+  const positionSectionEndTag = () => {
+    const tag = sectionEndTagElRef.current;
+    const el = timelineRef.current;
+    const drag = sectionEndDragRef.current;
+    if (!tag || !el || !drag) return;
+    const rect = el.getBoundingClientRect();
+    const handleX = rect.left + TRACK_PANEL_WIDTH + drag.endBeat * secondsPerBeat(bpm) * zoom - el.scrollLeft;
+    const w = tag.offsetWidth;
+    const minX = rect.left + TRACK_PANEL_WIDTH;
+    const maxX = Math.max(minX, rect.left + el.clientWidth - w);
+    const x = Math.min(Math.max(handleX - w / 2, minX), maxX);
+    const y = rect.top + RULER_TOP_PX + (RULER_HEIGHT_PX - tag.offsetHeight) / 2;
+    tag.style.transform = `translate(${x}px, ${y}px)`;
+    tag.style.visibility = 'visible';
+  };
+  const positionSectionEndTagRef = useRef(positionSectionEndTag);
+  positionSectionEndTagRef.current = positionSectionEndTag;
+  const sectionEndTagRef = useCallback((node: HTMLDivElement | null) => {
+    sectionEndTagElRef.current = node;
+    if (node) positionSectionEndTagRef.current();
+  }, []);
+  // The readout's text changes width: re-place it after every picked stop.
+  useLayoutEffect(() => { if (sectionEndDrag) positionSectionEndTagRef.current(); }, [sectionEndDrag, zoom]);
+
+  // Saves a section's base length. The cache already holds the new value (written
+  // synchronously on release, so the section never flickers back for a frame); a
+  // failure puts `previous` back and toasts the server's message (409: the section left
+  // the timeline). The section poll pauses while it's pending (sectionBaseLengthSaving).
+  const sectionBaseLengthMutation = useMutation({
+    mutationKey: ['song-sections-base-length', songId],
+    mutationFn: async ({ section, baseLength }: { section: string; baseLength: number | null; previous?: SongSectionRow[] }) => {
+      const res = await fetch(`/api/songs/${songId}/sections/base-length`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ section, baseLength }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message ?? `Saving the section length failed (${res.status})`);
+      }
+      return res.json() as Promise<SongSectionRow[]>;
+    },
+    onError: (err, vars) => {
+      console.error('Failed to save section length:', err);
+      if (vars.previous) queryClient.setQueryData(songSectionsKey(songId), vars.previous);
+      toast({ title: "Couldn't change the section length", description: (err as Error).message, variant: 'destructive' });
+    },
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['songs'] }),
+      queryClient.invalidateQueries({ queryKey: ['activity'] }),
+    ]),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: songSectionsKey(songId) }),
+  });
+
+  // Ends the handle drag. commit: send what sectionEndRelease decides — the picked
+  // length when the end changed; null at fit whenever a base length is stored (even one
+  // hidden under the content, with no drawn change); otherwise nothing.
+  // Cancel (Esc, blur, pointercancel): back to the stored layout, nothing sent.
+  const finishSectionEndDrag = (commit: boolean) => {
+    const drag = sectionEndDragRef.current;
+    if (!drag) return;
+    sectionEndCleanupRef.current?.();
+    sectionEndCleanupRef.current = null;
+    sectionEndDragRef.current = null;
+    const releaseHold = takeClipDragHold();
+    const release = commit ? sectionEndRelease(drag.range, drag.storedEndBeat, drag.storedBaseLength, drag.endBeat) : null;
+    if (release) {
+      const { baseLength } = release;
+      const previous = queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
+      if (previous) setSectionRowsCache(previous.map((r) => (r.name === drag.name ? { ...r, baseLength } : r)));
+      // mutateAsync, not mutate's own callbacks: those fire only for the latest call,
+      // and a second handle drag saved before this one settles must not strand its hold.
+      sectionBaseLengthMutation.mutateAsync({ section: drag.name, baseLength, previous })
+        .catch(() => { /* rolled back and toasted in onError */ })
+        .finally(releaseHold);
+    } else {
+      releaseHold();
+    }
+    setSectionEndDrag(null);
+  };
+  const finishSectionEndDragRef = useRef(finishSectionEndDrag);
+  finishSectionEndDragRef.current = finishSectionEndDrag;
+
+  const startSectionEndDrag = useCallback((e: React.PointerEvent, name: string) => {
+    if (e.button !== 0) return;
+    // Never a header drag (dnd-kit) or any other pointerdown handler.
+    e.stopPropagation();
+    e.nativeEvent.stopImmediatePropagation();
+    e.preventDefault();
+    startSectionEndDragRef.current(e.clientX, e.clientY, e.shiftKey, name);
+  }, []);
+  const startSectionEndDragImpl = (clientX: number, clientY: number, shiftKey: boolean, name: string) => {
+    if (sectionEndDragRef.current || !sectionEndInteractiveRef.current) return;
+    const sec = layout.sections.find((s) => s.name === name);
+    if (!sec) return;
+    const storedEndBeat = sec.startBeat + sec.lengthBeats;
+    const drag: SectionEndDrag = {
+      name,
+      range: sectionEndRange(sec.startBeat, contentNeedBeats(sec.contentNeed, bpm)),
+      storedEndBeat,
+      storedBaseLength: sec.baseLength,
+      endBeat: storedEndBeat,
+      grabOffsetSec: dragPointerTime(clientX) - sec.end,
+      originX: clientX,
+      moved: false,
+    };
+    takeClipDragHold()();
+    holdPollsForClipDrag();
+    clipDragMaxEndRef.current = layout.timelineEnd;
+    sectionEndShiftRef.current = shiftKey;
+    sectionEndDragRef.current = drag;
+
+    // Edge scroll like the header drag. The cap reads the content end live; the
+    // preview's end can't pass the 4096-beat maximum (nearestSectionEndStop), so
+    // neither can the scroll.
+    const scroller = createEdgeScroller({
+      getEl: () => timelineRef.current,
+      startInset: TRACK_PANEL_WIDTH,
+      endScrollCap: (el) => Math.max(0, Math.min(
+        contentEndRef.current * zoomRef.current - (el.clientWidth - TRACK_PANEL_WIDTH) / 2,
+        el.scrollWidth - el.clientWidth,
+      )),
+      onScrolled: (scrollLeft) => { lastAutoScrollRef.current = scrollLeft; },
+    });
+    scroller.start(clientX, clientY);
+    startDragPointer({ x: clientX, y: clientY }, {
+      onMove: (ev) => {
+        sectionEndShiftRef.current = ev.shiftKey;
+        scroller.onPointerMove(ev);
+      },
+    });
+    const onUp = (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      finishSectionEndDragRef.current(true);
+    };
+    const onCancel = () => finishSectionEndDragRef.current(false);
+    // Capture phase: Esc and Shift never reach the timeline's own key handlers mid-drag.
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && ev.type === 'keydown') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        finishSectionEndDragRef.current(false);
+        return;
+      }
+      if (ev.key !== 'Shift') return;
+      ev.stopPropagation();
+      if (sectionEndShiftRef.current === ev.shiftKey) return;
+      sectionEndShiftRef.current = ev.shiftKey;
+      recomputeDragIndicatorsRef.current();
+    };
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onCancel, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keyup', onKey, true);
+    window.addEventListener('blur', onCancel);
+    // col-resize everywhere for the whole drag (the headers' own cursor-grab would
+    // otherwise win), the same way the header drag sets grabbing.
+    const cursorStyle = document.createElement('style');
+    cursorStyle.textContent = '* { cursor: col-resize !important; }';
+    document.head.appendChild(cursorStyle);
+    sectionEndCleanupRef.current = () => {
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onCancel, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keyup', onKey, true);
+      window.removeEventListener('blur', onCancel);
+      cursorStyle.remove();
+      scroller.stop();
+      stopDragPointer();
+    };
+    setSectionEndDrag(drag);
+  };
+  const startSectionEndDragRef = useRef(startSectionEndDragImpl);
+  startSectionEndDragRef.current = startSectionEndDragImpl;
+  // Whether a handle may start now (no other drag or trim running) — read at
+  // pointerdown; set in the render below.
+  const sectionEndInteractiveRef = useRef(true);
+
   recomputeDragIndicatorsRef.current = () => {
     updateHeaderDrop();
     updateNewSectionLine();
@@ -3222,6 +3511,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     if (draggedSectionRef.current !== null) {
       positionSectionDragTag();
       positionSectionDragGhost();
+    }
+    if (sectionEndDragRef.current) {
+      updateSectionEndDrag();
+      positionSectionEndTag();
     }
   };
 
@@ -3308,8 +3601,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const firstClipSectionRows = (sectionName: string, hint: SectionPlacementHint | null): SongSectionRow[] => {
     const byName = new Map(sections.map((s) => [s.name, s]));
     const onTimeline = new Set(layout.sections.map((s) => s.name).filter((n) => byName.has(n) && n !== sectionName));
+    // The section coming back starts at fit to content, as the server resets its
+    // base_length when it gets its first clip again.
     return placeFirstClipSection(sections.map((s) => s.name), onTimeline, sectionName, hint)
-      .map((name, i) => ({ ...(byName.get(name) ?? { name, baseLength: null }), sortOrder: i }));
+      .map((name, i) => ({
+        ...(byName.get(name) ?? { name, baseLength: null }),
+        ...(name === sectionName ? { baseLength: null } : {}),
+        sortOrder: i,
+      }));
   };
   // Puts `rows` in the song-sections cache. A poll already in flight is cancelled, which
   // reverts the cache to its pre-fetch data — so the rows are set again once the cancel
@@ -4219,7 +4518,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // A loose file's frozen preview (looseConfirm, while its confirm dialog is open) is
   // drawn the same way.
   const activeDragPreview = looseConfirm?.placement ?? clipDragPreview;
+  // A section-end handle drag is drawn the same way: the stored clips with that
+  // section's base length set to the picked end (null = fit, at the minimum), so every
+  // later section slides with its clips on every track and cut pickups update live.
   const clipDragLayout = React.useMemo(() => {
+    if (sectionEndDrag) {
+      if (sectionEndDrag.endBeat === sectionEndDrag.storedEndBeat) return null;
+      const baseLength = baseLengthForEnd(sectionEndDrag.range, sectionEndDrag.endBeat);
+      const previewSections = sections.map((s) => (s.name === sectionEndDrag.name ? { ...s, baseLength } : s));
+      return deriveLayout(trackState, previewSections, bpm, timeSignature);
+    }
     const preview = activeDragPreview;
     if (!preview || !preview.changed) return null;
     const previewTracks = trackState.map((t) => {
@@ -4229,7 +4537,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       return { ...t, clips };
     });
     return deriveLayout(previewTracks, sections, bpm, timeSignature);
-  }, [activeDragPreview, trackState, sections, bpm, timeSignature]);
+  }, [sectionEndDrag, activeDragPreview, trackState, sections, bpm, timeSignature]);
   const displayLayout = clipDragLayout ?? layout;
   // The tracks as drawn: every clip at its preview-layout start and head cut (a push can
   // take a later pickup's room away, or give it back), except the dragged
@@ -4266,13 +4574,35 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // edge-scroll cap. During a timeline clip drag or a previewed version drag it follows
   // the preview layout but never shrinks (the widest seen since the drag started), so
   // the browser never clamps scrollLeft and nothing jumps under the pointer; after the
-  // drag it is the stored layout's end again.
+  // drag it is the stored layout's end again. The same during a section-end handle drag.
   let contentEnd = endOfTimeline;
-  if (draggedClipId || fileDrop || looseConfirm) {
+  if (draggedClipId || fileDrop || looseConfirm || sectionEndDrag) {
     clipDragMaxEndRef.current = Math.max(clipDragMaxEndRef.current, displayLayout.timelineEnd, endOfTimeline);
     contentEnd = clipDragMaxEndRef.current;
   }
   contentEndRef.current = contentEnd;
+  // Section-end handles (SectionEndHandles): sections on the timeline with a
+  // song_sections row (never orphans or full takes), at their drawn end. A handle can
+  // start only while nothing else is dragged or trimmed.
+  const sectionEndInteractive = activeSectionName === null && activeDragData === null
+    && fileDrop === null && looseConfirm === null && trimsBusy === 0;
+  sectionEndInteractiveRef.current = sectionEndInteractive;
+  const sectionEndMarks = React.useMemo<SectionEndMark[]>(() => {
+    const rowNames = new Set(sections.map((s) => s.name));
+    return displayLayout.sections
+      .filter((sec) => rowNames.has(sec.name))
+      .map((sec) => ({
+        name: sec.name,
+        endPx: TRACK_PANEL_WIDTH + sec.end * zoom,
+        addsSpace: sec.lengthBeats > contentNeedBeats(sec.contentNeed, bpm),
+      }));
+  }, [displayLayout, sections, zoom, bpm]);
+  // Which header the pointer is over, from its x against the drawn sections.
+  const handleHeaderRowPointerMove = (e: React.PointerEvent) => {
+    const t = dragPointerTime(e.clientX);
+    const name = t >= 0 ? sectionAt(t, displayLayout.sections)?.name ?? null : null;
+    if (name !== hoveredHeader) setHoveredHeader(name);
+  };
   // The dashed landing outline: where the dragged clip lands if released now, or its
   // own spot when nothing would change; trimmed length wide. Hidden while the pointer
   // is off the timeline (clipDragOffTimeline).
@@ -4597,6 +4927,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 );
               })()}
               {activeSectionName !== null && <SectionDragTag name={activeSectionName} tagRef={sectionDragTagRef} />}
+              {sectionEndDrag !== null && (
+                <SectionDragTag
+                  name={sectionEndReadout(sectionEndDrag.name, sectionEndDrag.range, sectionEndDrag.endBeat, parseTimeSignature(timeSignature).beatsPerBar)}
+                  tagRef={sectionEndTagRef}
+                />
+              )}
               {/* Section header drag: a ghost of the dragged section's clips that travels
                   with the pointer (positionSectionDragGhost), across the track rows only.
                   Its own layer in the content root, so it scrolls vertically with the rows;
@@ -4655,7 +4991,11 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                 onDragEnd={handleSectionDragEnd}
                 onDragCancel={handleSectionDragCancel}
               >
-                <div className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-[38px] z-30">
+                <div
+                  className="flex w-full h-6 border-b border-border/50 bg-[#09090b] sticky top-[38px] z-30"
+                  onPointerMove={handleHeaderRowPointerMove}
+                  onPointerLeave={() => setHoveredHeader(null)}
+                >
                   {/* Header-row layer for every gold insertion line (SplitInsertionLine).
                       Content px like the rows layer; runs 1px past the row (-bottom-px) to
                       cover its border-b, which otherwise left a 1px gap at y 62. Over the
@@ -4685,6 +5025,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                       />
                     ))}
                   </div>
+                  {/* Section-end handles: their own layer over the headers (z-20, above
+                      the looped header's border); over the track panel the z-50
+                      section-band spacer covers them. */}
+                  <SectionEndHandles
+                    marks={sectionEndMarks}
+                    hoveredName={hoveredHeader}
+                    draggingName={sectionEndDrag?.name ?? null}
+                    interactive={sectionEndInteractive}
+                    onPointerDown={startSectionEndDrag}
+                  />
                 </div>
 
               </DndContext>
