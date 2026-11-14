@@ -119,3 +119,34 @@ export function sectionEndRelease(
   if (endBeat <= range.minEndBeat && storedBaseLength !== null) return { baseLength: null };
   return null;
 }
+
+// ── "Fit to Content" (step 4g3) ───────────────────────────────────────────────
+
+// Whether a section's drawn length adds empty space after its content you can see:
+// its length (beats) is more than its content need (contentNeedBeats). The faint gold
+// added-space mark and "Fit to Content" both use this, so they never disagree.
+export function addsVisibleSpace(lengthBeats: number, needBeats: number): boolean {
+  return lengthBeats > needBeats;
+}
+
+// Whether the section header menu's "Fit to Content" is enabled: only for a section
+// with a song_sections row (storedBaseLength undefined = no row, an orphan) whose stored
+// base length adds visible empty space (addsVisibleSpace), and only while the
+// section-end handles are interactive (no other drag or trim running). A stored value
+// hidden under the content is left alone: no menu path clears it (the handle's release
+// at fit still does — sectionEndRelease).
+export function canFitToContent(
+  storedBaseLength: number | null | undefined,
+  lengthBeats: number,
+  needBeats: number,
+  interactive: boolean,
+): boolean {
+  return interactive && storedBaseLength !== null && storedBaseLength !== undefined
+    && addsVisibleSpace(lengthBeats, needBeats);
+}
+
+// Whether a base-length write is worth sending: never null over a stored null (or no
+// row), which would change nothing and only log a section-length-changed row.
+export function shouldSendBaseLength(storedBaseLength: number | null | undefined, next: number | null): boolean {
+  return next !== null || (storedBaseLength !== null && storedBaseLength !== undefined);
+}

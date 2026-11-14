@@ -56,7 +56,7 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapGridSeconds, parseTimeSignature, secondsPerBeat } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, contentNeedBeats, type TimelineLayout } from '@shared/timelineLayout';
-import { sectionEndRange, nearestSectionEndStop, baseLengthForEnd, sectionEndReadout, sectionEndRelease, type SectionEndRange } from '@shared/sectionBaseLength';
+import { sectionEndRange, nearestSectionEndStop, baseLengthForEnd, sectionEndReadout, sectionEndRelease, addsVisibleSpace, canFitToContent, shouldSendBaseLength, type SectionEndRange } from '@shared/sectionBaseLength';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
 import { placeDraggedClip, computeFileDropPlacement, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
@@ -67,7 +67,9 @@ import { DawScrollbar } from './DawScrollbar';
 import { isColumnScrollElement } from '@/hooks/use-column-edge-scroll';
 import { createEdgeScroller, type EdgeScroller, SCROLL_SPEED_PX, EDGE_ZONE_PX, EDGE_ZONE_RELEASE_PX, MIN_DRAG_DISTANCE_PX } from '@/lib/edge-scroller';
 import { MediaBucket } from './MediaBucket';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, ArrowLeftToLine } from 'lucide-react';
+import { ContextMenu, ContextMenuTrigger, ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
+import { useReopenableContextMenu } from '@/hooks/use-reopenable-context-menu';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from '@/components/ui/dialog';
@@ -324,26 +326,73 @@ const makeTrackFirstCollision = (isVersionDrop: () => boolean): CollisionDetecti
   return [];
 };
 
+// The section header's right-click menu (headers and section-end handles share it).
+// One item for now, "Fit to Content"; step 6 adds "Copy section to ▸" below it.
+// canFit (canFitToContent): the section has a stored base length and nothing else is
+// being dragged or trimmed; otherwise the item is greyed out, never hidden.
+interface SectionMenuProps {
+  canFit: boolean;
+  onFit: () => void;
+  onOpenChange: (open: boolean) => void;
+}
+function SectionMenuContent({ canFit, onFit }: { canFit: boolean; onFit: () => void }) {
+  return (
+    // A right-click inside the menu never opens the browser's menu or Clear Timeline.
+    // onCloseAutoFocus: closing never puts focus back on the header or handle. The
+    // right-press focused the header (dnd-kit makes it focusable), Radix's focus scope
+    // returns focus there on close, and after Esc :focus-visible drew the browser outline.
+    <ContextMenuContent
+      className="bg-popover border-border min-w-[160px]"
+      onContextMenu={(e) => e.preventDefault()}
+      onCloseAutoFocus={(e) => e.preventDefault()}
+    >
+      <ContextMenuItem disabled={!canFit} onClick={onFit} className="gap-2 text-xs uppercase tracking-wider font-semibold">
+        <ArrowLeftToLine size={14} className="text-primary" /> Fit to Content
+      </ContextMenuItem>
+    </ContextMenuContent>
+  );
+}
+// Wraps a header or a section-end handle (the child) in the section's menu. modal off +
+// useReopenableContextMenu, as the file cards do, so a second right-click moves the menu.
+// Radix's trigger cancels the contextmenu event, so neither the browser's menu nor
+// Clear Timeline (handleTimelineContextMenu skips cancelled events) opens.
+function SectionMenu({ menu, children }: { menu: SectionMenuProps; children: React.ReactElement }) {
+  const contextMenu = useReopenableContextMenu();
+  return (
+    <ContextMenu modal={false} onOpenChange={menu.onOpenChange}>
+      <ContextMenuTrigger asChild onContextMenuCapture={contextMenu.onContextMenuCapture}>
+        {children}
+      </ContextMenuTrigger>
+      <SectionMenuContent key={contextMenu.nonce} canFit={menu.canFit} onFit={menu.onFit} />
+    </ContextMenu>
+  );
+}
+
 // Draggable section header label — used inside the section-reorder DndContext.
-// id format: sec||${sectionName}
-function DraggableSectionHeader({ name, width, isLooped }: { name: string; width: number; isLooped?: boolean }) {
+// id format: sec||${sectionName}. A right-click opens the section menu; dnd-kit's
+// sensors ignore anything but the left button, so it never starts a header drag.
+// Looped: a gold underline and tint; the right divider stays the faint one every header
+// has, so the section-end handle and its added-space mark read cleanly on top.
+function DraggableSectionHeader({ name, width, isLooped, menu }: { name: string; width: number; isLooped?: boolean; menu: SectionMenuProps }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({ id: `sec||${name}` });
   return (
-    <div
-      ref={setNodeRef}
-      {...listeners}
-      {...attributes}
-      className={cn(
-        'border-r border-primary/20 flex items-start pt-1 px-2 shrink-0 cursor-grab active:cursor-grabbing select-none transition-opacity',
-        isDragging && 'opacity-30',
-        isLooped && 'bg-primary/10 border-b-2 border-r-2 border-primary rounded-br-md'
-      )}
-      style={{ width, minWidth: width }}
-    >
-      <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm pointer-events-none">
-        {name}
-      </span>
-    </div>
+    <SectionMenu menu={menu}>
+      <div
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
+        className={cn(
+          'border-r border-primary/20 flex items-start pt-1 px-2 shrink-0 cursor-grab active:cursor-grabbing select-none transition-opacity',
+          isDragging && 'opacity-30',
+          isLooped && 'bg-primary/10 border-b-2 border-b-primary'
+        )}
+        style={{ width, minWidth: width }}
+      >
+        <span className="text-[9px] font-bold text-primary/70 uppercase tracking-widest bg-[#09090b]/80 px-1 rounded backdrop-blur-sm pointer-events-none">
+          {name}
+        </span>
+      </div>
+    </SectionMenu>
   );
 }
 
@@ -446,24 +495,30 @@ interface SectionEndMark {
   name: string;
   endPx: number;       // content px (including the 256px track panel)
   addsSpace: boolean;  // its stored base length adds empty space after its content
+  canFit: boolean;     // its menu's "Fit to Content" is enabled (canFitToContent)
 }
 
 // The gold section-end handles: one per section on the timeline that has a
 // song_sections row, at its right boundary. Their own layer over the section header
 // row (a sibling of the headers, never inside one), so a handle can straddle the
-// boundary and sit above the next header and the looped header's gold border. The hit
-// area is 8px wide at every zoom; the gold bar and grip show while the pointer is over
-// the section's header (hoveredName) or the handle itself, and for the whole drag. A
+// boundary and sit above the next header (and its divider). The hit
+// area is 8px wide at every zoom; the gold bar and grip show for
+// hoveredName (the handle's own hit area, else the section's header — at most one at a
+// time; see handleHeaderRowPointerMove), and for the whole drag. A
 // section whose base length adds space always shows a faint gold mark there.
 // `interactive` false (another drag or trim running): no handles, only the marks.
 // Pointer handling is the Timeline's own (startSectionEndDrag), never dnd-kit.
 const SECTION_END_HIT_PX = 8;
-const SectionEndHandles = React.memo(function SectionEndHandles({ marks, hoveredName, draggingName, interactive, onPointerDown }: {
+// A right-click on a handle opens the menu of the section whose end it is (the one to
+// its left), never Clear Timeline or the browser's menu.
+const SectionEndHandles = React.memo(function SectionEndHandles({ marks, hoveredName, draggingName, interactive, onPointerDown, onFit, onMenuOpenChange }: {
   marks: SectionEndMark[];
   hoveredName: string | null;
   draggingName: string | null;
   interactive: boolean;
   onPointerDown: (e: React.PointerEvent, name: string) => void;
+  onFit: (name: string) => void;
+  onMenuOpenChange: (open: boolean) => void;
 }) {
   return (
     <div className="absolute inset-0 z-20 pointer-events-none">
@@ -473,26 +528,27 @@ const SectionEndHandles = React.memo(function SectionEndHandles({ marks, hovered
         if (!live && !m.addsSpace) return null;
         const shown = dragging || (live && hoveredName === m.name);
         return (
-          <div
-            key={m.name}
-            data-section-end={m.name}
-            className={cn('group/end absolute top-0 h-full', live && 'pointer-events-auto cursor-col-resize')}
-            style={{ left: m.endPx - SECTION_END_HIT_PX / 2, width: SECTION_END_HIT_PX }}
-            onPointerDown={live ? (e) => onPointerDown(e, m.name) : undefined}
-          >
-            {m.addsSpace && !shown && (
-              <div aria-hidden className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary/35" />
-            )}
-            {live && (
-              <div
-                aria-hidden
-                className={cn('absolute inset-0 transition-opacity duration-100', shown ? 'opacity-100' : 'opacity-0 group-hover/end:opacity-100')}
-              >
-                <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_6px_rgba(212,175,55,0.6)]" />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-3 rounded-[2px] bg-primary border border-[#09090b]/70" />
-              </div>
-            )}
-          </div>
+          <SectionMenu key={m.name} menu={{ canFit: m.canFit, onFit: () => onFit(m.name), onOpenChange: onMenuOpenChange }}>
+            <div
+              data-section-end={m.name}
+              className={cn('absolute top-0 h-full', live && 'pointer-events-auto cursor-col-resize')}
+              style={{ left: m.endPx - SECTION_END_HIT_PX / 2, width: SECTION_END_HIT_PX }}
+              onPointerDown={live ? (e) => onPointerDown(e, m.name) : undefined}
+            >
+              {m.addsSpace && !shown && (
+                <div aria-hidden className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary/35" />
+              )}
+              {live && (
+                <div
+                  aria-hidden
+                  className={cn('absolute inset-0 transition-opacity duration-100', shown ? 'opacity-100' : 'opacity-0')}
+                >
+                  <div className="absolute inset-y-0 left-1/2 -translate-x-1/2 w-0.5 bg-primary shadow-[0_0_6px_rgba(212,175,55,0.6)]" />
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-3 rounded-[2px] bg-primary border border-[#09090b]/70" />
+                </div>
+              )}
+            </div>
+          </SectionMenu>
         );
       })}
     </div>
@@ -3392,20 +3448,44 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     sectionEndDragRef.current = null;
     const releaseHold = takeClipDragHold();
     const release = commit ? sectionEndRelease(drag.range, drag.storedEndBeat, drag.storedBaseLength, drag.endBeat) : null;
-    if (release) {
-      const { baseLength } = release;
-      const previous = queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
-      if (previous) setSectionRowsCache(previous.map((r) => (r.name === drag.name ? { ...r, baseLength } : r)));
-      // mutateAsync, not mutate's own callbacks: those fire only for the latest call,
-      // and a second handle drag saved before this one settles must not strand its hold.
-      sectionBaseLengthMutation.mutateAsync({ section: drag.name, baseLength, previous })
-        .catch(() => { /* rolled back and toasted in onError */ })
-        .finally(releaseHold);
-    } else {
-      releaseHold();
-    }
+    const saving = release ? saveSectionBaseLength(drag.name, release.baseLength) : null;
+    if (saving) saving.finally(releaseHold);
+    else releaseHold();
     setSectionEndDrag(null);
   };
+
+  // Shared by a handle release and the section menu's "Fit to Content": shows the new
+  // base length at once (setSectionRowsCache, synchronously — onMutate runs a tick later
+  // and could flash the old length) and saves it. Sends nothing for null over a stored
+  // null (shouldSendBaseLength), so no pointless section-length-changed row. Returns the
+  // save, settled either way (a failure is rolled back and toasted in onError), or null
+  // when nothing was sent. mutateAsync, not mutate's own callbacks: those fire only for
+  // the latest call, and a second save made before this one settles must not strand a
+  // drag's poll hold.
+  const saveSectionBaseLength = (name: string, baseLength: number | null): Promise<void> | null => {
+    const previous = queryClient.getQueryData<SongSectionRow[]>(songSectionsKey(songId));
+    const stored = previous?.find((r) => r.name === name)?.baseLength;
+    if (!shouldSendBaseLength(stored, baseLength)) return null;
+    if (previous) setSectionRowsCache(previous.map((r) => (r.name === name ? { ...r, baseLength } : r)));
+    return sectionBaseLengthMutation.mutateAsync({ section: name, baseLength, previous })
+      .then(() => undefined, () => { /* rolled back and toasted in onError */ });
+  };
+  const saveSectionBaseLengthRef = useRef(saveSectionBaseLength);
+  saveSectionBaseLengthRef.current = saveSectionBaseLength;
+  // The section menu's "Fit to Content": the same instant change as a handle release at
+  // fit. No poll hold — the section poll already pauses while the save is pending
+  // (sectionBaseLengthSaving), and the timeline poll doesn't carry base lengths.
+  const fitSectionToContent = useCallback((name: string) => {
+    saveSectionBaseLengthRef.current(name, null);
+  }, []);
+  // Whether a section menu is open. A trim or a section-end handle drag stops its
+  // pointerdown, so Radix never sees it as an outside press; any drag or trim starting
+  // while a menu is open remounts the menus (sectionMenuEpoch), which closes it.
+  const sectionMenuOpenRef = useRef(false);
+  const [sectionMenuEpoch, setSectionMenuEpoch] = useState(0);
+  const handleSectionMenuOpenChange = useCallback((open: boolean) => {
+    sectionMenuOpenRef.current = open;
+  }, []);
   const finishSectionEndDragRef = useRef(finishSectionEndDrag);
   finishSectionEndDragRef.current = finishSectionEndDrag;
 
@@ -4411,6 +4491,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   }, [tracks, selectedTimelineTrackId, selectedTimelineClipId, songId, activeDragData]);
 
   const handleTimelineContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    // Already handled by a Radix menu trigger inside (the section menu on headers and
+    // section-end handles, the section menu's own content).
+    if (e.defaultPrevented) return;
     const target = e.target as HTMLElement;
     // Suppress on clips and draggable section header labels (all carry cursor-grab).
     if (target.closest('.cursor-grab')) return;
@@ -4587,20 +4670,58 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   const sectionEndInteractive = activeSectionName === null && activeDragData === null
     && fileDrop === null && looseConfirm === null && trimsBusy === 0;
   sectionEndInteractiveRef.current = sectionEndInteractive;
+  // The section menus: "Fit to Content" works only while nothing else (a handle drag
+  // included) is running, and an open menu closes when anything starts.
+  const sectionMenuInteractive = sectionEndInteractive && sectionEndDrag === null;
+  useEffect(() => {
+    if (sectionMenuInteractive || !sectionMenuOpenRef.current) return;
+    sectionMenuOpenRef.current = false;
+    setSectionMenuEpoch((n) => n + 1);
+  }, [sectionMenuInteractive]);
+  // Stored base lengths by section (song_sections rows; an orphan has none).
+  const storedBaseLengths = React.useMemo(
+    () => new Map(sections.map((r) => [r.name, r.baseLength] as const)),
+    [sections],
+  );
   const sectionEndMarks = React.useMemo<SectionEndMark[]>(() => {
-    const rowNames = new Set(sections.map((s) => s.name));
     return displayLayout.sections
-      .filter((sec) => rowNames.has(sec.name))
-      .map((sec) => ({
-        name: sec.name,
-        endPx: TRACK_PANEL_WIDTH + sec.end * zoom,
-        addsSpace: sec.lengthBeats > contentNeedBeats(sec.contentNeed, bpm),
-      }));
-  }, [displayLayout, sections, zoom, bpm]);
-  // Which header the pointer is over, from its x against the drawn sections.
+      .filter((sec) => storedBaseLengths.has(sec.name))
+      .map((sec) => {
+        const needBeats = contentNeedBeats(sec.contentNeed, bpm);
+        return {
+          name: sec.name,
+          endPx: TRACK_PANEL_WIDTH + sec.end * zoom,
+          addsSpace: addsVisibleSpace(sec.lengthBeats, needBeats),
+          canFit: canFitToContent(storedBaseLengths.get(sec.name), sec.lengthBeats, needBeats, sectionMenuInteractive),
+        };
+      });
+  }, [displayLayout, storedBaseLengths, zoom, bpm, sectionMenuInteractive]);
+  // "Fit to Content" per section for the header menus (an orphan has no mark: off).
+  const sectionCanFit = React.useMemo(
+    () => new Map(sectionEndMarks.map((m) => [m.name, m.canFit] as const)),
+    [sectionEndMarks],
+  );
+  // Which section's end handle shows (SectionEndHandles' hoveredName) — at most one.
+  // Over a handle's hit area: that handle's section, even where the hit area lies over
+  // the next header (the handle element the browser hit-tests, so where narrow
+  // sections' hit areas overlap, the one on top wins). Otherwise the header the pointer
+  // is over, from its x against the drawn sections. Pointer events from a portalled
+  // section menu bubble here through React but aren't over the row: they clear it, so
+  // a handle never stays shown after the menu closes.
   const handleHeaderRowPointerMove = (e: React.PointerEvent) => {
-    const t = dragPointerTime(e.clientX);
-    const name = t >= 0 ? sectionAt(t, displayLayout.sections)?.name ?? null : null;
+    const target = e.target as HTMLElement;
+    let name: string | null;
+    if (!e.currentTarget.contains(target)) {
+      name = null;
+    } else {
+      const handle = target.closest<HTMLElement>('[data-section-end]');
+      if (handle) {
+        name = handle.dataset.sectionEnd ?? null;
+      } else {
+        const t = dragPointerTime(e.clientX);
+        name = t >= 0 ? sectionAt(t, displayLayout.sections)?.name ?? null : null;
+      }
+    }
     if (name !== hoveredHeader) setHoveredHeader(name);
   };
   // The dashed landing outline: where the dragged clip lands if released now, or its
@@ -5018,22 +5139,30 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                   <div className="flex relative">
                     {displaySectionLayout.map((sec) => (
                       <DraggableSectionHeader
-                        key={sec.name}
+                        key={`${sec.name}:${sectionMenuEpoch}`}
                         name={sec.name}
                         width={sec.duration * zoom}
                         isLooped={sec.name === loopedSectionName}
+                        menu={{
+                          canFit: sectionCanFit.get(sec.name) ?? false,
+                          onFit: () => fitSectionToContent(sec.name),
+                          onOpenChange: handleSectionMenuOpenChange,
+                        }}
                       />
                     ))}
                   </div>
                   {/* Section-end handles: their own layer over the headers (z-20, above
-                      the looped header's border); over the track panel the z-50
+                      the headers and their dividers); over the track panel the z-50
                       section-band spacer covers them. */}
                   <SectionEndHandles
+                    key={sectionMenuEpoch}
                     marks={sectionEndMarks}
                     hoveredName={hoveredHeader}
                     draggingName={sectionEndDrag?.name ?? null}
                     interactive={sectionEndInteractive}
                     onPointerDown={startSectionEndDrag}
+                    onFit={fitSectionToContent}
+                    onMenuOpenChange={handleSectionMenuOpenChange}
                   />
                 </div>
 

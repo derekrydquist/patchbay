@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_SECTION_BASE_BEATS, isValidBaseLength, parseSectionBaseLengthBody,
   sectionEndRange, nearestSectionEndStop, baseLengthForEnd, formatBarsAndBeats, sectionEndReadout, sectionEndRelease,
+  addsVisibleSpace, canFitToContent, shouldSendBaseLength,
 } from './sectionBaseLength';
 
 describe('parseSectionBaseLengthBody', () => {
@@ -146,5 +147,45 @@ describe('sectionEndRelease (fit always clears)', () => {
 
   it('no change above the minimum sends nothing', () => {
     expect(sectionEndRelease(range, 20, 12, 20)).toBeNull();
+  });
+});
+
+describe('addsVisibleSpace', () => {
+  it('only when the length is more than the content need', () => {
+    expect(addsVisibleSpace(12, 8)).toBe(true);
+    expect(addsVisibleSpace(8, 8)).toBe(false);
+    expect(addsVisibleSpace(6, 8)).toBe(false);
+  });
+});
+
+describe('canFitToContent', () => {
+  it('needs a stored base length that adds visible space, and interactive handles', () => {
+    expect(canFitToContent(12, 12, 8, true)).toBe(true);
+    expect(canFitToContent(12, 12, 8, false)).toBe(false);
+    expect(canFitToContent(null, 8, 8, true)).toBe(false);
+  });
+
+  it('is off for a stored value hidden under the content', () => {
+    // Stored 4 beats, content needs 8: drawn at 8, no visible space.
+    expect(canFitToContent(4, 8, 8, true)).toBe(false);
+    // Equal to the content need: still nothing visible.
+    expect(canFitToContent(8, 8, 8, true)).toBe(false);
+  });
+
+  it('is off for an orphan (no song_sections row)', () => {
+    expect(canFitToContent(undefined, 12, 8, true)).toBe(false);
+  });
+});
+
+describe('shouldSendBaseLength', () => {
+  it('never sends null over a stored null or a missing row', () => {
+    expect(shouldSendBaseLength(null, null)).toBe(false);
+    expect(shouldSendBaseLength(undefined, null)).toBe(false);
+  });
+
+  it('sends null over a stored value, and any number', () => {
+    expect(shouldSendBaseLength(12, null)).toBe(true);
+    expect(shouldSendBaseLength(null, 8)).toBe(true);
+    expect(shouldSendBaseLength(12, 16)).toBe(true);
   });
 });
