@@ -1,7 +1,7 @@
 // Cases that already work, pinned so later parts of the placement rebuild can't
 // break them silently.
 import { describe, expect, it } from 'vitest';
-import { layoutTimeline, sectionContentNeeds, contentNeedBeats, type LayoutClipInput } from './timelineLayout';
+import { layoutTimeline, sectionContentNeeds, contentNeedBeats, storedTailSeconds, type LayoutClipInput } from './timelineLayout';
 
 const clip = (over: Partial<LayoutClipInput> & Pick<LayoutClipInput, 'id' | 'sectionName'>): LayoutClipInput => ({
   trackId: 't1',
@@ -403,5 +403,176 @@ describe('contentNeedBeats / sectionContentNeeds — the layout\'s own rule', ()
   it('has no entry for a section with only full takes or no clips (not on the timeline)', () => {
     const needs = sectionContentNeeds([clip({ id: 'z', sectionName: 'A', isFullTake: true })]);
     expect(needs.has('A')).toBe(false);
+  });
+});
+
+// Tails (step 4h1): the last tailSeconds of a clip may hang past its section's end
+// without growing it; the layout cuts the drawn tail where the next clip on its track is
+// drawn. 120 bpm 4/4: a beat is 0.5 s, a bar 2 s.
+describe('layoutTimeline — tails', () => {
+  const sections = (...names: string[]) => names.map((name, i) => ({ name, sortOrder: i, baseLength: null }));
+  const lay = (clips: LayoutClipInput[], secs = sections('A', 'B')) =>
+    layoutTimeline({ sections: secs, clips, bpm: 120, timeSignature: '4/4' });
+  const geometry = (l: ReturnType<typeof lay>) =>
+    l.sections.map((s) => ({ name: s.name, start: s.start, length: s.length, lengthBeats: s.lengthBeats }));
+
+  it('every clip has a tail cut of 0 when every tail is 0', () => {
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 2 }),
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: -1, duration: 2 }),
+      clip({ id: 'f', sectionName: null, isFullTake: true, start: 9, duration: 3 }),
+    ]);
+    expect(Array.from(l.clipTailCuts.entries()).sort()).toEqual([['a1', 0], ['b1', 0], ['f', 0]]);
+  });
+
+  it('a tail is cut by a normal clip in the next section; its stored end and the sections stay put', () => {
+    // a1 is 4 s with a 2 s tail: A needs 2 s (0–2), a1 is drawn to 4. b1 starts at B + 1 = 3.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 4, tailSeconds: 2 }),
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: 1, duration: 1 }),
+    ]);
+    expect(geometry(l)).toEqual([
+      { name: 'A', start: 0, length: 2, lengthBeats: 4 },
+      { name: 'B', start: 2, length: 2, lengthBeats: 4 },
+    ]);
+    expect(l.clipEnds.get('a1')).toBe(4); // uncut end
+    expect(l.clipTailCuts.get('a1')).toBe(1); // drawn to 3, where b1 starts
+    expect(l.clipStarts.get('b1')).toBe(3);
+    expect(l.clipTailCuts.get('b1')).toBe(0);
+    expect(l.timelineEnd).toBe(4); // B's end; a1's drawn end (3) is inside it
+  });
+
+  it("a tail is cut by a later section's pickup on its track, and the pickup is not cut", () => {
+    // A 0–1 (a1: 3 s, tail 2, drawn to 3). B 1–3, filled by t2; nothing of t1 in B.
+    // C 3–4: t1's pickup c1 at −1 hangs into B (drawn from 2), uncut.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 3, tailSeconds: 2 }),
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 2 }),
+      clip({ id: 'c1', sectionName: 'C', sectionOffset: -1, duration: 2 }),
+    ], sections('A', 'B', 'C'));
+    expect(l.sections.map((s) => [s.start, s.end])).toEqual([[0, 1], [1, 3], [3, 4]]);
+    expect(l.clipHeadCuts.get('c1')).toBe(0);
+    expect(l.clipStarts.get('c1')).toBe(2);
+    expect(l.clipTailCuts.get('a1')).toBe(1); // 3 → cut at 2
+  });
+
+  it("a pickup in the very next section is cut by the tail clip's own in-section part, and the tail meets it at the downbeat", () => {
+    // A 0–1 (a1 3 s, tail 2: it fills A to its end). B 1–1.5: pickup b1 at −0.5 has no
+    // room in A, so its head is cut to the downbeat; a1's tail is cut there too.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 3, tailSeconds: 2 }),
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: -0.5, duration: 1 }),
+    ]);
+    expect(l.sections.map((s) => [s.start, s.end])).toEqual([[0, 1], [1, 1.5]]);
+    expect(l.clipHeadCuts.get('b1')).toBe(0.5);
+    expect(l.clipStarts.get('b1')).toBe(1);
+    expect(l.clipTailCuts.get('a1')).toBe(2); // drawn end = A's end
+  });
+
+  it('a tail crosses several short sections with nothing on its track, and is cut at the first clip after them', () => {
+    // A 0–1 (a1 5 s, tail 4), B 1–1.5 and C 1.5–2 hold only t2, D 2–3.5: t1's d1 at +0.5.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 5, tailSeconds: 4 }),
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 0.5 }),
+      clip({ id: 'c2', sectionName: 'C', trackId: 't2', duration: 0.5 }),
+      clip({ id: 'd1', sectionName: 'D', sectionOffset: 0.5, duration: 1 }),
+    ], sections('A', 'B', 'C', 'D'));
+    expect(l.sections.map((s) => [s.start, s.end])).toEqual([[0, 1], [1, 1.5], [1.5, 2], [2, 3.5]]);
+    expect(l.clipStarts.get('d1')).toBe(2.5);
+    expect(l.clipTailCuts.get('a1')).toBe(2.5); // 5 → 2.5
+    expect(l.clipEnds.get('a1')).toBe(5);
+    expect(l.timelineEnd).toBe(3.5);
+  });
+
+  it("another track's clips never cut a tail", () => {
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 4, tailSeconds: 2 }),
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 1 }),
+    ]);
+    expect(l.clipTailCuts.get('a1')).toBe(0);
+  });
+
+  it('with no next clip on its track the tail rings past the last section, and timelineEnd covers it', () => {
+    // A 0–1 (a1 4 s, tail 3), B 1–2 (t2 only). a1 rings to 4.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 4, tailSeconds: 3 }),
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 1 }),
+    ]);
+    expect(l.sections[l.sections.length - 1].end).toBe(2);
+    expect(l.clipTailCuts.get('a1')).toBe(0);
+    expect(l.timelineEnd).toBe(4);
+  });
+
+  it('timelineEnd follows the cut end, not the stored end, for a tail past the last section', () => {
+    // A 0–1: a1 would ring to 8, far past B (1–3); t1's own b1 starts at 1.5 and cuts
+    // it there, so the timeline ends with B at 3, not at 8.
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 8, tailSeconds: 7 }),
+      clip({ id: 'b1', sectionName: 'B', sectionOffset: 0.5, duration: 1.5 }),
+    ]);
+    expect(l.clipTailCuts.get('a1')).toBe(6.5);
+    expect(l.timelineEnd).toBe(3);
+  });
+
+  it('a hidden tail (its section is long enough anyway) is not cut and changes nothing', () => {
+    // A has a base length of 8 beats (4 s); a1 ends at 3, inside it.
+    const secs = [{ name: 'A', sortOrder: 0, baseLength: 8 }, { name: 'B', sortOrder: 1, baseLength: null }];
+    const withTail = [clip({ id: 'a1', sectionName: 'A', duration: 3, tailSeconds: 2 }), clip({ id: 'b1', sectionName: 'B', duration: 1 })];
+    const noTail = [clip({ id: 'a1', sectionName: 'A', duration: 3 }), clip({ id: 'b1', sectionName: 'B', duration: 1 })];
+    const l = lay(withTail, secs);
+    const plain = lay(noTail, secs);
+    expect(l.clipTailCuts.get('a1')).toBe(0);
+    expect(geometry(l)).toEqual(geometry(plain));
+    expect(Array.from(l.clipStarts)).toEqual(Array.from(plain.clipStarts));
+    expect(l.timelineEnd).toBe(plain.timelineEnd);
+    // Another track making the section longer hides it the same way.
+    const byOtherTrack = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 3, tailSeconds: 2 }),
+      clip({ id: 'a2', sectionName: 'A', trackId: 't2', duration: 4 }),
+      clip({ id: 'b1', sectionName: 'B', duration: 1 }),
+    ]);
+    expect(byOtherTrack.sections[0].end).toBe(4);
+    expect(byOtherTrack.clipTailCuts.get('a1')).toBe(0);
+  });
+
+  it('a tail longer than the trimmed clip is capped at it', () => {
+    expect(storedTailSeconds({ duration: 2, trimStart: 0, trimEnd: null, tailSeconds: 10 })).toBe(2);
+    expect(storedTailSeconds({ duration: 9, trimStart: 0.5, trimEnd: 1.5, tailSeconds: 5 })).toBe(1);
+    const capped = lay([clip({ id: 'a1', sectionName: 'A', duration: 2, tailSeconds: 10 }), clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 1 })]);
+    const exact = lay([clip({ id: 'a1', sectionName: 'A', duration: 2, tailSeconds: 2 }), clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 1 })]);
+    expect(geometry(capped)).toEqual(geometry(exact));
+    expect(capped.sections[0].lengthBeats).toBe(1); // the one-beat floor
+    expect(capped.timelineEnd).toBe(exact.timelineEnd);
+  });
+
+  it('a bad stored tail (negative, NaN, infinite) is treated as 0', () => {
+    const base = [clip({ id: 'a1', sectionName: 'A', duration: 3 }), clip({ id: 'b1', sectionName: 'B', duration: 1 })];
+    const plain = lay(base);
+    for (const bad of [-1, NaN, Infinity, -Infinity]) {
+      expect(storedTailSeconds({ duration: 3, trimStart: 0, trimEnd: null, tailSeconds: bad })).toBe(0);
+      const l = lay([{ ...base[0], tailSeconds: bad }, base[1]]);
+      expect(geometry(l)).toEqual(geometry(plain));
+      expect(l.clipTailCuts.get('a1')).toBe(0);
+      expect(l.timelineEnd).toBe(plain.timelineEnd);
+    }
+  });
+
+  it('legacy full takes: their tail is ignored, and they never cut a tail', () => {
+    const l = lay([
+      clip({ id: 'a1', sectionName: 'A', duration: 4, tailSeconds: 3 }), // A 0–1, rings to 4
+      clip({ id: 'b2', sectionName: 'B', trackId: 't2', duration: 1 }),
+      clip({ id: 'f', sectionName: 'Full', isFullTake: true, start: 2, duration: 5, tailSeconds: 4 }),
+    ]);
+    expect(l.clipStarts.get('f')).toBe(2);
+    expect(l.clipEnds.get('f')).toBe(7);
+    expect(l.clipTailCuts.get('f')).toBe(0);
+    expect(l.clipTailCuts.get('a1')).toBe(0);
+    expect(l.sections.map((s) => s.name)).toEqual(['A', 'B']);
+  });
+
+  it('content need subtracts the tail, as before', () => {
+    const clips = [clip({ id: 'x', sectionName: 'A', sectionOffset: 1, duration: 3, tailSeconds: 1 })];
+    expect(sectionContentNeeds(clips).get('A')).toBe(3);
+    expect(lay(clips, sections('A')).sections[0].contentNeed).toBe(3);
   });
 });

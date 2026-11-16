@@ -972,7 +972,8 @@ function insertTimelineClipPlacedRows(
   } else if (sectioned) {
     ensureSongSection(songId, data.sectionName!);
   }
-  db.insert(timelineClips).values(data).run();
+  // A new clip never has a tail: 0 whatever the caller sent (step 4h1).
+  db.insert(timelineClips).values({ ...data, tailSeconds: 0 }).run();
   return db.select().from(timelineClips).where(eq(timelineClips.id, data.id)).get()!;
 }
 
@@ -1089,6 +1090,7 @@ function materializeLooseFileAtPosition(
       bucketClipId: clip.id,
       isFullTake: false,
       sectionOffset: position.sectionOffset,
+      tailSeconds: 0,
     }, position.pushed);
     return { clip, timelineClip };
   });
@@ -1190,6 +1192,7 @@ export function songLayoutInput(songId: string): TimelineLayoutInput {
       trimEnd: c.trimEnd,
       isFullTake: c.isFullTake,
       start: c.start,
+      tailSeconds: c.isFullTake ? 0 : c.tailSeconds,
     })),
     bpm: song?.bpm ?? null,
     timeSignature: song?.timeSignature ?? null,
@@ -2407,6 +2410,7 @@ export class SQLiteStorage implements IStorage {
         bucketClipId: clip.id,
         isFullTake: false,
         sectionOffset,
+        tailSeconds: 0,
       };
       tx.insert(timelineClips).values(timelineClip).run();
 

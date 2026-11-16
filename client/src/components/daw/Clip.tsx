@@ -1197,8 +1197,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     const channelData = buffer.getChannelData(0);
     const sampleRate = buffer.sampleRate;
 
-    // The played part of the file: trim plus a pickup's head cut (playedSpan).
-    const { inPoint, outPoint } = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut });
+    // The played part of the file: trim plus a pickup's head cut and a tail's cut (playedSpan).
+    const { inPoint, outPoint } = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut, tailCut: clip.tailCut });
     const startSample = Math.floor(inPoint * sampleRate);
     const endSample = Math.floor(outPoint * sampleRate);
     const samples = channelData.slice(startSample, Math.min(endSample, channelData.length));
@@ -1262,7 +1262,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   // Redraw when trim or the track color changes — buffer already decoded, no re-fetch needed
   useEffect(() => {
     drawRef.current?.();
-  }, [trimStart, trimEnd, clip.duration, clip.headCut, trackColor]);
+  }, [trimStart, trimEnd, clip.duration, clip.headCut, clip.tailCut, trackColor]);
 
   // Redraw on zoom/resize — fires whenever the canvas CSS width changes
   useEffect(() => {
@@ -1575,8 +1575,9 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   }, [setNodeRef]);
 
   // Drawn span: the live trim (local state, so a trim drag shows at once) plus the
-  // layout's head cut for a pickup with no room (clip.headCut, from Timeline).
-  const span = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut });
+  // layout's head cut for a pickup with no room and tail cut for a tail that runs into
+  // the next clip (clip.headCut / clip.tailCut, from Timeline).
+  const span = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut, tailCut: clip.tailCut });
   const displayWidth = span.length * zoom;
 
   // Torn edges where audio is hidden behind the edge — by a trim or a head cut;

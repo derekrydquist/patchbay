@@ -1626,7 +1626,8 @@ export async function registerRoutes(
     const trackId = req.params.trackId as string;
     const trackSongIdVal = trackSongId(trackId);
     if (!trackSongIdVal || !assertSongOwned(req, res, trackSongIdVal)) return;
-    const { pushed: rawPushed, ...body } = req.body ?? {};
+    // tailSeconds is never taken from the client: a new clip is always 0.
+    const { pushed: rawPushed, tailSeconds: _ignoredTail, ...body } = req.body ?? {};
     const hasPushed = req.body != null && typeof req.body === 'object' && 'pushed' in req.body;
     const parsed = insertTimelineClipSchema.safeParse({
       ...body,

@@ -140,6 +140,8 @@ export interface ApiTimelineClip {
   trimEnd: number | null;
   bucketClipId: string | null;
   isFullTake: boolean;
+  sectionOffset: number | null;
+  tailSeconds: number; // timeline_clips.tail_seconds; always 0 for a new clip
 }
 
 // ─── ApiClip → daw-data Clip ──────────────────────────────────────────────────

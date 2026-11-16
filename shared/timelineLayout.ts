@@ -19,6 +19,12 @@
 //     track in an earlier section, or before song time 0 — its head is cut: it is laid
 //     out from the point where there is room (clipHeadCuts), and the stored offset is
 //     left alone, so the full pickup comes back by itself when room returns.
+//   - Tails (tailSeconds, the mirror of a pickup) are the last seconds of a clip that
+//     may hang past its section's end; they count toward no section's length. A clip
+//     drawn past its section's end is cut where the next clip on its track is drawn
+//     (any later section, normal clip or pickup): clipTailCuts. The stored tail stays,
+//     so the full tail comes back when room returns. The pickup wins: a pickup's head
+//     is never cut by another clip's tail.
 //   - Legacy full takes keep their stored absolute start and take no part in the
 //     section layout (they go away in step 8). Non-full-take clips with no section
 //     name are treated the same way.
@@ -44,7 +50,10 @@ export interface LayoutClipInput {
   trimEnd: number | null;
   isFullTake: boolean;
   start: number;                // read only for full takes (and unsectioned clips)
-  tailSeconds?: number;         // ring-over that may hang into the next section; 0 for now
+  // Seconds at the clip's end that may hang past its section's end (timeline_clips.
+  // tail_seconds). Missing, negative or non-finite counts as 0; capped at the trimmed
+  // length (storedTailSeconds). Ignored for full takes and unsectioned clips.
+  tailSeconds?: number;
 }
 
 export interface LayoutSection {
@@ -71,14 +80,23 @@ export interface TimelineLayout {
   // Where each clip is drawn and played from: its section's start + sectionOffset +
   // its head cut (a full take or unsectioned clip: its stored start).
   clipStarts: Map<string | number, number>;
-  // Where each clip ends: the uncut end, which a head cut never moves.
+  // Where each clip ends: the uncut end, which neither a head cut nor a tail cut moves.
+  // Consumers subtract the tail cut for the drawn/played end, as they add the head cut
+  // for the drawn start.
   clipEnds: Map<string | number, number>;
   // Seconds cut from the start of each clip because there was no room for its pickup
   // (0 for every clip that isn't a cut pickup). Drawn/played length = trimmed length −
   // head cut; a clip whose head cut is its whole trimmed length has zero length in this
   // layout (clipStarts = clipEnds) and must be skipped.
   clipHeadCuts: Map<string | number, number>;
-  timelineEnd: number;       // end of the last section; 0 with no sections
+  // Seconds cut from the end of each clip drawn past its section's end, where the next
+  // clip on its track is drawn (0 for every other clip). Drawn/played end = clipEnds −
+  // tail cut.
+  clipTailCuts: Map<string | number, number>;
+  // The later of the last section's end and the furthest drawn (cut) end of any
+  // sectioned clip — a tail past the last section rings past it. 0 with no sections.
+  // Legacy full takes don't count (Export takes them into account itself).
+  timelineEnd: number;
   orphans: string[];         // section names that had clips but no song_sections row
 }
 
@@ -87,6 +105,16 @@ const BEAT_EPSILON = 1e-6;
 // A head cut shorter than this (seconds) is float noise — a previous clip that ends
 // exactly where the pickup starts — and counts as no cut.
 const HEAD_CUT_EPSILON = 1e-9;
+
+// A stored tail as the layout reads it: 0 for anything that isn't a positive finite
+// number, and never more than the clip's trimmed length.
+export function storedTailSeconds(
+  clip: Pick<LayoutClipInput, 'duration' | 'trimStart' | 'trimEnd' | 'tailSeconds'>,
+): number {
+  const tail = clip.tailSeconds;
+  if (tail === undefined || tail === null || !Number.isFinite(tail) || tail <= 0) return 0;
+  return Math.min(tail, Math.max(0, effectiveLength(clip)));
+}
 
 export function effectiveLength(clip: Pick<LayoutClipInput, 'duration' | 'trimStart' | 'trimEnd'>): number {
   return (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
@@ -111,7 +139,7 @@ export function sectionContentNeeds(
   const needs = new Map<string, number>();
   for (const clip of clips) {
     if (clip.isFullTake || !clip.sectionName) continue;
-    const end = (clip.sectionOffset ?? 0) + effectiveLength(clip) - (clip.tailSeconds ?? 0);
+    const end = (clip.sectionOffset ?? 0) + effectiveLength(clip) - storedTailSeconds(clip);
     needs.set(clip.sectionName, Math.max(needs.get(clip.sectionName) ?? 0, end));
   }
   return needs;
@@ -197,6 +225,7 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
   const clipStarts = new Map<string | number, number>();
   const clipEnds = new Map<string | number, number>();
   const clipHeadCuts = new Map<string | number, number>();
+  const clipTailCuts = new Map<string | number, number>();
 
   // Legacy full takes and unsectioned clips: their stored start, never cut.
   for (const clip of clips) {
@@ -204,11 +233,13 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     clipStarts.set(clip.id, clip.start);
     clipEnds.set(clip.id, clip.start + effectiveLength(clip));
     clipHeadCuts.set(clip.id, 0);
+    clipTailCuts.set(clip.id, 0);
   }
 
   // Sectioned clips, section by section in arrangement order. furthestEnd: per track,
-  // the furthest end (full end, tail included) of the clips placed on it in earlier
-  // sections — the room a pickup in a later section has, with song time 0.
+  // the furthest end of the clips placed on it in earlier sections, each counted only
+  // up to its own section's end (a tail hanging past it never takes a later pickup's
+  // room: the pickup wins) — the room a pickup in a later section has, with song time 0.
   const clipsBySection = new Map<string, (LayoutClipInput & { sectionName: string })[]>();
   for (const clip of clips) {
     if (!isSectioned(clip)) continue;
@@ -217,6 +248,10 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     else clipsBySection.set(clip.sectionName, [clip]);
   }
   const furthestEnd = new Map<string | number, number>();
+  // A clip "overhangs" only when it ends past its section's end by more than the float
+  // noise the beat rounding allows (sectionContentNeeds → beatsToHold); a clip ending a
+  // hair past its section today is not a tail.
+  const overhangEpsilon = BEAT_EPSILON * spb;
   for (const section of layoutSections) {
     const sectionClips = clipsBySection.get(section.name) ?? [];
     for (const clip of sectionClips) {
@@ -237,9 +272,53 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     }
     // Only after the whole section: clips in the same section never limit each other.
     for (const clip of sectionClips) {
-      const end = clipEnds.get(clip.id)!;
+      const fullEnd = clipEnds.get(clip.id)!;
+      const end = fullEnd > section.end + overhangEpsilon ? section.end : fullEnd;
       furthestEnd.set(clip.trackId, Math.max(furthestEnd.get(clip.trackId) ?? -Infinity, end));
     }
+  }
+
+  // Tail cuts, once every drawn start is known. A clip drawn past its section's end is
+  // cut where the first clip after it on its track is drawn — a clip in any later
+  // section, normal clip or pickup (at its cut start); clips drawn at zero length don't
+  // count. No later clip on the track: no cut, the tail rings past the last section.
+  const sectionIndex = new Map(layoutSections.map((s, i) => [s.name, i]));
+  const sectionedByTrack = new Map<string | number, (LayoutClipInput & { sectionName: string })[]>();
+  for (const clip of clips) {
+    if (!isSectioned(clip) || !sectionIndex.has(clip.sectionName)) continue;
+    const list = sectionedByTrack.get(clip.trackId);
+    if (list) list.push(clip);
+    else sectionedByTrack.set(clip.trackId, [clip]);
+  }
+  // The furthest drawn end of an overhanging clip (every other sectioned clip ends
+  // inside its section, so the last section's end covers it).
+  let furthestDrawnEnd = 0;
+  for (const trackClips of Array.from(sectionedByTrack.values())) {
+    for (const clip of trackClips) {
+      const index = sectionIndex.get(clip.sectionName)!;
+      const sectionEnd = layoutSections[index].end;
+      const start = clipStarts.get(clip.id)!;
+      const end = clipEnds.get(clip.id)!;
+      let tailCut = 0;
+      const overhangs = end > sectionEnd + overhangEpsilon;
+      if (overhangs) {
+        let nextStart = Infinity;
+        for (const other of trackClips) {
+          if (sectionIndex.get(other.sectionName)! <= index) continue;
+          const otherStart = clipStarts.get(other.id)!;
+          if (clipEnds.get(other.id)! - otherStart <= HEAD_CUT_EPSILON) continue; // not drawn
+          nextStart = Math.min(nextStart, otherStart);
+        }
+        const wanted = end - nextStart;
+        // Never more than the drawn length (start → end).
+        if (wanted > HEAD_CUT_EPSILON) tailCut = Math.min(wanted, Math.max(0, end - start));
+      }
+      clipTailCuts.set(clip.id, tailCut);
+      if (overhangs && end - start > HEAD_CUT_EPSILON) furthestDrawnEnd = Math.max(furthestDrawnEnd, end - tailCut);
+    }
+  }
+  for (const clip of clips) {
+    if (!clipTailCuts.has(clip.id)) clipTailCuts.set(clip.id, 0);
   }
 
   const last = layoutSections[layoutSections.length - 1];
@@ -248,7 +327,8 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     clipStarts,
     clipEnds,
     clipHeadCuts,
-    timelineEnd: last ? last.end : 0,
+    clipTailCuts,
+    timelineEnd: last ? Math.max(last.end, furthestDrawnEnd) : 0,
     orphans,
   };
 }

@@ -329,6 +329,16 @@ if (!hasTimelineClipsSectionOffset) {
   console.log("[PatchBay] Added section_offset column to timeline_clips table.");
 }
 
+// timeline_clips.tail_seconds — seconds at the clip's end that may hang past its home
+// section's end (a "tail", the mirror of a pickup). 0 for every existing row.
+const hasTimelineClipsTailSeconds = (sqlite.prepare(
+  "SELECT COUNT(*) as c FROM pragma_table_info('timeline_clips') WHERE name='tail_seconds'"
+).get() as { c: number }).c;
+if (!hasTimelineClipsTailSeconds) {
+  sqlite.exec("ALTER TABLE timeline_clips ADD COLUMN tail_seconds REAL NOT NULL DEFAULT 0");
+  console.log("[PatchBay] Added tail_seconds column to timeline_clips table.");
+}
+
 // song_sections — one row per (song, section name), song-wide.
 sqlite.exec(`
   CREATE TABLE IF NOT EXISTS song_sections (

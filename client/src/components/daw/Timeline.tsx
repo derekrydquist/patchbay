@@ -110,6 +110,7 @@ type ApiTrack = {
     trimEnd: number | null;
     bucketClipId: string | null;
     sectionOffset: number | null;
+    tailSeconds?: number; // timeline_clips.tail_seconds; 0 for every clip until 4h2
   }[];
 };
 
@@ -161,17 +162,19 @@ function deriveLayout(
       trimEnd: c.trimEnd ?? null,
       isFullTake: !!c.isFullTake,
       start: c.start,
+      tailSeconds: c.isFullTake ? 0 : (c.tailSeconds ?? 0),
     }))),
     bpm,
     timeSignature,
   });
 }
 
-// Tracks with every clip's in-memory start and head cut taken from the layout, so code
-// that reads clip.start (playback, keyboard nav, skip, Track.tsx) sees layout positions.
-// clip.start is the cut start; its in-point and length come from playedSpan
-// (lib/clip-span.ts), which counts the head cut. Always overwrites headCut, so a value
-// copied back into the tracks state by a write path never survives a layout.
+// Tracks with every clip's in-memory start, head cut and tail cut taken from the
+// layout, so code that reads clip.start (playback, keyboard nav, skip, Track.tsx) sees
+// layout positions. clip.start is the cut start; its in-point, out-point and length
+// come from playedSpan (lib/clip-span.ts), which counts both cuts. Always overwrites
+// headCut and tailCut, so a value copied back into the tracks state by a write path
+// never survives a layout.
 function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
   return tracks.map((track) => ({
     ...track,
@@ -179,11 +182,14 @@ function positionTracks(tracks: Track[], layout: TimelineLayout): Track[] {
   }));
 }
 
-// One clip at its layout start and head cut; the same object when neither changes.
+// One clip at its layout start, head cut and tail cut; the same object when none changes.
 function withLayoutPosition(clip: Clip, layout: TimelineLayout): Clip {
   const start = layout.clipStarts.get(clip.id) ?? clip.start;
   const headCut = layout.clipHeadCuts.get(clip.id) ?? 0;
-  return start === clip.start && headCut === (clip.headCut ?? 0) ? clip : { ...clip, start, headCut };
+  const tailCut = layout.clipTailCuts.get(clip.id) ?? 0;
+  return start === clip.start && headCut === (clip.headCut ?? 0) && tailCut === (clip.tailCut ?? 0)
+    ? clip
+    : { ...clip, start, headCut, tailCut };
 }
 
 // Whether a timeline clip is a pickup: it starts before its section's downbeat.
@@ -255,6 +261,7 @@ function serverClipsToClips(apiClips: ApiTimelineClip[]): Clip[] {
       trimEnd: c.trimEnd ?? null,
       bucketClipId: c.bucketClipId ?? undefined,
       sectionOffset: c.sectionOffset ?? null,
+      tailSeconds: c.tailSeconds ?? 0,
     }));
 }
 
@@ -3032,6 +3039,8 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     trimStart: 0,
     trimEnd: null,
     headCut: 0,
+    tailSeconds: 0,
+    tailCut: 0,
     isFullTake: false,
     isFinal: false,
     bucketClipId,
@@ -4323,7 +4332,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // Only fires when the clip is not already fully visible. Applies a directional overscroll margin
     // so the user can see a preview of what's next. Clamped to actual scrollable bounds.
     const scrollClipIntoView = (
-      clip: Pick<Clip, 'start' | 'duration' | 'trimStart' | 'trimEnd' | 'headCut'>,
+      clip: Pick<Clip, 'start' | 'duration' | 'trimStart' | 'trimEnd' | 'headCut' | 'tailCut'>,
       direction: 'left' | 'right' | 'vertical',
     ) => {
       const el = timelineRef.current;

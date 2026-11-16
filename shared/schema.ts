@@ -268,6 +268,11 @@ export const timelineClips = sqliteTable("timeline_clips", {
   // boot (server/db.ts). Kept equal to start − section start while clips are still
   // contiguous; becomes the authoritative position in the timeline placement rebuild.
   sectionOffset: real("section_offset"),
+  // Seconds at the clip's end that may hang past its home section's end without
+  // growing it (a "tail", the mirror of a pickup); the layout cuts it where the next
+  // clip on its track starts (shared/timelineLayout.ts). Added by a guarded ALTER in
+  // server/db.ts. Every write path stores 0 until tails can be made.
+  tailSeconds: real("tail_seconds").notNull().default(0),
 });
 
 export const insertTimelineClipSchema = createInsertSchema(timelineClips);

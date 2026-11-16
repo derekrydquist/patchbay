@@ -22,6 +22,7 @@ type TimelineClip = {
   sectionName: string | null;
   sectionOffset: number | null;
   isFullTake: boolean;
+  tailSeconds?: number; // timeline_clips.tail_seconds
 };
 
 type ApiTrack = {
@@ -33,7 +34,9 @@ type ApiTrack = {
 // start: where the clip plays from on the song timeline (the layout's clipStarts).
 // headCut: seconds of the clip's trimmed audio skipped at its start because the layout
 // cut a pickup's head (layout clipHeadCuts; 0 for every other clip).
-type ExportClip = { src: string; start: number; duration: number; volume: number; trimStart: number; trimEnd: number | null; headCut: number };
+// tailCut: seconds of the clip's trimmed audio skipped at its end because its tail runs
+// into the next clip on its track (layout clipTailCuts; 0 for every other clip).
+type ExportClip = { src: string; start: number; duration: number; volume: number; trimStart: number; trimEnd: number | null; headCut: number; tailCut: number };
 
 type Progress = { phase: string; done: number; total: number };
 
@@ -141,6 +144,7 @@ function exportLayout(
       trimEnd: c.trimEnd ?? null,
       isFullTake: !!c.isFullTake,
       start: c.start,
+      tailSeconds: c.isFullTake ? 0 : (c.tailSeconds ?? 0),
     }))),
     bpm,
     timeSignature,
@@ -170,7 +174,12 @@ async function renderClips(
         const decoded = await ctx.decodeAudioData(ab);
         console.log(`[Export] clip[${idx}] decoded: ${decoded.duration.toFixed(2)}s | ${decoded.numberOfChannels}ch | ${decoded.sampleRate}Hz`);
         onDecoded();
-        const trimEndSecs = clip.trimEnd ?? decoded.duration;
+        // A cut tail stops where the layout cut it: the stored out-point (trimEnd, else the
+        // stored duration) minus the cut, so it ends exactly where the next clip starts.
+        // An uncut clip keeps playing to trimEnd or the decoded end, as before.
+        const trimEndSecs = clip.tailCut > 0
+          ? (clip.trimEnd ?? clip.duration) - clip.tailCut
+          : clip.trimEnd ?? decoded.duration;
         // A cut pickup plays from trimStart + headCut (the layout already moved its start).
         let when = clip.start;
         let trimStartSecs = (clip.trimStart ?? 0) + clip.headCut;
@@ -336,14 +345,15 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
       }
 
       // A track's clips as Export plays them: from the layout's start, with a cut
-      // pickup's head skipped; a clip with zero length in the layout (a pickup with no
-      // room at all) is left out.
+      // pickup's head and a cut tail's end skipped; a clip with zero length in the
+      // layout (a pickup with no room at all) is left out.
       const exportClipsFor = (t: ApiTrack): ExportClip[] =>
         t.timelineClips.flatMap((c) => {
           if (!c.src) return [];
           const start = layout.clipStarts.get(c.id) ?? c.start;
           const end = layout.clipEnds.get(c.id);
-          if (end !== undefined && end - start <= 1e-9) return [];
+          const tailCut = layout.clipTailCuts.get(c.id) ?? 0;
+          if (end !== undefined && end - tailCut - start <= 1e-9) return [];
           return [{
             src: c.src,
             start,
@@ -352,14 +362,15 @@ export function ExportDialog({ children, songId = 'patchbay-default' }: { childr
             trimStart: c.trimStart ?? 0,
             trimEnd: c.trimEnd ?? null,
             headCut: layout.clipHeadCuts.get(c.id) ?? 0,
+            tailCut,
           }];
         });
       const allClips: ExportClip[] = tracksWithClips.flatMap(exportClipsFor);
-      // The end of the last section, or later if a clip (a full take) ends past it — no
-      // audio is ever cut off.
+      // The layout's end (the last section's end, or a tail ringing past it), or later
+      // if a clip (a full take) ends past it — no audio is ever cut off.
       const totalDuration = Math.max(
         layout.timelineEnd,
-        ...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart - c.headCut),
+        ...allClips.map((c) => c.start + (c.trimEnd ?? c.duration) - c.trimStart - c.headCut - c.tailCut),
       );
       console.log('[Export] allClips:', allClips, '| totalDuration:', totalDuration);
       const ext = format === 'mp3' ? 'mp3' : 'wav';

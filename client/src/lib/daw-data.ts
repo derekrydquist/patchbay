@@ -48,6 +48,15 @@ export interface Clip {
   // from the start of a pickup that has no room (shared layoutTimeline, clipHeadCuts),
   // set with start by positionTracks. Read it through playedSpan (lib/clip-span.ts).
   headCut?: number;
+  // Timeline clips only: seconds at the end that may hang past the home section's end
+  // (timeline_clips.tail_seconds, as stored). 0 / missing for every clip until tails
+  // can be made (4h2+).
+  tailSeconds?: number;
+  // Timeline clips only, in memory only (never saved or sent): seconds the layout cut
+  // from the end of a tail that runs into the next clip on its track (shared
+  // layoutTimeline, clipTailCuts), set with start and headCut by positionTracks. Read
+  // it through playedSpan (lib/clip-span.ts).
+  tailCut?: number;
   bucketClipId?: string;
   // Bucket versions only: the ideas row (section) the version lives in. Carried so a
   // version drag knows its own section; timeline clips never set it.

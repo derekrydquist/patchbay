@@ -17,6 +17,28 @@ describe('playedSpan', () => {
   });
 });
 
+describe('playedSpan — tail cuts', () => {
+  it('a tail cut moves the out-point in and shortens the length; the in-point stays', () => {
+    expect(playedSpan({ duration: 10, trimStart: 1, trimEnd: 8, tailCut: 2 })).toEqual({ inPoint: 1, outPoint: 6, length: 5 });
+    expect(playedSpan({ duration: 10, tailCut: 3 })).toEqual({ inPoint: 0, outPoint: 7, length: 7 });
+  });
+  it('a tail cut of 0 or missing changes nothing', () => {
+    expect(playedSpan({ duration: 10, trimStart: 1, trimEnd: 8, tailCut: 0 })).toEqual(playedSpan({ duration: 10, trimStart: 1, trimEnd: 8 }));
+  });
+  it('head and tail cuts together', () => {
+    expect(playedSpan({ duration: 10, trimStart: 1, trimEnd: 9, headCut: 2, tailCut: 3 })).toEqual({ inPoint: 3, outPoint: 6, length: 3 });
+  });
+  it('cuts that leave nothing: zero length, not drawn or played', () => {
+    const c = { duration: 4, headCut: 1, tailCut: 3 };
+    expect(playedSpan(c).length).toBe(0);
+    expect(hasPlayedLength(c)).toBe(false);
+    expect(hasPlayedLength({ duration: 4, headCut: 1, tailCut: 2.5 })).toBe(true);
+  });
+  it("a tail cut doesn't move a pickup's section start", () => {
+    expect(sectionStartInClip({ duration: 4, sectionOffset: -1.5, tailCut: 1 })).toBe(1.5);
+  });
+});
+
 describe('sectionStartInClip', () => {
   it('is null for a clip that starts at or after its section start, or a full take', () => {
     expect(sectionStartInClip({ duration: 4, sectionOffset: 0 })).toBeNull();
