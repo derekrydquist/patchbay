@@ -20,7 +20,7 @@ harden them. Do not add `NOT NULL` constraints until Phase 3 data validation is 
 Called at startup after `seedUsers()`. Idempotent: first run creates the default band and stamps
 all null `bandId` rows; every subsequent run logs a no-op message and exits immediately.
 
-The default band name is **"The Zenith Passage"** (hard-coded in `backfillBands()`).
+The default band name is **"Chickenhead"** (`DEFAULT_BAND_NAME` in `storage.ts`, used by `backfillBands()` and `bootstrapDefaultSong()`). It was "The Zenith Passage" until Nov 2026; `backfillBands()` renames that row in place at boot when no "Chickenhead" band exists, so the band id and everything scoped to it stay the same.
 
 ### Session plumbing (`server/routes.ts`)
 
@@ -106,7 +106,7 @@ is reserved for missing entities).
 - **Phase 3 — UI:** no band-switcher, no invite flow, no per-band settings screen.
 
 ## Band administration & first-login
-- scripts/band-admin.ts (tsx): create-band <name> · create-user <username> <password> <bandName> · wipe-band-content <bandName> (refuses The Zenith Passage). Demo tooling until a real invite flow exists; Band B / zed is the standing demo fixture.
+- scripts/band-admin.ts (tsx): create-band <name> · create-user <username> <password> <bandName> · wipe-band-content <bandName> (refuses Chickenhead). Demo tooling until a real invite flow exists; Band B / zed is the standing demo fixture.
 - Home onboarding card renders when the session band has zero songs AND zero activity; ghost panels are suppressed entirely in that state. Empty states follow doors-not-signs (gold primary = the action that fills the void).
 - AUTH RULE: queryClient.clear() runs on BOTH login and logout in AuthContext — any future auth change must preserve this or the previous user's cached queries paint into the next session (cache bleed found in manual testing 2026-07-11). Login response must include bandName (parity with /api/auth/me) so the header is correct on first paint.
 - BPM: no server-side validation exists (filed); input caps set to 999 in both settings and creation modals.

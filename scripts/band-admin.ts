@@ -17,14 +17,14 @@
  *       Cascade-deletes all children (tracks → ideas → clips, timeline clips,
  *       tasks, reviews, comments, etc.) via SQLite FK cascades.
  *       Band record and user accounts are PRESERVED.
- *       REFUSED for "The Zenith Passage" (safety rail).
+ *       REFUSED for "Chickenhead" (safety rail).
  */
 
 import Database from 'better-sqlite3';
 import bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
 
-const SAFETY_BAND = 'The Zenith Passage';
+const SAFETY_BAND = 'Chickenhead';
 const BCRYPT_COST = 10;
 
 const db = new Database('./patchbay.db');

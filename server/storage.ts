@@ -193,6 +193,9 @@ const UPLOADS_DIR = process.env.UPLOADS_DIR
   ? path.resolve(process.env.UPLOADS_DIR)
   : path.resolve("uploads");
 
+export const DEFAULT_BAND_NAME = "Chickenhead";
+const LEGACY_DEFAULT_BAND_NAME = "The Zenith Passage";
+
 export const DEFAULT_SONG_ID = "patchbay-default";
 
 export const DEMO_BAND_ID = "demo-band";
@@ -1591,8 +1594,8 @@ export class SQLiteStorage implements IStorage {
   // ── Bootstrap ──────────────────────────────────────────────────────────────
 
   async bootstrapDefaultSong(): Promise<void> {
-    const zenithBand = db.select({ id: bands.id }).from(bands).where(eq(bands.name, "The Zenith Passage")).get();
-    const bootstrapBandId = zenithBand?.id ?? null;
+    const defaultBand = db.select({ id: bands.id }).from(bands).where(eq(bands.name, DEFAULT_BAND_NAME)).get();
+    const bootstrapBandId = defaultBand?.id ?? null;
     db.insert(songs).values({ ...DEFAULT_SONG, bandId: bootstrapBandId }).onConflictDoNothing().run();
     if (bootstrapBandId) {
       db.update(songs).set({ bandId: bootstrapBandId }).where(and(eq(songs.id, DEFAULT_SONG_ID), isNull(songs.bandId))).run();
@@ -3361,7 +3364,13 @@ export class SQLiteStorage implements IStorage {
   }
 
   async backfillBands(): Promise<void> {
-    const DEFAULT_BAND_NAME = "The Zenith Passage";
+    // The default band was called "The Zenith Passage" until Nov 2026. Rename the
+    // existing row in place (it's looked up by name), so its users and songs move with it.
+    if (!db.select().from(bands).where(eq(bands.name, DEFAULT_BAND_NAME)).get()) {
+      const renamed = db.update(bands).set({ name: DEFAULT_BAND_NAME })
+        .where(eq(bands.name, LEGACY_DEFAULT_BAND_NAME)).run().changes;
+      if (renamed > 0) console.log(`[bands] Renamed "${LEGACY_DEFAULT_BAND_NAME}" to "${DEFAULT_BAND_NAME}"`);
+    }
 
     let band = db.select().from(bands).where(eq(bands.name, DEFAULT_BAND_NAME)).get();
     if (!band) {
@@ -3432,7 +3441,7 @@ export class SQLiteStorage implements IStorage {
   // route signs visitors in as it) and three bandmates whose content is made by hand.
   // Looked up by fixed id, never by name. Users are inserted with bandId in the same
   // write — createUser sets bandId null, and backfillBands would move such a user into
-  // The Zenith Passage. Existing users are never updated, so passwords stay as set.
+  // the default band (Chickenhead). Existing users are never updated, so passwords stay as set.
   async ensureDemoBand(): Promise<void> {
     if (!db.select().from(bands).where(eq(bands.id, DEMO_BAND_ID)).get()) {
       db.insert(bands).values({ id: DEMO_BAND_ID, name: "Glass Harbor", createdAt: new Date().toISOString() }).run();

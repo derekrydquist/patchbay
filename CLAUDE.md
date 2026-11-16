@@ -576,7 +576,7 @@ interface AuthUser { id: string; username: string; }
 
 A public demo for reviewers: the login page's "Check out a demo project" button logs the visitor in as a guest in the demo band **Glass Harbor**.
 
-- **Band and users** — `storage.ensureDemoBand()` runs at boot right after `backfillBands()`. It ensures the band `demo-band` ("Glass Harbor") and users `demo-guest` (username `guest`), `demo-mara`, `demo-theo` and `demo-kai` exist, each inserted with its `bandId` in the same write (never via `createUser`, which sets `bandId` null and would let `backfillBands` move the user into The Zenith Passage). Existing users are never updated, so passwords set at first boot stay. A taken username is logged and skipped, never a crash.
+- **Band and users** — `storage.ensureDemoBand()` runs at boot right after `backfillBands()`. It ensures the band `demo-band` ("Glass Harbor") and users `demo-guest` (username `guest`), `demo-mara`, `demo-theo` and `demo-kai` exist, each inserted with its `bandId` in the same write (never via `createUser`, which sets `bandId` null and would let `backfillBands` move the user into Chickenhead). Existing users are never updated, so passwords set at first boot stay. A taken username is logged and skipped, never a crash.
 - **Passwords** — mara, theo and kai get the bcrypt hash of `DEMO_PASSWORD`; if it is unset they are skipped with one log line. The guest's password is the hash of 96 random hex characters, so nobody can log in as guest with a password.
 - **Login route** — `POST /api/auth/demo` needs no existing session. It sets `req.session.userId`/`bandId` exactly as `POST /api/auth/login` does and returns the same response shape plus `demoSongId`: the demo band's most recently updated real song (`type = 'song'`, ordered by `updatedAt` then `createdAt`), or null. Returns 503 `{ message: "The demo isn't available right now." }` if the guest is missing.
 - **Client** — `loginAsDemo(onSuccess)` in `AuthContext` shares its response handling with `login`. It navigates to `/songs/:songId/workspace?tab=arrangement`, or to `/?tab=dashboard` when `demoSongId` is null. The navigation happens in the same step as setting the user, so the `/login` already-authenticated redirect can't win the race.
@@ -599,7 +599,7 @@ This split keeps workspace-level actions (shared settings, collaborator access) 
 
 ### Seeded users
 
-**The Zenith Passage** (default band — seeded by `seedUsers()` + `backfillBands()`):
+**Chickenhead** (default band — seeded by `seedUsers()` + `backfillBands()`):
 
 | Username | Password |
 |---|---|
@@ -893,7 +893,7 @@ These are things that need a decision before being built:
    the internet? Options: local disk (simple, free, not scalable), AWS S3, Cloudflare R2.
    Start with local disk; plan to abstract behind a storage interface.
 
-2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Eleven seeded users exist across three bands: six on The Zenith Passage (jordan/alex/jamie/sam/taylor/riley), zed on Band B, and guest/mara/theo/kai on the Glass Harbor public demo. Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
+2. ~~**Authentication provider:**~~ **Resolved.** Basic session auth is implemented using `express-session` + `bcrypt`. Eleven seeded users exist across three bands: six on Chickenhead (jordan/alex/jamie/sam/taylor/riley), zed on Band B, and guest/mara/theo/kai on the Glass Harbor public demo. Role-based permissions (Band Leader / Band Member / Engineer) are the next auth milestone — they are defined in the data model but not yet enforced.
 
 3. **Real-time vs async:** The spec calls for async collaboration to start. WebSockets (`ws`)
    is installed. Leave real-time for a future milestone.
