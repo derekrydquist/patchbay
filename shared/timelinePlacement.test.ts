@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
-import { snapTime } from './musicalTime';
+import { snapTime, parseTimeSignature, secondsPerBeat } from './musicalTime';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
 
@@ -574,6 +574,107 @@ describe('pickupOffsetError', () => {
     expect(pickupOffsetError(-3, -3, -2)).toBeNull();
     expect(pickupOffsetError(-2.5, -3, -2)).toBeNull();
     expect(pickupOffsetError(-3.5, -3, -2)).toMatch(/one bar/);
+  });
+});
+
+describe('pickupLeftLimit and overhangs', () => {
+  // 120 bpm 4/4 (bar 2 s). A: x at 0, 6 s with a 5 s tail (A 0–1). B: only another
+  // track, 4 s (1–5). C at 5: the bar limit is 3; x's tail hangs to 6, but it counts
+  // only up to A's end (1), as the layout's head cut does — so the limit is the bar, −2.
+  const mk = (id: string, trackId: string, sectionName: string, sectionOffset: number, duration: number, tailSeconds = 0): LayoutClipInput =>
+    ({ id, trackId, sectionName, sectionOffset, duration, trimStart: 0, trimEnd: null, isFullTake: false, start: 0, tailSeconds });
+  const sections = ['A', 'B', 'C'].map((name, i) => ({ name, sortOrder: i, baseLength: null }));
+  it('a later pickup may use the space an earlier clip\'s tail hangs into', () => {
+    const input = { sections, bpm: 120, timeSignature: '4/4', clips: [mk('x', 'd', 'A', 0, 6, 5), mk('y', 'b', 'B', 0, 4), mk('p', 'd', 'C', -1, 2)] };
+    const layout = layoutTimeline(input);
+    expect(pickupLeftLimit(input, layout, 'd', 'C')).toBeCloseTo(-2);
+    // And the layout agrees: a pickup at that limit is drawn whole.
+    const atLimit = { ...input, clips: [input.clips[0], input.clips[1], mk('p', 'd', 'C', -2, 2)] };
+    expect(layoutTimeline(atLimit).clipHeadCuts.get('p')).toBe(0);
+  });
+  it('a clip with no tail still counts to its full end', () => {
+    const input = { sections, bpm: 120, timeSignature: '4/4', clips: [mk('x', 'd', 'A', 0, 1), mk('y', 'b', 'B', 0, 4), mk('p', 'd', 'C', -1, 2)] };
+    // B 1–5, C at 5: bar limit 3 beats x's end at 1.
+    expect(pickupLeftLimit(input, layoutTimeline(input), 'd', 'C')).toBeCloseTo(-2);
+  });
+
+  // The limit before step 4h2a's follow-up: earlier clips counted to their full end.
+  const oldPickupLeftLimit = (input: TimelineLayoutInput, layout: ReturnType<typeof layoutTimeline>, trackId: string, sectionName: string) => {
+    const index = layout.sections.findIndex((s) => s.name === sectionName);
+    if (index < 0) return 0;
+    const sectionStart = layout.sections[index].start;
+    const barLength = parseTimeSignature(input.timeSignature).beatsPerBar * secondsPerBeat(input.bpm);
+    const earlier = new Set(layout.sections.slice(0, index).map((s) => s.name));
+    let previousEnd = -Infinity;
+    for (const c of input.clips) {
+      if (c.trackId !== trackId || c.isFullTake || !c.sectionName || !earlier.has(c.sectionName)) continue;
+      const end = layout.clipEnds.get(c.id);
+      if (end !== undefined) previousEnd = Math.max(previousEnd, end);
+    }
+    return Math.min(0, Math.max(sectionStart - barLength, 0, previousEnd) - sectionStart);
+  };
+  it('with every tail 0, matches the old limit on generated songs', () => {
+    let seed = 12345;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const pick = <T,>(xs: T[]) => xs[Math.floor(rand() * xs.length)];
+    let compared = 0;
+    for (let song = 0; song < 300; song++) {
+      const names = ['A', 'B', 'C', 'D', 'E'].slice(0, 1 + Math.floor(rand() * 5));
+      const secs = names.map((name, i) => ({ name, sortOrder: pick([i, 4 - i, i * 2]), baseLength: rand() < 0.3 ? Math.floor(rand() * 20) : null }));
+      const tracks = ['t1', 't2', 't3'].slice(0, 1 + Math.floor(rand() * 3));
+      const clips: LayoutClipInput[] = [];
+      for (let i = 0, n = Math.floor(rand() * 12); i < n; i++) {
+        const duration = 0.3 + rand() * 6;
+        const trimStart = rand() < 0.3 ? rand() * duration * 0.4 : 0;
+        clips.push({
+          id: `c${i}`, trackId: pick(tracks), sectionName: pick(names),
+          sectionOffset: rand() < 0.25 ? -rand() * 3 : rand() * 8,
+          duration, trimStart, trimEnd: rand() < 0.3 ? trimStart + (duration - trimStart) * (0.3 + rand() * 0.7) : null,
+          isFullTake: rand() < 0.05, start: rand() * 10, tailSeconds: 0,
+        });
+      }
+      const input: TimelineLayoutInput = { sections: secs, clips, bpm: pick([60, 90, 120, 133, 175, null]), timeSignature: pick(['4/4', '3/4', '6/8', '7/8']) };
+      const layout = layoutTimeline(input);
+      for (const t of tracks) for (const name of names) {
+        expect(pickupLeftLimit(input, layout, t, name)).toBe(oldPickupLeftLimit(input, layout, t, name));
+        compared++;
+      }
+    }
+    expect(compared).toBeGreaterThan(1000);
+  });
+});
+
+describe('tailWriteError', () => {
+  const sent = (tailSeconds: number, trimmedLength = 4, isLast = true) => ({ tailSeconds, trimmedLength, isLast });
+  it('accepts a valid sent tail that is not cut', () => {
+    expect(tailWriteError(0, 0, sent(1.5))).toBeNull();
+    expect(tailWriteError(0, 0, sent(0))).toBeNull();
+    expect(tailWriteError(0, 0, sent(0, 4, false))).toBeNull(); // 0 is fine on any clip
+  });
+  it('refuses a sent tail that is not finite or is negative', () => {
+    expect(tailWriteError(0, 0, sent(NaN))).toMatch(/finite/);
+    expect(tailWriteError(0, 0, sent(Infinity))).toMatch(/finite/);
+    expect(tailWriteError(0, 0, sent(-0.5))).toMatch(/finite/);
+  });
+  it('refuses a sent tail at or past the trimmed length', () => {
+    expect(tailWriteError(0, 0, sent(4))).toMatch(/shorter than the clip/);
+    expect(tailWriteError(0, 0, sent(5))).toMatch(/shorter than the clip/);
+    expect(tailWriteError(0, 0, sent(3.9))).toBeNull();
+  });
+  it('refuses a sent tail > 0 on a clip that is not last', () => {
+    expect(tailWriteError(0, 0, sent(1, 4, false))).toMatch(/last clip/);
+  });
+  it('refuses a write that creates a cut', () => {
+    expect(tailWriteError(0, 0.5, sent(1))).toMatch(/next clip/);
+    expect(tailWriteError(0, 0.5)).toMatch(/next clip/);
+  });
+  it('allows a cut within float noise', () => {
+    expect(tailWriteError(0, PLACEMENT_EPSILON / 2)).toBeNull();
+  });
+  it('leniency: an already-cut clip may keep or shrink its cut, never grow it', () => {
+    expect(tailWriteError(1, 1)).toBeNull();
+    expect(tailWriteError(1, 0.5)).toBeNull();
+    expect(tailWriteError(1, 1.5)).toMatch(/next clip/);
   });
 });
 

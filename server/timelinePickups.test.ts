@@ -120,4 +120,81 @@ describe.skipIf(!fs.existsSync(SOURCE))('timeline pickups — server', () => {
     expect(replaced.duration).toBeCloseTo(0.6);
     expect(replaced.trimEnd).toBeNull();
   });
+
+  // Tails and pickups (step 4h2a), on a song of their own (s2, 120 bpm 4/4) with
+  // tails seeded straight into the database (no route creates one yet).
+  const seedTailSong = (clips: [string, string, string, number, number, number][]) => {
+    const now = new Date().toISOString();
+    raw.exec("DELETE FROM timeline_clips WHERE track_id IN ('t2a', 't2b'); DELETE FROM song_sections WHERE song_id = 's2';");
+    if (!raw.prepare("SELECT id FROM songs WHERE id = 's2'").get()) {
+      raw.prepare("INSERT INTO songs (id, name, bpm, sections, type, created_at, updated_at, time_signature) VALUES ('s2', 'Tails', 120, '[]', 'song', ?, ?, '4/4')").run(now, now);
+      raw.prepare("INSERT INTO instrument_tracks (id, song_id, name, type, sort_order) VALUES ('t2a', 's2', 'Drums', 'instrument', 0)").run();
+      raw.prepare("INSERT INTO instrument_tracks (id, song_id, name, type, sort_order) VALUES ('t2b', 's2', 'Bass', 'instrument', 1)").run();
+    }
+    ['A', 'B', 'C'].forEach((name, i) => {
+      raw.prepare('INSERT INTO song_sections (id, song_id, section_name, sort_order, created_at) VALUES (?, ?, ?, ?, ?)').run(`s2-${name}`, 's2', name, i, now);
+    });
+    for (const [id, track, section, offset, duration, tail] of clips) {
+      raw.prepare("INSERT INTO timeline_clips (id, track_id, name, type, color, duration, section_name, section_offset, tail_seconds) VALUES (?, ?, ?, 'audio', 'x', ?, ?, ?, ?)")
+        .run(id, track, id, duration, section, offset, tail);
+    }
+  };
+
+  it('a tail never cuts a pickup; the overhang is cut at the pickup\'s drawn start', () => {
+    // A: x at 0, 6 s with a 5 s tail (A needs 1 s: 0–1). B: only Bass, 4 s (1–5).
+    // C at 5: a Drums pickup at −1, 2 s, wants to start at 4. x's tail reaches 6 but
+    // the pickup keeps its full head (drawn at 4); x is cut there, by 2.
+    seedTailSong([
+      ['x', 't2a', 'A', 0, 6, 5],
+      ['y', 't2b', 'B', 0, 4, 0],
+      ['p', 't2a', 'C', -1, 2, 0],
+    ]);
+    const layout = store.computeSongLayout('s2');
+    expect(layout.sections.map((s) => [s.name, s.start])).toEqual([['A', 0], ['B', 1], ['C', 5]]);
+    expect(layout.clipHeadCuts.get('p')).toBe(0);
+    expect(layout.clipStarts.get('p')).toBeCloseTo(4);
+    expect(layout.clipTailCuts.get('x')).toBeCloseTo(2);
+    expect(layout.clipEnds.get('x')! - layout.clipTailCuts.get('x')!).toBeCloseTo(4);
+  });
+
+  it('an overhang next to a pickup in the very next section is cut at the pickup\'s drawn (cut) start', () => {
+    // A: x at 0, 4 s with a 2 s tail (A 0–2). B: a pickup at −1, 2 s. x fills A to its
+    // end, so the pickup is cut to B's downbeat (2) by that in-section part — never by
+    // the tail — and x's tail is cut at 2.
+    seedTailSong([
+      ['x', 't2a', 'A', 0, 4, 2],
+      ['p', 't2a', 'B', -1, 2, 0],
+    ]);
+    const layout = store.computeSongLayout('s2');
+    expect(layout.sections[1].start).toBeCloseTo(2);
+    expect(layout.clipHeadCuts.get('p')).toBeCloseTo(1);
+    expect(layout.clipStarts.get('p')).toBeCloseTo(2);
+    expect(layout.clipTailCuts.get('x')).toBeCloseTo(2);
+    // Moving the pickup within its section through the batch path is unaffected by
+    // x's tail cut (only written clips' cuts are checked).
+    store.setTimelineClipOffsets('s2', [{ id: 'p', sectionOffset: -0.5 }]);
+    expect(store.computeSongLayout('s2').clipTailCuts.get('x')).toBeCloseTo(2);
+  });
+
+  it('a pickup may move left into the space an overhang crosses, and the server accepts it', () => {
+    // Same song as above: x's tail (A 0–1, ends at 6) crosses B (1–5); C at 5. x counts
+    // only up to A's end, so the pickup's limit is the bar before C: −2 (drawn at 3).
+    seedTailSong([
+      ['x', 't2a', 'A', 0, 6, 5],
+      ['y', 't2b', 'B', 0, 4, 0],
+      ['p', 't2a', 'C', -1, 2, 0],
+    ]);
+    expect(store.songPickupLeftLimit('s2', 't2a', 'C')).toBeCloseTo(-2);
+    store.setTimelineClipOffsets('s2', [{ id: 'p', sectionOffset: -2 }]);
+    expect(offsetOf('p')).toBeCloseTo(-2);
+    const layout = store.computeSongLayout('s2');
+    expect(layout.clipHeadCuts.get('p')).toBe(0);
+    expect(layout.clipStarts.get('p')).toBeCloseTo(3);
+    expect(layout.clipTailCuts.get('x')).toBeCloseTo(3); // the overhang is cut at the pickup
+    // Past the bar is still refused.
+    expect(() => store.setTimelineClipOffsets('s2', [{ id: 'p', sectionOffset: -2.5 }])).toThrow(/one bar/);
+    // A left trim may take it there too.
+    raw.prepare("UPDATE timeline_clips SET section_offset = -1, trim_start = 1, duration = 3 WHERE id = 'p'").run();
+    expect(store.writeTimelineClipTrim('p', 0, null)!.sectionOffset).toBeCloseTo(-2);
+  });
 });

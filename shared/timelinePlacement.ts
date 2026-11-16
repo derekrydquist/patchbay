@@ -6,7 +6,7 @@
 // section's start, lengths are trimmed lengths (effectiveLength). Legacy full takes
 // sit outside sections and never take part.
 
-import { effectiveLength, type LayoutClipInput, type TimelineLayout, type TimelineLayoutInput } from './timelineLayout';
+import { effectiveLength, pickupRoomEnd, type LayoutClipInput, type TimelineLayout, type TimelineLayoutInput } from './timelineLayout';
 import { parseTimeSignature, secondsPerBeat } from './musicalTime';
 
 // Float noise allowed when comparing positions, in seconds. Touching edges are never
@@ -240,8 +240,9 @@ export function trimEndBeforeNext(
 // `trackId` in `sectionName` may start at: the latest of one bar before the section
 // start (bar length from the song's tempo and time signature), song time 0, and the
 // end of the previous clip on that track — the furthest end (layout.clipEnds) of the
-// track's clips in earlier sections, legacy full takes and unsectioned clips ignored,
-// as the layout's head cut uses. Depends only on earlier sections, never on the clips
+// track's clips in earlier sections, each counted only up to its own section's end
+// (pickupRoomEnd: a pickup may use the space an earlier clip's tail hangs into), legacy
+// full takes and unsectioned clips ignored, as the layout's head cut uses. Depends only on earlier sections, never on the clips
 // in this section ("cut, don't push": a clip never moves its own section), so the clip
 // being moved can stay in the layout. A section that isn't on the timeline (no clips)
 // has no start: 0, no pickup.
@@ -257,12 +258,14 @@ export function pickupLeftLimit(
   if (index < 0) return 0;
   const sectionStart = layout.sections[index].start;
   const barLength = parseTimeSignature(input.timeSignature).beatsPerBar * secondsPerBeat(input.bpm);
-  const earlier = new Set(layout.sections.slice(0, index).map((s) => s.name));
+  const earlierEnds = new Map(layout.sections.slice(0, index).map((s) => [s.name, s.end]));
   let previousEnd = -Infinity;
   for (const c of input.clips) {
-    if (c.trackId !== trackId || c.isFullTake || !c.sectionName || !earlier.has(c.sectionName)) continue;
+    if (c.trackId !== trackId || c.isFullTake || !c.sectionName) continue;
+    const sectionEnd = earlierEnds.get(c.sectionName);
     const end = layout.clipEnds.get(c.id);
-    if (end !== undefined) previousEnd = Math.max(previousEnd, end);
+    if (sectionEnd === undefined || end === undefined) continue;
+    previousEnd = Math.max(previousEnd, pickupRoomEnd(end, sectionEnd, input.bpm));
   }
   return Math.min(0, Math.max(sectionStart - barLength, 0, previousEnd) - sectionStart);
 }
@@ -279,6 +282,47 @@ export function pickupOffsetError(
   const floor = currentOffset === null ? Math.min(0, leftLimit) : Math.min(leftLimit, currentOffset);
   if (offset < floor - PLACEMENT_EPSILON) {
     return "A pickup can't start more than one bar before its section, before the end of the previous clip on its track, or before the start of the song.";
+  }
+  return null;
+}
+
+// ── Overhangs (tails) ────────────────────────────────────────────────────────
+// The mirror of a pickup: tail_seconds is the last part of a clip that may hang past
+// its section's end; the layout cuts it where the next clip on its track is drawn
+// (clipTailCuts). Only Option creates one (a client rule); the server enforces:
+//   - a sent tail is a finite number ≥ 0, shorter than the clip's trimmed length (so
+//     its start stays inside its section), and > 0 only on the last clip on its track
+//     in its section (a non-last clip may keep a hidden stored tail it didn't send);
+//   - leniency: a written clip's tail cut after the write is no larger than before it
+//     (0 if it wasn't cut). A push on an already-cut clip that doesn't cut it further
+//     passes; moving it further into the next clip doesn't. Cutting ANOTHER clip's
+//     tail is never a reason to refuse a write.
+
+// A tail sent for a clip in this write, with what the check needs to know about it.
+export interface SentTail {
+  tailSeconds: number;
+  trimmedLength: number; // (trimEnd ?? duration) − trimStart, after the write
+  isLast: boolean;       // last clip on its track in its section, after the write
+}
+
+// Why a write can't save a clip's tail, or null when it can. `cutBefore` / `cutAfter`
+// are the clip's tail cut (layout.clipTailCuts) in the layout before and after the
+// whole write; `sent` is the tail the write sends for it, if any.
+export function tailWriteError(cutBefore: number, cutAfter: number, sent?: SentTail | null): string | null {
+  if (sent) {
+    const { tailSeconds, trimmedLength, isLast } = sent;
+    if (typeof tailSeconds !== 'number' || !Number.isFinite(tailSeconds) || tailSeconds < 0) {
+      return "tailSeconds must be a finite number of seconds, 0 or more";
+    }
+    if (tailSeconds > trimmedLength - PLACEMENT_EPSILON) {
+      return "An overhang must be shorter than the clip: its start has to stay inside its section.";
+    }
+    if (tailSeconds > PLACEMENT_EPSILON && !isLast) {
+      return "Only the last clip on its track in its section can hang over the section's end.";
+    }
+  }
+  if (cutAfter > Math.max(0, cutBefore) + PLACEMENT_EPSILON) {
+    return "An overhang can't run into the next clip on its track.";
   }
   return null;
 }

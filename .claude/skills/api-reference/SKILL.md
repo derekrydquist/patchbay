@@ -102,19 +102,32 @@ POST   /api/loose-files/:id/place-on-timeline — materialize a loose file as a 
                                            the section must already be on the timeline (409
                                            otherwise); overlap → 409 with full rollback, the file
                                            stays loose. Without sectionOffset it appends as before
-PUT    /api/songs/:songId/timeline-clips/offsets — body { clips: [{ id, sectionOffset }] }; saves
-                                           many clips' offsets in one transaction (a clip drag and
-                                           the clips it pushes). Every id must be a sectioned clip
-                                           on this song (404 otherwise); offsets finite (400);
-                                           negative = pickup, checked against the pickup limits in
-                                           the layout after the whole batch (400); any overlap on a
-                                           touched track + section → 409; either rolls everything
-                                           back. One sort-only timeline-reordered row per request.
-                                           Returns the updated clips
+PUT    /api/songs/:songId/timeline-clips/offsets — body { clips: [{ id, sectionOffset,
+                                           tailSeconds? }] }; saves many clips' offsets in one
+                                           transaction (a clip drag and the clips it pushes). Every
+                                           id must be a sectioned (non-full-take) clip on this song
+                                           (404 for a missing or other-song id, 400 for a full take
+                                           or unsectioned clip); offsets finite (400); negative =
+                                           pickup, checked against the pickup limits in the layout
+                                           after the whole batch (400); any overlap on a touched
+                                           track + section → 409.
+                                           tailSeconds (optional overhang): omitted keeps the stored
+                                           tail. Sent: must be a finite number ≥ 0 (400), shorter
+                                           than the clip's trimmed length (400), > 0 only on the
+                                           last clip on its track in its section after the batch
+                                           (400; 0 is fine anywhere), and that clip's tail cut in
+                                           the layout after the batch may not grow (400,
+                                           tailWriteError). Items without tailSeconds are never
+                                           cut-checked: the layout cuts their stored tail.
+                                           Any refusal rolls everything back. One sort-only
+                                           timeline-reordered row per request. Returns the updated
+                                           clips
 PATCH  /api/timeline-clips/:id           — update a placed clip; field whitelist: name, type, color,
                                            src, duration, trimStart, trimEnd, bucketClipId, isFinal,
-                                           sectionOffset (never start); a new sectionOffset is
-                                           checked for pickup limits (400) and overlap (409); a
+                                           sectionOffset (never start; tailSeconds is not on it, so
+                                           the stored tail is kept); a new sectionOffset is
+                                           checked for pickup limits (400) and overlap (409), and
+                                           refused if it would grow the clip's tail cut (400); a
                                            length change (Replace) keeps the clip's offset and is
                                            cut short at the next clip (updateTimelineClipKeepingSpot;
                                            409 if too short); logs sort-only

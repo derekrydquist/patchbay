@@ -28,10 +28,10 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, sectionContentNeeds, contentNeedBeats, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
+import { layoutTimeline, sectionContentNeeds, contentNeedBeats, effectiveLength, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
 import { isValidBaseLength } from "@shared/sectionBaseLength";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip, type SentTail } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFileToTimeline for a drop position in a section that has
 // no timeline clips (it may have emptied since the drag began) — the route answers 409.
@@ -99,6 +99,15 @@ export class PickupLimitError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "PickupLimitError";
+  }
+}
+
+// A tail (tail_seconds) a write can't save, or a write that would cut a clip's tail
+// further than it was (shared tailWriteError). Routes answer 400, like a pickup limit.
+export class TailLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TailLimitError";
   }
 }
 
@@ -1039,7 +1048,9 @@ function insertTimelineClipWithPushesRows(
     if (p.sectionOffset < stored - PLACEMENT_EPSILON) throw new PushedClipError(400, "A pushed clip can only move later");
   }
   const clip = insertTimelineClipPlacedRows(songId, data, hint);
-  writeTimelineClipOffsets(songId, pushed);
+  // Offsets only: a pushed clip keeps its stored tail and is never cut-checked — the
+  // layout cuts it ("cut, don't push").
+  writeTimelineClipOffsets(songId, pushed.map(({ id, sectionOffset }) => ({ id, sectionOffset })));
   if (findOverlap(sectionPlacementClips(data.trackId, data.sectionName!))) {
     throw new TimelineOverlapError(data.trackId, data.sectionName!);
   }
@@ -1126,10 +1137,18 @@ export function sectionPlacementClips(trackId: string, sectionName: string): Pla
 // (pickupOffsetError) in the song's layout after the whole batch — a batch can move
 // several clips at once, and an earlier section's clips set a later pickup's limit —
 // with each clip's offset before the batch as its leniency floor; a refusal throws
-// PickupLimitError and nothing is written. The caller checks ownership and that every
+// PickupLimitError and nothing is written. An item may carry tailSeconds: written only
+// when sent (omitted = the stored tail stays). Last, every item that sends a tail is
+// checked (shared tailWriteError) in the layout after the batch: the tail must be
+// valid (finite, ≥ 0, shorter than the clip, > 0 only on the last clip on its track in
+// its section), and that clip's tail cut may not grow; a refusal throws TailLimitError
+// and nothing is written. Items without a tail (pushed clips, old tabs) are never
+// cut-checked: "cut, don't push" — the layout cuts their stored tail. The caller checks ownership and that every
 // id is a sectioned clip of `songId`; offsets must already be finite. Returns the
 // updated rows.
-export function setTimelineClipOffsets(songId: string, updates: { id: string; sectionOffset: number }[]): TimelineClip[] {
+export type TimelineClipOffsetUpdate = { id: string; sectionOffset: number; tailSeconds?: number };
+
+export function setTimelineClipOffsets(songId: string, updates: TimelineClipOffsetUpdate[]): TimelineClip[] {
   return db.transaction((tx) => {
     writeTimelineClipOffsets(songId, updates);
     return updates.map((u) => tx.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get()!);
@@ -1138,13 +1157,22 @@ export function setTimelineClipOffsets(songId: string, updates: { id: string; se
 
 // setTimelineClipOffsets' writes and checks, with no transaction of its own — for
 // callers that already hold one (a throw rolls back the caller's transaction).
-function writeTimelineClipOffsets(songId: string, updates: { id: string; sectionOffset: number }[]): void {
+function writeTimelineClipOffsets(songId: string, updates: TimelineClipOffsetUpdate[]): void {
+  // Tail cuts before the writes, for items that send a tail (the leniency's floor).
+  const cutsBefore = updates.some((u) => u.tailSeconds !== undefined)
+    ? computeSongLayout(songId).clipTailCuts
+    : new Map<string | number, number>();
   const touched = new Map<string, { trackId: string; sectionName: string }>();
   const before = new Map<string, TimelineClip>();
   for (const u of updates) {
     const row = db.select().from(timelineClips).where(eq(timelineClips.id, u.id)).get();
     if (row) before.set(u.id, row);
-    db.update(timelineClips).set({ sectionOffset: u.sectionOffset }).where(eq(timelineClips.id, u.id)).run();
+    if (u.tailSeconds !== undefined && (!row?.sectionName || row.isFullTake)) {
+      throw new TailLimitError("Only clips in a section can hang over its end.");
+    }
+    const set: { sectionOffset: number; tailSeconds?: number } = { sectionOffset: u.sectionOffset };
+    if (u.tailSeconds !== undefined) set.tailSeconds = u.tailSeconds;
+    db.update(timelineClips).set(set).where(eq(timelineClips.id, u.id)).run();
     if (row?.sectionName) touched.set(`${row.trackId}\u0000${row.sectionName}`, { trackId: row.trackId, sectionName: row.sectionName });
   }
   for (const { trackId, sectionName } of Array.from(touched.values())) {
@@ -1161,6 +1189,35 @@ function writeTimelineClipOffsets(songId: string, updates: { id: string; section
     );
     if (error) throw new PickupLimitError(error);
   }
+  // Sent tails, on the layout after the whole batch.
+  for (const u of updates) {
+    const row = before.get(u.id);
+    if (u.tailSeconds === undefined || !row?.sectionName || row.isFullTake) continue;
+    const siblings = sectionPlacementClips(row.trackId, row.sectionName).filter((c) => c.id !== u.id);
+    const sent: SentTail = {
+      tailSeconds: u.tailSeconds,
+      trimmedLength: effectiveLength(row),
+      isLast: !siblings.some((c) => c.offset > u.sectionOffset + PLACEMENT_EPSILON),
+    };
+    const error = tailWriteError(cutsBefore.get(u.id) ?? 0, layout.clipTailCuts.get(u.id) ?? 0, sent);
+    if (error) throw new TailLimitError(error);
+  }
+}
+
+// Runs `write` (one timeline clip's update) in a transaction and refuses it with
+// TailLimitError, rolling it back, if it grows that clip's tail cut (shared
+// tailWriteError's leniency) — so a single PATCH of a section offset can't push an
+// overhanging clip further into the next clip. The stored tail itself is never changed
+// here. Cuts it makes to other clips' tails are allowed.
+export function withTailCutCheck<T>(songId: string, clipId: string, write: () => T): T {
+  return sqlite.transaction(() => {
+    const before = computeSongLayout(songId).clipTailCuts.get(clipId) ?? 0;
+    const result = write();
+    const after = computeSongLayout(songId).clipTailCuts.get(clipId) ?? 0;
+    const error = tailWriteError(before, after);
+    if (error) throw new TailLimitError(error);
+    return result;
+  })();
 }
 
 // The song's timeline layout (shared/timelineLayout.ts), built from the same inputs

@@ -116,6 +116,15 @@ export function storedTailSeconds(
   return Math.min(tail, Math.max(0, effectiveLength(clip)));
 }
 
+// How far an earlier clip takes a later pickup's room on its track: its end, but only
+// up to its own section's end when it overhangs (ends past it by more than the float
+// noise the beat rounding allows) — a tail never takes a pickup's room: the pickup wins.
+// The layout's head cuts and pickupLeftLimit (timelinePlacement.ts) both use this, so
+// they can't disagree. With no tails nothing overhangs and this is just `clipEnd`.
+export function pickupRoomEnd(clipEnd: number, sectionEnd: number, bpm: number | null): number {
+  return clipEnd > sectionEnd + BEAT_EPSILON * secondsPerBeat(bpm) ? sectionEnd : clipEnd;
+}
+
 export function effectiveLength(clip: Pick<LayoutClipInput, 'duration' | 'trimStart' | 'trimEnd'>): number {
   return (clip.trimEnd ?? clip.duration) - (clip.trimStart ?? 0);
 }
@@ -272,8 +281,7 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     }
     // Only after the whole section: clips in the same section never limit each other.
     for (const clip of sectionClips) {
-      const fullEnd = clipEnds.get(clip.id)!;
-      const end = fullEnd > section.end + overhangEpsilon ? section.end : fullEnd;
+      const end = pickupRoomEnd(clipEnds.get(clip.id)!, section.end, bpm);
       furthestEnd.set(clip.trackId, Math.max(furthestEnd.get(clip.trackId) ?? -Infinity, end));
     }
   }
