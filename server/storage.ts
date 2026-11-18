@@ -28,10 +28,10 @@ import {
   songSections,
 } from "@shared/schema";
 import { type ClipDependents, type TaskStatus, taskStatusAfterVersionLeaves } from "@shared/clip-dependents";
-import { layoutTimeline, sectionContentNeeds, contentNeedBeats, effectiveLength, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
+import { layoutTimeline, sectionContentNeeds, contentNeedBeats, effectiveLength, endsPastSection, type TimelineLayout, type TimelineLayoutInput } from "@shared/timelineLayout";
 import { isValidBaseLength } from "@shared/sectionBaseLength";
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from "@shared/sectionOrder";
-import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip, type SentTail } from "@shared/timelinePlacement";
+import { findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, MIN_TRIM_LENGTH, PLACEMENT_EPSILON, type PlacementClip, type SentTail } from "@shared/timelinePlacement";
 
 // Thrown by materializeLooseFileToTimeline for a drop position in a section that has
 // no timeline clips (it may have emptied since the drag began) — the route answers 409.
@@ -1274,6 +1274,53 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
   return appendOffset(sectionPlacementClips(trackId, sectionName));
 }
 
+// A sectioned clip's overhang state in the song's layout as the database holds it now
+// (uncommitted writes included inside a transaction) — what trims and Replace read
+// BEFORE they write (step 4h2b). null when the clip's section isn't on the timeline
+// (e.g. its track is hidden).
+interface ClipOverhangState {
+  input: TimelineLayoutInput;
+  layout: TimelineLayout;
+  sectionLength: number; // S: the section's length in seconds, from its start
+  overhanging: boolean;  // its full end is drawn past the section's end (endsPastSection)
+  cutBefore: number;     // its tail cut (layout.clipTailCuts)
+  nextStop: number;      // nextClipStop: the next clip on its track, from the section start
+}
+
+function clipOverhangState(songId: string, clip: TimelineClip): ClipOverhangState | null {
+  if (!clip.sectionName || clip.isFullTake) return null;
+  const input = songLayoutInput(songId);
+  const layout = layoutTimeline(input);
+  const section = layout.sections.find((s) => s.name === clip.sectionName);
+  const end = layout.clipEnds.get(clip.id);
+  if (!section || end === undefined) return null;
+  return {
+    input,
+    layout,
+    sectionLength: section.length,
+    overhanging: endsPastSection(end, section.end, input.bpm),
+    cutBefore: layout.clipTailCuts.get(clip.id) ?? 0,
+    nextStop: nextClipStop(input, layout, clip.trackId, clip.sectionName),
+  };
+}
+
+// The hard tail checks after a trim or Replace wrote a clip's tail (shared
+// tailWriteError): the tail is shorter than the clip, > 0 only on the last clip on its
+// track in its section, and the clip's tail cut didn't grow. Throws TailLimitError.
+function checkWrittenTail(songId: string, clipId: string, cutBefore: number): void {
+  const row = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
+  if (!row?.sectionName || row.isFullTake) return;
+  const offset = row.sectionOffset ?? 0;
+  const siblings = sectionPlacementClips(row.trackId, row.sectionName).filter((c) => c.id !== clipId);
+  const cutAfter = computeSongLayout(songId).clipTailCuts.get(clipId) ?? 0;
+  const error = tailWriteError(cutBefore, cutAfter, {
+    tailSeconds: row.tailSeconds,
+    trimmedLength: effectiveLength(row),
+    isLast: !siblings.some((c) => c.offset > offset + PLACEMENT_EPSILON),
+  });
+  if (error) throw new TailLimitError(error);
+}
+
 // Writes a timeline clip's trim points — the one write for trimStart/trimEnd on
 // timeline_clips (the trim route, apply/reset trim on all instances, Replace). A
 // sectioned clip's section_offset moves with its trimStart (new offset = old offset +
@@ -1287,10 +1334,20 @@ export function sectionAppendOffset(trackId: string, sectionName: string): numbe
 // may end before its section's downbeat). Only Option creates a pickup and the right
 // edge stops at a later section's pickup: both client rules, not checked here; and
 // TimelineOverlapError if the clip would overlap another clip on its
-// track in its section; nothing is written then. One transaction (a savepoint inside a
+// track in its section; nothing is written then.
+// Overhangs (step 4h2b): a sectioned clip's tail_seconds is written with the trim,
+// derived from the layout BEFORE the write (tailAfterTrim): an overhanging clip keeps
+// hanging past its section's end (new tail = max(0, new end − S)); any other clip gets
+// 0 (this clears a hidden tail), unless `allowOverhang` (Option, sent by the client) —
+// then it may hang over too, allowed only on the last clip on its track in its section
+// (TailLimitError otherwise). Then the hard checks (checkWrittenTail): the tail is
+// shorter than the clip and its tail cut didn't grow, else TailLimitError. Replace
+// passes `replaceTail` instead — the tail it worked out and the tail cut from the layout
+// at its own start — and the same checks run. One transaction (a savepoint inside a
 // caller's). Returns the updated row, or undefined if there's no such clip.
 export function writeTimelineClipTrim(
-  clipId: string, trimStart: number, trimEnd: number | null, opts: { keepOffset?: boolean } = {},
+  clipId: string, trimStart: number, trimEnd: number | null,
+  opts: { keepOffset?: boolean; allowOverhang?: boolean; replaceTail?: { tailSeconds: number; cutBefore: number } } = {},
 ): TimelineClip | undefined {
   return sqlite.transaction(() => {
     const clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
@@ -1314,6 +1371,13 @@ export function writeTimelineClipTrim(
         : `A clip can't be trimmed shorter than ${MIN_TRIM_LENGTH} s`);
     }
     const sectioned = !!clip.sectionName && !clip.isFullTake;
+    if (opts.allowOverhang && !sectioned) {
+      throw new TailLimitError("Only clips in a section can hang over its end.");
+    }
+    const songId = sectioned ? songIdForTrack(clip.trackId) : undefined;
+    // The layout before the write: the section's length, whether the clip overhangs,
+    // and its tail cut (the leniency's floor).
+    const before = songId && !opts.replaceTail ? clipOverhangState(songId, clip) : null;
     const oldOffset = clip.sectionOffset ?? 0;
     let sectionOffset = clip.sectionOffset;
     if (sectioned && !opts.keepOffset) {
@@ -1321,8 +1385,7 @@ export function writeTimelineClipTrim(
       // The lowest offset this trim may leave: its left limit (pickupLeftLimit), or its
       // old offset if already further left. Looked up only when the start goes below 0
       // and further left than it was.
-      const songId = moved < Math.min(0, oldOffset) - eps ? songIdForTrack(clip.trackId) : undefined;
-      const floor = songId
+      const floor = songId && moved < Math.min(0, oldOffset) - eps
         ? Math.min(songPickupLeftLimit(songId, clip.trackId, clip.sectionName!), oldOffset)
         : Math.min(0, oldOffset);
       if (moved < floor - eps) {
@@ -1331,13 +1394,25 @@ export function writeTimelineClipTrim(
       }
       sectionOffset = Math.max(floor, moved);
     }
+    let tailSeconds = clip.tailSeconds;
     if (sectioned) {
       const placed = toPlacementClip({ id: clip.id, sectionOffset, duration: clip.duration, trimStart, trimEnd });
       const others = sectionPlacementClips(clip.trackId, clip.sectionName!).filter((c) => c.id !== clip.id);
       if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, clip.sectionName!);
+      const isLast = !others.some((c) => c.offset > placed.offset + eps);
+      if (opts.allowOverhang && !isLast) {
+        throw new TailLimitError("Only the last clip on its track in its section can hang over the section's end.");
+      }
+      tailSeconds = opts.replaceTail
+        ? opts.replaceTail.tailSeconds
+        : before
+          ? tailAfterTrim(placed.offset + placed.length, before.sectionLength, before.overhanging, !!opts.allowOverhang)
+          : 0;
     }
-    return db.update(timelineClips).set({ trimStart, trimEnd, sectionOffset })
+    const updated = db.update(timelineClips).set({ trimStart, trimEnd, sectionOffset, tailSeconds })
       .where(eq(timelineClips.id, clipId)).returning().get();
+    if (songId) checkWrittenTail(songId, clipId, opts.replaceTail?.cutBefore ?? before?.cutBefore ?? 0);
+    return updated;
   })();
 }
 
@@ -1357,11 +1432,19 @@ export interface InstanceTrimResult {
 // instance's left edge stops at its section's downbeat, a pickup instance's at its own
 // left limit; every right edge stops at a later section's pickup on the track
 // (nextPickupStop) — an instance that would overlap gets
-// the closest allowed trim. An instance whose neighbours leave less room than the
+// the closest allowed trim. It never creates an overhang either (no allowOverhang):
+// each instance's tail follows writeTimelineClipTrim's rule, and an instance that
+// overhangs (step 4h2b) is clamped as a hand trim is checked: its tail cut never grows
+// — its right edge stops at the next clip on its track (nextClipStop: drawn start, any
+// later section), or where it ends now if it is already cut further (a bandmate's push):
+// it may stay there, so the stored overhang comes back when there's room — and its left
+// edge stops before its section's end (tail < trimmed length).
+// An instance whose neighbours leave less room than the
 // minimum clip length (clampTrim returns null) is skipped and left as it was — never an
-// overlap. Instances are done in section, then offset order, each
-// against the database as the earlier ones left it. One transaction, every write
-// through writeTimelineClipTrim. The caller validates the values and ownership.
+// overlap; so is one whose write is still refused (a safety net: never a 500). Instances
+// are done in section, then offset order, each against the database as the earlier
+// ones left it. One transaction, every write through writeTimelineClipTrim. The caller
+// validates the values and ownership.
 export function applyTrimToInstances(
   trackId: string, name: string, trimStart: number, trimEnd: number | null,
 ): InstanceTrimResult[] {
@@ -1372,28 +1455,43 @@ export function applyTrimToInstances(
       .orderBy(asc(timelineClips.sectionName), asc(timelineClips.sectionOffset))
       .all();
     return rows.map((row): InstanceTrimResult => {
+      const skip = (): InstanceTrimResult => ({
+        id: row.id, sectionName: row.sectionName, trimStart: row.trimStart, trimEnd: row.trimEnd,
+        sectionOffset: row.sectionOffset, clamped: true, skipped: true,
+      });
       const sectioned = !!row.sectionName && !row.isFullTake;
       const offset = row.sectionOffset ?? 0;
-      // A pickup instance keeps its own left limit, and every instance stops at a later
-      // pickup, from the layout as the earlier instances left it.
-      const input = sectioned && songId ? songLayoutInput(songId) : null;
-      const songLayout = input ? layoutTimeline(input) : null;
-      const pickupLimit = input && songLayout && offset < -PLACEMENT_EPSILON
-        ? pickupLeftLimit(input, songLayout, trackId, row.sectionName!)
+      // A pickup instance keeps its own left limit, every instance stops at a later
+      // pickup, and an overhanging one at the next clip and before its section's end —
+      // all from the layout as the earlier instances left it.
+      const state = sectioned && songId ? clipOverhangState(songId, row) : null;
+      const pickupLimit = state && offset < -PLACEMENT_EPSILON
+        ? pickupLeftLimit(state.input, state.layout, trackId, row.sectionName!)
         : 0;
-      const pickupStop = input && songLayout ? nextPickupStop(input, songLayout, trackId, row.sectionName!) : Infinity;
+      let pickupStop = state ? nextPickupStop(state.input, state.layout, trackId, row.sectionName!) : Infinity;
+      // An overhanging instance: the next clip on its track (always at or before any
+      // later pickup), or its current end when that's already further (its cut may stay,
+      // but never grow).
+      if (state?.overhanging) pickupStop = Math.max(state.nextStop, offset + effectiveLength(row));
       const nb = sectioned
         ? trimNeighbours({ offset }, sectionPlacementClips(trackId, row.sectionName!).filter((c) => c.id !== row.id), pickupLimit, { nextPickupStop: pickupStop })
         : null;
+      // Strictly inside the section: tailWriteError wants tail < length − PLACEMENT_EPSILON.
+      if (nb && state?.overhanging) nb.maxOffset = state.sectionLength - 2 * PLACEMENT_EPSILON;
       const r = clampTrim(
         { offset, duration: row.duration, trimStart: row.trimStart, trimEnd: row.trimEnd },
         { trimStart, trimEnd }, nb,
       );
-      if (!r) {
-        return { id: row.id, sectionName: row.sectionName, trimStart: row.trimStart, trimEnd: row.trimEnd,
-          sectionOffset: row.sectionOffset, clamped: true, skipped: true };
+      if (!r) return skip();
+      let updated: TimelineClip;
+      try {
+        updated = writeTimelineClipTrim(row.id, r.trimStart, r.trimEnd)!;
+      } catch (err) {
+        if (err instanceof TailLimitError || err instanceof TrimValidationError || err instanceof TimelineOverlapError) {
+          return skip();
+        }
+        throw err;
       }
-      const updated = writeTimelineClipTrim(row.id, r.trimStart, r.trimEnd)!;
       return { id: row.id, sectionName: row.sectionName, trimStart: updated.trimStart, trimEnd: updated.trimEnd,
         sectionOffset: updated.sectionOffset, clamped: r.clamped, skipped: false };
     });
@@ -1405,12 +1503,27 @@ export function applyTrimToInstances(
 // new trimmed length would run into the next clip on its track in its section, it is
 // cut short to end exactly there; the last clip in a section is never cut — the
 // section grows. If the cut would leave it shorter than the minimum clip length,
-// ReplaceTooShortError is thrown instead. The trim (sent, or the cut) is written through writeTimelineClipTrim
-// with keepOffset. One transaction; if the clip still overlaps a sibling afterwards
+// ReplaceTooShortError is thrown instead.
+// Overhangs (step 4h2b), from the layout at the START of Replace, before the new
+// duration is written: a clip that was overhanging keeps its part inside the section
+// (P = S − offset) and hangs the rest of the new file past the end (tailAfterReplace;
+// a file no longer than P leaves no tail and the section shrinks); if that would run
+// past the next clip on its track (nextClipStop, any later section) it is cut with
+// trimEnd to end exactly there, the tail reduced to match (shorter than the minimum →
+// ReplaceTooShortError). Any other clip (normal, or a hidden tail) gets tail 0 and the
+// rules above — Replace never creates an overhang. The trim (sent, or the cut) and the
+// tail are written through writeTimelineClipTrim with keepOffset; with no trim to write,
+// the tail is written here and checked the same way (checkWrittenTail). One
+// transaction; if the clip still overlaps a sibling afterwards
 // (only possible when an earlier clip already ran past its start), TimelineOverlapError
 // is thrown, and bad trim values throw TrimValidationError; nothing is written then.
 export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<InsertTimelineClip>): TimelineClip | undefined {
   return sqlite.transaction(() => {
+    const original = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get();
+    if (!original) return undefined;
+    // The layout before anything is written.
+    const songId = original.sectionName && !original.isFullTake ? songIdForTrack(original.trackId) : undefined;
+    const before = songId ? clipOverhangState(songId, original) : null;
     const { trimStart: sentStart, trimEnd: sentEnd, ...rest } = updates;
     const sentTrim = "trimStart" in updates || "trimEnd" in updates;
     if (Object.keys(rest).length > 0) db.update(timelineClips).set(rest).where(eq(timelineClips.id, clipId)).run();
@@ -1419,12 +1532,19 @@ export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<I
     const trimStart = "trimStart" in updates ? (sentStart as number) : clip.trimStart;
     let trimEnd = "trimEnd" in updates ? (sentEnd ?? null) : clip.trimEnd;
     const sectionName = clip.sectionName;
+    const sectioned = !!sectionName && !clip.isFullTake;
+    const offset = clip.sectionOffset ?? 0;
     let cutTo: number | null = null;
-    if (sectionName && !clip.isFullTake) {
-      const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
-      cutTo = trimEndBeforeNext(
-        { offset: clip.sectionOffset ?? 0, duration: clip.duration, trimStart, trimEnd }, others,
-      );
+    let tailSeconds = 0;
+    if (sectioned) {
+      const others = sectionPlacementClips(clip.trackId, sectionName!).filter((c) => c.id !== clip!.id);
+      cutTo = trimEndBeforeNext({ offset, duration: clip.duration, trimStart, trimEnd }, others);
+      // An overhanging clip is the last in its section: it stops at the next clip on
+      // its track in a later section instead, where that clip is drawn.
+      if (cutTo === null && before?.overhanging) {
+        const room = before.nextStop - offset;
+        if ((trimEnd ?? clip.duration) - trimStart > room + PLACEMENT_EPSILON) cutTo = trimStart + room;
+      }
       if (cutTo !== null) {
         // The space before the next clip is shorter than the minimum: refuse the
         // Replace (the transaction rolls back the fields written above).
@@ -1433,12 +1553,25 @@ export function updateTimelineClipKeepingSpot(clipId: string, updates: Partial<I
       }
       // A pickup keeps its offset, however short the new file (it may end before the
       // downbeat).
+      tailSeconds = before
+        ? tailAfterReplace((trimEnd ?? clip.duration) - trimStart, offset, before.sectionLength, before.overhanging)
+        : 0;
     }
-    if (sentTrim || cutTo !== null) clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, { keepOffset: true }) ?? clip;
-    if (sectionName && !clip.isFullTake) {
+    const cutBefore = before?.cutBefore ?? 0;
+    if (sentTrim || cutTo !== null) {
+      clip = writeTimelineClipTrim(clip.id, trimStart, trimEnd, {
+        keepOffset: true,
+        ...(sectioned ? { replaceTail: { tailSeconds, cutBefore } } : {}),
+      }) ?? clip;
+    } else if (sectioned) {
+      db.update(timelineClips).set({ tailSeconds }).where(eq(timelineClips.id, clipId)).run();
+      if (songId) checkWrittenTail(songId, clipId, cutBefore);
+      clip = db.select().from(timelineClips).where(eq(timelineClips.id, clipId)).get()!;
+    }
+    if (sectioned) {
       const placed = toPlacementClip(clip);
-      const others = sectionPlacementClips(clip.trackId, sectionName).filter((c) => c.id !== clip!.id);
-      if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, sectionName);
+      const others = sectionPlacementClips(clip.trackId, sectionName!).filter((c) => c.id !== clip!.id);
+      if (others.some((o) => findOverlap([o, placed]))) throw new TimelineOverlapError(clip.trackId, sectionName!);
     }
     return clip;
   })();

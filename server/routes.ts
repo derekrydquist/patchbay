@@ -2098,18 +2098,23 @@ export async function registerRoutes(
     const clipId = req.params.id as string;
     const tclipSongId = timelineClipSongId(clipId);
     if (!tclipSongId || !assertSongOwned(req, res, tclipSongId)) return;
-    const { trimStart, trimEnd } = req.body ?? {};
+    const { trimStart, trimEnd, allowOverhang } = req.body ?? {};
     if (typeof trimStart !== 'number' || (trimEnd !== null && trimEnd !== undefined && typeof trimEnd !== 'number')) {
       return res.status(400).json({ message: "trimStart must be a number; trimEnd must be a number or null" });
     }
+    if (allowOverhang !== undefined && typeof allowOverhang !== 'boolean') {
+      return res.status(400).json({ message: "allowOverhang must be true or false" });
+    }
     // Trim, and the clip's own section_offset moved by the trimStart change (the server
     // works it out; an offset in the body is ignored). Neighbours never move; an
-    // overlap is refused (writeTimelineClipTrim).
+    // overlap is refused (writeTimelineClipTrim). The clip's tail follows the overhang
+    // rule (step 4h2b): an overhanging clip keeps hanging over, any other clip gets 0,
+    // unless allowOverhang (Option, from the client) — last clip in its section only.
     let clip;
     try {
-      clip = writeTimelineClipTrim(clipId, trimStart, trimEnd ?? null);
+      clip = writeTimelineClipTrim(clipId, trimStart, trimEnd ?? null, { allowOverhang: allowOverhang === true });
     } catch (err) {
-      if (err instanceof TrimValidationError) return res.status(400).json({ message: err.message });
+      if (err instanceof TrimValidationError || err instanceof TailLimitError) return res.status(400).json({ message: err.message });
       if (err instanceof TimelineOverlapError) {
         return res.status(409).json({ message: "That trim would overlap another clip in this section." });
       }

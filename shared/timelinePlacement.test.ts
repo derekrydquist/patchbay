@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
-import { layoutTimeline, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
+import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { layoutTimeline, endsPastSection, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 import { snapTime, parseTimeSignature, secondsPerBeat } from './musicalTime';
 
 const clip = (id: string, offset: number, length: number): PlacementClip => ({ id, offset, length });
@@ -1432,5 +1432,123 @@ describe('computeFileDropPlacement — a Media Bucket version drag', () => {
   it('empty section on its track: lands where aimed (or snapped), nothing pushed', () => {
     expect(drop([], 4, 2.2)).toEqual({ offset: 2.2, moved: [] });
     expect(drop([], 4, 0)).toEqual({ offset: 0, moved: [] });
+  });
+});
+
+
+// ── Step 4h2b: overhangs through trims and Replace ───────────────────────────
+describe('tailAfterTrim', () => {
+  // The worked example: S = 8; X overhangs (offset 5, length 5, ends 10).
+  it('an overhanging clip: tail = new end − S, never below 0', () => {
+    expect(tailAfterTrim(8.5, 8, true)).toBeCloseTo(0.5);
+    expect(tailAfterTrim(7, 8, true)).toBe(0);
+    expect(tailAfterTrim(10.5, 8, true)).toBeCloseTo(2.5);
+    expect(tailAfterTrim(10, 8, true)).toBeCloseTo(2); // a left trim keeps the end
+  });
+
+  it('a clip that was not overhanging gets 0, unless allowOverhang', () => {
+    expect(tailAfterTrim(9, 8, false)).toBe(0);
+    expect(tailAfterTrim(9, 8, false, true)).toBeCloseTo(1);
+    expect(tailAfterTrim(7, 8, false, true)).toBe(0);
+  });
+
+  it('float noise is not a tail', () => {
+    expect(tailAfterTrim(8 + PLACEMENT_EPSILON / 2, 8, true)).toBe(0);
+  });
+});
+
+describe('tailAfterReplace', () => {
+  // P = S − offset = 8 − 5 = 3.
+  it('an overhanging clip hangs everything past P', () => {
+    expect(tailAfterReplace(5.5, 5, 8, true)).toBeCloseTo(2.5);
+    expect(tailAfterReplace(4, 5, 8, true)).toBeCloseTo(1);
+    expect(tailAfterReplace(3, 5, 8, true)).toBe(0);
+    expect(tailAfterReplace(2, 5, 8, true)).toBe(0);
+  });
+
+  it('Replace never creates an overhang', () => {
+    expect(tailAfterReplace(10, 5, 8, false)).toBe(0);
+  });
+});
+
+describe('nextClipStop', () => {
+  const input = (clips: Partial<LayoutClipInput>[]): TimelineLayoutInput => ({
+    sections: [
+      { name: 'Intro', sortOrder: 0, baseLength: null },
+      { name: 'Verse', sortOrder: 1, baseLength: null },
+      { name: 'Chorus', sortOrder: 2, baseLength: null },
+    ],
+    clips: clips.map((c, i) => ({
+      id: `c${i}`, trackId: 'drums', sectionName: 'Intro', sectionOffset: 0, duration: 1,
+      trimStart: 0, trimEnd: null, isFullTake: false, start: 0, ...c,
+    })),
+    bpm: 120,
+    timeSignature: '4/4',
+  });
+  const stop = (i: TimelineLayoutInput, section = 'Intro', track = 'drums') =>
+    nextClipStop(i, layoutTimeline(i), track, section);
+
+  it('the drawn start of the next clip on the track in a later section, from the section start', () => {
+    // Intro 0–8 (X: offset 5, length 5, tail 2); Verse 8–12 with a clip at offset 3 → 11.
+    const i = input([
+      { id: 'x', sectionOffset: 5, duration: 5, tailSeconds: 2 },
+      { id: 'n', sectionName: 'Verse', sectionOffset: 3 },
+    ]);
+    expect(stop(i)).toBeCloseTo(11);
+  });
+
+  it('skips sections in between and picks the earliest; a pickup counts at its drawn start', () => {
+    const i = input([
+      { id: 'x', sectionOffset: 0, duration: 4 },
+      { id: 'b', trackId: 'bass', sectionName: 'Verse', sectionOffset: 0, duration: 2 },
+      { id: 'p', sectionName: 'Chorus', sectionOffset: -0.5, duration: 1 },
+    ]);
+    // Intro 0–4, Verse 4–6, Chorus 6–6.5: the pickup is drawn from 5.5.
+    expect(stop(i)).toBeCloseTo(5.5);
+  });
+
+  it('another track, the same section, and clips drawn at zero length never count', () => {
+    const i = input([
+      { id: 'x', sectionOffset: 0, duration: 2 },
+      { id: 'same', sectionOffset: 3, duration: 1 },
+      { id: 'other', trackId: 'bass', sectionName: 'Verse', sectionOffset: 0 },
+    ]);
+    expect(stop(i)).toBe(Infinity);
+  });
+
+  it('Infinity for a section that is not on the timeline', () => {
+    expect(stop(input([{ id: 'x' }]), 'Chorus')).toBe(Infinity);
+  });
+});
+
+describe('clampTrim — maxOffset keeps an overhanging clip\'s start inside its section', () => {
+  const x: TrimClip = { offset: 5, duration: 10, trimStart: 2, trimEnd: 7 };
+
+  it('a left trim stops at maxOffset', () => {
+    const r = clampTrim(x, { trimStart: 6, trimEnd: 7 }, { prevEnd: 0, nextStart: 11, maxOffset: 7.5 })!;
+    expect(r.offset).toBeCloseTo(7.5);
+    expect(r.trimStart).toBeCloseTo(4.5);
+    expect(r.clamped).toBe(true);
+  });
+
+  it('a left trim inside the limit and a right-only change are untouched', () => {
+    expect(clampTrim(x, { trimStart: 3, trimEnd: 7 }, { prevEnd: 0, nextStart: 11, maxOffset: 7.5 }))
+      .toEqual({ trimStart: 3, trimEnd: 7, offset: 6, clamped: false });
+    expect(clampTrim(x, { trimStart: 2, trimEnd: 7.5 }, { prevEnd: 0, nextStart: 11, maxOffset: 4 }))
+      .toEqual({ trimStart: 2, trimEnd: 7.5, offset: 5, clamped: false });
+  });
+
+  it('the right edge stops at nextStart (the next clip, any later section)', () => {
+    const r = clampTrim(x, { trimStart: 2, trimEnd: null }, { prevEnd: 0, nextStart: 11, maxOffset: 8 })!;
+    expect(r.trimEnd).toBeCloseTo(8);
+    expect(r.clamped).toBe(true);
+  });
+});
+
+describe('endsPastSection', () => {
+  it('past the end by more than the beat rounding noise only', () => {
+    expect(endsPastSection(10, 8, 120)).toBe(true);
+    expect(endsPastSection(8, 8, 120)).toBe(false);
+    expect(endsPastSection(8 + 1e-9, 8, 120)).toBe(false);
   });
 });

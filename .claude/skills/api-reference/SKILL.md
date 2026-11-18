@@ -124,13 +124,18 @@ PUT    /api/songs/:songId/timeline-clips/offsets — body { clips: [{ id, sectio
                                            clips
 PATCH  /api/timeline-clips/:id           — update a placed clip; field whitelist: name, type, color,
                                            src, duration, trimStart, trimEnd, bucketClipId, isFinal,
-                                           sectionOffset (never start; tailSeconds is not on it, so
-                                           the stored tail is kept); a new sectionOffset is
+                                           sectionOffset (never start or tailSeconds); a new sectionOffset is
                                            checked for pickup limits (400) and overlap (409), and
                                            refused if it would grow the clip's tail cut (400); a
                                            length change (Replace) keeps the clip's offset and is
                                            cut short at the next clip (updateTimelineClipKeepingSpot;
-                                           409 if too short); logs sort-only
+                                           409 if too short); its tail is rewritten from the layout
+                                           before the Replace: an overhanging clip keeps its part
+                                           inside the section and the overhang absorbs the length
+                                           difference (tailAfterReplace), cut with trimEnd where the
+                                           next clip on its track is drawn (any later section); any
+                                           other clip gets tail 0 (never creates an overhang); a tail
+                                           check failure is 400; logs sort-only
                                            timeline-reordered when sectionOffset is sent; also accepts
                                            { isFinal: bool, author? } to mark/unmark the clip as
                                            final — syncs the bucket clip via syncFinalClipFromTimeline,
@@ -138,10 +143,17 @@ PATCH  /api/timeline-clips/:id           — update a placed clip; field whiteli
                                            clears them), clears sibling names in the same section,
                                            and updates the linked production task status
 PATCH  /api/timeline-clips/:id/trim      — update trim points only; body: { trimStart: number,
-                                           trimEnd: number | null }; goes through
-                                           writeTimelineClipTrim: 400 unless the trim is in range,
-                                           at least 0.5 s (or the whole file), and within the pickup
-                                           limits; section_offset moves with trimStart; neighbours
+                                           trimEnd: number | null, allowOverhang?: boolean }; goes
+                                           through writeTimelineClipTrim: 400 unless the trim is in
+                                           range, at least 0.5 s (or the whole file), and within the
+                                           pickup limits; section_offset moves with trimStart; the
+                                           tail is derived from the layout before the write
+                                           (tailAfterTrim: an overhanging clip keeps hanging over,
+                                           any other clip gets 0 unless allowOverhang); 400 when
+                                           allowOverhang isn't a boolean, is true on a clip that
+                                           isn't the last on its track in its section, the tail
+                                           would reach the clip's trimmed length, or the clip's
+                                           tail cut would grow; nothing written then; neighbours
                                            never move; does not touch isFinal or start;
                                            client calls queryClient.invalidateQueries on success to
                                            push updated trimStart/trimEnd into the tracks state
@@ -151,7 +163,11 @@ POST   /api/timeline-clips/apply-trim-to-instances — bulk-sets trimStart/trimE
                                            Instances" (current values) and "Reset Trim on All
                                            Instances" (trimStart: 0, trimEnd: null); each instance
                                            through writeTimelineClipTrim, clamped at its own limits
-                                           or skipped; never creates a pickup
+                                           or skipped; never creates a pickup or an overhang (no
+                                           allowOverhang); an overhanging instance is clamped at the
+                                           next clip on its track (nextClipStop) — or where it ends
+                                           now if already cut further — and before its section's
+                                           end; a refused write is reported as skipped (never 500)
 DELETE /api/timeline-clips/:id           — remove a clip from the timeline
 GET    /api/timeline-clips/:id/replacements — returns bucket clips that can replace this timeline clip:
                                               looks up the clip's trackId+sectionName → idea → all

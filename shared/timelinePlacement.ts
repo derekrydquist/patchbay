@@ -327,6 +327,64 @@ export function tailWriteError(cutBefore: number, cutAfter: number, sent?: SentT
   return null;
 }
 
+// ── Overhangs through trims and Replace (step 4h2b) ──────────────────────────
+// A trim or Replace never leaves the written clip cut ("writes stop at limits"); its
+// tail is derived from the layout BEFORE the write: the section's length S (seconds,
+// from its start) and whether the clip was overhanging (endsPastSection on its full
+// end). Tails below PLACEMENT_EPSILON count as 0 (float noise, not an overhang).
+
+function cleanTail(seconds: number): number {
+  return seconds > PLACEMENT_EPSILON ? seconds : 0;
+}
+
+// The tail a trim leaves. `newEnd` is the clip's full end after the trim (new offset +
+// new trimmed length, from its section's start). An overhanging clip keeps hanging past
+// S: a right trim uses up the overhang first (the section's end stays put), extending
+// grows it. A clip that wasn't overhanging (a normal clip, or a hidden stored tail) gets
+// 0 — the section grows as it always has — unless the trim was sent with allowOverhang
+// (Option, a client rule; the caller checks it's the last clip there).
+export function tailAfterTrim(
+  newEnd: number, sectionLength: number, overhanging: boolean, allowOverhang = false,
+): number {
+  return overhanging || allowOverhang ? cleanTail(newEnd - sectionLength) : 0;
+}
+
+// The tail Replace leaves. An overhanging clip keeps its part inside the section,
+// P = S − offset, and hangs the rest of the new file (`newLength`, trimmed and cut)
+// past the end: max(0, newLength − P) — a file no longer than P leaves no tail and the
+// section shrinks. A clip that wasn't overhanging gets 0 (Replace never creates one).
+export function tailAfterReplace(
+  newLength: number, offset: number, sectionLength: number, overhanging: boolean,
+): number {
+  return overhanging ? cleanTail(newLength - (sectionLength - offset)) : 0;
+}
+
+// Where an overhanging clip in `sectionName` on `trackId` must stop: the earliest drawn
+// start (layout.clipStarts) of a clip on that track in any later section — normal clip
+// or pickup, at its cut start — as an offset from this section's start, as the layout's
+// tail cuts measure it; clips drawn at zero length don't count. Infinity when there is
+// none (the tail may ring past the last section) or the section isn't on the timeline.
+// Pass the stored layout as it was before the write.
+export function nextClipStop(
+  input: { clips: Pick<LayoutClipInput, 'id' | 'trackId' | 'sectionName' | 'isFullTake'>[] },
+  layout: Pick<TimelineLayout, 'sections' | 'clipStarts' | 'clipEnds'>,
+  trackId: string | number,
+  sectionName: string,
+): number {
+  const index = layout.sections.findIndex((s) => s.name === sectionName);
+  if (index < 0) return Infinity;
+  const later = new Set(layout.sections.slice(index + 1).map((s) => s.name));
+  let stop = Infinity;
+  for (const c of input.clips) {
+    if (c.trackId !== trackId || c.isFullTake || !c.sectionName || !later.has(c.sectionName)) continue;
+    const start = layout.clipStarts.get(c.id);
+    const end = layout.clipEnds.get(c.id);
+    if (start === undefined || end === undefined || end - start <= PLACEMENT_EPSILON) continue;
+    stop = Math.min(stop, start);
+  }
+  return stop - layout.sections[index].start;
+}
+
 // Whether releasing a dragged clip with placement `result` changes anything: no clip
 // pushed, and the dragged clip landing on its drawn offset (within PLACEMENT_EPSILON),
 // is a no-op and nothing is saved. `drawnOffset` is where it is drawn now, from its
@@ -398,6 +456,10 @@ export function minTrimLength(duration: number): number {
 export interface TrimNeighbours {
   prevEnd: number;
   nextStart: number;
+  // The highest offset the left edge may move to (default none). Apply / reset trim on
+  // all instances sets it for an overhanging instance, so its start stays inside its
+  // section (its tail stays shorter than the clip).
+  maxOffset?: number;
 }
 
 // A clip's neighbours among `others` — the other clips on its track in its section,
@@ -473,7 +535,8 @@ export interface TrimResult {
 // means no neighbours and no offset limits (a legacy full take, or an unsectioned
 // clip): only 0 ≤ trimStart and trimEnd ≤ duration apply, and the offset stays.
 //   Left edge:  trimStart ≥ 0; the new offset ≥ nb.prevEnd (the previous clip's end;
-//               with none, 0 — or a pickup's left limit); unless a pickup is allowed
+//               with none, 0 — or a pickup's left limit) and ≤ nb.maxOffset when set
+//               (a left move only); unless a pickup is allowed
 //               (`opts.allowPickup`, by default only for a clip that is already a
 //               pickup; pass the matching trimNeighbours) it never goes below 0; the
 //               clip stays at least minTrimLength long.
@@ -504,7 +567,12 @@ export function clampTrim(
   // right-only change leaves the left edge alone (the right edge yields instead) — for
   // a pickup exactly where it is, whatever its limits say.
   const leftMoves = Math.abs(wantedStart - clip.trimStart) > PLACEMENT_EPSILON;
-  const highStart = leftMoves ? Math.min(wantedEnd, clip.duration) - minLength : Infinity;
+  const highStart = leftMoves
+    ? Math.min(
+      Math.min(wantedEnd, clip.duration) - minLength,
+      nb?.maxOffset !== undefined ? clip.trimStart + (nb.maxOffset - clip.offset) : Infinity,
+    )
+    : Infinity;
   const trimStart = isPickup && !leftMoves
     ? clip.trimStart
     : Math.max(lowStart, Math.min(wantedStart, highStart));

@@ -122,7 +122,16 @@ export function storedTailSeconds(
 // The layout's head cuts and pickupLeftLimit (timelinePlacement.ts) both use this, so
 // they can't disagree. With no tails nothing overhangs and this is just `clipEnd`.
 export function pickupRoomEnd(clipEnd: number, sectionEnd: number, bpm: number | null): number {
-  return clipEnd > sectionEnd + BEAT_EPSILON * secondsPerBeat(bpm) ? sectionEnd : clipEnd;
+  return endsPastSection(clipEnd, sectionEnd, bpm) ? sectionEnd : clipEnd;
+}
+
+// Whether a clip ending at `clipEnd` (its full, uncut end) is drawn past its section's
+// end — "overhanging": past it by more than the float noise the beat rounding allows
+// (sectionContentNeeds → beatsToHold), so a clip ending a hair past its section is not
+// a tail. The layout's tail cuts, pickupRoomEnd and the server's trim / Replace tail
+// rules all use this one test.
+export function endsPastSection(clipEnd: number, sectionEnd: number, bpm: number | null): boolean {
+  return clipEnd > sectionEnd + BEAT_EPSILON * secondsPerBeat(bpm);
 }
 
 export function effectiveLength(clip: Pick<LayoutClipInput, 'duration' | 'trimStart' | 'trimEnd'>): number {
@@ -257,10 +266,6 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
     else clipsBySection.set(clip.sectionName, [clip]);
   }
   const furthestEnd = new Map<string | number, number>();
-  // A clip "overhangs" only when it ends past its section's end by more than the float
-  // noise the beat rounding allows (sectionContentNeeds → beatsToHold); a clip ending a
-  // hair past its section today is not a tail.
-  const overhangEpsilon = BEAT_EPSILON * spb;
   for (const section of layoutSections) {
     const sectionClips = clipsBySection.get(section.name) ?? [];
     for (const clip of sectionClips) {
@@ -308,7 +313,8 @@ export function layoutTimeline({ sections, clips, bpm, timeSignature }: Timeline
       const start = clipStarts.get(clip.id)!;
       const end = clipEnds.get(clip.id)!;
       let tailCut = 0;
-      const overhangs = end > sectionEnd + overhangEpsilon;
+      // A clip "overhangs" only when it ends past its section's end (endsPastSection).
+      const overhangs = endsPastSection(end, sectionEnd, bpm);
       if (overhangs) {
         let nextStart = Infinity;
         for (const other of trackClips) {
