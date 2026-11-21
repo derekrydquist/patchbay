@@ -274,6 +274,9 @@ interface TrackProps {
   timeSignature: string;
   // The clip being dragged — drawn above the other clips on its row, "picked up".
   raisedClipId?: string | null;
+  // Its section's stored length (seconds): the floating clip keeps its drag-start look,
+  // so its overhang mark isn't measured against the preview's (growing) section.
+  raisedSectionLength?: number | null;
   // Where the dragged clip will land (content px within the lane), for the gold
   // landing outline. Only the dragged clip's row gets one.
   landing?: { left: number; width: number } | null;
@@ -299,6 +302,7 @@ export const TimelineTrack = React.memo(function TimelineTrack({
   bpm,
   timeSignature,
   raisedClipId,
+  raisedSectionLength,
   landing,
 }: TrackProps) {
   const { setNodeRef } = useDroppable({
@@ -426,6 +430,11 @@ export const TimelineTrack = React.memo(function TimelineTrack({
           const nextPickupStop = trimLimits?.pickupStops.get(clip.sectionName ?? '') ?? Infinity;
           const nb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: false, nextPickupStop });
           const pickupNb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: true, nextPickupStop });
+          // Its section's length as drawn, for the overhang mark (a number, so the
+          // memoized clip re-renders only when it changes).
+          const sectionLength = clip.id === raisedClipId && raisedSectionLength != null
+            ? raisedSectionLength
+            : sections.find((s) => s.name === clip.sectionName)?.duration;
           return (
           <TimelineClip
             key={clip.id}
@@ -437,6 +446,7 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             trimPrevEnd={nb.prevEnd}
             trimPickupPrevEnd={pickupNb.prevEnd}
             trimNextStart={nb.nextStart}
+            sectionLength={sectionLength}
             instanceCount={track.clips.filter((c) => c.name === clip.name).length}
             isFlash={flashClipId === clip.id}
             isSelected={selectedClipId === clip.id}

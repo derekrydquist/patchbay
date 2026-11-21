@@ -51,12 +51,18 @@ export function toPlacementClip(
 //      gap starts there instead of at 0. Below 0 only for a pickup drag (clipDragMinOffset).
 //      A clip among `others` that starts before minOffset (an existing pickup, when A
 //      may not be one) never moves: the first gap starts at its end instead.
+//   6. `maxOffset` (default none) is the highest offset A may take in the LAST gap only
+//      (the one after every other clip, which otherwise has no end): an overhang drag
+//      (clipDragMaxOffset). Inner gaps are untouched. A limit below the last gap's start
+//      leaves no room, and is ignored there: A is placed as a normal clip (the section
+//      grows), never squeezed.
 // Assumes the stored clips don't overlap (the server refuses any save that would).
 export function placeInGap(
   others: PlacementClip[],
   draggedLength: number,
   wantedOffset: number,
   minOffset = 0,
+  maxOffset = Infinity,
 ): PlacementResult {
   const min = Number.isFinite(minOffset) ? Math.min(0, minOffset) : 0;
   const end = (c: PlacementClip) => c.offset + c.length;
@@ -87,6 +93,11 @@ export function placeInGap(
     g1 = gapEndAfter(end(x));
   }
 
+  // ── Rule 6: the last gap ends where A's start may go no further ────────────
+  if (g1 === Infinity && Number.isFinite(maxOffset) && maxOffset >= g0 - PLACEMENT_EPSILON) {
+    g1 = Math.max(g0, maxOffset) + draggedLength;
+  }
+
   // ── Rule 3: place A in [g0, g1] ────────────────────────────────────────────
   if (g1 - g0 >= draggedLength - PLACEMENT_EPSILON) {
     return { offset: Math.max(g0, Math.min(s, g1 - draggedLength)), moved: [] };
@@ -111,7 +122,12 @@ export function placeInGap(
 //     (its start − the dragged clip's played length);
 //   - the drag's minimum offset, when it's below 0 (a pickup allowed: the pickup limit);
 //   - the dragged clip's current drawn start (stored offset + head cut), so dropping it
-//     back near where it was keeps it exactly there, even off the beat.
+//     back near where it was keeps it exactly there, even off the beat;
+//   - when an overhang is possible (`overhang`, the mirror of the pickup limit): ending
+//     flush against the stop (stop − its length) and ending exactly at its section's
+//     frozen end (sectionLength − its length, a normal clip again).
+// "Its length" is always the dragged clip's full trimmed length: the result is an offset,
+// and a clip at offset X ends at X + trimmed length whatever its cuts are now.
 // A tie goes to the later spot, as snapTime rounds halfway later. `grid` null (snap off
 // or Shift) → the free start, unchanged. The result goes into placeInGap as the wanted
 // offset; the gaps model decides where it lands. Pass the other clips only in `others`,
@@ -120,12 +136,13 @@ export interface SnapDragStartInput {
   freeOffset: number;                           // the unsnapped start, from the section start
   grid: { step: number; sectionStart: number } | null; // snapGridSeconds + the section's layout start
   others: { start: number; end: number }[];     // the other clips' drawn spans, as offsets
-  draggedLength: number;                        // the dragged clip's played length
+  draggedLength: number;                        // the dragged clip's trimmed length
   minOffset: number;                            // clipDragMinOffset
   currentOffset?: number;                       // the dragged clip's drawn start now
+  overhang?: OverhangLimits | null;             // only when an overhang is possible
 }
 
-export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffset, currentOffset }: SnapDragStartInput): number {
+export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffset, currentOffset, overhang }: SnapDragStartInput): number {
   if (!grid || !Number.isFinite(freeOffset) || !(grid.step > 0)) return freeOffset;
   const candidates = [
     Math.round((grid.sectionStart + freeOffset) / grid.step) * grid.step - grid.sectionStart,
@@ -134,6 +151,10 @@ export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffs
   for (const o of others) candidates.push(o.end, o.start - draggedLength);
   if (minOffset < 0) candidates.push(minOffset);
   if (currentOffset !== undefined && Number.isFinite(currentOffset)) candidates.push(currentOffset);
+  if (overhang) {
+    if (Number.isFinite(overhang.stop)) candidates.push(overhang.stop - draggedLength);
+    candidates.push(overhang.sectionLength - draggedLength);
+  }
   let best = candidates[0];
   for (const c of candidates) {
     const d = Math.abs(c - freeOffset);
@@ -150,27 +171,53 @@ export function snapDragStart({ freeOffset, grid, others, draggedLength, minOffs
 // track in its section (placeInGap). The other clips come in twice: as stored
 // (`others`, offset + trimmed length, for the gaps) and as drawn (`drawnOthers`, a cut
 // pickup at its cut start, for flush snapping).
+// Overhangs (4h3): pass `overhang` only while one is allowed (overhangAllowed). Then the
+// last gap ends at clipDragMaxOffset, the two overhang snap candidates join, and the
+// result's tailSeconds is the overhang (tailFromPlacement). With no room for an overhang
+// (clipDragMaxOffset is Infinity) everything is as for a normal clip: tail 0.
 export interface DragPlacementInput {
   freeOffset: number;                           // the unsnapped start, from the section start
   grid: { step: number; sectionStart: number } | null; // null = snap off or Shift
   others: PlacementClip[];                      // the other clips as stored
   drawnOthers: { start: number; end: number }[]; // the other clips' drawn spans, as offsets
-  length: number;                               // the dragged clip's trimmed length
-  drawnLength: number;                          // its played length (flush snap against a clip's start)
+  length: number;                               // the dragged clip's trimmed length (flush snapping too)
   minOffset: number;                            // placeInGap's minOffset (clipDragMinOffset)
   currentOffset?: number;                       // its drawn start now (a clip already placed)
+  // Only while an overhang is allowed; `wall` when Option itself is held (a wall at
+  // the section's end when there's no room to hang over — clipDragMaxOffset).
+  overhang?: (OverhangLimits & { wall?: boolean }) | null;
 }
 
-export function placeDraggedClip(input: DragPlacementInput): PlacementResult {
+export interface DragPlacementResult extends PlacementResult {
+  tailSeconds: number; // the dragged clip's overhang after this placement (0: none)
+}
+
+export function placeDraggedClip(input: DragPlacementInput): DragPlacementResult {
+  const maxOffset = input.overhang
+    ? clipDragMaxOffset({ ...input.overhang, length: input.length, others: input.others, minOffset: input.minOffset })
+    : Infinity;
+  const overhang = input.overhang && overhangPossible(maxOffset, input.length, input.overhang.sectionLength)
+    ? input.overhang
+    : null;
+  // A wall (Option, no room to hang over): the only extra snap point is ending exactly
+  // at the section's end.
+  const wall = !overhang && input.overhang && Number.isFinite(maxOffset)
+    ? { sectionLength: input.overhang.sectionLength, stop: Infinity }
+    : null;
   const wantedOffset = snapDragStart({
     freeOffset: input.freeOffset,
     grid: input.grid,
     others: input.drawnOthers,
-    draggedLength: input.drawnLength,
+    draggedLength: input.length,
     minOffset: input.minOffset,
     currentOffset: input.currentOffset,
+    overhang: overhang ?? wall,
   });
-  return placeInGap(input.others, input.length, wantedOffset, input.minOffset);
+  const result = placeInGap(input.others, input.length, wantedOffset, input.minOffset, maxOffset);
+  const tailSeconds = overhang
+    ? tailFromPlacement(result, { length: input.length, sectionLength: overhang.sectionLength, others: input.others })
+    : 0;
+  return { ...result, tailSeconds };
 }
 
 // A file dragged in from the Media Bucket (a version): a new clip with no current
@@ -178,7 +225,7 @@ export function placeDraggedClip(input: DragPlacementInput): PlacementResult {
 // minimum offset is the section's start (0): a drop aimed before the section's start
 // lands at its start, after any pickups there. `others` / `drawnOthers` are every
 // non-full-take clip on its track in its section. Snap and the gaps model are the same
-// as for a timeline clip drag.
+// as for a timeline clip drag. Never an overhang.
 export function computeFileDropPlacement(input: {
   freeOffset: number;
   grid: { step: number; sectionStart: number } | null;
@@ -186,7 +233,8 @@ export function computeFileDropPlacement(input: {
   drawnOthers: { start: number; end: number }[];
   length: number;
 }): PlacementResult {
-  return placeDraggedClip({ ...input, drawnLength: input.length, minOffset: 0 });
+  const { offset, moved } = placeDraggedClip({ ...input, minOffset: 0 });
+  return { offset, moved };
 }
 
 // The first pair of clips in `clips` that overlap, or null. Touching edges (within
@@ -391,8 +439,17 @@ export function nextClipStop(
 // section start: its stored offset + the layout's head cut (clipHeadCuts). For a cut
 // pickup that is its cut start, not its stored offset, so a drag released back on its
 // own spot keeps the stored offset, and the full pickup comes back when room returns.
-export function placementChanged(result: PlacementResult, drawnOffset: number): boolean {
-  return result.moved.length > 0 || Math.abs(result.offset - drawnOffset) > PLACEMENT_EPSILON;
+// Overhangs (4h3): the tail counts too — `result.tailSeconds` (missing = 0) against
+// `tailBefore`, the overhang as drawn at drag start (tailAtDragStart: 0 for a clip that
+// wasn't overhanging, so a hidden stored tail released on its own spot is no change).
+export function placementChanged(
+  result: PlacementResult & { tailSeconds?: number },
+  drawnOffset: number,
+  tailBefore = 0,
+): boolean {
+  return result.moved.length > 0
+    || Math.abs(result.offset - drawnOffset) > PLACEMENT_EPSILON
+    || Math.abs((result.tailSeconds ?? 0) - tailBefore) > PLACEMENT_EPSILON;
 }
 
 // ── Pickup drags ─────────────────────────────────────────────────────────────
@@ -423,6 +480,108 @@ export function afterPickupPlacement(state: PickupDragState, landedOffset: numbe
 // is allowed; otherwise its left limit (pickupLeftLimit), never above 0.
 export function clipDragMinOffset(allowPickup: boolean, leftLimit: number): number {
   return allowPickup ? Math.min(0, leftLimit) : 0;
+}
+
+// ── Overhang drags (4h3) ─────────────────────────────────────────────────────
+// The mirror of pickup drags. Only Option creates an overhang. A clip that is drawn past
+// its section's end when its drag starts (endsPastSection on the stored layout — never
+// just "has a stored tail") may move within its space without Option, until its end
+// lands at or before the section's end: then it's a normal clip for the rest of that
+// drag, and crossing back needs Option. While an overhang is allowed the section's end
+// is frozen at its length when the drag started (S0): the clip's tail is how far it ends
+// past S0, and nothing later moves. A normal clip without Option grows its section.
+// All offsets below are seconds from the section's start; `sectionLength` is S0.
+
+export interface OverhangDragState {
+  wasOverhanging: boolean; // drawn past its section's end when the drag started
+  backInside: boolean;     // its end has landed at or before the section's end in this drag
+}
+
+export function startOverhangDrag(wasOverhanging: boolean): OverhangDragState {
+  return { wasOverhanging, backInside: false };
+}
+
+// Whether the drag may let the clip hang past its section's end now.
+export function overhangAllowed(state: OverhangDragState, option: boolean): boolean {
+  return option || (state.wasOverhanging && !state.backInside);
+}
+
+// The state after a placement whose end (offset + trimmed length) is `newEnd`.
+export function afterOverhangPlacement(state: OverhangDragState, newEnd: number, sectionLength: number): OverhangDragState {
+  return !state.backInside && newEnd <= sectionLength + PLACEMENT_EPSILON ? { ...state, backInside: true } : state;
+}
+
+// What limits an overhang: the section's frozen length S0 and the stop (nextClipStop on
+// the stored layout at drag start, as an offset from this section's start; Infinity
+// when no later clip on the track).
+export interface OverhangLimits {
+  sectionLength: number;
+  stop: number;
+}
+
+// The highest offset the dragged clip may take in its last gap while an overhang is
+// allowed: min(stop − length, S0 − minTrimLength(length)) — it never runs into the next
+// clip on its track, and at least 0.5 s of it (the whole clip, if shorter) stays inside
+// its section. Infinity — no limit, a normal clip whose section grows — whenever an
+// overhang isn't possible:
+//   - the limit is below the last gap's start (the end of the furthest other clip, or
+//     minOffset): no room;
+//   - even at the limit the clip wouldn't end past S0: the stop is at or before S0 (a
+//     clip on the downbeat of the next section, or a pickup into it), or the clip is no
+//     longer than minTrimLength (it must stay wholly inside).
+//
+// `wall` (Option held — the key, not just an overhanging clip moving without it): when
+// an overhang isn't possible, the section's end is a wall instead — the mirror of a
+// pickup drag stopping at the section's start when there's no pickup room. The limit
+// is then S0 − length (the clip ends at most exactly at the section's end: tail 0, the
+// section doesn't grow). Exception: when even the last gap's start can't fit the clip
+// inside the section, Infinity as before (the section grows). Without `wall` an
+// impossible overhang is always Infinity. A limit with an overhang possible is told
+// apart from a wall by overhangPossible.
+export function clipDragMaxOffset(input: OverhangLimits & {
+  length: number;
+  others: PlacementClip[];
+  minOffset?: number;
+  wall?: boolean;
+}): number {
+  const { sectionLength, stop, length, others } = input;
+  if (!Number.isFinite(sectionLength) || !(length > 0) || Number.isNaN(stop)) return Infinity;
+  const max = Math.min(stop - length, sectionLength - minTrimLength(length));
+  const lastGapStart = others.reduce((m, c) => Math.max(m, c.offset + c.length), Math.min(0, input.minOffset ?? 0));
+  if (max >= lastGapStart - PLACEMENT_EPSILON && max + length > sectionLength + PLACEMENT_EPSILON) return max;
+  // No overhang possible.
+  if (!input.wall) return Infinity;
+  const wallAt = sectionLength - length;
+  return wallAt >= lastGapStart - PLACEMENT_EPSILON ? wallAt : Infinity;
+}
+
+// Whether a limit from clipDragMaxOffset lets the clip hang over (its end may go past
+// S0), as opposed to a wall at the section's end or no limit at all.
+export function overhangPossible(maxOffset: number, length: number, sectionLength: number): boolean {
+  return Number.isFinite(maxOffset) && maxOffset + length > sectionLength + PLACEMENT_EPSILON;
+}
+
+// The dragged clip's tail after a placement: how far it ends past the section's frozen
+// length S0, when it landed in the last gap (no other clip on its track in its section
+// starts after it, nothing pushed); otherwise 0. Pass this only while an overhang is
+// possible (clipDragMaxOffset finite); with none the tail is 0. Float noise counts as 0.
+export function tailFromPlacement(
+  result: PlacementResult,
+  input: { length: number; sectionLength: number; others: PlacementClip[] },
+): number {
+  if (result.moved.length > 0) return 0;
+  if (input.others.some((c) => c.offset > result.offset + PLACEMENT_EPSILON)) return 0;
+  const tail = result.offset + input.length - input.sectionLength;
+  return tail > PLACEMENT_EPSILON ? tail : 0;
+}
+
+// The overhang as drawn when the drag starts, for placementChanged: how far its end
+// (stored offset + trimmed length) is past S0 when it was overhanging, else 0 — a hidden
+// stored tail counts as none.
+export function tailAtDragStart(end: number, sectionLength: number, wasOverhanging: boolean): number {
+  if (!wasOverhanging) return 0;
+  const tail = end - sectionLength;
+  return tail > PLACEMENT_EPSILON ? tail : 0;
 }
 
 // ── Trims ────────────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, startOverhangDrag, overhangAllowed, afterOverhangPlacement, clipDragMaxOffset, overhangPossible, tailFromPlacement, tailAtDragStart, type OverhangLimits, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, endsPastSection, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 import { snapTime, parseTimeSignature, secondsPerBeat } from './musicalTime';
 
@@ -1342,7 +1342,8 @@ describe('placeDraggedClip — the core both drag kinds share', () => {
   const before = (i: DragPlacementInput) => placeInGap(
     i.others,
     i.length,
-    snapDragStart({ freeOffset: i.freeOffset, grid: i.grid, others: i.drawnOthers, draggedLength: i.drawnLength, minOffset: i.minOffset, currentOffset: i.currentOffset }),
+    // Flush snapping uses the trimmed length since 4h3a (it used the drawn length).
+    snapDragStart({ freeOffset: i.freeOffset, grid: i.grid, others: i.drawnOthers, draggedLength: i.length, minOffset: i.minOffset, currentOffset: i.currentOffset }),
     i.minOffset,
   );
   // A small deterministic generator (no Math.random), so a failure always reproduces.
@@ -1366,11 +1367,10 @@ describe('placeDraggedClip — the core both drag kinds share', () => {
         others,
         drawnOthers: others.map((c) => ({ start: Math.max(c.offset, -0.5), end: c.offset + c.length })),
         length: 0.5 + rand() * 5,
-        drawnLength: 0.5 + rand() * 5,
         minOffset: rand() < 0.3 ? -rand() * 2 : 0,
         currentOffset: rand() < 0.5 ? rand() * 8 : undefined,
       };
-      expect(placeDraggedClip(input), `case ${n}`).toEqual(before(input));
+      expect(placeDraggedClip(input), `case ${n}`).toEqual({ ...before(input), tailSeconds: 0 });
     }
   });
 });
@@ -1550,5 +1550,483 @@ describe('endsPastSection', () => {
     expect(endsPastSection(10, 8, 120)).toBe(true);
     expect(endsPastSection(8, 8, 120)).toBe(false);
     expect(endsPastSection(8 + 1e-9, 8, 120)).toBe(false);
+  });
+});
+
+// ── Step 4h3a: overhang drags (Option-drag right) ────────────────────────────
+
+describe('overhang drag state', () => {
+  it('only Option allows an overhang for a clip that was not overhanging', () => {
+    const st = startOverhangDrag(false);
+    expect(overhangAllowed(st, false)).toBe(false);
+    expect(overhangAllowed(st, true)).toBe(true);
+  });
+  it('an overhanging clip moves without Option until its end lands at or before the section end', () => {
+    let st = startOverhangDrag(true);
+    expect(overhangAllowed(st, false)).toBe(true);
+    st = afterOverhangPlacement(st, 9, 8);
+    expect(overhangAllowed(st, false)).toBe(true);
+    st = afterOverhangPlacement(st, 8, 8); // exactly at the end counts as back inside
+    expect(st.backInside).toBe(true);
+    expect(overhangAllowed(st, false)).toBe(false);
+    expect(overhangAllowed(st, true)).toBe(true);
+    // It stays a normal clip for the rest of the drag, even after ending past it again.
+    expect(overhangAllowed(afterOverhangPlacement(st, 10, 8), false)).toBe(false);
+  });
+  it('Option held while it ends inside also counts as back inside', () => {
+    const st = afterOverhangPlacement(startOverhangDrag(true), 7.5, 8);
+    expect(overhangAllowed(st, true)).toBe(true);
+    expect(overhangAllowed(st, false)).toBe(false);
+  });
+});
+
+describe('placeInGap — maxOffset limits the last gap only', () => {
+  const others = [clip('a', 0, 2), clip('b', 4, 1)];
+  it('the last gap: lands where aimed up to the limit, then at the limit', () => {
+    expect(placeInGap(others, 2, 5.5, 0, 6)).toEqual({ offset: 5.5, moved: [] });
+    expect(placeInGap(others, 2, 10, 0, 6)).toEqual({ offset: 6, moved: [] });
+    expect(placeInGap(others, 2, 6, 0, 6)).toEqual({ offset: 6, moved: [] });
+  });
+  it("aimed at the last clip's second half: snug after it, still within the limit", () => {
+    expect(placeInGap(others, 2, 4.6, 0, 6)).toEqual({ offset: 5, moved: [] });
+  });
+  it('inner gaps are unchanged, fits and pushes alike', () => {
+    for (const [len, wanted] of [[2, 2.3], [1, 2.5], [3, 2.1], [3, 0.4]] as [number, number][]) {
+      expect(placeInGap(others, len, wanted, 0, 6)).toEqual(placeInGap(others, len, wanted));
+    }
+    expect(placeInGap(others, 3, 2.1, 0, 6)).toEqual({ offset: 2, moved: [{ id: 'b', offset: 7 }] });
+  });
+  it("a limit below the last gap's start leaves no room and is ignored: a normal clip", () => {
+    expect(placeInGap([clip('a', 0, 6)], 2, 10, 0, 5)).toEqual({ offset: 10, moved: [] });
+  });
+  it('minOffset and maxOffset together (the only gap is the last one)', () => {
+    expect(placeInGap([], 4, -5, -2, 3)).toEqual({ offset: -2, moved: [] });
+    expect(placeInGap([], 4, 10, -2, 3)).toEqual({ offset: 3, moved: [] });
+    expect(placeInGap([], 4, 1, -2, 3)).toEqual({ offset: 1, moved: [] });
+    // A pickup among the others raises the floor; the limit still caps the last gap.
+    expect(placeInGap([clip('p', -1, 2), clip('b', 2, 1)], 2, 9, 0, 4)).toEqual({ offset: 4, moved: [] });
+  });
+  it('Infinity (the default) is exactly today', () => {
+    expect(placeInGap(others, 2, 50, 0, Infinity)).toEqual(placeInGap(others, 2, 50));
+  });
+});
+
+describe('clipDragMaxOffset', () => {
+  const max = (stop: number, length: number, others: PlacementClip[] = [], sectionLength = 8, minOffset = 0) =>
+    clipDragMaxOffset({ sectionLength, stop, length, others, minOffset });
+  it('the stop: it never runs into the next clip on its track', () => {
+    expect(max(11, 4)).toBeCloseTo(7);
+  });
+  it('the 0.5 s rule: at least 0.5 s stays inside its section', () => {
+    expect(max(20, 4)).toBeCloseTo(7.5);
+    expect(max(Infinity, 4)).toBeCloseTo(7.5);
+    expect(max(20, 0.6)).toBeCloseTo(7.5);
+  });
+  it('a file no longer than 0.5 s must stay wholly inside: no overhang possible', () => {
+    expect(max(20, 0.3)).toBe(Infinity);
+    expect(max(20, 0.5)).toBe(Infinity);
+  });
+  it('a stop at or before the section end (a clip on the next downbeat, or a pickup into it): none possible', () => {
+    expect(max(8, 4)).toBe(Infinity);
+    expect(max(7.5, 4)).toBe(Infinity);
+  });
+  it('with Option (wall): no overhang possible → the clip ends at most at the section end', () => {
+    const wall = (stop: number, length: number, others: PlacementClip[] = []) =>
+      clipDragMaxOffset({ sectionLength: 8, stop, length, others, wall: true });
+    expect(wall(8, 4)).toBeCloseTo(4);              // a clip on the next downbeat
+    expect(wall(7.5, 4)).toBeCloseTo(4);            // a pickup into the next section
+    expect(wall(20, 0.3)).toBeCloseTo(7.7);         // 0.5 s or shorter: must stay wholly inside
+    expect(wall(20, 0.5)).toBeCloseTo(7.5);
+    // Too little room for the 0.5 s rule (the last gap starts at 7.8): the wall at 4 is
+    // before the gap's start, so the clip can't fit inside — the exception: no limit.
+    expect(wall(11, 4, [clip('a', 0, 7.8)])).toBe(Infinity);
+    // A stop just past the end (8.2) still leaves room to hang over by 0.2 s: that's
+    // the limit, not a wall.
+    expect(wall(8.2, 4, [clip('a', 0, 3)])).toBeCloseTo(4.2);
+    // Possible overhangs are the same with or without the wall.
+    expect(wall(11, 4)).toBeCloseTo(clipDragMaxOffset({ sectionLength: 8, stop: 11, length: 4, others: [] }));
+  });
+  it('the exception: even the last gap start cannot fit the clip inside → no limit, the section grows', () => {
+    // The last gap starts at 4.5; a 4 s clip would end at 8.5 > 8 even there.
+    expect(clipDragMaxOffset({ sectionLength: 8, stop: 8, length: 4, others: [clip('a', 0, 4.5)], wall: true })).toBe(Infinity);
+    // Exactly fitting still walls.
+    expect(clipDragMaxOffset({ sectionLength: 8, stop: 8, length: 4, others: [clip('a', 0, 4)], wall: true })).toBeCloseTo(4);
+  });
+  it('overhangPossible tells an overhang limit from a wall or no limit', () => {
+    expect(overhangPossible(7, 4, 8)).toBe(true);
+    expect(overhangPossible(4, 4, 8)).toBe(false);
+    expect(overhangPossible(Infinity, 4, 8)).toBe(false);
+  });
+  it("no room in the last gap, no Option: none possible (decision 4)", () => {
+    expect(max(11, 4, [clip('a', 0, 7.8)])).toBe(Infinity);
+    expect(max(11, 4, [clip('a', 0, 7)])).toBeCloseTo(7); // exactly at the gap's start still fits
+  });
+  it('a pickup-allowed drag with no other clips: the last gap starts at minOffset', () => {
+    expect(max(11, 4, [], 8, -2)).toBeCloseTo(7);
+  });
+});
+
+describe('tailFromPlacement', () => {
+  const t = (offset: number, others: PlacementClip[] = [], moved: { id: string; offset: number }[] = [], length = 4) =>
+    tailFromPlacement({ offset, moved }, { length, sectionLength: 8, others });
+  it('the last gap: how far it ends past the frozen section end', () => {
+    expect(t(6, [clip('a', 0, 3)])).toBeCloseTo(2);
+    expect(t(3, [clip('a', 0, 3)])).toBe(0); // ends inside
+    expect(t(4, [clip('a', 0, 3)])).toBe(0); // ends exactly at the end
+    expect(t(4 + 1e-9)).toBe(0);             // float noise
+  });
+  it('an inner gap (another clip starts after it): 0', () => {
+    expect(t(5, [clip('a', 0, 3), clip('b', 9.5, 1)])).toBe(0);
+  });
+  it('a placement that pushes: 0', () => {
+    expect(t(6, [], [{ id: 'b', offset: 10 }])).toBe(0);
+  });
+  it('not allowed: placeDraggedClip without `overhang` always gives 0', () => {
+    const r = placeDraggedClip({ freeOffset: 9, grid: null, others: [], drawnOthers: [], length: 4, minOffset: 0 });
+    expect(r).toEqual({ offset: 9, moved: [], tailSeconds: 0 });
+  });
+});
+
+describe('placeDraggedClip with an overhang allowed', () => {
+  const base = { grid: null, others: [clip('a', 0, 3)], drawnOthers: [{ start: 0, end: 3 }], length: 4, minOffset: 0 };
+  const limits: OverhangLimits = { sectionLength: 8, stop: 11 };
+  it('hangs over up to the stop, with the tail as far as it ends past the end', () => {
+    expect(placeDraggedClip({ ...base, freeOffset: 6, overhang: limits })).toEqual({ offset: 6, moved: [], tailSeconds: expect.closeTo(2, 9) });
+    const r = placeDraggedClip({ ...base, freeOffset: 9, overhang: limits });
+    expect(r.offset).toBeCloseTo(7);
+    expect(r.tailSeconds).toBeCloseTo(3);
+  });
+  it('ending inside its section: tail 0', () => {
+    expect(placeDraggedClip({ ...base, freeOffset: 3.5, overhang: limits })).toEqual({ offset: 3.5, moved: [], tailSeconds: 0 });
+  });
+  it('no room for an overhang, moving without Option: a normal clip (no limit, tail 0)', () => {
+    const r = placeDraggedClip({ ...base, others: [clip('a', 0, 7.8)], drawnOthers: [{ start: 0, end: 7.8 }], freeOffset: 9, overhang: limits });
+    expect(r).toEqual({ offset: 9, moved: [], tailSeconds: 0 });
+  });
+  it('no room for an overhang with Option: a wall at the section end (tail 0)', () => {
+    const blocked = { sectionLength: 8, stop: 8, wall: true };
+    expect(placeDraggedClip({ ...base, freeOffset: 9, overhang: blocked })).toEqual({ offset: 4, moved: [], tailSeconds: 0 });
+    expect(placeDraggedClip({ ...base, freeOffset: 3.5, overhang: blocked })).toEqual({ offset: 3.5, moved: [], tailSeconds: 0 });
+    // Snap: ending exactly at the section end (offset 4) is a snap point.
+    expect(placeDraggedClip({ ...base, freeOffset: 4.2, grid: { step: 2, sectionStart: 0 }, overhang: blocked }).offset).toBeCloseTo(4);
+  });
+  it('the exception, with Option: the last gap starts too late to fit inside → no limit, the section grows', () => {
+    const r = placeDraggedClip({
+      ...base, others: [clip('a', 0, 7.8)], drawnOthers: [{ start: 0, end: 7.8 }], freeOffset: 9,
+      overhang: { sectionLength: 8, stop: 11, wall: true },
+    });
+    expect(r).toEqual({ offset: 9, moved: [], tailSeconds: 0 });
+  });
+});
+
+describe('snapDragStart — overhang candidates and the full-length flush fix', () => {
+  const grid = { step: 0.5, sectionStart: 0 };
+  const snap = (freeOffset: number, overhang: OverhangLimits | null, step = 0.5, others: { start: number; end: number }[] = []) =>
+    snapDragStart({ freeOffset, grid: { ...grid, step }, others, draggedLength: 3, minOffset: 0, overhang });
+  it('ending flush against the stop', () => {
+    // stop 10.3, length 3 → 7.3; free 7.2 is 0.1 from it and 0.2 from the beat at 7.0.
+    expect(snap(7.2, { sectionLength: 8, stop: 10.3 })).toBeCloseTo(7.3);
+    expect(snap(7.2, null)).toBeCloseTo(7);
+  });
+  it("ending exactly at the section's end (a normal clip again)", () => {
+    // Bar snap (2 s): free 5.1 → bar 6 without the overhang; 5 (ends at 8) with it.
+    expect(snap(5.1, { sectionLength: 8, stop: Infinity }, 2)).toBeCloseTo(5);
+    expect(snap(5.1, null, 2)).toBeCloseTo(6);
+  });
+  it('a tie goes to the later spot', () => {
+    // 5.25 is halfway between 5 (section end) and 5.5 (beat): the later spot wins.
+    expect(snap(5.25, { sectionLength: 8, stop: Infinity })).toBeCloseTo(5.5);
+  });
+  it('flush against a clip ends exactly at its start, using the trimmed length', () => {
+    // A cut clip (trimmed 3, drawn 2): flush before a clip at 6 is 3, not 4.
+    // placeDraggedClip takes only the trimmed length (no drawn length since 4h3b).
+    const r = snapDragStart({ freeOffset: 3.1, grid: { step: 2, sectionStart: 0 }, others: [{ start: 6, end: 8 }], draggedLength: 3, minOffset: 0 });
+    expect(r).toBeCloseTo(3);
+    const viaDrag = placeDraggedClip({
+      freeOffset: 3.1, grid: { step: 2, sectionStart: 0 }, others: [clip('o', 6, 2)], drawnOthers: [{ start: 6, end: 8 }],
+      length: 3, minOffset: 0,
+    });
+    expect(viaDrag.offset).toBeCloseTo(3);
+  });
+});
+
+describe('placementChanged — overhang tails (decision 5)', () => {
+  it('missing tails count as 0: no change from before 4h3', () => {
+    expect(placementChanged({ offset: 2, moved: [] }, 2)).toBe(false);
+    expect(placementChanged({ offset: 2, moved: [], tailSeconds: 0 }, 2, 0)).toBe(false);
+  });
+  it('a hidden stored tail released on its own spot is no change', () => {
+    // Not overhanging at drag start → before = 0, whatever is stored.
+    const before = tailAtDragStart(7, 10, false);
+    expect(before).toBe(0);
+    expect(placementChanged({ offset: 3, moved: [], tailSeconds: 0 }, 3, before)).toBe(false);
+  });
+  it('an overhanging clip released on its own spot with the same overhang is no change', () => {
+    const before = tailAtDragStart(10, 8, true);
+    expect(before).toBeCloseTo(2);
+    expect(placementChanged({ offset: 6, moved: [], tailSeconds: 10 - 8 }, 6, before)).toBe(false);
+  });
+  it('the same offset with a different tail is a change (back inside: the section grows)', () => {
+    expect(placementChanged({ offset: 6, moved: [], tailSeconds: 0 }, 6, 2)).toBe(true);
+    expect(placementChanged({ offset: 6, moved: [], tailSeconds: 1 }, 6, 0)).toBe(true);
+  });
+});
+
+// One timeline clip drag with overhangs, as 4h3b will run it: the stored layout fixes
+// S0 (the section's length), the stop (nextClipStop) and whether the clip was drawn
+// past its section's end at drag start. Per pointer step: whether an overhang is
+// allowed (Option, or overhanging at drag start and not back inside since), the
+// placement, then the state update. No pickups here (minOffset 0), snap off.
+function overhangDrag(
+  input: TimelineLayoutInput,
+  clipId: string,
+  steps: { wanted: number; option?: boolean }[],
+): { offset: number; tail: number }[] {
+  const layout = layoutTimeline(input);
+  const me = input.clips.find((c) => c.id === clipId)!;
+  const section = layout.sections.find((s) => s.name === me.sectionName)!;
+  const S0 = section.length;
+  const stop = nextClipStop(input, layout, me.trackId, me.sectionName!);
+  const drawnEnd = layout.clipEnds.get(clipId)! - layout.clipTailCuts.get(clipId)!;
+  const length = me.duration;
+  const others = input.clips
+    .filter((c) => c.id !== clipId && c.trackId === me.trackId && c.sectionName === me.sectionName)
+    .map((c) => clip(String(c.id), c.sectionOffset ?? 0, c.duration));
+  let state = startOverhangDrag(endsPastSection(drawnEnd, section.end, input.bpm));
+  return steps.map(({ wanted, option = false }) => {
+    const allow = overhangAllowed(state, option);
+    const r = placeDraggedClip({
+      freeOffset: wanted, grid: null, others, drawnOthers: [], length, minOffset: 0,
+      overhang: allow ? { sectionLength: S0, stop, wall: option } : null,
+    });
+    state = afterOverhangPlacement(state, r.offset + length, S0);
+    return { offset: r.offset, tail: r.tailSeconds };
+  });
+}
+
+describe('overhang drags — the frozen section end in the layout', () => {
+  // 120 bpm, 4/4 (a beat is 0.5 s). Intro: drums X 0–6.3, bass 0–4 → content 6.3, so
+  // the Intro is 13 beats = 6.5 s (S0). Verse: drums clip at offset 2 (drawn at 8.5),
+  // bass 0–3.
+  const input: TimelineLayoutInput = {
+    sections: rows('Intro', 'Verse'),
+    clips: [
+      lc('X', 'drums', 'Intro', 0, 6.3), lc('b1', 'bass', 'Intro', 0, 4),
+      lc('v', 'drums', 'Verse', 2, 1), lc('b2', 'bass', 'Verse', 0, 3),
+    ],
+    bpm: 120, timeSignature: '4/4',
+  };
+  const stored = layoutTimeline(input);
+  const withX = (offset: number, tail: number) => layoutTimeline({
+    ...input,
+    clips: input.clips.map((c) => (c.id === 'X' ? { ...c, sectionOffset: offset, tailSeconds: tail } : c)),
+  });
+
+  it('without Option the section grows, as today', () => {
+    const [step] = overhangDrag(input, 'X', [{ wanted: 1 }]);
+    expect(step).toEqual({ offset: 1, tail: 0 });
+    expect(withX(step.offset, step.tail).sections[0].length).toBeCloseTo(7.5); // 7.3 → 15 beats
+  });
+
+  it('with Option: the section stays at S0, later sections and their clips do not move, the stop holds', () => {
+    const [step] = overhangDrag(input, 'X', [{ wanted: 3, option: true }]);
+    // Limited by the stop: 8.5 − 6.3 = 2.2; the tail is 8.5 − 6.5 = 2.
+    expect(step.offset).toBeCloseTo(2.2);
+    expect(step.tail).toBeCloseTo(2);
+    const after = withX(step.offset, step.tail);
+    expect(after.sections.map((s) => [s.name, s.start, s.end])).toEqual(stored.sections.map((s) => [s.name, s.start, s.end]));
+    for (const id of ['b1', 'v', 'b2']) expect(after.clipStarts.get(id)).toBeCloseTo(stored.clipStarts.get(id)!);
+    expect(after.clipTailCuts.get('X')).toBe(0); // ends exactly where the Verse clip starts
+    expect(endsPastSection(after.clipEnds.get('X')!, after.sections[0].end, 120)).toBe(true);
+  });
+
+  it('Option pressed after the section grew: it snaps back to S0; released: it grows again', () => {
+    const steps = overhangDrag(input, 'X', [{ wanted: 1 }, { wanted: 1, option: true }, { wanted: 1 }]);
+    expect(steps.map((s) => s.offset)).toEqual([1, 1, 1]);
+    expect(steps[0].tail).toBe(0);
+    expect(steps[1].tail).toBeCloseTo(0.8);
+    expect(steps[2].tail).toBe(0);
+    expect(withX(1, steps[1].tail).sections[0].length).toBeCloseTo(6.5);
+    expect(withX(1, steps[2].tail).sections[0].length).toBeCloseTo(7.5);
+  });
+
+  it('an overhanging clip moves without Option until it comes back inside; then crossing needs Option', () => {
+    // Stored overhanging: X at 1 with a 0.8 s tail (the Intro stays 6.5, X ends at 7.3).
+    const over: TimelineLayoutInput = {
+      ...input,
+      clips: input.clips.map((c) => (c.id === 'X' ? { ...c, sectionOffset: 1, tailSeconds: 0.8 } : c)),
+    };
+    const steps = overhangDrag(over, 'X', [
+      { wanted: 1.5 }, { wanted: 0.1 }, { wanted: 1.5 }, { wanted: 1.5, option: true },
+    ]);
+    expect(steps[0].offset).toBeCloseTo(1.5);
+    expect(steps[0].tail).toBeCloseTo(1.3);
+    expect(steps[1]).toEqual({ offset: 0.1, tail: 0 }); // ends at 6.4: back inside
+    expect(steps[2]).toEqual({ offset: 1.5, tail: 0 }); // a normal clip now: the section grows
+    expect(steps[3].tail).toBeCloseTo(1.3);              // Option again
+  });
+
+  it('a hidden stored tail never makes an overhang without Option', () => {
+    // Bass fills the Intro to 8: X (0–6.3, tail 1) is inside; dragged right without Option.
+    const hidden: TimelineLayoutInput = {
+      ...input,
+      clips: input.clips.map((c) => (c.id === 'X' ? { ...c, tailSeconds: 1 } : c.id === 'b1' ? { ...c, duration: 8 } : c)),
+    };
+    const steps = overhangDrag(hidden, 'X', [{ wanted: 3 }]);
+    expect(steps[0]).toEqual({ offset: 3, tail: 0 });
+  });
+
+  it('a clip on the next downbeat on its track: with Option the section end is a wall; without, it grows', () => {
+    const blocked: TimelineLayoutInput = {
+      ...input,
+      clips: input.clips.map((c) => (c.id === 'v' ? { ...c, sectionOffset: 0 } : c)),
+    };
+    // X is 6.3 s in a 6.5 s Intro: with Option it ends at most at 6.5 (offset 0.2), tail 0.
+    const steps = overhangDrag(blocked, 'X', [
+      { wanted: 2, option: true }, { wanted: 2 }, { wanted: 2, option: true },
+    ]);
+    expect(steps[0].offset).toBeCloseTo(0.2);
+    expect(steps[0].tail).toBe(0);
+    expect(steps[1]).toEqual({ offset: 2, tail: 0 });   // Option released: normal growth
+    expect(steps[2].offset).toBeCloseTo(0.2);            // pressed again: back at the wall
+    const at = (offset: number) => layoutTimeline({ ...blocked, clips: blocked.clips.map((c) => (c.id === 'X' ? { ...c, sectionOffset: offset } : c)) });
+    expect(at(steps[0].offset).sections[0].length).toBeCloseTo(6.5); // the section doesn't grow
+    expect(at(steps[1].offset).sections[0].length).toBeCloseTo(8.5);
+  });
+
+  it('an overhanging clip moving without Option keeps the old fallback (no wall)', () => {
+    // Only Option itself makes a wall: overhangDrag passes wall: false while an
+    // overhanging clip moves without it, and an impossible overhang is then no limit.
+    expect(clipDragMaxOffset({ sectionLength: 6.5, stop: 6.5, length: 6.3, others: [] })).toBe(Infinity);
+    expect(clipDragMaxOffset({ sectionLength: 6.5, stop: 6.5, length: 6.3, others: [], wall: false })).toBe(Infinity);
+  });
+
+  it('another track sets the length: the clip grows inside first, then hangs over past S0', () => {
+    // Bass fills the Intro to 8 (S0 = 8); X is 3 s long, no later drums clip (stop: none).
+    const wide: TimelineLayoutInput = {
+      ...input,
+      clips: [lc('X', 'drums', 'Intro', 0, 3), lc('b1', 'bass', 'Intro', 0, 8), lc('b2', 'bass', 'Verse', 0, 3)],
+    };
+    const steps = overhangDrag(wide, 'X', [{ wanted: 4, option: true }, { wanted: 6, option: true }, { wanted: 20, option: true }]);
+    expect(steps[0]).toEqual({ offset: 4, tail: 0 });
+    expect(steps[1]).toEqual({ offset: 6, tail: 1 });
+    expect(steps[2].offset).toBeCloseTo(7.5); // the 0.5 s rule
+    expect(steps[2].tail).toBeCloseTo(2.5);
+    const after = layoutTimeline({ ...wide, clips: wide.clips.map((c) => (c.id === 'X' ? { ...c, sectionOffset: 7.5, tailSeconds: 2.5 } : c)) });
+    expect(after.sections[0].length).toBeCloseTo(8);
+    expect(after.sections[1].start).toBeCloseTo(8);
+  });
+});
+
+// The placement code as it was before 4h3a (commit 29aa7da), frozen here: with no
+// overhang allowed the new code must give exactly these results.
+function oldPlaceInGap(others: PlacementClip[], draggedLength: number, wantedOffset: number, minOffset = 0) {
+  const min = Number.isFinite(minOffset) ? Math.min(0, minOffset) : 0;
+  const end = (c: PlacementClip) => c.offset + c.length;
+  const fixed = others.filter((c) => c.offset < min - PLACEMENT_EPSILON);
+  const floor = fixed.reduce((m, c) => Math.max(m, end(c)), min);
+  const sorted = others.filter((c) => !fixed.includes(c)).sort((a, b) => a.offset - b.offset);
+  const s = Number.isFinite(wantedOffset) ? Math.max(floor, wantedOffset) : Math.max(floor, 0);
+  const gapStartBefore = (at: number) =>
+    sorted.filter((c) => end(c) <= at + PLACEMENT_EPSILON).reduce((m, c) => Math.max(m, end(c)), floor);
+  const gapEndAfter = (at: number) =>
+    sorted.find((c) => c.offset >= at - PLACEMENT_EPSILON)?.offset ?? Infinity;
+  let g0: number;
+  let g1: number;
+  const x = sorted.find((c) => c.offset - PLACEMENT_EPSILON <= s && s < end(c) - PLACEMENT_EPSILON);
+  if (!x) { g0 = gapStartBefore(s); g1 = gapEndAfter(s); }
+  else if (s - x.offset < x.length / 2) { g0 = gapStartBefore(x.offset); g1 = x.offset; }
+  else { g0 = end(x); g1 = gapEndAfter(end(x)); }
+  if (g1 - g0 >= draggedLength - PLACEMENT_EPSILON) {
+    return { offset: Math.max(g0, Math.min(s, g1 - draggedLength)), moved: [] as { id: string; offset: number }[] };
+  }
+  return { offset: g0, moved: sorted.filter((c) => c.offset >= g1 - PLACEMENT_EPSILON).map((c) => ({ id: c.id, offset: c.offset + draggedLength })) };
+}
+function oldSnapDragStart({ freeOffset, grid, others, draggedLength, minOffset, currentOffset }: {
+  freeOffset: number; grid: { step: number; sectionStart: number } | null; others: { start: number; end: number }[];
+  draggedLength: number; minOffset: number; currentOffset?: number;
+}): number {
+  if (!grid || !Number.isFinite(freeOffset) || !(grid.step > 0)) return freeOffset;
+  const candidates = [Math.round((grid.sectionStart + freeOffset) / grid.step) * grid.step - grid.sectionStart, 0];
+  for (const o of others) candidates.push(o.end, o.start - draggedLength);
+  if (minOffset < 0) candidates.push(minOffset);
+  if (currentOffset !== undefined && Number.isFinite(currentOffset)) candidates.push(currentOffset);
+  let best = candidates[0];
+  for (const c of candidates) {
+    const d = Math.abs(c - freeOffset);
+    const bestD = Math.abs(best - freeOffset);
+    if (d < bestD - PLACEMENT_EPSILON || (Math.abs(d - bestD) <= PLACEMENT_EPSILON && c > best)) best = c;
+  }
+  return best;
+}
+
+describe('no overhang allowed → identical results to before 4h3a', () => {
+  let seed = 4321;
+  const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+
+  it('placeInGap, snapDragStart and placeDraggedClip match the old code on 5,000 generated drags', () => {
+    let checked = 0;
+    for (let n = 0; n < 5000; n++) {
+      const others: PlacementClip[] = [];
+      let at = rand() < 0.3 ? -1 - rand() : rand() * 2;
+      const count = Math.floor(rand() * 5);
+      for (let k = 0; k < count; k++) {
+        const length = 0.5 + rand() * 4;
+        others.push(clip(`c${k}`, at, length));
+        at += length + (rand() < 0.4 ? 0 : rand() * 3);
+      }
+      const length = 0.3 + rand() * 5;
+      const freeOffset = -3 + rand() * 25;
+      const grid = rand() < 0.5 ? null : { step: [0.25, 0.5, 2][Math.floor(rand() * 3)], sectionStart: rand() * 10 };
+      const minOffset = rand() < 0.3 ? -rand() * 2 : 0;
+      const currentOffset = rand() < 0.5 ? rand() * 8 : undefined;
+      const drawnOthers = others.map((c) => ({ start: Math.max(c.offset, -0.5), end: c.offset + c.length }));
+
+      expect(placeInGap(others, length, freeOffset, minOffset), `placeInGap ${n}`).toEqual(oldPlaceInGap(others, length, freeOffset, minOffset));
+      expect(placeInGap(others, length, freeOffset, minOffset, Infinity), `placeInGap ∞ ${n}`).toEqual(oldPlaceInGap(others, length, freeOffset, minOffset));
+      const snapIn = { freeOffset, grid, others: drawnOthers, draggedLength: length, minOffset, currentOffset };
+      expect(snapDragStart({ ...snapIn, overhang: null }), `snap ${n}`).toBe(oldSnapDragStart(snapIn));
+      // A clip with no cuts (drawn = trimmed length): exactly the old drag.
+      const old = oldPlaceInGap(others, length, oldSnapDragStart(snapIn), minOffset);
+      const input: DragPlacementInput = { freeOffset, grid, others, drawnOthers, length, minOffset, currentOffset };
+      expect(placeDraggedClip(input), `drag ${n}`).toEqual({ ...old, tailSeconds: 0 });
+      expect(placeDraggedClip({ ...input, overhang: null }), `drag null ${n}`).toEqual({ ...old, tailSeconds: 0 });
+      checked++;
+    }
+    expect(checked).toBe(5000);
+  });
+
+  it('with an overhang allowed, the result differs only in the last gap, and never pushes there', () => {
+    let differed = 0;
+    for (let n = 0; n < 3000; n++) {
+      const others: PlacementClip[] = [];
+      let at = rand() * 2;
+      const count = Math.floor(rand() * 4);
+      for (let k = 0; k < count; k++) {
+        const length = 0.5 + rand() * 3;
+        others.push(clip(`c${k}`, at, length));
+        at += length + rand() * 2;
+      }
+      const length = 0.6 + rand() * 4;
+      const sectionLength = Math.max(at, ...others.map((c) => c.offset + c.length), 1) + rand() * 2;
+      const stop = rand() < 0.3 ? Infinity : sectionLength + rand() * 6;
+      const freeOffset = rand() * 20;
+      const input: DragPlacementInput = { freeOffset, grid: null, others, drawnOthers: [], length, minOffset: 0 };
+      const plain = placeDraggedClip(input);
+      const hung = placeDraggedClip({ ...input, overhang: { sectionLength, stop } });
+      const lastGapStart = others.reduce((m, c) => Math.max(m, c.offset + c.length), 0);
+      if (hung.offset !== plain.offset || hung.moved.length !== plain.moved.length) {
+        differed++;
+        expect(hung.moved).toEqual([]);
+        expect(hung.offset).toBeGreaterThanOrEqual(lastGapStart - PLACEMENT_EPSILON);
+        expect(hung.offset + length).toBeLessThanOrEqual(stop + PLACEMENT_EPSILON);
+        expect(hung.offset).toBeLessThanOrEqual(sectionLength - minTrimLength(length) + PLACEMENT_EPSILON);
+      }
+      // A tail never runs past the stop, and leaves the clip's start inside its section.
+      expect(hung.tailSeconds).toBeGreaterThanOrEqual(0);
+      expect(hung.tailSeconds).toBeLessThan(length);
+      if (hung.tailSeconds > 0) expect(hung.offset + length).toBeLessThanOrEqual(stop + PLACEMENT_EPSILON);
+    }
+    expect(differed).toBeGreaterThan(100);
   });
 });

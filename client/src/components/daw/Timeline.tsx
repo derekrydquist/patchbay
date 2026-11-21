@@ -55,11 +55,11 @@ import { TimelineTrack, SectionInfo, type TrackTrimLimits } from './Track';
 import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapGridSeconds, parseTimeSignature, secondsPerBeat } from '@/lib/musical-time';
-import { layoutTimeline, sectionAt, effectiveLength, contentNeedBeats, type TimelineLayout } from '@shared/timelineLayout';
+import { layoutTimeline, sectionAt, effectiveLength, contentNeedBeats, endsPastSection, type TimelineLayout } from '@shared/timelineLayout';
 import { sectionEndRange, nearestSectionEndStop, baseLengthForEnd, sectionEndReadout, sectionEndRelease, addsVisibleSpace, canFitToContent, shouldSendBaseLength, type SectionEndRange } from '@shared/sectionBaseLength';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
-import { placeDraggedClip, computeFileDropPlacement, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, PLACEMENT_EPSILON, type PickupDragState } from '@shared/timelinePlacement';
+import { placeDraggedClip, computeFileDropPlacement, toPlacementClip, appendOffset, pickupLeftLimit, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, nextClipStop, startOverhangDrag, overhangAllowed, afterOverhangPlacement, clipDragMaxOffset, tailAtDragStart, PLACEMENT_EPSILON, type PickupDragState, type OverhangDragState, type OverhangLimits } from '@shared/timelinePlacement';
 import { SnapControls, readSnapSetting, writeSnapSetting, type SnapSetting } from './SnapControls';
 import { moveSection, placeFirstClipSection, type SectionPlacementHint } from '@shared/sectionOrder';
 import { headerDropTarget, type HeaderDropTarget } from '@/lib/section-drag';
@@ -215,9 +215,12 @@ function applySectionMove(sections: SongSectionRow[], move: SectionMove): SongSe
 // Saves many clips' sectionOffset in one request (PUT /api/songs/:songId/timeline-
 // clips/offsets): one transaction on the server, which refuses the whole save (409) if
 // it would leave two clips overlapping. Only sectionOffset is sent (the server never
-// takes start from the client); the server logs one sort-only timeline-reordered row.
-// Rejects with the server's message on any non-2xx answer.
-async function saveClipOffsets(songId: string, clips: { id: string; sectionOffset: number }[]): Promise<void> {
+// takes start from the client), plus tailSeconds for the dragged clip of a timeline
+// clip drag (its overhang, 0 when it ends inside its section; pushed clips never send
+// one, so they keep their stored tails). A bad tail is refused with 400. The server
+// logs one sort-only timeline-reordered row. Rejects with the server's message on any
+// non-2xx answer.
+async function saveClipOffsets(songId: string, clips: { id: string; sectionOffset: number; tailSeconds?: number }[]): Promise<void> {
   const res = await fetch(`/api/songs/${songId}/timeline-clips/offsets`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -462,7 +465,9 @@ function ClipDragFocusVeil({ litLeft, litRight, top, height, zIndex }: {
       {litLeft > TRACK_PANEL_WIDTH && (
         <div aria-hidden className={veil} style={{ left: TRACK_PANEL_WIDTH, width: litLeft - TRACK_PANEL_WIDTH, top, height, zIndex }} />
       )}
-      <div aria-hidden className={veil} style={{ left: litRight, right: 0, top, height, zIndex }} />
+      {Number.isFinite(litRight) && (
+        <div aria-hidden className={veil} style={{ left: litRight, right: 0, top, height, zIndex }} />
+      )}
     </>
   );
 }
@@ -2718,6 +2723,13 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // Whether this drag may place the clip before its downbeat without Option (shared
   // pickupAllowed): set at drag start from its stored offset, updated by each placement.
   const clipDragPickupRef = useRef<PickupDragState>({ wasPickup: false, crossedDownbeat: false });
+  // Overhangs, the mirror (shared overhangAllowed): whether the clip was drawn past its
+  // section's end at drag start, updated by each placement. And what limits an overhang,
+  // fixed at drag start from the stored layout: the section's length S0 (its end stays
+  // there while the clip hangs over) and the stop (nextClipStop), plus the overhang as
+  // drawn then (tailAtDragStart, for placementChanged). null for a full take.
+  const clipDragOverhangRef = useRef<OverhangDragState>({ wasOverhanging: false, backInside: false });
+  const clipDragOverhangLimitsRef = useRef<(OverhangLimits & { tailBefore: number }) | null>(null);
   const clipDragKeyCleanupRef = useRef<(() => void) | null>(null);
   const clipDragDropStart = (): number | null => {
     const drag = clipDragRef.current;
@@ -2765,6 +2777,25 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     clipDragKeysRef.current = { shift: false, option: false };
     const storedClip = trackState.find((t) => t.id === trackId)?.clips.find((c) => c.id === clip.id);
     clipDragPickupRef.current = startPickupDrag(storedClip?.sectionOffset);
+    // Overhanging at drag start: its DRAWN end (full end − tail cut) past its section's
+    // end on the stored layout. A hidden tail, or one cut back to the end, doesn't count.
+    const homeSection = storedClip && !storedClip.isFullTake && storedClip.sectionName
+      ? layout.sections.find((s) => s.name === storedClip.sectionName)
+      : undefined;
+    if (storedClip && homeSection) {
+      const drawnEnd = (layout.clipEnds.get(storedClip.id) ?? 0) - (layout.clipTailCuts.get(storedClip.id) ?? 0);
+      const wasOverhanging = endsPastSection(drawnEnd, homeSection.end, bpm);
+      const fullEnd = (storedClip.sectionOffset ?? 0) + effectiveLength(placementInput(storedClip));
+      clipDragOverhangRef.current = startOverhangDrag(wasOverhanging);
+      clipDragOverhangLimitsRef.current = {
+        sectionLength: homeSection.length,
+        stop: nextClipStop(pickupLimitInput, layout, trackId, homeSection.name),
+        tailBefore: tailAtDragStart(fullEnd, homeSection.length, wasOverhanging),
+      };
+    } else {
+      clipDragOverhangRef.current = startOverhangDrag(false);
+      clipDragOverhangLimitsRef.current = null;
+    }
     // A key pressed or released under a still pointer: update the state and re-run the
     // drag's preview step at the last pointer position (the indicators, and dnd-kit's
     // collision pass via a synthetic move). Shift/Option key events stop here (capture
@@ -2824,6 +2855,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     }
     clipDragRef.current = null;
     clipDragKeysRef.current = { shift: false, option: false };
+    clipDragPickupRef.current = { wasPickup: false, crossedDownbeat: false };
+    clipDragOverhangRef.current = { wasOverhanging: false, backInside: false };
+    clipDragOverhangLimitsRef.current = null;
     setClipDragPreview(null);
     setClipDragOffTimeline(false);
   };
@@ -2895,6 +2929,15 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // A Media Bucket version drag: the new clip it would make (id = draggedId), added to
     // the preview layout at offsets.get(draggedId). null for a timeline clip drag.
     virtual: Clip | null;
+    // A timeline clip drag: the dragged clip's overhang (tailSeconds) if released now —
+    // 0 when it ends inside its section. The preview layout uses it (so the section's
+    // end stays put while it hangs over) and the save sends it. null for a file drag
+    // (never an overhang).
+    tailSeconds: number | null;
+    // While an overhang is allowed and possible: how far the focus veil lights up, in
+    // song seconds — the stop (the next clip on its track), or Infinity when there is
+    // none (lit to the end of the content). null otherwise.
+    overhangLitEnd: number | null;
   }
   // The other clips on a track in a section, both ways the drag placement takes them
   // (shared placeDraggedClip): as stored, and drawn (layout start + head cut, playedSpan,
@@ -2937,35 +2980,58 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     // stored layout: a clip never moves its own section); its end may stop before the
     // downbeat. Otherwise it stops at the downbeat, however fast the drag overshoots.
     const length = effectiveLength(placementInput(clip));
-    const allowPickup = pickupAllowed(clipDragPickupRef.current, clipDragModifiers().option);
+    const option = clipDragModifiers().option;
+    const allowPickup = pickupAllowed(clipDragPickupRef.current, option);
     const minOffset = clipDragMinOffset(
       allowPickup,
       allowPickup ? pickupLeftLimit(pickupLimitInput, layout, track.id, clip.sectionName) : 0,
     );
+    // Overhangs, the mirror: Option, or a clip drawn past its section's end at drag start
+    // that hasn't ended inside it since, may hang past the end — its section's end stays
+    // where it was at drag start (S0), up to the next clip on its track (the stop) and
+    // with at least 0.5 s inside (clipDragMaxOffset, inside placeDraggedClip). With no
+    // room it's a normal clip and the section grows, Option or not.
+    const limits = clipDragOverhangLimitsRef.current;
+    // With Option held and no room to hang over, the section's end is a wall: the clip
+    // ends at most exactly there and the section doesn't grow (clipDragMaxOffset's wall).
+    const overhang = limits && overhangAllowed(clipDragOverhangRef.current, option)
+      ? { sectionLength: limits.sectionLength, stop: limits.stop, wall: option }
+      : null;
     // Where it's drawn now, from its section start: its stored offset + head cut (the cut
     // start for a cut pickup).
     const drawnOffset = (clip.sectionOffset ?? 0) + (layout.clipHeadCuts.get(clip.id) ?? 0);
     // Snap (on, no Shift): to the nearest beat, the section start, flush against another
-    // clip on this track in this section where it's drawn, the pickup limit, or its own
-    // current spot (snapDragStart), then the gaps model (shared placeDraggedClip).
-    const drawnClip = tracks.find((t) => t.id === track.id)?.clips.find((c) => c.id === clip.id);
+    // clip on this track in this section where it's drawn, the pickup limit, its own
+    // current spot, and while it may hang over the stop and the section's end
+    // (snapDragStart), then the gaps model (shared placeDraggedClip).
     const result = placeDraggedClip({
       freeOffset: dropStart - section.start,
       grid: free ? null : { step: snapGridSeconds(snap.unit, bpm, timeSignature), sectionStart: section.start },
       others,
       drawnOthers: drawnSpansInSection(track.id, clip.sectionName, section.start, clip.id),
       length,
-      drawnLength: drawnClip ? playedSpan(drawnClip).length : length,
       minOffset,
       currentOffset: drawnOffset,
+      overhang,
     });
     clipDragPickupRef.current = afterPickupPlacement(clipDragPickupRef.current, result.offset);
+    if (limits) {
+      clipDragOverhangRef.current = afterOverhangPlacement(clipDragOverhangRef.current, result.offset + length, limits.sectionLength);
+    }
     const offsets = new Map<string, number>([[clip.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
-    // Released on its own drawn spot with nothing pushed: no change, nothing saved, the
-    // stored offset kept.
-    const changed = placementChanged(result, drawnOffset);
-    return { trackId: track.id, sectionName: clip.sectionName, sectionStart: section.start, draggedId: clip.id, offsets, changed, virtual: null };
+    // Released on its own drawn spot with nothing pushed and the same overhang as drawn
+    // at drag start: no change, nothing saved, the stored offset (and tail) kept.
+    const changed = placementChanged(result, drawnOffset, limits?.tailBefore ?? 0);
+    // The veil lights up to the stop only while an overhang is allowed and possible (a
+    // wall keeps the normal veil).
+    const overhangLitEnd = overhang && Number.isFinite(clipDragMaxOffset({ ...overhang, wall: false, length, others, minOffset }))
+      ? section.start + overhang.stop
+      : null;
+    return {
+      trackId: track.id, sectionName: clip.sectionName, sectionStart: section.start, draggedId: clip.id,
+      offsets, changed, virtual: null, tailSeconds: result.tailSeconds, overhangLitEnd,
+    };
   };
 
   // ── Media Bucket file drag (a version or a loose file): live placement preview ──
@@ -3179,7 +3245,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const offsets = new Map<string, number>([[drag.virtual.id, result.offset]]);
     for (const m of result.moved) offsets.set(m.id, m.offset);
     const virtual = drag.virtual.sectionName === sectionName ? drag.virtual : { ...drag.virtual, sectionName };
-    return { trackId: track.id, sectionName, sectionStart: section.start, draggedId: drag.virtual.id, offsets, changed: true, virtual };
+    return {
+      trackId: track.id, sectionName, sectionStart: section.start, draggedId: drag.virtual.id, offsets, changed: true, virtual,
+      tailSeconds: null, overhangLitEnd: null,
+    };
   };
   // The drag preview: the placement a release would apply now — it drives the landing
   // outline, the pushed clips' live positions (no other clip is drawn moved during the
@@ -3203,6 +3272,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       if (prev === next) return prev;
       if (prev && next && prev.trackId === next.trackId && prev.sectionName === next.sectionName
           && prev.sectionStart === next.sectionStart && prev.changed === next.changed
+          && prev.tailSeconds === next.tailSeconds && prev.overhangLitEnd === next.overhangLitEnd
           && prev.virtual?.id === next.virtual?.id && prev.offsets.size === next.offsets.size
           && Array.from(next.offsets).every(([id, offset]) => prev.offsets.get(id) === offset)) {
         return prev;
@@ -3219,22 +3289,37 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // one batch request. If the save fails, every one of them goes back where it was.
   // `releaseHold` (the drag's poll hold) runs once the save and the refetch after it
   // are done, or at once when there is nothing to save.
+  // The dragged clip is always sent with its tail (its overhang, 0 when it ends inside
+  // its section), even when only its tail changed; pushed clips never send one.
   const commitClipDragPlacement = (placement: ClipDragPlacement, releaseHold: () => void) => {
     const track = trackState.find((t) => t.id === placement.trackId);
     if (!track) return;
-    const before = new Map(track.clips
+    type Spot = { sectionOffset: number; tailSeconds?: number };
+    const draggedTail = placement.tailSeconds;
+    const before = new Map<string, Spot>(track.clips
       .filter((c) => placement.offsets.has(c.id))
-      .map((c) => [c.id, c.sectionOffset ?? 0] as const));
+      .map((c) => [c.id, { sectionOffset: c.sectionOffset ?? 0, tailSeconds: c.tailSeconds ?? 0 }] as const));
     const changes = Array.from(placement.offsets)
-      .filter(([id, offset]) => before.has(id) && Math.abs(offset - before.get(id)!) > PLACEMENT_EPSILON)
-      .map(([id, sectionOffset]) => ({ id, sectionOffset }));
+      .filter(([id, offset]) => before.has(id)
+        && (Math.abs(offset - before.get(id)!.sectionOffset) > PLACEMENT_EPSILON
+          || (id === placement.draggedId && draggedTail !== null)))
+      .map(([id, sectionOffset]) => (id === placement.draggedId && draggedTail !== null
+        ? { id, sectionOffset, tailSeconds: draggedTail }
+        : { id, sectionOffset }));
     if (changes.length === 0) { releaseHold(); return; }
-    const applyOffsets = (offsets: Map<string, number>) => setTracks((prev) => prev.map((t) =>
+    // Sets each clip's offset, and its tail where one is given (only the dragged clip).
+    const applyOffsets = (spots: Map<string, Spot>) => setTracks((prev) => prev.map((t) =>
       t.id !== placement.trackId ? t : {
         ...t,
-        clips: sortClipsByOffset(t.clips.map((c) => offsets.has(c.id) ? { ...c, sectionOffset: offsets.get(c.id)! } : c)),
+        clips: sortClipsByOffset(t.clips.map((c) => {
+          const spot = spots.get(c.id);
+          if (!spot) return c;
+          return spot.tailSeconds === undefined
+            ? { ...c, sectionOffset: spot.sectionOffset }
+            : { ...c, sectionOffset: spot.sectionOffset, tailSeconds: spot.tailSeconds };
+        })),
       }));
-    applyOffsets(new Map(changes.map((c) => [c.id, c.sectionOffset])));
+    applyOffsets(new Map(changes.map((c) => [c.id, c])));
     const timelineKey = [`/api/songs/${songId}/timeline`];
     queryClient.cancelQueries({ queryKey: timelineKey });
     saveClipOffsets(songId, changes)
@@ -4622,9 +4707,19 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     }
     const preview = activeDragPreview;
     if (!preview || !preview.changed) return null;
+    // The dragged clip of a timeline clip drag also takes its computed tail (0 when it
+    // ends inside its section — a hidden stored tail never makes an overhang here), so
+    // while it hangs over its section's end stays where it was at drag start. Pushed
+    // clips keep their stored tails.
     const previewTracks = trackState.map((t) => {
       if (t.id !== preview.trackId) return t;
-      const clips = t.clips.map((c) => preview.offsets.has(c.id) ? { ...c, sectionOffset: preview.offsets.get(c.id)! } : c);
+      const clips = t.clips.map((c) => {
+        if (!preview.offsets.has(c.id)) return c;
+        const sectionOffset = preview.offsets.get(c.id)!;
+        return c.id === preview.draggedId && preview.tailSeconds !== null
+          ? { ...c, sectionOffset, tailSeconds: preview.tailSeconds }
+          : { ...c, sectionOffset };
+      });
       if (preview.virtual) clips.push({ ...preview.virtual, sectionOffset: preview.offsets.get(preview.virtual.id) ?? 0 });
       return { ...t, clips };
     });
@@ -4801,6 +4896,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // Focus during a timeline clip drag: the home section (at its live length) and the
   // one bar before it (pickup reach) stay bright; everything else in the track rows and
   // the section header row is dimmed by a veil (ClipDragFocusVeil). Song seconds.
+  // While the clip may hang over its section's end (Option, or overhanging at drag
+  // start, with room), it stays bright up to the stop — the next clip on its track — or
+  // to the end of the content when there is none (litEnd Infinity: no right veil).
   // The same for a previewed file drag (its destination section), only while there is a
   // preview, and for a loose file's frozen preview.
   const clipDragFocus = React.useMemo(() => {
@@ -4817,8 +4915,17 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     const home = displayLayout.sections.find((sec) => sec.name === homeName);
     if (!home) return null;
     const bar = snapGridSeconds('bar', bpm, timeSignature);
-    return { litStart: Math.max(0, home.start - bar), litEnd: home.end };
+    const overhangLitEnd = !fileDrop && !looseConfirm ? activeDragPreview?.overhangLitEnd ?? null : null;
+    return { litStart: Math.max(0, home.start - bar), litEnd: overhangLitEnd === null ? home.end : Math.max(home.end, overhangLitEnd) };
   }, [fileDrop, looseConfirm, activeDragPreview, draggedClipId, tracks, displayLayout, bpm, timeSignature]);
+  // The floating (dragged) clip keeps its drag-start look, so its overhang mark is
+  // measured against its section's stored length, not the preview's (Track.tsx).
+  const raisedSectionLength = React.useMemo(() => {
+    if (!draggedClipId) return null;
+    const clip = tracks.flatMap((t) => t.clips).find((c) => c.id === draggedClipId);
+    if (!clip || clip.isFullTake || !clip.sectionName) return null;
+    return layout.sections.find((sec) => sec.name === clip.sectionName)?.length ?? null;
+  }, [draggedClipId, tracks, layout]);
   // Sections a drag's clip can't land in — the same for every row, so one shared set.
   const draggedSectionName = activeDragData?.clip?.sectionName;
   // Keyed on the names only, so a drag that just changes section lengths keeps the set.
@@ -5231,6 +5338,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
                     key={track.id}
                     track={track}
                     raisedClipId={isDragRow ? clipDragLanding.clipId : null}
+                    raisedSectionLength={isDragRow ? raisedSectionLength : null}
                     landing={isDragRow && !clipDragOffTimeline ? clipDragLanding.rect : null}
                     sections={displaySectionLayout}
                     trimLimits={trimLimitsByTrack.get(track.id) ?? NO_TRIM_LIMITS}

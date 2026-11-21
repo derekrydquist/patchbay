@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { playedSpan, hasPlayedLength, sectionStartInClip } from './clip-span';
+import { playedSpan, hasPlayedLength, sectionStartInClip, sectionEndInClip } from './clip-span';
 
 describe('playedSpan', () => {
   it('is the trimmed part of the file when there is no head cut', () => {
@@ -58,5 +58,43 @@ describe('sectionStartInClip', () => {
   });
   it('is null for a pickup cut to nothing', () => {
     expect(sectionStartInClip({ duration: 4, sectionOffset: -4, headCut: 4 })).toBeNull();
+  });
+});
+
+describe('sectionEndInClip — the mirror of sectionStartInClip for overhangs', () => {
+  it("where its section's end falls in the clip's drawn span", () => {
+    // Offset 5, 5 s long (ends at 10), section 8 s: the end is 3 s into the clip.
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5 }, 8)).toBe(3);
+  });
+  it('a tail cut shortens the drawn span; cut back to the section end, nothing hangs over', () => {
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5, tailCut: 1 }, 8)).toBe(3);
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5, tailCut: 2 }, 8)).toBeNull();
+  });
+  it('a clip ending inside its section, or exactly at its end: null', () => {
+    expect(sectionEndInClip({ duration: 4, sectionOffset: 2 }, 8)).toBeNull();
+    expect(sectionEndInClip({ duration: 4, sectionOffset: 4 }, 8)).toBeNull();
+    expect(sectionEndInClip({ duration: 4, sectionOffset: 4 + 1e-9 }, 8)).toBeNull();
+  });
+  it('trims count: the drawn span is the trimmed one', () => {
+    // 10 s file trimmed to 2–7 (5 s) at offset 5: same as an untrimmed 5 s clip.
+    expect(sectionEndInClip({ duration: 10, trimStart: 2, trimEnd: 7, sectionOffset: 5 }, 8)).toBe(3);
+  });
+  it('a clip that is both a pickup and an overhang has both marks, measured from its drawn start', () => {
+    const c = { duration: 10, sectionOffset: -1 };
+    expect(sectionStartInClip(c)).toBe(1);
+    expect(sectionEndInClip(c, 8)).toBe(9);
+    // A head cut moves the drawn start: both marks move with it.
+    const cut = { ...c, headCut: 0.5 };
+    expect(sectionStartInClip(cut)).toBe(0.5);
+    expect(sectionEndInClip(cut, 8)).toBe(8.5);
+  });
+  it('full takes, unsectioned clips, clips with nothing drawn and a bad length: null', () => {
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5, isFullTake: true }, 8)).toBeNull();
+    expect(sectionEndInClip({ duration: 5, sectionOffset: null }, 8)).toBeNull();
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5, headCut: 2, tailCut: 3 }, 8)).toBeNull();
+    expect(sectionEndInClip({ duration: 5, sectionOffset: 5 }, NaN)).toBeNull();
+  });
+  it('drawn wholly past the end (never allowed, but safe): dims from its start', () => {
+    expect(sectionEndInClip({ duration: 2, sectionOffset: 9 }, 8)).toBe(0);
   });
 });

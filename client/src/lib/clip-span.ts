@@ -43,3 +43,21 @@ export function sectionStartInClip(
   const drawnOffset = clip.sectionOffset + (clip.headCut ?? 0);
   return drawnOffset < -PLAYED_LENGTH_EPSILON ? -drawnOffset : null;
 }
+
+// The mirror for an overhang: where its own section ends, in seconds from the clip's
+// drawn start (its cut start), when the section's end falls inside the clip's drawn span
+// — the part after it hangs past the end. `sectionLength` is the section's length as
+// laid out (seconds); a clip doesn't know it, so the row passes it. Null unless the clip
+// is a sectioned clip drawn past its section's end (its drawn end, after any tail cut,
+// is later than the section's end). Never below 0: a clip drawn wholly past the end
+// (which the 0.5 s-inside rule shouldn't allow) dims from its start.
+export function sectionEndInClip(
+  clip: Pick<Clip, SpanFields | 'sectionOffset' | 'isFullTake'>,
+  sectionLength: number,
+): number | null {
+  if (clip.isFullTake || clip.sectionOffset === null || clip.sectionOffset === undefined) return null;
+  if (!Number.isFinite(sectionLength) || !hasPlayedLength(clip)) return null;
+  const drawnOffset = clip.sectionOffset + (clip.headCut ?? 0);
+  const at = sectionLength - drawnOffset;
+  return at < playedSpan(clip).length - PLAYED_LENGTH_EPSILON ? Math.max(0, at) : null;
+}

@@ -49,7 +49,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, type TrimNeighbours } from '@shared/timelinePlacement';
-import { playedSpan, sectionStartInClip } from '@/lib/clip-span';
+import { playedSpan, sectionStartInClip, sectionEndInClip } from '@/lib/clip-span';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
 // loose_file_comments rows, which differ only in their parent-id column.
@@ -162,6 +162,9 @@ interface ClipProps {
   trimPrevEnd?: number;
   trimPickupPrevEnd?: number;
   trimNextStart?: number;
+  // Sectioned timeline clips: the length of its section as drawn (seconds), for the
+  // overhang mark (sectionEndInClip). Undefined for full takes.
+  sectionLength?: number;
 }
 
 // Tells Timeline a trim drag or trim save started (+1) or ended (−1); the timeline
@@ -259,6 +262,23 @@ function PickupMarker({ atPx, width, tornLayerStyle }: {
   return (
     <div aria-hidden className="pointer-events-none absolute inset-0 z-[6]" style={tornLayerStyle}>
       <div className="absolute inset-y-0 left-0 bg-black/35" style={{ width: Math.min(atPx, width) }} />
+    </div>
+  );
+}
+
+// An overhang's mark, the mirror of PickupMarker: the part of the clip after its own
+// section's end — hanging over the next section — is drawn dimmer. `atPx` is the section
+// end in px from the clip's left edge (sectionEndInClip × zoom). Same layer rules as
+// PickupMarker: the clip's clipped box with the torn shape, z-6.
+function OverhangMarker({ atPx, width, tornLayerStyle }: {
+  atPx: number;
+  width: number;
+  tornLayerStyle: React.CSSProperties;
+}) {
+  const left = Math.max(0, Math.min(atPx, width));
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 z-[6]" style={tornLayerStyle}>
+      <div className="absolute inset-y-0 right-0 bg-black/35" style={{ left }} />
     </div>
   );
 }
@@ -1112,7 +1132,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimPickupPrevEnd, trimNextStart }: ClipProps) {
+function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimPickupPrevEnd, trimNextStart, sectionLength }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1580,10 +1600,11 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   const span = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut, tailCut: clip.tailCut });
   const displayWidth = span.length * zoom;
 
-  // Torn edges where audio is hidden behind the edge — by a trim or a head cut;
-  // straight once fully untrimmed.
+  // Torn edges where audio is hidden behind the edge — by a trim, a head cut or a tail
+  // cut (an overhang cut where the next clip on its track starts); straight once fully
+  // untrimmed and uncut.
   const tornLeft = span.inPoint > 0.001;
-  const tornRight = trimEnd !== null && trimEnd < clip.duration - 0.001;
+  const tornRight = span.outPoint < clip.duration - 0.001;
   const torn = tornEdges(displayWidth, tornLeft, tornRight);
   // For the body, waveform and border layers: the torn shape, square corners on a torn side.
   const tornCornerStyle: React.CSSProperties = {
@@ -1600,6 +1621,11 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   // drawn before its section). Live through trims and drags: both update sectionOffset.
   const sectionStartSecs = isOverlay ? null : sectionStartInClip({ ...clip, trimStart, trimEnd });
   const pickupMarkerPx = sectionStartSecs === null ? null : sectionStartSecs * zoom;
+  // An overhang's own section end, the same way (null: not drawn past its section's end).
+  const sectionEndSecs = isOverlay || sectionLength === undefined
+    ? null
+    : sectionEndInClip({ ...clip, trimStart, trimEnd }, sectionLength);
+  const overhangMarkerPx = sectionEndSecs === null ? null : sectionEndSecs * zoom;
 
   // Positioned on the whole track row (Track.tsx) at its layout start, so it can be
   // drawn anywhere on the row. The drag transform is never applied: while it's dragged,
@@ -1776,6 +1802,9 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
 
               {pickupMarkerPx !== null && (
                 <PickupMarker atPx={pickupMarkerPx} width={displayWidth} tornLayerStyle={tornLayerStyle} />
+              )}
+              {overhangMarkerPx !== null && (
+                <OverhangMarker atPx={overhangMarkerPx} width={displayWidth} tornLayerStyle={tornLayerStyle} />
               )}
 
               {isFinal && (
