@@ -49,6 +49,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
 import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, type TrimNeighbours } from '@shared/timelinePlacement';
+import { TRIM_START_THRESHOLD_PX, trimEdgeAt, trimZoneWidths } from '@/lib/trim-zones';
 import { playedSpan, sectionStartInClip, sectionEndInClip } from '@/lib/clip-span';
 
 // The comment-thread shape ClipInfoWindow renders — shared by clip_comments and
@@ -1410,9 +1411,13 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     let pickup = startPickupDrag(start.offset);
     let option = e.altKey;
     let deltaSecs = 0;
+    // Nothing changes until the pointer has moved TRIM_START_THRESHOLD_PX, so a click
+    // on an edge never saves a stray trim.
+    let started = false;
 
     // Shows the trim for the current pointer position and Option state.
     const place = () => {
+      if (!started) return;
       const wanted = edge === 'left'
         ? { trimStart: start.trimStart + deltaSecs, trimEnd: start.trimEnd }
         : { trimStart: start.trimStart, trimEnd: (start.trimEnd ?? clip.duration) + deltaSecs };
@@ -1424,6 +1429,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     };
     const onMove = (moveE: PointerEvent) => {
       option = moveE.altKey;
+      if (!started && Math.abs(moveE.clientX - startX) < TRIM_START_THRESHOLD_PX) return;
+      started = true;
       deltaSecs = (moveE.clientX - startX) / zoom;
       place();
     };
@@ -1438,11 +1445,12 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     };
     const cancel = () => {
       finish();
-      showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
+      if (started) showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
       signalTrimBusy(-1);
     };
     const onUp = () => {
       finish();
+      if (!started) { signalTrimBusy(-1); return; }
       // At the very end of the file counts as no right trim.
       const end = trimEndRef.current;
       const storedEnd = end !== null && end >= clip.duration - 0.01 ? null : end;
@@ -1599,6 +1607,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   // the next clip (clip.headCut / clip.tailCut, from Timeline).
   const span = playedSpan({ duration: clip.duration, trimStart, trimEnd, headCut: clip.headCut, tailCut: clip.tailCut });
   const displayWidth = span.length * zoom;
+  // Where a press trims instead of moving (shared by the press test and the resize cursor).
+  const trimZones = trimZoneWidths(displayWidth, { duration: clip.duration, trimStart, trimEnd });
 
   // Torn edges where audio is hidden behind the edge — by a trim, a head cut or a tail
   // cut (an overhang cut where the next clip on its track starts); straight once fully
@@ -1732,11 +1742,12 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
             {...attributes}
             onPointerDown={(e) => {
               if (!isOverlay) {
+                // Only the primary button trims; anything else (right-click) goes on to
+                // dnd-kit, which ignores it, and the context menu.
                 const rect = clipContainerRef.current?.getBoundingClientRect();
-                if (rect) {
-                  const x = e.clientX - rect.left;
-                  if (x <= 8) { startTrimDrag(e, 'left'); return; }
-                  if (x >= rect.width - 8) { startTrimDrag(e, 'right'); return; }
+                if (rect && e.button === 0) {
+                  const edge = trimEdgeAt(e.clientX - rect.left, rect.width, trimZones);
+                  if (edge) { startTrimDrag(e, edge); return; }
                 }
               }
               dndOnPointerDown?.(e);
@@ -1756,10 +1767,7 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
             onMouseMove={(e) => {
               if (isOverlay || isTrimDragging) return;
               const rect = e.currentTarget.getBoundingClientRect();
-              const x = e.clientX - rect.left;
-              if (x <= 8) { setTrimEdge('left'); }
-              else if (x >= rect.width - 8) { setTrimEdge('right'); }
-              else { setTrimEdge(null); }
+              setTrimEdge(trimEdgeAt(e.clientX - rect.left, rect.width, trimZones));
             }}
             className={cn(
               "h-full rounded-md flex items-center group cursor-grab active:cursor-grabbing touch-none select-none focus-visible:outline-none",
