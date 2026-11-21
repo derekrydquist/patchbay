@@ -56,6 +56,7 @@ import { nanoid } from 'nanoid';
 import { Ruler } from './Ruler';
 import { DEFAULT_BPM, snapGridSeconds, parseTimeSignature, secondsPerBeat } from '@/lib/musical-time';
 import { layoutTimeline, sectionAt, effectiveLength, contentNeedBeats, endsPastSection, type TimelineLayout } from '@shared/timelineLayout';
+import { clipDragPreviewSections } from '@shared/clipDragFloor';
 import { sectionEndRange, nearestSectionEndStop, baseLengthForEnd, sectionEndReadout, sectionEndRelease, addsVisibleSpace, canFitToContent, shouldSendBaseLength, type SectionEndRange } from '@shared/sectionBaseLength';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { MIN_ZOOM, MAX_ZOOM, DEFAULT_ZOOM, parseSavedZoom } from '@/lib/timeline-zoom';
@@ -4699,8 +4700,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // (positionFloatingClip) and the timeline is drawn from the drag's preview layout:
   // the shared layoutTimeline run on the stored clips plus the preview's offsets (the
   // dragged clip's landing offset and every clip it pushes). So the home section grows
-  // or shrinks live, and every later section slides with everything in it, on all
-  // tracks together. It lives only in drag-preview state, never in the tracks, and is
+  // live (a timeline clip drag never shrinks it below its drag-start length — see
+  // clipDragPreviewSections), and every later section slides with everything in it, on
+  // all tracks together. It lives only in drag-preview state, never in the tracks, and is
   // recomputed only when the placement changes (clipDragPreview is replaced only then).
   // null = the stored layout: no drag, the pointer off the clip's row (a release there
   // changes nothing), or a placement that changes nothing.
@@ -4737,8 +4739,16 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       if (preview.virtual) clips.push({ ...preview.virtual, sectionOffset: preview.offsets.get(preview.virtual.id) ?? 0 });
       return { ...t, clips };
     });
-    return deriveLayout(previewTracks, sections, bpm, timeSignature);
-  }, [sectionEndDrag, activeDragPreview, trackState, sections, bpm, timeSignature]);
+    // No live shrinking (4h4b): during a timeline clip drag (no virtual clip) the home
+    // section never goes below its stored length at drag start (S0) — `layout` is the
+    // stored layout, fixed while the drag holds the polls. It still grows live past S0.
+    // File drags (a virtual clip) can't shrink a section and are left alone.
+    const previewSections = clipDragPreviewSections(sections, layout, {
+      kind: preview.virtual ? 'file' : 'clip',
+      homeSection: preview.sectionName,
+    });
+    return deriveLayout(previewTracks, previewSections, bpm, timeSignature);
+  }, [sectionEndDrag, activeDragPreview, trackState, sections, layout, bpm, timeSignature]);
   const displayLayout = clipDragLayout ?? layout;
   // The tracks as drawn: every clip at its preview-layout start and head cut (a push can
   // take a later pickup's room away, or give it back), except the dragged

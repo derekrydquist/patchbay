@@ -136,7 +136,7 @@ describe('drag preview layouts', () => {
     expect(verse(grown).start).toBeCloseTo(verse(base).start); // earlier sections never move
   });
 
-  it("the section's last clip dragged earlier shrinks it", () => {
+  it("the section's last clip dragged earlier shrinks it in the plain layout (a clip drag's preview is floored: clipDragFloor)", () => {
     // The preview layout just takes the offsets it's given (overlap is placeInGap's
     // job): v2 at 0.5 → the section needs only max(0 + 2, 0.5 + 2) = 2.5 s, not 4.
     const shrunk = run({ v2: 0.5 });
