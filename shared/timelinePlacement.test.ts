@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, startOverhangDrag, overhangAllowed, afterOverhangPlacement, clipDragMaxOffset, overhangPossible, tailFromPlacement, tailAtDragStart, type OverhangLimits, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
+import { placeInGap, snapDragStart, placeDraggedClip, computeFileDropPlacement, type DragPlacementInput, findOverlap, toPlacementClip, appendOffset, trimEndBeforeNext, trimNeighbours, clampTrim, MIN_TRIM_LENGTH, minTrimLength, pickupLeftLimit, pickupOffsetError, tailWriteError, tailAfterTrim, tailAfterReplace, nextClipStop, nextPickupStop, clipDragMinOffset, placementChanged, startPickupDrag, pickupAllowed, afterPickupPlacement, startOverhangDrag, overhangAllowed, afterOverhangPlacement, clipDragMaxOffset, overhangPossible, tailFromPlacement, tailAtDragStart, overhangTrimState, overhangTrimMaxEnd, overhangTrimMaxOffset, overhangTrimNeighbours, trimAllowsOverhang, trimPreviewTail, type OverhangTrimState, type OverhangLimits, PLACEMENT_EPSILON, type PlacementClip, type TrimClip, type TrimNeighbours, type TrimResult } from './timelinePlacement';
 import { layoutTimeline, endsPastSection, type LayoutClipInput, type TimelineLayoutInput } from './timelineLayout';
 import { snapTime, parseTimeSignature, secondsPerBeat } from './musicalTime';
 
@@ -2028,5 +2028,225 @@ describe('no overhang allowed → identical results to before 4h3a', () => {
       if (hung.tailSeconds > 0) expect(hung.offset + length).toBeLessThanOrEqual(stop + PLACEMENT_EPSILON);
     }
     expect(differed).toBeGreaterThan(100);
+  });
+});
+
+// ── Step 4h4a: overhang trims on the client ──────────────────────────────────
+// The worked example (120 bpm, 4/4, a beat is 0.5 s): Intro is 8 s long; X sits at
+// offset 5 with 5 s of trimmed audio (file 10 s, trim 2–7) and a 2 s tail, so it ends at
+// 10 and hangs 2 s past Intro's end; the next clip on its track is drawn at 11 (stop 11).
+
+describe('overhangTrimState', () => {
+  const x: TrimClip = { offset: 5, duration: 10, trimStart: 2, trimEnd: 7 };
+
+  it("judges overhanging on the full end, as the server does", () => {
+    const st = overhangTrimState({ sectionLength: 8, stop: 11, clip: x, isLast: true, bpm: 120 });
+    expect(st).toEqual({ sectionLength: 8, stop: 11, offset: 5, fullEnd: 10, duration: 10, overhanging: true, isLast: true });
+  });
+
+  it('a clip ending at the section end (or a hair past it) is not overhanging', () => {
+    const at = { offset: 2, duration: 6, trimStart: 0, trimEnd: null };
+    expect(overhangTrimState({ sectionLength: 8, stop: 11, clip: at, isLast: true, bpm: 120 }).overhanging).toBe(false);
+    const hair = { offset: 2 + 1e-9, duration: 6, trimStart: 0, trimEnd: null };
+    expect(overhangTrimState({ sectionLength: 8, stop: 11, clip: hair, isLast: true, bpm: 120 }).overhanging).toBe(false);
+  });
+
+  it('a fully cut overhang (its full end past the section, the next clip at the downbeat) still counts', () => {
+    const st = overhangTrimState({ sectionLength: 8, stop: 8, clip: x, isLast: true, bpm: 120 });
+    expect(st.overhanging).toBe(true);
+  });
+});
+
+describe('overhangTrimMaxEnd — the highest end the right edge may reach', () => {
+  const state = (over: Partial<OverhangTrimState>): OverhangTrimState => ({
+    sectionLength: 8, stop: 11, offset: 2, fullEnd: 8, duration: 10, overhanging: false, isLast: true, ...over,
+  });
+
+  it('an overhanging clip: the stop (the next clip on its track), Option or not', () => {
+    const st = state({ offset: 5, fullEnd: 10, overhanging: true });
+    expect(overhangTrimMaxEnd(st, false, Infinity)).toBe(11);
+    expect(overhangTrimMaxEnd(st, true, Infinity)).toBe(11);
+  });
+
+  it('an overhanging clip with no later clip on its track: no limit', () => {
+    expect(overhangTrimMaxEnd(state({ offset: 5, fullEnd: 10, overhanging: true, stop: Infinity }), false, Infinity)).toBe(Infinity);
+  });
+
+  it('an already cut clip: its current end — the cut may stay, never grow', () => {
+    // Stop 9.5 (a bandmate pushed the next clip in), X still ends at 10.
+    expect(overhangTrimMaxEnd(state({ offset: 5, fullEnd: 10, overhanging: true, stop: 9.5 }), false, Infinity)).toBe(10);
+  });
+
+  it('a normal last clip without Option: as before (normalStop)', () => {
+    expect(overhangTrimMaxEnd(state({}), false, Infinity)).toBe(Infinity);
+    expect(overhangTrimMaxEnd(state({}), false, 7.5)).toBe(7.5);
+  });
+
+  it('Option on a normal last clip with room: the stop', () => {
+    expect(overhangTrimMaxEnd(state({}), true, Infinity)).toBe(11);
+    expect(overhangTrimMaxEnd(state({ stop: Infinity }), true, Infinity)).toBe(Infinity);
+  });
+
+  it('Option with no room (the next clip on the downbeat): the wall at the section end', () => {
+    expect(overhangTrimMaxEnd(state({ stop: 8 }), true, Infinity)).toBe(8);
+    // A later pickup drawn before the section's end still stops it first.
+    expect(overhangTrimMaxEnd(state({ stop: 7.5 }), true, 7.5)).toBe(7.5);
+  });
+
+  it('Option with less than 0.5 s of the clip inside: the wall', () => {
+    expect(overhangTrimMaxEnd(state({ offset: 7.7, fullEnd: 8 }), true, Infinity)).toBe(8);
+    expect(overhangTrimMaxEnd(state({ offset: 7.5, fullEnd: 8 }), true, Infinity)).toBe(11);
+  });
+
+  it('Option on a clip that is not last: as before', () => {
+    expect(overhangTrimMaxEnd(state({ isLast: false }), true, 6)).toBe(6);
+  });
+});
+
+describe('overhangTrimMaxOffset and trimAllowsOverhang', () => {
+  const st = overhangTrimState({ sectionLength: 8, stop: 11, clip: { offset: 5, duration: 10, trimStart: 2, trimEnd: 7 }, isLast: true, bpm: 120 });
+
+  it('an overhanging clip keeps 0.5 s inside; never below where it starts', () => {
+    expect(overhangTrimMaxOffset(st)).toBeCloseTo(7.5);
+    expect(overhangTrimMaxOffset({ ...st, offset: 7.8 })).toBeCloseTo(7.8);
+    expect(overhangTrimMaxOffset({ ...st, overhanging: false })).toBeUndefined();
+  });
+
+  it('only the right edge, with Option, on the last clip', () => {
+    expect(trimAllowsOverhang(st, 'right', true)).toBe(true);
+    expect(trimAllowsOverhang(st, 'right', false)).toBe(false);
+    expect(trimAllowsOverhang(st, 'left', true)).toBe(false);
+    expect(trimAllowsOverhang({ ...st, isLast: false }, 'right', true)).toBe(false);
+    expect(trimAllowsOverhang(null, 'right', true)).toBe(false);
+  });
+});
+
+describe('overhang trims — a sequence of moves, the preview tail and the frozen section', () => {
+  // The layout with the preview's clip: the section's length as the timeline draws it.
+  const layoutWith = (c: { offset: number; trimStart: number; trimEnd: number | null; tail: number; duration: number }, next: { section: string; offset: number } | null) => {
+    const input: TimelineLayoutInput = {
+      sections: [
+        { name: 'Intro', sortOrder: 0, baseLength: null },
+        { name: 'Verse', sortOrder: 1, baseLength: null },
+      ],
+      clips: [
+        { id: 'x', trackId: 'drums', sectionName: 'Intro', sectionOffset: c.offset, duration: c.duration, trimStart: c.trimStart, trimEnd: c.trimEnd, tailSeconds: c.tail, isFullTake: false, start: 0 },
+        ...(next ? [{ id: 'n', trackId: 'drums', sectionName: next.section, sectionOffset: next.offset, duration: 1, trimStart: 0, trimEnd: null, isFullTake: false, start: 0 }] : []),
+      ],
+      bpm: 120,
+      timeSignature: '4/4',
+    };
+    return layoutTimeline(input);
+  };
+  // One live trim step, as startTrimDrag's place() does it.
+  const step = (st: OverhangTrimState, start: TrimClip, edge: 'left' | 'right', wanted: { trimStart: number; trimEnd: number | null }, option: boolean, nb: TrimNeighbours) => {
+    const r = clampTrim(start, wanted, overhangTrimNeighbours(nb, st, edge === 'right' && option))!;
+    return { ...r, tail: trimPreviewTail(st, r, trimAllowsOverhang(st, edge, option)) };
+  };
+  const nb: TrimNeighbours = { prevEnd: 0, nextStart: Infinity };
+
+  it('an overhanging clip, right edge: shortening uses up the overhang, extending stops at the next clip, Intro stays 8 s', () => {
+    const x: TrimClip = { offset: 5, duration: 10, trimStart: 2, trimEnd: 7 };
+    const st = overhangTrimState({ sectionLength: 8, stop: 3 + 8, clip: x, isLast: true, bpm: 120 });
+    const next = { section: 'Verse', offset: 3 };
+    const shorter = step(st, x, 'right', { trimStart: 2, trimEnd: 5.5 }, false, nb);
+    expect(shorter.tail).toBeCloseTo(0.5);
+    expect(layoutWith({ ...shorter, duration: 10 }, next).sections[0].length).toBeCloseTo(8);
+    // Option makes no difference for an overhanging clip.
+    const withOption = step(st, x, 'right', { trimStart: 2, trimEnd: 5.5 }, true, nb);
+    expect(withOption.tail).toBeCloseTo(0.5);
+    // Extending past the next clip (drawn at 11) stops there: end 11, tail 3, no cut.
+    const longer = step(st, x, 'right', { trimStart: 2, trimEnd: 9.5 }, false, nb);
+    expect(longer.trimEnd).toBeCloseTo(8);
+    expect(longer.tail).toBeCloseTo(3);
+    const l = layoutWith({ ...longer, duration: 10 }, next);
+    expect(l.sections[0].length).toBeCloseTo(8);
+    expect(l.clipTailCuts.get('x') ?? 0).toBeCloseTo(0);
+    // Back inside: tail 0, the section shrinks live (no latch).
+    const inside = step(st, x, 'right', { trimStart: 2, trimEnd: 4 }, false, nb);
+    expect(inside.tail).toBe(0);
+    expect(layoutWith({ ...inside, duration: 10 }, next).sections[0].length).toBeCloseTo(7);
+    // And out again, without Option: hangs over again.
+    expect(step(st, x, 'right', { trimStart: 2, trimEnd: 6 }, false, nb).tail).toBeCloseTo(1);
+  });
+
+  it('Option on a normal last clip: frozen while held, normal growth when released, frozen again when pressed', () => {
+    // Intro holds one clip, offset 2, 6 s long (ends 8); Verse's clip on the track at 3 → stop 11.
+    const c: TrimClip = { offset: 2, duration: 10, trimStart: 0, trimEnd: 6 };
+    const st = overhangTrimState({ sectionLength: 8, stop: 11, clip: c, isLast: true, bpm: 120 });
+    expect(st.overhanging).toBe(false);
+    const next = { section: 'Verse', offset: 3 };
+    const moves = [
+      { trimEnd: 7, option: true, tail: 1, section: 8 },
+      { trimEnd: 7, option: false, tail: 0, section: 9 },
+      { trimEnd: 8, option: true, tail: 2, section: 8 },
+      { trimEnd: 10, option: true, tail: 3, section: 8, end: 9 }, // stops at 11: trimEnd 9
+      { trimEnd: 10, option: false, tail: 0, section: 12 },        // no Option: grows to fit the whole file
+    ];
+    for (const m of moves) {
+      const r = step(st, c, 'right', { trimStart: 0, trimEnd: m.trimEnd }, m.option, nb);
+      expect(r.trimEnd ?? 10).toBeCloseTo(m.end ?? m.trimEnd);
+      expect(r.tail).toBeCloseTo(m.tail);
+      expect(layoutWith({ ...r, duration: 10 }, next).sections[0].length).toBeCloseTo(m.section);
+    }
+  });
+
+  it('Option with no room: the right edge stops at the section end (the wall)', () => {
+    const c: TrimClip = { offset: 2, duration: 10, trimStart: 0, trimEnd: 5 };
+    const st = overhangTrimState({ sectionLength: 8, stop: 8, clip: c, isLast: true, bpm: 120 });
+    const r = step(st, c, 'right', { trimStart: 0, trimEnd: 9 }, true, nb);
+    expect(r.trimEnd).toBeCloseTo(6);
+    expect(r.tail).toBe(0);
+  });
+
+  it('a clip that is not last: Option changes nothing', () => {
+    const c: TrimClip = { offset: 0, duration: 10, trimStart: 0, trimEnd: 2 };
+    const st = overhangTrimState({ sectionLength: 8, stop: 11, clip: c, isLast: false, bpm: 120 });
+    const r = step(st, c, 'right', { trimStart: 0, trimEnd: 6 }, true, { prevEnd: 0, nextStart: 4 });
+    expect(r.trimEnd).toBeCloseTo(4);
+    expect(r.tail).toBe(0);
+  });
+
+  it('a hidden stored tail on a normal clip previews as 0, as the server stores it', () => {
+    const c: TrimClip = { offset: 0, duration: 10, trimStart: 0, trimEnd: 4 };
+    const st = overhangTrimState({ sectionLength: 8, stop: Infinity, clip: c, isLast: true, bpm: 120 });
+    expect(step(st, c, 'right', { trimStart: 0, trimEnd: 9 }, false, nb).tail).toBe(0);
+  });
+});
+
+describe('clampTrim with maxOffset — left trims on an overhanging clip (4h4a)', () => {
+  const x: TrimClip = { offset: 5, duration: 10, trimStart: 2, trimEnd: 7 };
+  const st = overhangTrimState({ sectionLength: 8, stop: 11, clip: x, isLast: true, bpm: 120 });
+  const nb = overhangTrimNeighbours({ prevEnd: 0, nextStart: Infinity }, st, false)!;
+
+  it('the left edge keeps 0.5 s inside the section; the end and the tail stay', () => {
+    const r = clampTrim(x, { trimStart: 6, trimEnd: 7 }, nb)!;
+    expect(r.offset).toBeCloseTo(7.5);
+    expect(r.trimStart).toBeCloseTo(4.5);
+    expect(r.trimEnd).toBe(7);
+    expect(trimPreviewTail(st, r, false)).toBeCloseTo(2);
+  });
+
+  it('pulling the left edge out (earlier) is untouched', () => {
+    const r = clampTrim(x, { trimStart: 1, trimEnd: 7 }, nb)!;
+    expect(r).toMatchObject({ trimStart: 1, trimEnd: 7, clamped: false });
+    expect(r.offset).toBeCloseTo(4);
+  });
+
+  it('a left trim on a cut clip never moves its right edge', () => {
+    const cut = overhangTrimState({ sectionLength: 8, stop: 9.5, clip: x, isLast: true, bpm: 120 });
+    // nextStart 9.5 alone would pull the end in; the cut clip's own end (10) is the limit.
+    const r = clampTrim(x, { trimStart: 3, trimEnd: 7 }, overhangTrimNeighbours({ prevEnd: 0, nextStart: 9.5 }, cut, false))!;
+    expect(r.trimEnd).toBe(7);
+  });
+
+  it('Reset Trim and Detect Trim → Apply get the same stops', () => {
+    const reset = clampTrim(x, { trimStart: 0, trimEnd: null }, nb)!;
+    expect(reset.offset).toBeCloseTo(3);
+    expect(reset.trimEnd).toBeCloseTo(8); // ends at 11, the next clip
+    expect(trimPreviewTail(st, reset, false)).toBeCloseTo(3);
+    const detect = clampTrim(x, { trimStart: 5.5, trimEnd: 6.8 }, nb)!;
+    expect(detect.offset).toBeCloseTo(7.5);
+    expect(detect.trimEnd).toBeCloseTo(6.8);
   });
 });

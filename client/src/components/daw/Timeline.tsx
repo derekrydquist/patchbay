@@ -116,7 +116,7 @@ type ApiTrack = {
 
 const EMPTY_SECTIONS: SongSectionRow[] = [];
 // A track with no sectioned clips: no trim limits.
-const NO_TRIM_LIMITS: TrackTrimLimits = { pickupLimits: new Map(), pickupStops: new Map() };
+const NO_TRIM_LIMITS: TrackTrimLimits = { pickupLimits: new Map(), pickupStops: new Map(), clipStops: new Map() };
 
 function sameNumberMap(a: ReadonlyMap<string, number>, b: ReadonlyMap<string, number>): boolean {
   if (a.size !== b.size) return false;
@@ -708,6 +708,10 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   // pause for them too, so they can't snap a trimmed clip back mid-drag or before the
   // save lands.
   const [trimsBusy, setTrimsBusy] = useState(0);
+  // The same count as a ref, and the widest content end (seconds) seen since the first
+  // trim of the current busy run started — see contentEnd in the render.
+  const trimsBusyRef = useRef(0);
+  const trimMaxEndRef = useRef(0);
   const timelineEditBusy = clipDragsBusy > 0 || trimsBusy > 0;
   // A poll response already on its way when a drag or trim starts would bring back the
   // old state — drop it (both polls).
@@ -733,6 +737,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
       const delta = (e as CustomEvent<{ delta: 1 | -1 }>).detail.delta;
       // A poll already on its way would bring back the old trim — drop it.
       if (delta > 0) dropPollsInFlightRef.current();
+      // A new busy run: the content-width floor starts again from the stored layout.
+      if (delta > 0 && trimsBusyRef.current === 0) trimMaxEndRef.current = 0;
+      trimsBusyRef.current = Math.max(0, trimsBusyRef.current + delta);
       setTrimsBusy((n) => Math.max(0, n + delta));
     };
     window.addEventListener('trim-busy', onTrimBusy);
@@ -790,8 +797,9 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   );
   // Trim limits per track, by section name (Track.tsx → trimNeighbours): each section's
   // pickup left limit (shared pickupLeftLimit — a pickup's left edge, or with Option any
-  // clip's) and where its clips' right edges stop for a later section's pickup (shared
-  // nextPickupStop). A trim reads them as they were when it started.
+  // clip's), where its clips' right edges stop for a later section's pickup (shared
+  // nextPickupStop), and where an overhang stops (shared nextClipStop: the next clip on
+  // the track). A trim reads them as they were when it started.
   // Their input: every stored clip, the tempo and time signature.
   const pickupLimitInput = React.useMemo(() => ({
     clips: trackState.flatMap((t) => t.clips.map((c) => ({ id: c.id, trackId: t.id, sectionName: c.sectionName, sectionOffset: c.sectionOffset ?? null, isFullTake: !!c.isFullTake }))),
@@ -807,14 +815,17 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
     for (const t of trackState) {
       const pickupLimits = new Map<string, number>();
       const pickupStops = new Map<string, number>();
+      const clipStops = new Map<string, number>();
       for (const c of t.clips) {
         if (c.isFullTake || !c.sectionName || pickupLimits.has(c.sectionName)) continue;
         pickupLimits.set(c.sectionName, pickupLeftLimit(input, layout, t.id, c.sectionName));
         pickupStops.set(c.sectionName, nextPickupStop(input, layout, t.id, c.sectionName));
+        clipStops.set(c.sectionName, nextClipStop(input, layout, t.id, c.sectionName));
       }
       const prev = trimLimitsRef.current.get(t.id);
-      const same = prev && sameNumberMap(prev.pickupLimits, pickupLimits) && sameNumberMap(prev.pickupStops, pickupStops);
-      byTrack.set(t.id, same ? prev : { pickupLimits, pickupStops });
+      const same = prev && sameNumberMap(prev.pickupLimits, pickupLimits) && sameNumberMap(prev.pickupStops, pickupStops)
+        && sameNumberMap(prev.clipStops, clipStops);
+      byTrack.set(t.id, same ? prev : { pickupLimits, pickupStops, clipStops });
     }
     trimLimitsRef.current = byTrack;
     return byTrack;
@@ -1079,12 +1090,14 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
 
   useEffect(() => {
     const handleTrimPreview = (e: any) => {
-      const { clipId, trimStart, trimEnd, sectionOffset } = e.detail as {
-        clipId: string; trimStart: number; trimEnd: number | null; sectionOffset?: number;
+      const { clipId, trimStart, trimEnd, sectionOffset, tailSeconds } = e.detail as {
+        clipId: string; trimStart: number; trimEnd: number | null; sectionOffset?: number; tailSeconds?: number;
       };
       // Only the trimmed clip changes: its trim, and for a sectioned clip the offset
-      // that moves with trimStart (TimelineClip clamps both at its neighbours). The
-      // neighbours never move and nothing is re-packed; the trim route saves it.
+      // that moves with trimStart (TimelineClip clamps both at its neighbours) and the
+      // tail the server will store (tailAfterTrim — while an overhang is in play its
+      // section's end stays put; otherwise 0, so the section grows and shrinks live).
+      // The neighbours never move and nothing is re-packed; the trim route saves it.
       setTracks((prev) => prev.map((t) => !t.clips.some((c) => c.id === clipId) ? t : {
         ...t,
         clips: t.clips.map((c) => c.id !== clipId ? c : {
@@ -1092,6 +1105,7 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
           trimStart,
           trimEnd,
           ...(sectionOffset !== undefined && c.sectionName && !c.isFullTake ? { sectionOffset } : {}),
+          ...(tailSeconds !== undefined && c.sectionName && !c.isFullTake ? { tailSeconds } : {}),
         }),
       }));
     };
@@ -4766,6 +4780,12 @@ export function Timeline({ songId, modeTabs }: { songId: string; modeTabs?: Reac
   if (draggedClipId || fileDrop || looseConfirm || sectionEndDrag) {
     clipDragMaxEndRef.current = Math.max(clipDragMaxEndRef.current, displayLayout.timelineEnd, endOfTimeline);
     contentEnd = clipDragMaxEndRef.current;
+  }
+  // A trim (its drag, its save and the refetch after it) never shrinks it either, so
+  // trimming near the end of the song can't make the browser clamp scrollLeft.
+  if (trimsBusy > 0) {
+    trimMaxEndRef.current = Math.max(trimMaxEndRef.current, endOfTimeline);
+    contentEnd = Math.max(contentEnd, trimMaxEndRef.current);
   }
   contentEndRef.current = contentEnd;
   // Section-end handles (SectionEndHandles): sections on the timeline with a

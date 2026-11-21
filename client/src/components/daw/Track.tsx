@@ -7,7 +7,7 @@ import { TimelineClip } from './Clip';
 import { playedSpan, hasPlayedLength } from '@/lib/clip-span';
 import { BeatGrid } from './BeatGrid';
 import { trackDisplayColor } from '@/lib/track-color';
-import { trimNeighbours } from '@shared/timelinePlacement';
+import { trimNeighbours, PLACEMENT_EPSILON } from '@shared/timelinePlacement';
 import { Mic, Headphones, Activity } from 'lucide-react';
 import { Slider } from '@/components/ui/slider';
 import {
@@ -250,10 +250,13 @@ const TrackHeader = React.memo(function TrackHeader({
 
 // Trim limits for one track's clips, by section name: the pickup left limit (shared
 // pickupLeftLimit) and where the right edge stops for a later section's pickup (shared
-// nextPickupStop; Infinity for none). Both are offsets from the section start.
+// nextPickupStop; Infinity for none), and where an overhang stops — the next clip on
+// the track in any later section (shared nextClipStop; Infinity for none). All are
+// offsets from the section start.
 export interface TrackTrimLimits {
   pickupLimits: ReadonlyMap<string, number>;
   pickupStops: ReadonlyMap<string, number>;
+  clipStops: ReadonlyMap<string, number>;
 }
 
 interface TrackProps {
@@ -428,6 +431,9 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             .map((c) => ({ id: c.id, offset: c.sectionOffset ?? 0, length: (c.trimEnd ?? c.duration) - (c.trimStart ?? 0) }));
           const pickupLimit = trimLimits?.pickupLimits.get(clip.sectionName ?? '') ?? 0;
           const nextPickupStop = trimLimits?.pickupStops.get(clip.sectionName ?? '') ?? Infinity;
+          const clipStop = trimLimits?.clipStops.get(clip.sectionName ?? '') ?? Infinity;
+          // The last clip on this track in its section: only it can start an overhang.
+          const isLastInSection = !others.some((c) => c.offset > offset + PLACEMENT_EPSILON);
           const nb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: false, nextPickupStop });
           const pickupNb = trimNeighbours({ offset }, others, pickupLimit, { allowPickup: true, nextPickupStop });
           // Its section's length as drawn, for the overhang mark (a number, so the
@@ -447,6 +453,9 @@ export const TimelineTrack = React.memo(function TimelineTrack({
             trimPickupPrevEnd={pickupNb.prevEnd}
             trimNextStart={nb.nextStart}
             sectionLength={sectionLength}
+            trimClipStop={clipStop}
+            isLastInSection={isLastInSection}
+            bpm={bpm}
             instanceCount={track.clips.filter((c) => c.name === clip.name).length}
             isFlash={flashClipId === clip.id}
             isSelected={selectedClipId === clip.id}

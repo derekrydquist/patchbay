@@ -6,7 +6,7 @@
 // section's start, lengths are trimmed lengths (effectiveLength). Legacy full takes
 // sit outside sections and never take part.
 
-import { effectiveLength, pickupRoomEnd, type LayoutClipInput, type TimelineLayout, type TimelineLayoutInput } from './timelineLayout';
+import { effectiveLength, pickupRoomEnd, endsPastSection, type LayoutClipInput, type TimelineLayout, type TimelineLayoutInput } from './timelineLayout';
 import { parseTimeSignature, secondsPerBeat } from './musicalTime';
 
 // Float noise allowed when comparing positions, in seconds. Touching edges are never
@@ -747,4 +747,109 @@ export function clampTrim(
   const clamped = Math.abs(trimStart - wanted.trimStart) > PLACEMENT_EPSILON
     || Math.abs(trimEnd - wantedEnd) > PLACEMENT_EPSILON;
   return { trimStart, trimEnd: storedEnd, offset, clamped };
+}
+
+// ── Overhang trims (step 4h4a) ───────────────────────────────────────────────
+// The mirror of pickup trims, on the right edge. The server derives a trimmed clip's
+// tail itself (writeTimelineClipTrim → tailAfterTrim, from the layout before the write);
+// the client only stops the edges where that write is allowed and shows the tail the
+// server will store (tailAfterTrim with the same inputs), so the preview and the save
+// agree. Everything is fixed when the trim starts, from the stored layout:
+//   - "overhanging" is the server's test: the clip's FULL (uncut) end is past its
+//     section's end (endsPastSection). No back-inside latch: the server can't be told a
+//     clip that was overhanging should now grow its section, so for the whole trim any
+//     end past S0 is overhang;
+//   - an overhanging clip's right edge extends without Option and stops at the next
+//     clip on its track (nextClipStop), or where it ends now if a cut already runs past
+//     that (the cut may stay, never grow); its left edge keeps at least minTrimLength
+//     inside the section;
+//   - Option on the right edge of a normal clip that is the last on its track in its
+//     section starts an overhang (the client sends allowOverhang): with room (the stop
+//     past the section's end, and at least minTrimLength of the clip inside) the edge
+//     goes up to the stop; with none it stops exactly at the section's end (the wall).
+// While an overhang is in play the section's end stays at S0 in the preview; a normal
+// trim grows or shrinks its section live, as before.
+
+export interface OverhangTrimState {
+  sectionLength: number; // S0: the section's stored length in seconds, from its start
+  stop: number;          // nextClipStop, from the section's start (Infinity: none)
+  offset: number;        // the clip's offset at trim start
+  fullEnd: number;       // offset + trimmed length at trim start (its uncut end)
+  duration: number;      // the file's full length (for minTrimLength)
+  overhanging: boolean;  // fullEnd past the section's end (endsPastSection)
+  isLast: boolean;       // the last clip on its track in its section
+}
+
+export function overhangTrimState(input: {
+  sectionLength: number;
+  stop: number;
+  clip: TrimClip;
+  isLast: boolean;
+  bpm: number | null;
+}): OverhangTrimState {
+  const { sectionLength, stop, clip, isLast, bpm } = input;
+  const fullEnd = clip.offset + (clip.trimEnd ?? clip.duration) - clip.trimStart;
+  return {
+    sectionLength,
+    stop,
+    offset: clip.offset,
+    fullEnd,
+    duration: clip.duration,
+    overhanging: endsPastSection(fullEnd, sectionLength, bpm),
+    isLast,
+  };
+}
+
+// Whether a trim with this Option state may hang the clip over now (passed to
+// tailAfterTrim, and sent as allowOverhang on release): the right edge, Option held,
+// and the last clip in its section. An overhanging clip hangs over without it.
+export function trimAllowsOverhang(state: OverhangTrimState | null, edge: 'left' | 'right', option: boolean): boolean {
+  return !!state && edge === 'right' && option && state.isLast;
+}
+
+// The highest end (offset from the section's start) the clip's right edge may reach.
+// `normalStop` is where it stops without an overhang (the next clip in its section, or
+// for the last clip a later section's pickup: trimNeighbours' nextStart).
+//   - overhanging: max(stop, fullEnd) — never into the next clip on its track, but an
+//     existing cut may stay (Option makes no difference);
+//   - not the last clip, or no Option: normalStop, as before 4h4a;
+//   - Option with room (stop past S0, at least minTrimLength inside): the stop;
+//   - Option with no room: the section's end, the wall (never past normalStop).
+export function overhangTrimMaxEnd(state: OverhangTrimState, option: boolean, normalStop: number): number {
+  if (state.overhanging) return Math.max(state.stop, state.fullEnd);
+  if (!state.isLast || !option) return normalStop;
+  const room = state.stop > state.sectionLength + PLACEMENT_EPSILON
+    && state.sectionLength - state.offset >= minTrimLength(state.duration) - PLACEMENT_EPSILON;
+  return room ? state.stop : Math.min(normalStop, state.sectionLength);
+}
+
+// The highest offset an overhanging clip's left edge may move to: at least
+// minTrimLength stays inside its section (S0 − minTrimLength), or its offset at trim
+// start if already further right (never a jump). undefined for any other clip.
+export function overhangTrimMaxOffset(state: OverhangTrimState): number | undefined {
+  if (!state.overhanging) return undefined;
+  return Math.max(state.sectionLength - minTrimLength(state.duration), state.offset);
+}
+
+// The trim neighbours with the overhang stops applied: the right edge's stop
+// (overhangTrimMaxEnd) and, for an overhanging clip, the left edge's maxOffset.
+// `nb` null (a full take) stays null; `state` null leaves `nb` as it is.
+export function overhangTrimNeighbours(
+  nb: TrimNeighbours | null, state: OverhangTrimState | null, option: boolean,
+): TrimNeighbours | null {
+  if (!nb || !state) return nb;
+  const maxOffset = overhangTrimMaxOffset(state);
+  return {
+    ...nb,
+    nextStart: overhangTrimMaxEnd(state, option, nb.nextStart),
+    ...(maxOffset !== undefined ? { maxOffset: Math.min(nb.maxOffset ?? Infinity, maxOffset) } : {}),
+  };
+}
+
+// The tail the server will store for this trim result (tailAfterTrim on the new full
+// end), for the preview. With it a normal clip gets 0 (a hidden stored tail is cleared,
+// as the server does), so its section grows and shrinks live as before.
+export function trimPreviewTail(state: OverhangTrimState, result: TrimResult, allowOverhang: boolean): number {
+  const newEnd = result.offset + (result.trimEnd ?? state.duration) - result.trimStart;
+  return tailAfterTrim(newEnd, state.sectionLength, state.overhanging, allowOverhang);
 }

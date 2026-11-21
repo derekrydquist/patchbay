@@ -20,6 +20,11 @@ import { createServer, type Server } from 'http';
 import express from 'express';
 import Database from 'better-sqlite3';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import {
+  clampTrim, trimNeighbours, pickupLeftLimit, nextPickupStop, nextClipStop, overhangTrimState,
+  overhangTrimNeighbours, trimAllowsOverhang, trimPreviewTail, PLACEMENT_EPSILON,
+} from '../shared/timelinePlacement';
+import { layoutTimeline } from '../shared/timelineLayout';
 
 const SOURCE = path.resolve(import.meta.dirname, '..', 'patchbay.db');
 
@@ -431,6 +436,130 @@ describe.skipIf(!fs.existsSync(SOURCE))('overhangs through trims, apply-to-insta
       expect(res.status).toBe(200);
       expect(row('y').tail).toBe(0);
       expect(sectionLength('Intro')).toBeCloseTo(10);
+    });
+  });
+
+  // Step 4h4a: what the client now sends for a trim, worked out exactly as TimelineClip
+  // does (Track.tsx's neighbours, Timeline's stops, overhangTrimNeighbours, clampTrim),
+  // from the layout as the server holds it. Every value must be accepted (never a 400),
+  // and the server must store the tail the preview showed (trimPreviewTail).
+  describe('client trims (4h4a) are always accepted', () => {
+    const clientTrim = (id: string, edge: 'left' | 'right', wanted: { trimStart: number; trimEnd: number | null }, option = false) => {
+      const c = raw.prepare('SELECT track_id AS trackId, section_name AS sectionName, section_offset AS offset, duration, trim_start AS trimStart, trim_end AS trimEnd FROM timeline_clips WHERE id = ?')
+        .get(id) as { trackId: string; sectionName: string; offset: number; duration: number; trimStart: number; trimEnd: number | null };
+      const input = store.songLayoutInput('s1');
+      const l = layoutTimeline(input);
+      const others = store.sectionPlacementClips(c.trackId, c.sectionName).filter((o) => o.id !== id);
+      const nb = trimNeighbours({ offset: c.offset }, others, pickupLeftLimit(input, l, c.trackId, c.sectionName), {
+        allowPickup: false, nextPickupStop: nextPickupStop(input, l, c.trackId, c.sectionName),
+      });
+      const clip = { offset: c.offset, duration: c.duration, trimStart: c.trimStart, trimEnd: c.trimEnd };
+      const st = overhangTrimState({
+        sectionLength: l.sections.find((x) => x.name === c.sectionName)!.length,
+        stop: nextClipStop(input, l, c.trackId, c.sectionName),
+        clip,
+        isLast: !others.some((o) => o.offset > c.offset + PLACEMENT_EPSILON),
+        bpm: input.bpm,
+      });
+      const r = clampTrim(clip, wanted, overhangTrimNeighbours(nb, st, edge === 'right' && option))!;
+      const allow = trimAllowsOverhang(st, edge, option);
+      return {
+        body: { trimStart: r.trimStart, trimEnd: r.trimEnd, ...(allow ? { allowOverhang: true } : {}) },
+        previewTail: trimPreviewTail(st, r, allow),
+      };
+    };
+    const expectAccepted = async (id: string, t: ReturnType<typeof clientTrim>) => {
+      const res = await trim(id, t.body);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(row(id).tail).toBeCloseTo(t.previewTail, 9);
+      expect(tailCut(id)).toBeCloseTo(0, 9);
+    };
+
+    it('overhanging, right edge out far past the next clip: stops at it, Intro stays 8 s', async () => {
+      seedExample();
+      const t = clientTrim('x', 'right', { trimStart: 2, trimEnd: 10 });
+      expect(t.body.trimEnd).toBeCloseTo(8);
+      await expectAccepted('x', t);
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+    });
+
+    it('overhanging, right edge in (with and without Option)', async () => {
+      seedExample();
+      await expectAccepted('x', clientTrim('x', 'right', { trimStart: 2, trimEnd: 5.5 }, true));
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+      await expectAccepted('x', clientTrim('x', 'right', { trimStart: 2, trimEnd: 3 }));
+    });
+
+    it('overhanging, left edge far in: keeps 0.5 s inside', async () => {
+      seedExample();
+      const t = clientTrim('x', 'left', { trimStart: 6.9, trimEnd: 7 });
+      await expectAccepted('x', t);
+      expect(row('x').offset).toBeCloseTo(7.5);
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+    });
+
+    it('an already cut clip: extending is held at its current end, left trims and shortening pass', async () => {
+      add('x', { section: 'Intro', offset: 5, duration: 10, trimStart: 2, trimEnd: 7, tail: 2 });
+      add('n', { section: 'Verse', offset: 1, duration: 1 }); // drawn at 9: X is cut by 1 s
+      expect(tailCut('x')).toBeCloseTo(1);
+      const out = clientTrim('x', 'right', { trimStart: 2, trimEnd: 9 });
+      expect(out.body.trimEnd).toBeCloseTo(7);
+      expect((await trim('x', out.body)).status).toBe(200);
+      expect((await trim('x', clientTrim('x', 'left', { trimStart: 3, trimEnd: 7 }).body)).status).toBe(200);
+      expect((await trim('x', clientTrim('x', 'right', { trimStart: 3, trimEnd: 6 }).body)).status).toBe(200);
+      expect(tailCut('x')).toBeCloseTo(0);
+    });
+
+    it('Option on a normal last clip with room: hangs over up to the next clip, Intro stays 8 s', async () => {
+      add('y', { section: 'Intro', offset: 2, duration: 10, trimStart: 0, trimEnd: 6 });
+      add('n', { section: 'Verse', offset: 3, duration: 1 });
+      const t = clientTrim('y', 'right', { trimStart: 0, trimEnd: null }, true);
+      expect(t.body).toMatchObject({ allowOverhang: true });
+      expect(t.body.trimEnd).toBeCloseTo(9);
+      await expectAccepted('y', t);
+      expect(row('y').tail).toBeCloseTo(3);
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+    });
+
+    it('Option with no room: the wall, tail 0, accepted', async () => {
+      add('y', { section: 'Intro', offset: 2, duration: 10, trimStart: 0, trimEnd: 6 });
+      add('n', { section: 'Verse', offset: 0, duration: 1 }); // on the downbeat
+      const t = clientTrim('y', 'right', { trimStart: 0, trimEnd: null }, true);
+      expect(t.body.trimEnd).toBeCloseTo(6);
+      await expectAccepted('y', t);
+      expect(row('y').tail).toBe(0);
+    });
+
+    it('Option on a clip that is not last sends no flag and is accepted', async () => {
+      add('a', { section: 'Intro', offset: 0, duration: 10, trimStart: 0, trimEnd: 2 });
+      add('b', { section: 'Intro', offset: 4, duration: 4 });
+      const t = clientTrim('a', 'right', { trimStart: 0, trimEnd: 8 }, true);
+      expect(t.body).not.toHaveProperty('allowOverhang');
+      expect(t.body.trimEnd).toBeCloseTo(4);
+      await expectAccepted('a', t);
+    });
+
+    it('Reset Trim and Detect Trim → Apply on an overhanging clip (no flag)', async () => {
+      seedExample();
+      await expectAccepted('x', clientTrim('x', 'right', { trimStart: 0, trimEnd: null }));
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+      raw.exec('DELETE FROM timeline_clips;');
+      seedExample();
+      await expectAccepted('x', clientTrim('x', 'left', { trimStart: 5.5, trimEnd: 6.8 }));
+      expect(sectionLength('Intro')).toBeCloseTo(8);
+    });
+
+    it('Reset Trim on a cut clip', async () => {
+      add('x', { section: 'Intro', offset: 5, duration: 10, trimStart: 2, trimEnd: 7, tail: 2 });
+      add('n', { section: 'Verse', offset: 1, duration: 1 });
+      expect((await trim('x', clientTrim('x', 'right', { trimStart: 0, trimEnd: null }).body)).status).toBe(200);
+    });
+
+    it('a normal clip with a hidden tail: previewed and stored as 0', async () => {
+      add('y', { section: 'Intro', offset: 0, duration: 10, trimStart: 0, trimEnd: 4, tail: 1 });
+      add('z', { track: 'bass', section: 'Intro', offset: 0, duration: 8 }); // Intro 8 s
+      await expectAccepted('y', clientTrim('y', 'right', { trimStart: 0, trimEnd: 6 }));
+      expect(row('y').tail).toBe(0);
     });
   });
 });

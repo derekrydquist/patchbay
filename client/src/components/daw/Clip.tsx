@@ -48,7 +48,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { ClipComment } from '@shared/schema';
-import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, type TrimNeighbours } from '@shared/timelinePlacement';
+import { clampTrim, minTrimLength, startPickupDrag, pickupAllowed, afterPickupPlacement, overhangTrimState, overhangTrimNeighbours, trimAllowsOverhang, trimPreviewTail, type TrimNeighbours, type OverhangTrimState } from '@shared/timelinePlacement';
 import { TRIM_START_THRESHOLD_PX, trimEdgeAt, trimZoneWidths } from '@/lib/trim-zones';
 import { playedSpan, sectionStartInClip, sectionEndInClip } from '@/lib/clip-span';
 
@@ -164,8 +164,16 @@ interface ClipProps {
   trimPickupPrevEnd?: number;
   trimNextStart?: number;
   // Sectioned timeline clips: the length of its section as drawn (seconds), for the
-  // overhang mark (sectionEndInClip). Undefined for full takes.
+  // overhang mark (sectionEndInClip) and, at trim start, its stored length S0 for
+  // overhang trims. Undefined for full takes.
   sectionLength?: number;
+  // Sectioned timeline clips, for overhang trims (step 4h4a): where an overhang stops —
+  // the next clip on its track in any later section, from its section's start (shared
+  // nextClipStop; Infinity for none) — whether it's the last clip on its track in its
+  // section (only it can start an overhang), and the tempo (endsPastSection's noise).
+  trimClipStop?: number;
+  isLastInSection?: boolean;
+  bpm?: number;
 }
 
 // Tells Timeline a trim drag or trim save started (+1) or ended (−1); the timeline
@@ -1133,7 +1141,7 @@ type ReplacementClip = {
   createdAt: string;
 };
 
-function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimPickupPrevEnd, trimNextStart, sectionLength }: ClipProps) {
+function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor, songId = 'patchbay-default', instanceCount = 1, isFlash = false, isSelected = false, isRaised = false, trimPrevEnd, trimPickupPrevEnd, trimNextStart, sectionLength, trimClipStop, isLastInSection, bpm }: ClipProps) {
   const { user } = useAuth();
   const [showInfo, setShowInfo] = useState(false);
   const [focusNotes, setFocusNotes] = useState(false);
@@ -1341,9 +1349,26 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     trimEnd: trimEndRef.current,
   });
 
+  // What limits an overhang trim, from the layout as it is now (shared
+  // overhangTrimState): the section's length S0, the stop, whether the clip's full end
+  // is past its section's end (the server's test) and whether it's the last clip there.
+  // null for a full take. A trim takes it once, when it starts.
+  const overhangTrim = (): OverhangTrimState | null => {
+    if (!trimNb || sectionLength === undefined) return null;
+    return overhangTrimState({
+      sectionLength,
+      stop: trimClipStop ?? Infinity,
+      clip: currentTrimClip(),
+      isLast: !!isLastInSection,
+      bpm: bpm ?? null,
+    });
+  };
+
   // Shows a trim on screen at once: this clip's own state, and Timeline's copy (trim and,
-  // for a sectioned clip, the offset that moves with trimStart). Nothing is saved here.
-  const showTrim = (next: { trimStart: number; trimEnd: number | null; offset: number }) => {
+  // for a sectioned clip, the offset that moves with trimStart, and `tailSeconds` — the
+  // tail the server will store, trimPreviewTail — so while an overhang is in play the
+  // section's end stays put). Nothing is saved here.
+  const showTrim = (next: { trimStart: number; trimEnd: number | null; offset: number }, tailSeconds?: number) => {
     trimStartRef.current = next.trimStart;
     trimEndRef.current = next.trimEnd;
     setTrimStart(next.trimStart);
@@ -1354,19 +1379,22 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
         trimStart: next.trimStart,
         trimEnd: next.trimEnd,
         ...(trimNb ? { sectionOffset: next.offset } : {}),
+        ...(trimNb && tailSeconds !== undefined ? { tailSeconds } : {}),
       },
     }));
   };
 
   // Saves a trim. The server moves the offset with trimStart itself. Both timeline polls
   // stay paused until the save and the refetch after it are done.
-  const patchTrim = async (newTrimStart: number, newTrimEnd: number | null) => {
+  // `allowOverhang` (Option on the last clip's right edge) lets the server hang it over
+  // its section's end; the server works out the tail itself — a trim never sends one.
+  const patchTrim = async (newTrimStart: number, newTrimEnd: number | null, allowOverhang = false) => {
     signalTrimBusy(1);
     try {
       const res = await fetch(`/api/timeline-clips/${clip.id}/trim`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trimStart: newTrimStart, trimEnd: newTrimEnd }),
+        body: JSON.stringify({ trimStart: newTrimStart, trimEnd: newTrimEnd, ...(allowOverhang ? { allowOverhang: true } : {}) }),
       });
       if (res.ok) {
         queryClient.invalidateQueries({ queryKey: ['songs'] });
@@ -1396,6 +1424,14 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   // cleared on release, Escape and blur. The limits are the ones from the render the
   // trim started in. Escape or the window losing focus cancels: the clip goes back and
   // nothing is saved.
+  // Overhangs (4h4a), the mirror on the right edge (shared overhangTrimNeighbours): an
+  // overhanging clip (its full end past its section's end at trim start) extends without
+  // Option up to the next clip on its track and keeps 0.5 s inside on the left; Option on
+  // the last clip's right edge lets it hang over up to that stop, or stops it at the
+  // section's end when there's no room (the wall). Meanwhile the preview carries the
+  // tail the server will store, so the section's end stays put. Esc and blur restore
+  // the tail too; a release with Option on the last clip's right edge sends
+  // allowOverhang.
   const startTrimDrag = (e: React.PointerEvent, edge: 'left' | 'right') => {
     if (isOverlay) return;
     e.preventDefault();
@@ -1409,6 +1445,8 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     const nb = trimNb;
     const pickupNb = trimPickupNb;
     let pickup = startPickupDrag(start.offset);
+    const overhang = overhangTrim();
+    const startTail = clip.tailSeconds ?? 0;
     let option = e.altKey;
     let deltaSecs = 0;
     // Nothing changes until the pointer has moved TRIM_START_THRESHOLD_PX, so a click
@@ -1422,10 +1460,11 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
         ? { trimStart: start.trimStart + deltaSecs, trimEnd: start.trimEnd }
         : { trimStart: start.trimStart, trimEnd: (start.trimEnd ?? clip.duration) + deltaSecs };
       const allowPickup = !!nb && pickupAllowed(pickup, option);
-      const next = clampTrim(start, wanted, allowPickup ? pickupNb : nb, { allowPickup });
+      const limits = overhangTrimNeighbours(allowPickup ? pickupNb : nb, overhang, edge === 'right' && option);
+      const next = clampTrim(start, wanted, limits, { allowPickup });
       if (!next) return;
       if (nb) pickup = afterPickupPlacement(pickup, next.offset);
-      showTrim(next);
+      showTrim(next, overhang ? trimPreviewTail(overhang, next, trimAllowsOverhang(overhang, edge, option)) : undefined);
     };
     const onMove = (moveE: PointerEvent) => {
       option = moveE.altKey;
@@ -1445,10 +1484,12 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
     };
     const cancel = () => {
       finish();
-      if (started) showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset });
+      if (started) showTrim({ trimStart: start.trimStart, trimEnd: start.trimEnd, offset: startOffset }, overhang ? startTail : undefined);
       signalTrimBusy(-1);
     };
     const onUp = () => {
+      // Read before finish() clears Option.
+      const allowOverhang = trimAllowsOverhang(overhang, edge, option);
       finish();
       if (!started) { signalTrimBusy(-1); return; }
       // At the very end of the file counts as no right trim.
@@ -1456,9 +1497,10 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
       const storedEnd = end !== null && end >= clip.duration - 0.01 ? null : end;
       const changed = Math.abs(trimStartRef.current - start.trimStart) > 1e-6 || storedEnd !== start.trimEnd;
       if (storedEnd !== end) {
-        showTrim({ trimStart: trimStartRef.current, trimEnd: storedEnd, offset: startOffset + (trimStartRef.current - start.trimStart) });
+        const settled = { trimStart: trimStartRef.current, trimEnd: storedEnd, offset: startOffset + (trimStartRef.current - start.trimStart) };
+        showTrim(settled, overhang ? trimPreviewTail(overhang, { ...settled, clamped: false }, allowOverhang) : undefined);
       }
-      if (changed) patchTrim(trimStartRef.current, storedEnd);
+      if (changed) patchTrim(trimStartRef.current, storedEnd, allowOverhang);
       signalTrimBusy(-1);
     };
     // Escape cancels. Option pressed or released under a still pointer re-places the
@@ -1487,11 +1529,14 @@ function TimelineClipComponent({ clip, isOverlay, zoom = 80, trackId, trackColor
   };
 
   // A whole-trim change from a menu or the detected-trim Apply: the closest allowed trim
-  // to `wanted` at this clip's neighbours, shown at once and saved.
+  // to `wanted` at this clip's neighbours, shown at once and saved. The same overhang
+  // stops as a trim without Option (an overhanging clip stops at the next clip on its
+  // track and keeps 0.5 s inside), never allowOverhang, so the server accepts it.
   const applyTrim = (wanted: { trimStart: number; trimEnd: number | null }) => {
-    const next = clampTrim(currentTrimClip(), wanted, trimNb);
+    const overhang = overhangTrim();
+    const next = clampTrim(currentTrimClip(), wanted, overhangTrimNeighbours(trimNb, overhang, false));
     if (!next) return;
-    showTrim(next);
+    showTrim(next, overhang ? trimPreviewTail(overhang, next, false) : undefined);
     patchTrim(next.trimStart, next.trimEnd);
   };
 
